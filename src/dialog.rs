@@ -273,6 +273,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         if r.changed() {
                             *changed = true;
                         }
+                        if r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)) {
+                            ENTER.with(|e| e.set(true));
+                        }
                         r
                     });
                 };
@@ -396,6 +399,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
             });
     });
+    if ENTER.with(|e| e.replace(false)) {
+        ok = true;
+    }
     if let Some(i) = new_active {
         if let Some(d) = &mut app.dialog {
             d.active_field = i;
@@ -406,6 +412,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     } else if cancel {
         app.dialog_cancel();
     }
+}
+
+thread_local! {
+    static ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
 
 fn hint_for(kind: &str) -> String {

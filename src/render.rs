@@ -211,7 +211,7 @@ struct POut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32>, @loc
     let uv = vec2<f32>(xs[vi], ys[vi]);
     let off = uv * size * 0.5 * u.viewport.z / (u.viewport.xy * 0.5) * cp.w;
     var o: POut;
-    o.pos = vec4<f32>(cp.xy + off, cp.z - 0.002 * cp.w, cp.w);
+    o.pos = vec4<f32>(cp.xy + off, cp.z - 0.000002 * cp.w, cp.w);
     o.c = c; o.uv = uv;
     return o;
 }
@@ -359,7 +359,7 @@ impl Renderer {
                 compilation_options: Default::default(),
             }),
             primitive: wgpu::PrimitiveState::default(),
-            depth_stencil: depth(false, wgpu::CompareFunction::Always, 0),
+            depth_stencil: depth(false, wgpu::CompareFunction::LessEqual, 0),
             multisample: ms,
             multiview_mask: None,
             cache: None,

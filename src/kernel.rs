@@ -116,9 +116,11 @@ impl<'a> Model<'a> {
             Ref::FeaturePlane { feature } => self.frames.get(feature).copied().ok_or("referenced plane is missing".into()),
             Ref::Face { point, normal } => {
                 let (face, _) = self.find_face(v3(*point), v3(*normal))?;
-                let c = face.center_of_mass();
-                let n = face.normal_at(c).normalize();
-                Ok(plane_frame(c, n))
+                let g = face_geom(&face);
+                if !g.planar {
+                    return Err("sketch planes must be flat faces".into());
+                }
+                Ok(plane_frame(g.center, g.normal))
             }
             _ => Err("not a plane".into()),
         }
@@ -130,7 +132,7 @@ impl<'a> Model<'a> {
         for (bi, b) in self.bodies.iter().enumerate() {
             for f in unique_faces(&b.shape) {
                 let d = face_distance(&f, p);
-                let fn_ = f.normal_at(f.center_of_mass());
+                let fn_ = face_geom(&f).normal;
                 let pen = if n.length_squared() > 0.5 && fn_.dot(n) < 0.5 { 1.0 } else { 0.0 };
                 let score = d + pen;
                 if best.as_ref().map(|b| score < b.0).unwrap_or(true) {
@@ -233,8 +235,8 @@ impl<'a> Model<'a> {
                 }
                 Ref::Face { point, normal } => {
                     let (f, _) = self.find_face(v3(*point), v3(*normal))?;
-                    let c = f.center_of_mass();
-                    let fr = frame_from(c, f.normal_at(c));
+                    let g = face_geom(&f);
+                    let fr = frame_from(g.center, g.normal);
                     out.push((f, fr));
                 }
                 _ => return Err("select sketch regions or faces".into()),
@@ -336,36 +338,45 @@ impl<'a> Model<'a> {
                 let d2 = if *second { self.len(depth2)? } else { 0.0 };
                 let _ = self.ang(draft)?;
                 let sign = if *opposite { -1.0 } else { 1.0 };
-                let mut tools = vec![];
-                for (face, fr) in &faces {
-                    let n = fr.normal() * sign;
-                    let solid: Shape = match end {
-                        EndType::Symmetric => {
-                            let moved = Shape::from(face).translated(-n * (d / 2.0));
-                            let f2 = moved.faces().next().ok_or("bad profile")?;
-                            checked(f2.extrude(n * d).into())?
-                        }
-                        _ => {
-                            let mut s: Shape = checked(face.extrude(n * d).into())?;
-                            if *second && d2 > 0.0 {
-                                let back: Shape = checked(face.extrude(-n * d2).into())?;
-                                s = checked(s.union(&back).shape)?;
+                let build = |sign: f64| -> R<Vec<Shape>> {
+                    let mut tools = vec![];
+                    for (face, fr) in &faces {
+                        let n = fr.normal() * sign;
+                        let solid: Shape = match end {
+                            EndType::Symmetric => {
+                                let moved = Shape::from(face).translated(-n * (d / 2.0));
+                                let f2 = moved.faces().next().ok_or("bad profile")?;
+                                checked(f2.extrude(n * d).into())?
                             }
-                            s
-                        }
-                    };
-                    let solid = if *end == EndType::UpToFace {
-                        let r = up_to.as_ref().ok_or("select the face to extrude up to")?;
-                        let (target, _) = self.find_face_ref(r)?;
-                        // keep the part of the long prism that lies before the target plane
-                        let c = target.center_of_mass();
-                        let tn = target.normal_at(c).normalize();
-                        let half = half_space(c, if tn.dot(n) > 0.0 { tn } else { -tn }, self.model_size() * 4.0);
-                        checked(solid.subtract(&half).shape)?
-                    } else {
-                        solid
-                    };
-                    tools.push(solid);
+                            _ => {
+                                let mut s: Shape = checked(face.extrude(n * d).into())?;
+                                if *second && d2 > 0.0 {
+                                    let back: Shape = checked(face.extrude(-n * d2).into())?;
+                                    s = checked(s.union(&back).shape)?;
+                                }
+                                s
+                            }
+                        };
+                        let solid = if *end == EndType::UpToFace {
+                            let r = up_to.as_ref().ok_or("select the face to extrude up to")?;
+                            let (target, _) = self.find_face_ref(r)?;
+                            // keep the part of the long prism that lies before the target plane
+                            let g = face_geom(&target);
+                            let (c, tn) = (g.center, g.normal);
+                            let half = half_space(c, if tn.dot(n) > 0.0 { tn } else { -tn }, self.model_size() * 4.0);
+                            checked(solid.subtract(&half).shape)?
+                        } else {
+                            solid
+                        };
+                        tools.push(solid);
+                    }
+                    Ok(tools)
+                };
+                let mut tools = build(sign)?;
+                // Cutting away from the material does nothing: go into it instead, as the original does.
+                let cutting = matches!(op, BoolOp::Remove | BoolOp::Intersect);
+                if cutting && *end != EndType::Symmetric && !*second && !tools.iter().any(|t| self.bodies.iter().any(|b| volume(&b.shape.intersect(t).shape) > 1e-9)) {
+                    tools = build(-sign)?;
                 }
                 self.apply(fid, tools, *op)
             }
@@ -764,12 +775,49 @@ pub fn frame_from(p: DVec3, n: DVec3) -> Frame {
     Frame { origin: p.into(), x: x.into(), y: y.into(), normal: n.into() }
 }
 
+/// Join neighbouring arcs of the same circle (regions split circles at artificial points).
+fn merge_arcs(segs: &[Seg]) -> Vec<Seg> {
+    use std::f64::consts::TAU;
+    let joinable = |a: &Seg, b: &Seg| -> Option<Seg> {
+        if let (Seg::Arc { c, r, t0, t1 }, Seg::Arc { c: c2, r: r2, t0: u0, t1: u1 }) = (a, b) {
+            let same = (*c - *c2).length() < 1e-7 && (r - r2).abs() < 1e-7;
+            let dir = (t1 - t0).signum() == (u1 - u0).signum();
+            let gap = (u0 - t1).rem_euclid(TAU);
+            if same && dir && (gap < 1e-9 || TAU - gap < 1e-9) {
+                return Some(Seg::Arc { c: *c, r: *r, t0: *t0, t1: t1 + (u1 - u0) });
+            }
+        }
+        None
+    };
+    let mut out: Vec<Seg> = vec![];
+    for s in segs {
+        if let Some(m) = out.last().and_then(|l| joinable(l, s)) {
+            *out.last_mut().unwrap() = m;
+        } else {
+            out.push(s.clone());
+        }
+    }
+    if out.len() > 1 {
+        if let Some(m) = joinable(&out[out.len() - 1], &out[0]) {
+            out.pop();
+            out[0] = m;
+        }
+    }
+    out
+}
+
 fn region_face(r: &Region, fr: &Frame) -> R<Face> {
     let wire = |segs: &[Seg]| -> Wire {
+        let segs = merge_arcs(segs);
         let edges: Vec<Edge> = segs
             .iter()
             .map(|s| match s {
                 Seg::Line { a, b } => Edge::segment(fr.to_world(*a), fr.to_world(*b)),
+                Seg::Arc { c, r, t0, t1 } if (t1 - t0).abs() > std::f64::consts::TAU - 1e-6 => {
+                    // full circle; its direction follows the axis
+                    let n = if t1 > t0 { fr.normal() } else { -fr.normal() };
+                    Edge::circle(fr.to_world(*c), n, *r)
+                }
                 Seg::Arc { .. } => Edge::arc(fr.to_world(s.start()), fr.to_world(s.mid()), fr.to_world(s.end())),
             })
             .collect();
@@ -806,10 +854,9 @@ fn overlaps(a: &Shape, b: &Shape) -> bool {
 }
 
 fn shares_face(a: &Shape, b: &Shape) -> bool {
-    let fa: Vec<(DVec3, DVec3)> = unique_faces(a).iter().map(|f| (f.center_of_mass(), f.normal_at(f.center_of_mass()))).collect();
-    unique_faces(b).iter().any(|f| {
-        let c = f.center_of_mass();
-        let n = f.normal_at(c);
+    let fa: Vec<(DVec3, DVec3)> = unique_faces(a).iter().map(face_geom).filter(|g| g.planar).map(|g| (g.center, g.normal)).collect();
+    unique_faces(b).iter().map(face_geom).filter(|g| g.planar).any(|g| {
+        let (c, n) = (g.center, g.normal);
         fa.iter().any(|(c2, n2)| n.dot(*n2) < -0.999 && (c - *c2).dot(n).abs() < 1e-6)
     })
 }
@@ -911,15 +958,79 @@ impl RotateAbout for Shape {
 }
 
 fn face_distance(f: &Face, p: DVec3) -> f64 {
-    // project onto the face surface via its triangulation
-    let shape: Shape = f.into();
-    let Ok(m) = shape.mesh_with_tolerance(0.05) else { return f64::INFINITY };
-    let mut best = f64::INFINITY;
-    for t in m.indices.chunks(3) {
-        let d = point_triangle_distance(p, m.vertices[t[0]], m.vertices[t[1]], m.vertices[t[2]]);
-        best = best.min(d);
+    face_tris(f).iter().map(|t| point_triangle_distance(p, t[0], t[1], t[2])).fold(f64::INFINITY, f64::min)
+}
+
+/// Triangles of a face (meshing it first if needed), wound so the normal points out of the material.
+pub fn face_tris(face: &Face) -> Vec<[DVec3; 3]> {
+    let mut loc = ffi::top_loc::Location_new();
+    let mut th = ffi::b_rep::BRep_Tool_Triangulation(&face.inner, loc.pin_mut());
+    if th.IsNull() {
+        let shape = ffi::topo_ds::cast_face_to_shape(&face.inner);
+        let _m = ffi::b_rep_mesh::IncrementalMesh_new(shape, 0.05);
+        loc = ffi::top_loc::Location_new();
+        th = ffi::b_rep::BRep_Tool_Triangulation(&face.inner, loc.pin_mut());
     }
-    best
+    let Ok(tri) = ffi::poly::Handle_Poly_Triangulation_Get(&th) else { return vec![] };
+    let trsf = ffi::top_loc::TopLoc_Location_Transformation(&loc);
+    let verts: Vec<DVec3> = (1..=tri.NbNodes())
+        .map(|i| {
+            let mut p = ffi::poly::Poly_Triangulation_Node(tri, i);
+            p.pin_mut().Transform(&trsf);
+            DVec3::new(p.X(), p.Y(), p.Z())
+        })
+        .collect();
+    let reversed = face.orientation() != opencascade::primitives::FaceOrientation::Forward;
+    (1..=tri.NbTriangles())
+        .map(|i| {
+            let t = tri.Triangle(i);
+            let (a, b, c) = (t.Value(1) as usize - 1, t.Value(2) as usize - 1, t.Value(3) as usize - 1);
+            if reversed { [verts[c], verts[b], verts[a]] } else { [verts[a], verts[b], verts[c]] }
+        })
+        .collect()
+}
+
+pub struct FaceGeom {
+    /// A point on the face near its middle.
+    pub center: DVec3,
+    /// Area-weighted average normal.
+    pub normal: DVec3,
+    pub planar: bool,
+    pub area: f64,
+}
+
+/// Face position and normal from its triangulation (OCCT's projection-based
+/// normal query throws for points such as a cylinder's centre of mass).
+pub fn face_geom(face: &Face) -> FaceGeom {
+    let tris = face_tris(face);
+    let mut area = 0.0;
+    let mut nsum = DVec3::ZERO;
+    let mut csum = DVec3::ZERO;
+    for t in &tris {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]) * 0.5;
+        let a = n.length();
+        area += a;
+        nsum += n;
+        csum += (t[0] + t[1] + t[2]) / 3.0 * a;
+    }
+    let normal = nsum.normalize_or_zero();
+    let centroid = if area > 0.0 { csum / area } else { DVec3::ZERO };
+    let planar = !tris.is_empty() && tris.iter().all(|t| {
+        let n = (t[1] - t[0]).cross(t[2] - t[0]);
+        n.length() < 1e-12 || n.normalize().dot(normal) > 0.9999
+    });
+    // nearest triangle centre to the centroid, so the point lies on the face
+    let center = tris
+        .iter()
+        .map(|t| (t[0] + t[1] + t[2]) / 3.0)
+        .min_by(|a, b| (*a - centroid).length().total_cmp(&(*b - centroid).length()))
+        .unwrap_or(centroid);
+    let center = if planar { centroid_on_plane(centroid, center, normal) } else { center };
+    FaceGeom { center, normal, planar, area }
+}
+
+fn centroid_on_plane(centroid: DVec3, on: DVec3, n: DVec3) -> DVec3 {
+    centroid - n * (centroid - on).dot(n)
 }
 
 pub fn point_triangle_distance(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> f64 {
@@ -1043,10 +1154,8 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             out.indices.extend(t.map(|i| base + i as u32));
             out.tri_face.push(fi as u32);
         }
-        let c = face.center_of_mass();
-        let n = face.normal_at(c);
-        let planar = normals.iter().all(|m| m.normalize_or_zero().dot(n.normalize_or_zero()) > 0.9999 || m.length() < 1e-12);
-        out.faces.push(FaceInfo { center: c.into(), normal: n.into(), planar, area: face.surface_area() });
+        let g = face_geom(&face);
+        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area });
     }
     for e in visible_edges(shape) {
         let pts: Vec<DVec3> = e.approximation_segments().collect();
@@ -1080,4 +1189,146 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
 #[allow(dead_code)]
 pub fn origin_frames() -> Vec<(OriginPlane, Frame)> {
     OriginPlane::ALL.iter().map(|p| (*p, p.frame())).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn box_faces_have_outward_normals() {
+        let b = Shape::box_with_dimensions(10.0, 20.0, 30.0);
+        let m = mesh_body(&b).unwrap();
+        assert_eq!(m.faces.len(), 6);
+        for f in &m.faces {
+            let c = DVec3::from(f.center);
+            let n = DVec3::from(f.normal);
+            let mid = DVec3::new(5.0, 10.0, 15.0);
+            eprintln!("center {c:?} normal {n:?}");
+            assert!((c - mid).dot(n) > 0.0, "normal should point outwards");
+        }
+        assert!((m.volume - 6000.0).abs() < 1e-6);
+        assert_eq!(m.edges.len(), 12);
+    }
+}
+
+#[cfg(test)]
+mod feature_tests {
+    use super::*;
+    use crate::doc::{Document, Op, OriginPlane, Ref};
+    use crate::sketch::{Geom, Sketch};
+
+    fn rect_sketch(doc: &mut Document, w: f64, h: f64) -> FeatId {
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (w, 0.0), (w, h), (0.0, h)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        doc.insert("Sketch 1".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP })
+    }
+
+    fn extrude(doc: &mut Document, sk: FeatId, at: [f64; 2], depth: &str, end: EndType, op: BoolOp) -> FeatId {
+        let mut o = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth: d, end: e, op: bop, .. } = &mut o {
+            profiles.push(Ref::Region { sketch: sk, point: at });
+            *d = depth.into();
+            *e = end;
+            *bop = op;
+        }
+        doc.insert("Extrude".into(), o)
+    }
+
+    fn ok(r: &RebuildResult) {
+        for f in &r.features {
+            assert!(f.error.is_none(), "feature {} failed: {:?}", f.id, f.error);
+        }
+    }
+
+    #[test]
+    fn extrude_then_cut_through_all_from_top_face() {
+        let mut doc = Document::default();
+        let s1 = rect_sketch(&mut doc, 40.0, 20.0);
+        extrude(&mut doc, s1, [5.0, 5.0], "10", EndType::Blind, BoolOp::New);
+        // circle on the top face, cut through all (direction must flip into the material)
+        let mut s = Sketch::default();
+        let c = s.add_point(DVec2::new(20.0, 10.0));
+        s.add_curve(Geom::Circle { c, r: 5.0 }, false);
+        let top = Ref::Face { point: [20.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] };
+        let s2 = doc.insert("Sketch 2".into(), Op::Sketch { plane: top, sketch: s, frame: Frame::TOP });
+        extrude(&mut doc, s2, [20.0, 10.0], "10", EndType::ThroughAll, BoolOp::Remove);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        assert_eq!(r.bodies.len(), 1);
+        let want = 40.0 * 20.0 * 10.0 - std::f64::consts::PI * 25.0 * 10.0;
+        assert!((r.bodies[0].volume - want).abs() < 1.0, "volume {} want {want}", r.bodies[0].volume);
+        // the hole wall is one cylindrical face (no seam split)
+        assert_eq!(r.bodies[0].faces.len(), 7);
+    }
+
+    #[test]
+    fn fillet_and_shell() {
+        let mut doc = Document::default();
+        let s1 = rect_sketch(&mut doc, 40.0, 20.0);
+        extrude(&mut doc, s1, [5.0, 5.0], "10", EndType::Blind, BoolOp::New);
+        let mut f = Op::new_default("fillet").unwrap();
+        if let Op::Fillet { edges, radius, .. } = &mut f {
+            edges.push(Ref::Edge { point: [20.0, 0.0, 10.0] });
+            *radius = "3".into();
+        }
+        doc.insert("Fillet".into(), f);
+        let mut sh = Op::new_default("shell").unwrap();
+        if let Op::Shell { faces, thickness } = &mut sh {
+            faces.push(Ref::Face { point: [30.0, 15.0, 0.0], normal: [0.0, 0.0, -1.0] });
+            *thickness = "1".into();
+        }
+        doc.insert("Shell".into(), sh);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        assert!(r.bodies[0].volume < 8000.0 * 0.5);
+    }
+
+    #[test]
+    fn patterns_mirror_and_revolve() {
+        let mut doc = Document::default();
+        let s1 = rect_sketch(&mut doc, 10.0, 10.0);
+        let e = extrude(&mut doc, s1, [5.0, 5.0], "10", EndType::Blind, BoolOp::New);
+        let mut lp = Op::new_default("linearPattern").unwrap();
+        if let Op::LinearPattern { bodies, direction, spacing, count, .. } = &mut lp {
+            bodies.push(Ref::Body { body: (e, 0) });
+            *direction = Some(Ref::Axis { axis: 0 });
+            *spacing = "20".into();
+            *count = "3".into();
+        }
+        doc.insert("LP".into(), lp);
+        let mut m = Op::new_default("mirror").unwrap();
+        if let Op::Mirror { bodies, plane } = &mut m {
+            bodies.push(Ref::Body { body: (e, 0) });
+            *plane = Some(Ref::OriginPlane { plane: OriginPlane::Front });
+        }
+        doc.insert("Mirror".into(), m);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        assert!((r.bodies[0].volume - 6000.0).abs() < 1e-3, "{}", r.bodies[0].volume);
+        let bb = r.bodies[0].bbox;
+        assert!((bb[0][1] + 10.0).abs() < 1e-6 && (bb[1][1] - 10.0).abs() < 1e-6, "{bb:?}");
+
+        // revolve a rectangle about the Y axis -> a tube
+        let mut doc = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(5.0, 0.0), (10.0, 0.0), (10.0, 20.0), (5.0, 20.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut rv = Op::new_default("revolve").unwrap();
+        if let Op::Revolve { profiles, axis, .. } = &mut rv {
+            profiles.push(Ref::Region { sketch: sk, point: [7.0, 10.0] });
+            *axis = Some(Ref::Axis { axis: 1 });
+        }
+        doc.insert("R".into(), rv);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        let want = std::f64::consts::PI * (100.0 - 25.0) * 20.0;
+        assert!((r.bodies[0].volume - want).abs() < 1.0, "{} vs {want}", r.bodies[0].volume);
+    }
 }

@@ -205,6 +205,7 @@ impl App {
     }
 
     fn open_session(&mut self, id: FeatId, before: Document, is_new: bool) {
+        self.hover = None;
         self.sketch = Some(SketchSession {
             feature: id,
             before,

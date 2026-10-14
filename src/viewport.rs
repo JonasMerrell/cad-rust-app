@@ -216,11 +216,11 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     let (o, d) = cam.ray(s);
     let (o, d) = (o.as_dvec3(), d.as_dvec3());
     let mut best: Option<(f64, Ref)> = None;
-    let mut consider = |t: f64, r: Ref| {
+    fn consider(best: &mut Option<(f64, Ref)>, t: f64, r: Ref) {
         if t > 0.0 && best.as_ref().map(|b| t < b.0).unwrap_or(true) {
-            best = Some((t, r));
+            *best = Some((t, r));
         }
-    };
+    }
     if !app.xray {
         for b in &app.result.bodies {
             for (ti, tri) in b.indices.chunks(3).enumerate() {
@@ -229,7 +229,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
                     if section_keeps(app, o + d * t) {
                         let fi = b.tri_face[ti] as usize;
                         let fa = &b.faces[fi];
-                        consider(t, Ref::Face { point: (o + d * t).into(), normal: fa.normal });
+                        consider(&mut best, t, Ref::Face { point: (o + d * t).into(), normal: fa.normal });
                     }
                 }
             }
@@ -244,19 +244,23 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
                 for r in find_regions(sketch) {
                     if r.contains(p) {
                         // regions sit on faces; prefer them on ties
-                        consider(t - 1e-3, Ref::Region { sketch: f.id, point: r.sample.into() });
+                        consider(&mut best, t - 1e-3, Ref::Region { sketch: f.id, point: r.sample.into() });
                         break;
                     }
                 }
             }
         }
     }
+    // origin planes only when nothing else is under the cursor
+    if best.is_some() {
+        return best.map(|b| b.1);
+    }
     let size = plane_size(app) as f64;
     for p in OriginPlane::ALL {
         let fr = p.frame();
         if let Some((t, l)) = ray_plane(o, d, &fr) {
             if l.x >= 0.0 && l.y >= 0.0 && l.x <= size && l.y <= size {
-                consider(t + 1e-3, Ref::OriginPlane { plane: p });
+                consider(&mut best, t + 1e-3, Ref::OriginPlane { plane: p });
             }
         }
     }
@@ -267,7 +271,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
             }
             if let Some((t, l)) = ray_plane(o, d, fr) {
                 if l.x.abs() <= size / 2.0 && l.y.abs() <= size / 2.0 {
-                    consider(t + 1e-3, Ref::FeaturePlane { feature: f.id });
+                    consider(&mut best, t + 1e-3, Ref::FeaturePlane { feature: f.id });
                 }
             }
         }
