@@ -81,4 +81,12 @@ pub const ICONS: &[(&str, &str)] = &[
     ("helix", "M6 4c6 0 12 2 12 4s-12 2-12 4 12 2 12 4-12 2-12 4M12 2v20"),
     ("transform", "M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"),
     ("deleteFace", "M4 4h16v16H4zM8 8l8 8M16 8l-8 8"),
+    ("assembly", "M4 4h7v7H4zM13 13h7v7h-7zM11 7.5h4.5V13"),
+    ("drawing", "M5 3h10l4 4v14H5zM15 3v4h4M8 13h8M8 17h5"),
+    ("mateFastened", "M7 11V7a5 5 0 0 1 10 0v4M5 11h14v10H5z"),
+    ("mateRevolute", "M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M19 12a7 7 0 1 1-2-5M19 4v4h-4"),
+    ("mateSlider", "M3 12h18M7 8l-4 4 4 4M17 8l4 4-4 4M9 9h6v6H9z"),
+    ("mateCylindrical", "M6 6h12M6 18h12M6 6v12M18 6v12M12 3v18"),
+    ("matePlanar", "M3 15l9-5 9 5-9 5zM12 3v7"),
+    ("mateBall", "M12 12m-6 0a6 6 0 1 0 12 0a6 6 0 1 0 -12 0M6 12h12M12 6c3 2 3 10 0 12"),
 ];

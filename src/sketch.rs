@@ -752,7 +752,7 @@ impl System {
 }
 
 /// dx = -W⁻¹Jᵀ (J W⁻¹ Jᵀ + μI)⁻¹ r
-fn min_norm_step(j: &[Vec<f64>], r: &[f64], w: &[f64], n: usize) -> Vec<f64> {
+pub fn min_norm_step(j: &[Vec<f64>], r: &[f64], w: &[f64], n: usize) -> Vec<f64> {
     let m = j.len();
     if m == 0 {
         return vec![0.0; n];
@@ -784,7 +784,7 @@ fn min_norm_step(j: &[Vec<f64>], r: &[f64], w: &[f64], n: usize) -> Vec<f64> {
     dx
 }
 
-fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
+pub fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
     let n = b.len();
     for c in 0..n {
         let piv = (c..n).max_by(|&i, &k| a[i][c].abs().total_cmp(&a[k][c].abs())).unwrap();

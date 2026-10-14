@@ -19,7 +19,7 @@ pub struct Nav {
     pub button: egui::PointerButton,
 }
 
-fn rgba(c: Color32, a: f32) -> [f32; 4] {
+pub fn rgba(c: Color32, a: f32) -> [f32; 4] {
     to_rgba(c, a)
 }
 
@@ -94,7 +94,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     context_menu(app, ui);
 }
 
-fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
+pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
     let rect = resp.rect;
     let (pos, scroll, pinch) = ui.input(|i| (i.pointer.hover_pos(), i.smooth_scroll_delta.y, i.zoom_delta()));
     if let Some(p) = pos {
@@ -675,7 +675,7 @@ pub fn label_box(painter: &egui::Painter, at: Pos2, text: &str, color: Color32) 
     painter.galley(r.min + egui::vec2(6.0, 2.0), g, color);
 }
 
-fn axis_triad(app: &App, painter: &egui::Painter, rect: egui::Rect) {
+pub fn axis_triad(app: &App, painter: &egui::Painter, rect: egui::Rect) {
     let c = Pos2::new(rect.left() + 36.0, rect.bottom() - 36.0);
     let cam = &app.camera;
     for (dir, col, l) in [(Vec3::X, vp::AXIS_X, "X"), (Vec3::Y, vp::AXIS_Y, "Y"), (Vec3::Z, vp::AXIS_Z, "Z")] {

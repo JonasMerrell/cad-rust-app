@@ -32,6 +32,9 @@ pub struct EdgeInfo {
     pub linear: bool,
     pub circular: bool,
     pub length: f64,
+    /// Centre, axis and radius of circular edges.
+    #[serde(default)]
+    pub circle: Option<([f64; 3], [f64; 3], f64)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1360,12 +1363,19 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             acc += l;
         }
         let ty = e.edge_type();
+        let circular = ty == opencascade::primitives::EdgeType::Circle;
+        let circle = if circular && pts.len() >= 3 {
+            circle_from_points(&pts).map(|(c, n)| (c.into(), n.into(), (pts[0] - c).length()))
+        } else {
+            None
+        };
         out.edges.push(EdgeInfo {
             pts: pts.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect(),
             mid: mid.into(),
             linear: ty == opencascade::primitives::EdgeType::Line,
-            circular: ty == opencascade::primitives::EdgeType::Circle,
+            circular,
             length,
+            circle,
         });
     }
     Ok(out)

@@ -18,7 +18,7 @@ const TAG: &str = "\u{1e}CAD ";
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     Ping,
-    Rebuild { id: u64, doc: Document, skip: Vec<FeatId> },
+    Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
 }
 
@@ -26,7 +26,7 @@ pub enum Request {
 pub enum Reply {
     Ready,
     Progress { id: u64, feature: FeatId },
-    Rebuilt { id: u64, result: RebuildResult },
+    Rebuilt { id: u64, tag: usize, result: RebuildResult },
     Exported { id: u64, error: Option<String> },
 }
 
@@ -43,9 +43,9 @@ pub fn worker_main() {
         let Ok(req) = serde_json::from_str::<Request>(&line) else { continue };
         match req {
             Request::Ping => send(&Reply::Ready),
-            Request::Rebuild { id, doc, skip } => {
+            Request::Rebuild { id, tag, doc, skip } => {
                 let result = kernel::rebuild(&doc, &skip, |f| send(&Reply::Progress { id, feature: f }));
-                send(&Reply::Rebuilt { id, result });
+                send(&Reply::Rebuilt { id, tag, result });
             }
             Request::Export { id, doc, format, path } => {
                 let error = kernel::export(&doc, &format, &path).err();
@@ -64,7 +64,8 @@ pub enum KernelState {
 }
 
 pub enum Outcome {
-    Rebuilt(RebuildResult),
+    /// (part studio index, result)
+    Rebuilt(usize, RebuildResult),
     Exported(Option<String>, String),
 }
 
@@ -83,9 +84,10 @@ pub struct KernelClient {
     proc: Option<Proc>,
     pub state: KernelState,
     next_id: u64,
-    /// The rebuild in flight: (id, doc, skip list, feature currently running)
-    inflight: Option<(u64, Document, Vec<FeatId>, Option<FeatId>)>,
-    queued: Option<Document>,
+    /// The rebuild in flight: (id, tag, doc, skip list, feature currently running)
+    inflight: Option<(u64, usize, Document, Vec<FeatId>, Option<FeatId>)>,
+    /// Waiting rebuilds, newest per tag.
+    queued: Vec<(usize, Document)>,
     export: Option<(u64, String)>,
     pub crashes: u32,
     ctx: Option<egui::Context>,
@@ -93,7 +95,7 @@ pub struct KernelClient {
 
 impl KernelClient {
     pub fn new(ctx: egui::Context) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: None, export: None, crashes: 0, ctx: Some(ctx) };
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx: Some(ctx) };
         k.spawn();
         k
     }
@@ -151,20 +153,28 @@ impl KernelClient {
         self.inflight.is_some() || self.export.is_some()
     }
 
-    /// Ask for a rebuild; if one is running, the newest request replaces any queued one.
-    pub fn rebuild(&mut self, doc: &Document) {
+    /// Ask for a rebuild of part studio `tag`; a newer request replaces a queued one for the same tag.
+    pub fn rebuild(&mut self, tag: usize, doc: &Document) {
         if self.inflight.is_some() || self.state == KernelState::Loading {
-            self.queued = Some(doc.clone());
+            self.queued.retain(|q| q.0 != tag);
+            self.queued.push((tag, doc.clone()));
             return;
         }
-        self.start(doc.clone(), vec![]);
+        self.start(tag, doc.clone(), vec![]);
     }
 
-    fn start(&mut self, doc: Document, skip: Vec<FeatId>) {
+    fn start_next(&mut self) {
+        if self.inflight.is_none() && !self.queued.is_empty() {
+            let (tag, d) = self.queued.remove(0);
+            self.start(tag, d, vec![]);
+        }
+    }
+
+    fn start(&mut self, tag: usize, doc: Document, skip: Vec<FeatId>) {
         let id = self.next_id;
         self.next_id += 1;
-        self.send(&Request::Rebuild { id, doc: doc.clone(), skip: skip.clone() });
-        self.inflight = Some((id, doc, skip, None));
+        self.send(&Request::Rebuild { id, tag, doc: doc.clone(), skip: skip.clone() });
+        self.inflight = Some((id, tag, doc, skip, None));
         self.state = KernelState::Busy;
     }
 
@@ -192,27 +202,21 @@ impl KernelClient {
                     if self.state == KernelState::Loading {
                         self.state = KernelState::Ready;
                     }
-                    if self.inflight.is_none() {
-                        if let Some(d) = self.queued.take() {
-                            self.start(d, vec![]);
-                        }
-                    }
+                    self.start_next();
                 }
                 Ev::Reply(Reply::Progress { id, feature }) => {
                     if let Some(f) = &mut self.inflight {
                         if f.0 == id {
-                            f.3 = Some(feature);
+                            f.4 = Some(feature);
                         }
                     }
                 }
-                Ev::Reply(Reply::Rebuilt { id, result }) => {
+                Ev::Reply(Reply::Rebuilt { id, tag, result }) => {
                     if self.inflight.as_ref().map(|f| f.0) == Some(id) {
                         self.inflight = None;
                         self.state = KernelState::Ready;
-                        out.push(Outcome::Rebuilt(result));
-                        if let Some(d) = self.queued.take() {
-                            self.start(d, vec![]);
-                        }
+                        out.push(Outcome::Rebuilt(tag, result));
+                        self.start_next();
                     }
                 }
                 Ev::Reply(Reply::Exported { id, error }) => {
@@ -238,13 +242,16 @@ impl KernelClient {
                     }
                     self.state = KernelState::Loading;
                     self.spawn();
-                    if let Some((_, doc, mut skip, running)) = retry {
+                    if let Some((_, tag, doc, mut skip, running)) = retry {
                         // retry without the feature that crashed, unless a newer request is waiting
                         if let Some(f) = running {
                             skip.push(f);
                         }
-                        let doc = self.queued.take().unwrap_or(doc);
-                        self.start(doc, skip);
+                        let newer = self.queued.iter().position(|q| q.0 == tag).map(|i| self.queued.remove(i).1);
+                        match newer {
+                            Some(d) => self.start(tag, d, vec![]),
+                            None => self.start(tag, doc, skip),
+                        }
                     }
                     break;
                 }

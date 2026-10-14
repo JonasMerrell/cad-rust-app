@@ -109,6 +109,14 @@ pub struct App {
     pub viewport_rect: egui::Rect,
     pub nav: Option<crate::viewport::Nav>,
     pub first_fit: bool,
+    pub ws: crate::workspace::Workspace,
+    pub tab: crate::workspace::Tab,
+    pub cur_studio: usize,
+    pub studio_results: HashMap<usize, RebuildResult>,
+    pub studio_undo: HashMap<usize, (Vec<Document>, Vec<Document>)>,
+    pub asm: crate::asm_ui::AsmUi,
+    pub dwg: crate::drawing_ui::DrawUi,
+    pub renaming_tab: Option<(crate::workspace::Tab, String)>,
     pub screenshot_pending: Option<std::path::PathBuf>,
     pub context_menu: Option<(egui::Pos2, Option<Ref>)>,
 }
@@ -152,6 +160,14 @@ impl App {
             viewport_rect: egui::Rect::NOTHING,
             nav: None,
             first_fit: true,
+            ws: crate::workspace::Workspace::default(),
+            tab: crate::workspace::Tab::Studio(0),
+            cur_studio: 0,
+            studio_results: HashMap::new(),
+            studio_undo: HashMap::new(),
+            asm: Default::default(),
+            dwg: Default::default(),
+            renaming_tab: None,
             screenshot_pending: None,
             context_menu: None,
         };
@@ -189,6 +205,9 @@ impl App {
     }
 
     pub fn undo(&mut self) {
+        if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
+            return crate::asm_ui::undo(self);
+        }
         if let Some(s) = &mut self.sketch {
             if let Some(d) = s.undo.pop() {
                 s.redo.push(self.doc.clone());
@@ -206,6 +225,9 @@ impl App {
     }
 
     pub fn redo(&mut self) {
+        if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
+            return crate::asm_ui::redo(self);
+        }
         if let Some(s) = &mut self.sketch {
             if let Some(d) = s.redo.pop() {
                 s.undo.push(self.doc.clone());
@@ -223,10 +245,16 @@ impl App {
     }
 
     pub fn can_undo(&self) -> bool {
+        if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
+            return !self.asm.undo.is_empty();
+        }
         !self.undo.is_empty() || self.sketch.as_ref().map(|s| !s.undo.is_empty()).unwrap_or(false)
     }
 
     pub fn can_redo(&self) -> bool {
+        if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
+            return !self.asm.redo.is_empty();
+        }
         !self.redo.is_empty() || self.sketch.as_ref().map(|s| !s.redo.is_empty()).unwrap_or(false)
     }
 
@@ -309,14 +337,97 @@ impl App {
     }
 
     pub fn new_document(&mut self) {
-        self.checkpoint();
         let units = self.doc.units;
-        self.doc = Document { units, ..Default::default() };
+        self.load_workspace(crate::workspace::Workspace::default());
+        self.doc.units = units;
         self.path = None;
+    }
+
+    /// Put the live Part Studio back into the workspace.
+    pub fn sync_ws(&mut self) {
+        if let Some(s) = self.ws.studios.get_mut(self.cur_studio) {
+            s.doc = self.doc.clone();
+        }
+        self.ws.active = self.tab;
+    }
+
+    pub fn load_workspace(&mut self, ws: crate::workspace::Workspace) {
+        self.ws = ws;
+        if self.ws.studios.is_empty() {
+            self.ws.studios.push(crate::workspace::Studio { name: "Part Studio 1".into(), doc: Document::default() });
+        }
+        self.cur_studio = 0;
+        self.doc = self.ws.studios[0].doc.clone();
+        self.result = RebuildResult::default();
+        self.studio_results.clear();
+        self.studio_undo.clear();
+        self.undo.clear();
+        self.redo.clear();
         self.picks.clear();
         self.dialog = None;
         self.sketch = None;
+        self.asm = Default::default();
+        self.dwg = Default::default();
+        self.first_fit = true;
+        self.tab = crate::workspace::Tab::Studio(0);
         self.changed();
+        let active = self.ws.active;
+        self.switch_tab(active);
+    }
+
+    /// Make `t` the visible tab; the Part Studio whose tab is shown becomes the live `doc`.
+    pub fn switch_tab(&mut self, t: crate::workspace::Tab) {
+        use crate::workspace::Tab;
+        if self.sketch.is_some() {
+            crate::sketcher::finish(self);
+        }
+        if self.dialog.is_some() {
+            self.dialog_ok();
+        }
+        if let Tab::Studio(j) = t {
+            if j != self.cur_studio && j < self.ws.studios.len() {
+                let cur = self.cur_studio;
+                self.ws.studios[cur].doc = self.doc.clone();
+                self.studio_results.insert(cur, std::mem::take(&mut self.result));
+                self.studio_undo.insert(cur, (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo)));
+                self.doc = self.ws.studios[j].doc.clone();
+                self.result = self.studio_results.remove(&j).unwrap_or_default();
+                let (u, r) = self.studio_undo.remove(&j).unwrap_or_default();
+                self.undo = u;
+                self.redo = r;
+                self.cur_studio = j;
+                self.errors = self.result.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
+                self.dirty_model = true;
+            }
+        }
+        if matches!(t, Tab::Assembly(_) | Tab::Drawing(_)) {
+            // every Part Studio needs geometry for the assembly/drawing
+            for i in 0..self.ws.studios.len() {
+                if i != self.cur_studio && !self.studio_results.contains_key(&i) {
+                    let d = self.ws.studios[i].doc.clone();
+                    self.kernel.rebuild(i, &d);
+                }
+            }
+            self.asm.scene_dirty = true;
+            self.dwg.dirty = true;
+        }
+        self.picks.clear();
+        self.hover = None;
+        self.tab = t;
+        self.scene_dirty = true;
+    }
+
+    /// Meshes of a Part Studio's parts.
+    pub fn studio_bodies(&self, studio: usize) -> &[crate::kernel::BodyMesh] {
+        if studio == self.cur_studio {
+            &self.result.bodies
+        } else {
+            self.studio_results.get(&studio).map(|r| r.bodies.as_slice()).unwrap_or(&[])
+        }
+    }
+
+    pub fn studio_doc(&self, studio: usize) -> Option<&Document> {
+        if studio == self.cur_studio { Some(&self.doc) } else { self.ws.studios.get(studio).map(|s| &s.doc) }
     }
 
     // ------------------------------------------------------------ files
@@ -328,16 +439,10 @@ impl App {
     }
 
     pub fn open_path(&mut self, p: std::path::PathBuf) {
-        match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| Document::from_json(&s)) {
-            Ok(d) => {
-                self.checkpoint();
-                self.doc = d;
+        match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| crate::workspace::Workspace::from_json(&s)) {
+            Ok(ws) => {
+                self.load_workspace(ws);
                 self.path = Some(p);
-                self.picks.clear();
-                self.dialog = None;
-                self.sketch = None;
-                self.first_fit = true;
-                self.changed();
             }
             Err(e) => self.flash(format!("Could not open {}: {e}", p.display()), ToastKind::Error),
         }
@@ -350,7 +455,8 @@ impl App {
             self.path.clone()
         };
         if let Some(p) = path {
-            match std::fs::write(&p, self.doc.to_json()) {
+            self.sync_ws();
+            match std::fs::write(&p, self.ws.to_json()) {
                 Ok(()) => {
                     self.flash_info(format!("Saved {}", p.display()), Some(Duration::from_secs(2)));
                     self.path = Some(p);
@@ -416,7 +522,14 @@ impl App {
         let was_loading = self.kernel.state == KernelState::Loading && self.kernel.crashes == 0;
         for o in self.kernel.poll() {
             match o {
-                Outcome::Rebuilt(r) => {
+                Outcome::Rebuilt(tag, r) if tag != self.cur_studio => {
+                    self.studio_results.insert(tag, r);
+                    self.asm.scene_dirty = true;
+                    self.dwg.dirty = true;
+                }
+                Outcome::Rebuilt(_, r) => {
+                    self.asm.scene_dirty = true;
+                    self.dwg.dirty = true;
                     self.errors = r.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
                     // keep sketch frames in the document in sync (not an undoable edit)
                     for f in &mut self.doc.features {
@@ -444,7 +557,8 @@ impl App {
         }
         if self.dirty_model && self.kernel.state != KernelState::Error {
             self.dirty_model = false;
-            self.kernel.rebuild(&self.doc);
+            let cur = self.cur_studio;
+            self.kernel.rebuild(cur, &self.doc);
         }
     }
 
@@ -508,6 +622,11 @@ impl App {
         }
         if ctrl {
             return;
+        }
+        match self.tab {
+            crate::workspace::Tab::Assembly(_) => return crate::asm_ui::shortcuts(self, ctx),
+            crate::workspace::Tab::Drawing(_) => return crate::drawing_ui::shortcuts(self, ctx),
+            _ => {}
         }
         if self.sketch.is_some() {
             crate::sketcher::shortcuts(self, ctx);
@@ -585,7 +704,7 @@ impl App {
         r.on_hover_text(tip)
     }
 
-    fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
+    pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 24.0), Sense::hover());
         ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, BORDER));
         ui.add_space(6.0);
@@ -602,10 +721,11 @@ impl App {
             }
             ui.label(RichText::new("cad-app").strong().size(13.5));
             if !self.phone {
-                if self.sketch.is_some() {
-                    crate::sketcher::toolbar(self, ui);
-                } else {
-                    self.model_tools(ui);
+                match self.tab {
+                    crate::workspace::Tab::Assembly(_) => crate::asm_ui::toolbar(self, ui),
+                    crate::workspace::Tab::Drawing(_) => crate::drawing_ui::toolbar(self, ui),
+                    _ if self.sketch.is_some() => crate::sketcher::toolbar(self, ui),
+                    _ => self.model_tools(ui),
                 }
             }
             Self::group(ui, |ui| {
@@ -1207,6 +1327,191 @@ impl App {
             });
     }
 
+    fn tabs_ui(&mut self, ui: &mut Ui) {
+        use crate::workspace::Tab;
+        let mut tabs: Vec<(Tab, String, &str)> = vec![];
+        for (i, s) in self.ws.studios.iter().enumerate() {
+            tabs.push((Tab::Studio(i), s.name.clone(), "sketch"));
+        }
+        for (i, a) in self.ws.assemblies.iter().enumerate() {
+            tabs.push((Tab::Assembly(i), a.name.clone(), "assembly"));
+        }
+        for (i, d) in self.ws.drawings.iter().enumerate() {
+            tabs.push((Tab::Drawing(i), d.name.clone(), "drawing"));
+        }
+        let mut switch = None;
+        let mut action: Option<(&str, Tab)> = None;
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 2.0;
+            for (t, name, icon) in tabs {
+                if let Some((rt, text)) = &mut self.renaming_tab {
+                    if *rt == t {
+                        let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
+                        r.request_focus();
+                        if r.lost_focus() {
+                            action = Some(("rename-done", t));
+                        }
+                        continue;
+                    }
+                }
+                let active = self.tab == t;
+                let b = egui::Button::image_and_text(icons::image(icon, 14.0).tint(if active { theme::ACTIVE_TEXT } else { MUTED }), RichText::new(&name).size(12.0).color(if active { TEXT } else { MUTED }))
+                    .fill(if active { PANEL_2 } else { Color32::TRANSPARENT })
+                    .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 });
+                let r = ui.add(b);
+                if r.clicked() {
+                    switch = Some(t);
+                }
+                if r.double_clicked() {
+                    action = Some(("rename", t));
+                }
+                r.context_menu(|ui| {
+                    if ui.button("Rename").clicked() {
+                        action = Some(("rename", t));
+                        ui.close();
+                    }
+                    if ui.button("Duplicate").clicked() {
+                        action = Some(("duplicate", t));
+                        ui.close();
+                    }
+                    if ui.button(RichText::new("Delete").color(theme::ERROR_SOFT)).clicked() {
+                        action = Some(("delete", t));
+                        ui.close();
+                    }
+                });
+            }
+            ui.add_space(6.0);
+            ui.menu_button(RichText::new("+").size(14.0), |ui| {
+                if ui.button("Part Studio").clicked() {
+                    action = Some(("new-studio", Tab::Studio(0)));
+                    ui.close();
+                }
+                if ui.button("Assembly").clicked() {
+                    action = Some(("new-assembly", Tab::Studio(0)));
+                    ui.close();
+                }
+                if ui.button("Drawing").clicked() {
+                    action = Some(("new-drawing", Tab::Studio(0)));
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("Add a Part Studio, Assembly or Drawing");
+        });
+        if let Some(t) = switch {
+            if t != self.tab {
+                self.switch_tab(t);
+            }
+        }
+        if let Some((a, t)) = action {
+            self.tab_action(a, t);
+        }
+    }
+
+    fn tab_action(&mut self, a: &str, t: crate::workspace::Tab) {
+        use crate::workspace::Tab;
+        let name_of = |ws: &crate::workspace::Workspace, t: Tab| match t {
+            Tab::Studio(i) => ws.studios.get(i).map(|s| s.name.clone()),
+            Tab::Assembly(i) => ws.assemblies.get(i).map(|s| s.name.clone()),
+            Tab::Drawing(i) => ws.drawings.get(i).map(|s| s.name.clone()),
+        };
+        match a {
+            "rename" => self.renaming_tab = name_of(&self.ws, t).map(|n| (t, n)),
+            "rename-done" => {
+                if let Some((_, text)) = self.renaming_tab.take() {
+                    let text = text.trim().to_string();
+                    if !text.is_empty() {
+                        match t {
+                            Tab::Studio(i) => self.ws.studios[i].name = text,
+                            Tab::Assembly(i) => self.ws.assemblies[i].name = text,
+                            Tab::Drawing(i) => self.ws.drawings[i].name = text,
+                        }
+                    }
+                }
+            }
+            "new-studio" => {
+                self.sync_ws();
+                let n = self.ws.studios.len() + 1;
+                self.ws.studios.push(crate::workspace::Studio { name: format!("Part Studio {n}"), doc: Document { units: self.doc.units, ..Default::default() } });
+                self.switch_tab(Tab::Studio(n - 1));
+            }
+            "new-assembly" => {
+                let n = self.ws.assemblies.len() + 1;
+                self.ws.assemblies.push(crate::assembly::Assembly { name: format!("Assembly {n}"), ..Default::default() });
+                self.switch_tab(Tab::Assembly(n - 1));
+                self.asm.insert_open = true;
+            }
+            "new-drawing" => {
+                let n = self.ws.drawings.len() + 1;
+                self.ws.drawings.push(crate::drawing::Drawing { name: format!("Drawing {n}"), sheet: "A3".into(), ..Default::default() });
+                self.switch_tab(Tab::Drawing(n - 1));
+                crate::drawing_ui::add_standard_views(self);
+            }
+            "duplicate" => {
+                self.sync_ws();
+                match t {
+                    Tab::Studio(i) => {
+                        let mut s = self.ws.studios[i].clone();
+                        s.name = format!("{} copy", s.name);
+                        self.ws.studios.push(s);
+                    }
+                    Tab::Assembly(i) => {
+                        let mut s = self.ws.assemblies[i].clone();
+                        s.name = format!("{} copy", s.name);
+                        self.ws.assemblies.push(s);
+                    }
+                    Tab::Drawing(i) => {
+                        let mut s = self.ws.drawings[i].clone();
+                        s.name = format!("{} copy", s.name);
+                        self.ws.drawings.push(s);
+                    }
+                }
+            }
+            "delete" => {
+                let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len();
+                if total <= 1 || (matches!(t, Tab::Studio(_)) && self.ws.studios.len() <= 1) {
+                    self.flash("A document needs at least one Part Studio", ToastKind::Info);
+                    return;
+                }
+                self.sync_ws();
+                self.switch_tab(Tab::Studio(0));
+                match t {
+                    Tab::Studio(i) => {
+                        // move to a studio that stays, then drop this one
+                        let keep = if i == 0 { 1 } else { 0 };
+                        self.switch_tab(Tab::Studio(keep));
+                        self.sync_ws();
+                        self.ws.studios.remove(i);
+                        let fix = |k: usize| if k > i { k - 1 } else { k };
+                        self.cur_studio = fix(self.cur_studio);
+                        self.studio_results = std::mem::take(&mut self.studio_results).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
+                        self.studio_undo = std::mem::take(&mut self.studio_undo).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
+                        for a in &mut self.ws.assemblies {
+                            a.instances.retain(|x| x.studio != i);
+                            for x in &mut a.instances {
+                                x.studio = fix(x.studio);
+                            }
+                        }
+                        for d in &mut self.ws.drawings {
+                            d.views.retain(|v| v.studio != i);
+                            for v in &mut d.views {
+                                v.studio = fix(v.studio);
+                            }
+                        }
+                        self.tab = Tab::Studio(self.cur_studio);
+                    }
+                    Tab::Assembly(i) => {
+                        self.ws.assemblies.remove(i);
+                    }
+                    Tab::Drawing(i) => {
+                        self.ws.drawings.remove(i);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+
     fn dock(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1234,6 +1539,7 @@ impl eframe::App for App {
         let bar = Frame::new().fill(PANEL).inner_margin(Margin::symmetric(8, 5)).stroke(Stroke::NONE);
         egui::Panel::top("toolbar").frame(bar).resizable(false).show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("status").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 4))).resizable(false).show(ui, |ui| self.statusbar(ui));
+        egui::Panel::bottom("tabs").frame(Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(6, 3))).resizable(false).show(ui, |ui| self.tabs_ui(ui));
         if self.phone {
             egui::Panel::bottom("dock").frame(Frame::new().fill(PANEL).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
         }
@@ -1243,12 +1549,20 @@ impl eframe::App for App {
                 .resizable(true)
                 .default_size(270.0)
                 .min_size(200.0)
-                .show(ui, |ui| self.sidebar(ui));
+                .show(ui, |ui| match self.tab {
+                    crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
+                    _ => self.sidebar(ui),
+                });
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| {
-            crate::viewport::show(self, ui);
-            if let Some(_) = &self.dialog {
-                crate::dialog::show(self, ui);
+        egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
+            crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
+            crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
+            _ => {
+                crate::viewport::show(self, ui);
+                if self.dialog.is_some() {
+                    crate::dialog::show(self, ui);
+                }
             }
         });
         self.toast_ui(&ctx);

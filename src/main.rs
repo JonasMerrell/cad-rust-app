@@ -1,4 +1,9 @@
 mod app;
+mod drawing_ui;
+mod asm_ui;
+mod workspace;
+mod drawing;
+mod assembly;
 mod camera;
 mod dialog;
 mod doc;
