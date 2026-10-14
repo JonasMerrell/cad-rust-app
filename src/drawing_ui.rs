@@ -539,9 +539,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
             ui.add_space(8.0);
             ui.label(RichText::new("VIEWS").color(MUTED).size(11.0).strong());
-            let views: Vec<(u64, String, f64, bool)> = app.ws.drawings[di].views.iter().map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines)).collect();
-            for (id, dir, scale, hidden) in views {
-                let label = DIRS.iter().find(|x| x.0 == dir).map(|x| x.1).unwrap_or("View");
+            let views: Vec<(u64, String, f64, bool, bool)> = app.ws.drawings[di].views.iter().map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines, v.detail.is_some())).collect();
+            for (id, dir, scale, hidden, detail) in views {
+                let label = if detail { "Detail" } else { DIRS.iter().find(|x| x.0 == dir).map(|x| x.1).unwrap_or("View") };
                 let sel = app.dwg.sel == Some(DSel::View(id));
                 ui.horizontal(|ui| {
                     if ui.selectable_label(sel, label).clicked() {

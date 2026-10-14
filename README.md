@@ -4,6 +4,14 @@ A desktop parametric CAD application in Rust with the same UI as `cad-app.html`
 (toolbar, feature tree, variables, viewport, status bar), built on egui/eframe
 with a wgpu viewport and the OpenCascade (OCCT 7.8) kernel.
 
+## What it does
+
+- **Documents with tabs** like Onshape: Part Studios, Assemblies and Drawings, plus named versions you can restore.
+- **Part Studio:** sketches (line, rectangles, circle, arcs, tangent arc, slot, polygon, ellipse, spline, text, point; trim, extend, sketch fillet, offset, mirror, project, sketch patterns, construction) with a constraint solver (coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, midpoint, concentric, fix, symmetric) and driving dimensions that accept expressions and variables. Features: extrude (blind, symmetric, through all, up to face, second direction, add/remove/intersect), revolve, sweep (including along a helix), loft, fillet (constant/variable), chamfer, shell, hole (simple/counterbore/countersink, ISO sizes), draft, thicken, rib, move face, delete face, helix, plane (offset, angle, 3 points, normal to curve, mid plane), linear/circular pattern and mirror of parts or features, boolean, split, transform/copy, delete body, sheet metal (bent profile or plate, K-factor flat pattern DXF), STEP/IGES import. Variables and configurations, rollback bar, suppress/hide, part names, colours, materials and mass properties, measure, section view, X-ray.
+- **Assemblies:** insert parts, fastened/revolute/slider/cylindrical/planar/ball mates with a mate solver, drag to move, fix/hide instances, exploded view, section view, bill of materials (CSV).
+- **Drawings:** hidden-line projected views (standard layout), section views with hatching, detail views, title block, dimensions, notes, BOM table, PDF/DXF/SVG export.
+- **Export:** STEP, IGES, STL, OBJ, PNG.
+
 ## Build and run
 
     cargo build --release        # first build compiles OpenCascade (~20 min)
