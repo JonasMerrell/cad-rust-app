@@ -5,18 +5,29 @@ use std::f64::consts::TAU;
 
 use glam::DVec2;
 
-use crate::sketch::{arc_angles, Geom, Sketch};
+use crate::sketch::{Geom, Sketch, arc_angles};
 
 const TOL: f64 = 1e-6;
 
 /// A boundary piece in sketch coordinates, oriented along the loop.
 #[derive(Clone, Debug)]
 pub enum Seg {
-    Line { a: DVec2, b: DVec2 },
+    Line {
+        a: DVec2,
+        b: DVec2,
+    },
     /// From angle `t0` to `t1` (t1 < t0 means clockwise).
-    Arc { c: DVec2, r: f64, t0: f64, t1: f64 },
+    Arc {
+        c: DVec2,
+        r: f64,
+        t0: f64,
+        t1: f64,
+    },
     /// A free-form piece (spline, ellipse) through these points.
-    Poly { pts: Vec<DVec2>, closed: bool },
+    Poly {
+        pts: Vec<DVec2>,
+        closed: bool,
+    },
 }
 
 impl Seg {
@@ -31,7 +42,13 @@ impl Seg {
         match *self {
             Seg::Line { b, .. } => b,
             Seg::Arc { c, r, t1, .. } => c + DVec2::from_angle(t1) * r,
-            Seg::Poly { ref pts, closed } => if closed { pts[0] } else { pts[pts.len() - 1] },
+            Seg::Poly { ref pts, closed } => {
+                if closed {
+                    pts[0]
+                } else {
+                    pts[pts.len() - 1]
+                }
+            }
         }
     }
     pub fn mid(&self) -> DVec2 {
@@ -146,11 +163,22 @@ pub fn point_in_poly(p: DVec2, poly: &[DVec2]) -> bool {
 /// A sketch curve in a form convenient for splitting.
 #[derive(Clone, Debug)]
 enum Prim {
-    Line { a: DVec2, b: DVec2 },
+    Line {
+        a: DVec2,
+        b: DVec2,
+    },
     /// Arc from angle t0 to t1 (t1 > t0), full circle when t1 - t0 = TAU.
-    Arc { c: DVec2, r: f64, t0: f64, t1: f64 },
+    Arc {
+        c: DVec2,
+        r: f64,
+        t0: f64,
+        t1: f64,
+    },
     /// Polyline (spline, ellipse, text outline); closed ones end where they start.
-    Poly { pts: Vec<DVec2>, closed: bool },
+    Poly {
+        pts: Vec<DVec2>,
+        closed: bool,
+    },
 }
 
 impl Prim {
@@ -466,10 +494,7 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
     }
 
     let (faces, outers): (Vec<Loop>, Vec<Loop>) = loops.into_iter().partition(|l| l.area() > 1e-9);
-    let mut regions: Vec<Region> = faces
-        .into_iter()
-        .map(|outer| Region { area: outer.area(), outer, holes: vec![], tris: vec![], sample: DVec2::ZERO })
-        .collect();
+    let mut regions: Vec<Region> = faces.into_iter().map(|outer| Region { area: outer.area(), outer, holes: vec![], tris: vec![], sample: DVec2::ZERO }).collect();
     // Each clockwise component boundary is a hole of the smallest face that contains it
     // (and that is not bounded by the same component).
     for o in outers {
@@ -478,11 +503,7 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
         let best = regions
             .iter()
             .enumerate()
-            .filter(|(_, r)| {
-                point_in_poly(inside_pt, &r.outer.poly)
-                    && point_in_poly(probe, &r.outer.poly)
-                    && !r.outer.poly.iter().any(|q| (*q - probe).length() < TOL * 10.0)
-            })
+            .filter(|(_, r)| point_in_poly(inside_pt, &r.outer.poly) && point_in_poly(probe, &r.outer.poly) && !r.outer.poly.iter().any(|q| (*q - probe).length() < TOL * 10.0))
             .min_by(|a, b| a.1.area.total_cmp(&b.1.area))
             .map(|(i, _)| i);
         if let Some(i) = best {
@@ -512,11 +533,7 @@ fn triangulate(r: &mut Region) {
     let Ok(idx) = earcutr::earcut(&coords, &holes, 2) else { return };
     let pt = |i: usize| DVec2::new(coords[2 * i], coords[2 * i + 1]);
     r.tris = idx.chunks(3).map(|t| [pt(t[0]), pt(t[1]), pt(t[2])]).collect();
-    let best = r
-        .tris
-        .iter()
-        .max_by(|a, b| tri_area(a).total_cmp(&tri_area(b)))
-        .copied();
+    let best = r.tris.iter().max_by(|a, b| tri_area(a).total_cmp(&tri_area(b))).copied();
     if let Some(t) = best {
         r.sample = (t[0] + t[1] + t[2]) / 3.0;
     }

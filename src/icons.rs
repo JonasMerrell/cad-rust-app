@@ -23,6 +23,5 @@ fn table() -> &'static HashMap<&'static str, &'static [u8]> {
 /// An icon image `size` points square, white so it can be tinted.
 pub fn image(name: &str, size: f32) -> egui::Image<'static> {
     let bytes = table().get(name).copied().unwrap_or_else(|| table()["more"]);
-    egui::Image::from_bytes(format!("bytes://icon/{name}.svg"), bytes)
-        .fit_to_exact_size(egui::vec2(size, size))
+    egui::Image::from_bytes(format!("bytes://icon/{name}.svg"), bytes).fit_to_exact_size(egui::vec2(size, size))
 }

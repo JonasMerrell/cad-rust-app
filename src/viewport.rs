@@ -111,13 +111,7 @@ pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
         }
     }
     let (down_sec, down_mid, shift, delta, latest) = ui.input(|i| {
-        (
-            i.pointer.button_down(egui::PointerButton::Secondary),
-            i.pointer.button_down(egui::PointerButton::Middle),
-            i.modifiers.shift,
-            i.pointer.delta(),
-            i.pointer.latest_pos(),
-        )
+        (i.pointer.button_down(egui::PointerButton::Secondary), i.pointer.button_down(egui::PointerButton::Middle), i.modifiers.shift, i.pointer.delta(), i.pointer.latest_pos())
     });
     if app.nav.is_none() && (resp.drag_started_by(egui::PointerButton::Secondary) || resp.drag_started_by(egui::PointerButton::Middle)) {
         let button = if down_mid { egui::PointerButton::Middle } else { egui::PointerButton::Secondary };
@@ -391,9 +385,7 @@ pub fn plane_size(app: &App) -> f32 {
 // ---------------------------------------------------------------- scene
 
 fn is_picked(app: &App, r: &Ref) -> bool {
-    app.picks.contains(r)
-        || app.measure.as_ref().map(|m| m.picks.contains(r)).unwrap_or(false)
-        || crate::dialog::field_refs(app).iter().any(|x| x == r)
+    app.picks.contains(r) || app.measure.as_ref().map(|m| m.picks.contains(r)).unwrap_or(false) || crate::dialog::field_refs(app).iter().any(|x| x == r)
 }
 
 fn build_scene(app: &App) -> SceneData {
@@ -411,7 +403,13 @@ fn build_scene(app: &App) -> SceneData {
         if in_sketch.is_some() && !picked {
             continue;
         }
-        let col = if picked { vp::PICKED } else if hov { vp::HOVER } else { vp::PLANE };
+        let col = if picked {
+            vp::PICKED
+        } else if hov {
+            vp::HOVER
+        } else {
+            vp::PLANE
+        };
         let q = |x: f32, y: f32| (fr.to_world(DVec2::new(x as f64, y as f64))).as_vec3();
         let quad = [q(0.0, 0.0), q(size, 0.0), q(size, size), q(0.0, size)];
         s.quad(true, quad, rgba(col, if picked || hov { 0.22 } else { 0.07 }));
@@ -433,7 +431,13 @@ fn build_scene(app: &App) -> SceneData {
             let r = Ref::FeaturePlane { feature: f.id };
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r) || app.dialog.as_ref().map(|d| d.feature == f.id).unwrap_or(false);
-            let col = if picked { vp::PICKED } else if hov { vp::HOVER } else { vp::PLANE };
+            let col = if picked {
+                vp::PICKED
+            } else if hov {
+                vp::HOVER
+            } else {
+                vp::PLANE
+            };
             let h = (size / 2.0) as f64;
             let q = |x: f64, y: f64| fr.to_world(DVec2::new(x, y)).as_vec3();
             let quad = [q(-h, -h), q(h, -h), q(h, h), q(-h, h)];
@@ -522,8 +526,18 @@ fn build_scene(app: &App) -> SceneData {
                 let rr = Ref::Region { sketch: f.id, point: r.sample.into() };
                 let hov = app.hover.as_ref().map(|h| matches!(h, Ref::Region { sketch, point } if *sketch == f.id && r.contains(DVec2::from(*point)))).unwrap_or(false);
                 let picked = is_picked(app, &rr)
-                    || app.picks.iter().chain(crate::dialog::field_refs(app).iter()).any(|x| matches!(x, Ref::Region { sketch, point } if *sketch == f.id && r.contains(DVec2::from(*point))));
-                let (col, a) = if picked { (vp::PICKED, 0.45) } else if hov { (vp::HOVER, 0.35) } else { (vp::SKETCH, 0.10) };
+                    || app
+                        .picks
+                        .iter()
+                        .chain(crate::dialog::field_refs(app).iter())
+                        .any(|x| matches!(x, Ref::Region { sketch, point } if *sketch == f.id && r.contains(DVec2::from(*point))));
+                let (col, a) = if picked {
+                    (vp::PICKED, 0.45)
+                } else if hov {
+                    (vp::HOVER, 0.35)
+                } else {
+                    (vp::SKETCH, 0.10)
+                };
                 // lift slightly towards the viewer so regions on faces stay visible
                 let lift = frame.normal().as_vec3() * 0.01;
                 for t in &r.tris {
@@ -567,7 +581,13 @@ fn build_scene(app: &App) -> SceneData {
     // curve features (helices)
     for c in &app.result.curves {
         let r = Ref::Curve { feature: c.feature };
-        let col = if is_picked(app, &r) { vp::PICKED } else if app.hover.as_ref() == Some(&r) { vp::HOVER } else { vp::SKETCH };
+        let col = if is_picked(app, &r) {
+            vp::PICKED
+        } else if app.hover.as_ref() == Some(&r) {
+            vp::HOVER
+        } else {
+            vp::SKETCH
+        };
         let pts: Vec<Vec3> = c.pts.iter().map(|p| Vec3::from(*p)).collect();
         s.polyline(&pts, 2.0, rgba(col, 1.0), false);
     }
@@ -656,7 +676,13 @@ fn hover_text(app: &App, r: &Ref) -> String {
         Ref::Edge { point } => {
             for b in &app.result.bodies {
                 if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
-                    let kind = if e.linear { "line" } else if e.circular { "circle" } else { "curve" };
+                    let kind = if e.linear {
+                        "line"
+                    } else if e.circular {
+                        "circle"
+                    } else {
+                        "curve"
+                    };
                     return format!("{kind} edge · {}", app.doc.units.fmt_with(e.length));
                 }
             }
@@ -719,7 +745,9 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                     }
                 }
                 let sk = match t {
-                    Ref::FeaturePlane { feature } | Ref::Region { sketch: feature, .. } | Ref::SketchCurve { sketch: feature, .. } | Ref::SketchPoint { sketch: feature, .. } => Some(*feature),
+                    Ref::FeaturePlane { feature } | Ref::Region { sketch: feature, .. } | Ref::SketchCurve { sketch: feature, .. } | Ref::SketchPoint { sketch: feature, .. } => {
+                        Some(*feature)
+                    }
                     _ => None,
                 };
                 if let Some(f) = sk {
@@ -755,11 +783,7 @@ fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
         Ref::Edge { point } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
         Ref::SketchPoint { sketch, point } => {
             let f = app.doc.feature(*sketch)?;
-            if let Op::Sketch { sketch, frame, .. } = &f.op {
-                Some((frame.to_world(sketch.point(*point)?.v()), None))
-            } else {
-                None
-            }
+            if let Op::Sketch { sketch, frame, .. } = &f.op { Some((frame.to_world(sketch.point(*point)?.v()), None)) } else { None }
         }
         Ref::OriginPlane { plane } => Some((DVec3::ZERO, Some(plane.frame().normal()))),
         _ => None,
@@ -798,11 +822,7 @@ pub fn measure_pair(app: &App, m: &Measure) -> Option<(DVec3, DVec3, String)> {
     }
     let d = (b - a).length();
     let dd = b - a;
-    Some((
-        a,
-        b,
-        format!("distance {} (dx {}, dy {}, dz {})", u.fmt_with(d), u.fmt(dd.x.abs()), u.fmt(dd.y.abs()), u.fmt(dd.z.abs())),
-    ))
+    Some((a, b, format!("distance {} (dx {}, dy {}, dz {})", u.fmt_with(d), u.fmt(dd.x.abs()), u.fmt(dd.y.abs()), u.fmt(dd.z.abs()))))
 }
 
 pub fn measure_text(app: &App, m: &Measure) -> String {

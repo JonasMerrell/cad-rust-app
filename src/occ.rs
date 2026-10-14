@@ -3,10 +3,10 @@
 //! with OCCT's message instead of aborting the process.
 
 use cxx::UniquePtr;
+use ffi::extra as ex;
 use glam::{DMat3, DVec3};
 use opencascade::primitives::{Edge, Face, Shape, Wire};
 use opencascade_sys as ffi;
-use ffi::extra as ex;
 
 pub type R<T> = Result<T, String>;
 
@@ -78,10 +78,7 @@ pub fn thicken(s: &Shape, t: f64) -> R<Shape> {
 
 pub fn draft(s: &Shape, faces: &[Face], pull: DVec3, angle_rad: f64, plane_p: DVec3, plane_n: DVec3) -> R<Shape> {
     let l = list(faces.iter().map(face_shape));
-    take(
-        ex::ex_draft(&s.inner, &l, pull.x, pull.y, pull.z, angle_rad, plane_p.x, plane_p.y, plane_p.z, plane_n.x, plane_n.y, plane_n.z),
-        "draft",
-    )
+    take(ex::ex_draft(&s.inner, &l, pull.x, pull.y, pull.z, angle_rad, plane_p.x, plane_p.y, plane_p.z, plane_n.x, plane_n.y, plane_n.z), "draft")
 }
 
 pub fn sweep(profile: &Wire, spine: &Wire, frenet: bool) -> R<Shape> {

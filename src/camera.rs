@@ -30,13 +30,7 @@ pub enum StdView {
 
 impl Default for Camera {
     fn default() -> Self {
-        let mut c = Self {
-            target: Vec3::ZERO,
-            back: Vec3::ONE.normalize(),
-            up: Vec3::Z,
-            half_height: 110.0,
-            size: Vec2::new(800.0, 600.0),
-        };
+        let mut c = Self { target: Vec3::ZERO, back: Vec3::ONE.normalize(), up: Vec3::Z, half_height: 110.0, size: Vec2::new(800.0, 600.0) };
         c.set_view(StdView::Iso);
         c.target = Vec3::new(40.0, 40.0, 30.0);
         c

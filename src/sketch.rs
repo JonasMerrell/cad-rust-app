@@ -31,16 +31,37 @@ impl Point {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "type", rename_all = "lowercase")]
 pub enum Geom {
-    Line { a: Id, b: Id },
-    Circle { c: Id, r: f64 },
+    Line {
+        a: Id,
+        b: Id,
+    },
+    Circle {
+        c: Id,
+        r: f64,
+    },
     /// Counter-clockwise from `a` to `b` around `c`.
-    Arc { c: Id, a: Id, b: Id },
+    Arc {
+        c: Id,
+        a: Id,
+        b: Id,
+    },
     /// Full ellipse: centre, end of the major axis, minor radius.
-    Ellipse { c: Id, a: Id, rmin: f64 },
+    Ellipse {
+        c: Id,
+        a: Id,
+        rmin: f64,
+    },
     /// Smooth curve through the points.
-    Spline { pts: Vec<Id>, #[serde(default)] closed: bool },
+    Spline {
+        pts: Vec<Id>,
+        #[serde(default)]
+        closed: bool,
+    },
     /// Fixed outline (e.g. from text); not driven by the solver.
-    Poly { pts: Vec<[f64; 2]>, closed: bool },
+    Poly {
+        pts: Vec<[f64; 2]>,
+        closed: bool,
+    },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -64,31 +85,98 @@ pub struct Dim {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
 pub enum Constraint {
-    PointOnLine { p: Id, l: Id },
-    PointOnCircle { p: Id, c: Id },
-    Horizontal { l: Id },
-    Vertical { l: Id },
-    HorizontalPts { a: Id, b: Id },
-    VerticalPts { a: Id, b: Id },
-    Parallel { a: Id, b: Id },
-    Perpendicular { a: Id, b: Id },
+    PointOnLine {
+        p: Id,
+        l: Id,
+    },
+    PointOnCircle {
+        p: Id,
+        c: Id,
+    },
+    Horizontal {
+        l: Id,
+    },
+    Vertical {
+        l: Id,
+    },
+    HorizontalPts {
+        a: Id,
+        b: Id,
+    },
+    VerticalPts {
+        a: Id,
+        b: Id,
+    },
+    Parallel {
+        a: Id,
+        b: Id,
+    },
+    Perpendicular {
+        a: Id,
+        b: Id,
+    },
     /// Line–circle or circle–circle tangency; `inner` for internal circle tangency.
-    Tangent { a: Id, b: Id, #[serde(default)] inner: bool },
-    Equal { a: Id, b: Id },
-    Midpoint { p: Id, l: Id },
-    Fix { p: Id, x: f64, y: f64 },
+    Tangent {
+        a: Id,
+        b: Id,
+        #[serde(default)]
+        inner: bool,
+    },
+    Equal {
+        a: Id,
+        b: Id,
+    },
+    Midpoint {
+        p: Id,
+        l: Id,
+    },
+    Fix {
+        p: Id,
+        x: f64,
+        y: f64,
+    },
     /// Points `a` and `b` mirror each other across line `l`.
-    Symmetric { a: Id, b: Id, l: Id },
+    Symmetric {
+        a: Id,
+        b: Id,
+        l: Id,
+    },
     /// Point-to-point distance.
-    Distance { a: Id, b: Id, dim: Dim },
+    Distance {
+        a: Id,
+        b: Id,
+        dim: Dim,
+    },
     /// Horizontal (`axis` 0) or vertical (1) distance between two points.
-    AxisDistance { a: Id, b: Id, axis: u8, dim: Dim },
-    PointLineDistance { p: Id, l: Id, dim: Dim },
-    Length { l: Id, dim: Dim },
-    Radius { c: Id, dim: Dim },
-    Diameter { c: Id, dim: Dim },
+    AxisDistance {
+        a: Id,
+        b: Id,
+        axis: u8,
+        dim: Dim,
+    },
+    PointLineDistance {
+        p: Id,
+        l: Id,
+        dim: Dim,
+    },
+    Length {
+        l: Id,
+        dim: Dim,
+    },
+    Radius {
+        c: Id,
+        dim: Dim,
+    },
+    Diameter {
+        c: Id,
+        dim: Dim,
+    },
     /// Angle from line `a` to line `b` in degrees.
-    Angle { a: Id, b: Id, dim: Dim },
+    Angle {
+        a: Id,
+        b: Id,
+        dim: Dim,
+    },
 }
 
 impl Constraint {
@@ -325,11 +413,9 @@ impl Sketch {
         // A point-on-curve constraint whose point is already an endpoint of the curve is redundant.
         let curves = self.curves.clone();
         self.constraints.retain(|k| match *k {
-            Constraint::PointOnLine { p, l } | Constraint::PointOnCircle { p, c: l } => curves
-                .iter()
-                .find(|c| c.id == l)
-                .map(|c| !Self::curve_points(&c.geom).contains(&p))
-                .unwrap_or(false),
+            Constraint::PointOnLine { p, l } | Constraint::PointOnCircle { p, c: l } => {
+                curves.iter().find(|c| c.id == l).map(|c| !Self::curve_points(&c.geom).contains(&p)).unwrap_or(false)
+            }
             _ => true,
         });
     }
@@ -434,25 +520,58 @@ fn norm2(r: &[f64]) -> f64 {
 enum Res {
     Fix(usize, f64),
     /// cross((b-a),(p-a))/|b-a|
-    PointLine { p: usize, a: usize, b: usize },
+    PointLine {
+        p: usize,
+        a: usize,
+        b: usize,
+    },
     /// |p-c| - r  where r is param `r` or |q-c|
-    PointCircle { p: usize, c: usize, r: RIdx },
+    PointCircle {
+        p: usize,
+        c: usize,
+        r: RIdx,
+    },
     Horiz(usize, usize),
     Vert(usize, usize),
     Parallel(usize, usize, usize, usize),
     Perp(usize, usize, usize, usize),
     Angle(usize, usize, usize, usize, f64),
-    LineCircleTangent { a: usize, b: usize, c: usize, r: RIdx },
-    CircleCircle { c1: usize, r1: RIdx, c2: usize, r2: RIdx, inner: bool },
+    LineCircleTangent {
+        a: usize,
+        b: usize,
+        c: usize,
+        r: RIdx,
+    },
+    CircleCircle {
+        c1: usize,
+        r1: RIdx,
+        c2: usize,
+        r2: RIdx,
+        inner: bool,
+    },
     EqualLen(usize, usize, usize, usize),
     EqualR(RIdx, RIdx),
-    MidX { p: usize, a: usize, b: usize },
+    MidX {
+        p: usize,
+        a: usize,
+        b: usize,
+    },
     Dist(usize, usize, f64),
     AxisDist(usize, usize, usize, f64),
-    PointLineDist { p: usize, a: usize, b: usize, d: f64 },
+    PointLineDist {
+        p: usize,
+        a: usize,
+        b: usize,
+        d: f64,
+    },
     RadiusIs(RIdx, f64),
     /// midpoint of p,q on line a-b and p-q perpendicular to it
-    Symmetric { p: usize, q: usize, a: usize, b: usize },
+    Symmetric {
+        p: usize,
+        q: usize,
+        a: usize,
+        b: usize,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -899,10 +1018,12 @@ impl Sketch {
                 let u = self.pv(a) - ctr;
                 let v = u.perp().normalize_or_zero() * rmin;
                 let n = ((std::f64::consts::TAU * u.length().max(rmin) / seg_len).ceil() as usize).clamp(32, 360);
-                (0..=n).map(|i| {
-                    let t = i as f64 / n as f64 * std::f64::consts::TAU;
-                    ctr + u * t.cos() + v * t.sin()
-                }).collect()
+                (0..=n)
+                    .map(|i| {
+                        let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                        ctr + u * t.cos() + v * t.sin()
+                    })
+                    .collect()
             }
             Geom::Spline { ref pts, closed } => {
                 let p: Vec<DVec2> = pts.iter().map(|id| self.pv(*id)).collect();
@@ -931,11 +1052,7 @@ impl Sketch {
                 while t < a0 {
                     t += std::f64::consts::TAU;
                 }
-                if t <= a1 {
-                    ((p - ctr).length() - r).abs()
-                } else {
-                    (p - self.pv(a)).length().min((p - self.pv(b)).length())
-                }
+                if t <= a1 { ((p - ctr).length() - r).abs() } else { (p - self.pv(a)).length().min((p - self.pv(b)).length()) }
             }
             _ => {
                 let pts = self.tessellate(c, 0.5);

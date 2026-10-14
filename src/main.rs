@@ -1,13 +1,12 @@
 mod app;
-mod drawing_export;
-mod drawing_ui;
 mod asm_ui;
-mod workspace;
-mod drawing;
 mod assembly;
 mod camera;
 mod dialog;
 mod doc;
+mod drawing;
+mod drawing_export;
+mod drawing_ui;
 mod expr;
 mod icon_paths;
 mod icons;
@@ -21,6 +20,7 @@ mod text;
 mod theme;
 mod viewport;
 mod worker;
+mod workspace;
 
 fn main() -> eframe::Result {
     if std::env::args().any(|a| a == "--kernel-worker") {

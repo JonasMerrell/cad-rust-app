@@ -82,11 +82,7 @@ impl SceneData {
     pub fn polyline(&mut self, pts: &[Vec3], width: f32, color: [f32; 4], top: bool) {
         for w in pts.windows(2) {
             let l = LineInst { a: w[0].into(), b: w[1].into(), width, bias: 0.0, color };
-            if top {
-                self.lines_top.push(l)
-            } else {
-                self.lines.push(l)
-            }
+            if top { self.lines_top.push(l) } else { self.lines.push(l) }
         }
     }
 
@@ -114,13 +110,7 @@ impl Buf {
     fn upload<T: Pod>(&mut self, device: &wgpu::Device, data: &[T], usage: wgpu::BufferUsages) {
         use wgpu::util::DeviceExt;
         self.count = data.len() as u32;
-        self.buf = (!data.is_empty()).then(|| {
-            device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: None,
-                contents: bytemuck::cast_slice(data),
-                usage,
-            })
-        });
+        self.buf = (!data.is_empty()).then(|| device.create_buffer_init(&wgpu::util::BufferInitDescriptor { label: None, contents: bytemuck::cast_slice(data), usage }));
     }
 }
 
@@ -225,10 +215,7 @@ struct POut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32>, @loc
 impl Renderer {
     pub fn install(rs: &egui_wgpu::RenderState) {
         let device = &rs.device;
-        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
-            label: Some("viewport"),
-            source: wgpu::ShaderSource::Wgsl(SHADER.into()),
-        });
+        let shader = device.create_shader_module(wgpu::ShaderModuleDescriptor { label: Some("viewport"), source: wgpu::ShaderSource::Wgsl(SHADER.into()) });
         let uniform = device.create_buffer(&wgpu::BufferDescriptor {
             label: Some("viewport uniforms"),
             size: std::mem::size_of::<Uniforms>() as u64,
@@ -240,11 +227,7 @@ impl Renderer {
             entries: &[wgpu::BindGroupLayoutEntry {
                 binding: 0,
                 visibility: wgpu::ShaderStages::VERTEX_FRAGMENT,
-                ty: wgpu::BindingType::Buffer {
-                    ty: wgpu::BufferBindingType::Uniform,
-                    has_dynamic_offset: false,
-                    min_binding_size: None,
-                },
+                ty: wgpu::BindingType::Buffer { ty: wgpu::BufferBindingType::Uniform, has_dynamic_offset: false, min_binding_size: None },
                 count: None,
             }],
         });
@@ -253,16 +236,8 @@ impl Renderer {
             layout: &bgl,
             entries: &[wgpu::BindGroupEntry { binding: 0, resource: uniform.as_entire_binding() }],
         });
-        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
-            label: None,
-            bind_group_layouts: &[Some(&bgl)],
-            immediate_size: 0,
-        });
-        let target = [Some(wgpu::ColorTargetState {
-            format: rs.target_format,
-            blend: Some(wgpu::BlendState::ALPHA_BLENDING),
-            write_mask: wgpu::ColorWrites::ALL,
-        })];
+        let layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl)], immediate_size: 0 });
+        let target = [Some(wgpu::ColorTargetState { format: rs.target_format, blend: Some(wgpu::BlendState::ALPHA_BLENDING), write_mask: wgpu::ColorWrites::ALL })];
         let depth = |write: bool, cmp: wgpu::CompareFunction, bias: i32| {
             Some(wgpu::DepthStencilState {
                 format: DEPTH,
@@ -275,27 +250,13 @@ impl Renderer {
         let ms = wgpu::MultisampleState { count: MSAA, mask: !0, alpha_to_coverage_enabled: false };
 
         let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
-        let mesh_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<MeshVertex>() as u64,
-            step_mode: wgpu::VertexStepMode::Vertex,
-            attributes: &mesh_attrs,
-        };
+        let mesh_layout = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<MeshVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &mesh_attrs };
         let mesh = |write: bool, bias: i32, label: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_mesh"),
-                    buffers: &[Some(mesh_layout.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_mesh"),
-                    targets: &target,
-                    compilation_options: Default::default(),
-                }),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_mesh"), buffers: &[Some(mesh_layout.clone())], compilation_options: Default::default() },
+                fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_mesh"), targets: &target, compilation_options: Default::default() }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: depth(write, wgpu::CompareFunction::LessEqual, bias),
                 multisample: ms,
@@ -307,27 +268,13 @@ impl Renderer {
         let mesh_transparent = mesh(false, 2, "mesh transparent");
 
         let line_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32, 2 => Float32x3, 3 => Float32, 4 => Float32x4];
-        let line_layout = wgpu::VertexBufferLayout {
-            array_stride: std::mem::size_of::<LineInst>() as u64,
-            step_mode: wgpu::VertexStepMode::Instance,
-            attributes: &line_attrs,
-        };
+        let line_layout = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<LineInst>() as u64, step_mode: wgpu::VertexStepMode::Instance, attributes: &line_attrs };
         let line = |cmp: wgpu::CompareFunction, label: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
                 label: Some(label),
                 layout: Some(&layout),
-                vertex: wgpu::VertexState {
-                    module: &shader,
-                    entry_point: Some("vs_line"),
-                    buffers: &[Some(line_layout.clone())],
-                    compilation_options: Default::default(),
-                },
-                fragment: Some(wgpu::FragmentState {
-                    module: &shader,
-                    entry_point: Some("fs_line"),
-                    targets: &target,
-                    compilation_options: Default::default(),
-                }),
+                vertex: wgpu::VertexState { module: &shader, entry_point: Some("vs_line"), buffers: &[Some(line_layout.clone())], compilation_options: Default::default() },
+                fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_line"), targets: &target, compilation_options: Default::default() }),
                 primitive: wgpu::PrimitiveState::default(),
                 depth_stencil: depth(false, cmp, 0),
                 multisample: ms,
@@ -352,12 +299,7 @@ impl Renderer {
                 })],
                 compilation_options: Default::default(),
             },
-            fragment: Some(wgpu::FragmentState {
-                module: &shader,
-                entry_point: Some("fs_point"),
-                targets: &target,
-                compilation_options: Default::default(),
-            }),
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_point"), targets: &target, compilation_options: Default::default() }),
             primitive: wgpu::PrimitiveState::default(),
             depth_stencil: depth(false, wgpu::CompareFunction::LessEqual, 0),
             multisample: ms,
@@ -414,12 +356,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         vec![]
     }
 
-    fn paint(
-        &self,
-        info: egui::PaintCallbackInfo,
-        rp: &mut wgpu::RenderPass<'static>,
-        res: &egui_wgpu::CallbackResources,
-    ) {
+    fn paint(&self, info: egui::PaintCallbackInfo, rp: &mut wgpu::RenderPass<'static>, res: &egui_wgpu::CallbackResources) {
         let Some(r) = res.get::<Renderer>() else { return };
         let _ = info;
         rp.set_bind_group(0, &r.bind, &[]);

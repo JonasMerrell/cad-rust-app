@@ -11,8 +11,8 @@ use serde::{Deserialize, Serialize};
 
 use crate::doc::{BodyId, BoolOp, BooleanKind, Document, EndType, FeatId, HoleType, Op, OriginPlane, Ref};
 use crate::expr::{Kind, Units};
-use crate::regions::{find_regions, Region, Seg};
 use crate::occ;
+use crate::regions::{Region, Seg, find_regions};
 use crate::sketch::Frame;
 
 // ------------------------------------------------------------------ results
@@ -204,7 +204,9 @@ impl<'a> Model<'a> {
                         let (pa, pb) = (fr.to_world(sk.pv(a)), fr.to_world(sk.pv(b)));
                         Ok((pa, (pb - pa).normalize()))
                     }
-                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) | Some(crate::sketch::Geom::Ellipse { c, .. }) => Ok((fr.to_world(sk.pv(c)), fr.normal())),
+                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) | Some(crate::sketch::Geom::Ellipse { c, .. }) => {
+                        Ok((fr.to_world(sk.pv(c)), fr.normal()))
+                    }
                     Some(_) => Err("use a line, circle or arc as the axis".into()),
                     None => Err("the axis curve no longer exists".into()),
                 }
@@ -248,11 +250,7 @@ impl<'a> Model<'a> {
                     let (sk, fr) = self.sketch(*sketch)?;
                     let regions = cache.entry(*sketch).or_insert_with(|| find_regions(sk));
                     let p = DVec2::from(*point);
-                    let reg = regions
-                        .iter()
-                        .filter(|g| g.contains(p))
-                        .min_by(|a, b| a.area.total_cmp(&b.area))
-                        .ok_or("a profile region no longer exists")?;
+                    let reg = regions.iter().filter(|g| g.contains(p)).min_by(|a, b| a.area.total_cmp(&b.area)).ok_or("a profile region no longer exists")?;
                     out.push((region_face(reg, &fr)?, fr));
                 }
                 Ref::Face { point, normal } => {
@@ -1128,10 +1126,7 @@ pub fn unique_edges(s: &Shape) -> Vec<Edge> {
 pub fn visible_edges(s: &Shape) -> Vec<Edge> {
     let mut map = ffi::top_tools::new_indexed_data_map_of_shape_list_of_shape();
     ffi::top_exp::TopExp::MapShapesAndUniqueAncestors(&s.inner, ffi::top_abs::TopAbs_ShapeEnum::TopAbs_EDGE, ffi::top_abs::TopAbs_ShapeEnum::TopAbs_FACE, map.pin_mut(), false);
-    (1..=map.Extent())
-        .filter(|&i| map.FindFromIndex(i).Size() != 1)
-        .map(|i| Edge::from_edge(ffi::topo_ds::TopoDS::Edge(map.FindKey(i))))
-        .collect()
+    (1..=map.Extent()).filter(|&i| map.FindFromIndex(i).Size() != 1).map(|i| Edge::from_edge(ffi::topo_ds::TopoDS::Edge(map.FindKey(i)))).collect()
 }
 
 fn e_is_line(e: &Edge) -> bool {
@@ -1219,16 +1214,13 @@ pub fn face_geom(face: &Face) -> FaceGeom {
     }
     let normal = nsum.normalize_or_zero();
     let centroid = if area > 0.0 { csum / area } else { DVec3::ZERO };
-    let planar = !tris.is_empty() && tris.iter().all(|t| {
-        let n = (t[1] - t[0]).cross(t[2] - t[0]);
-        n.length() < 1e-12 || n.normalize().dot(normal) > 0.9999
-    });
+    let planar = !tris.is_empty()
+        && tris.iter().all(|t| {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            n.length() < 1e-12 || n.normalize().dot(normal) > 0.9999
+        });
     // nearest triangle centre to the centroid, so the point lies on the face
-    let center = tris
-        .iter()
-        .map(|t| (t[0] + t[1] + t[2]) / 3.0)
-        .min_by(|a, b| (*a - centroid).length().total_cmp(&(*b - centroid).length()))
-        .unwrap_or(centroid);
+    let center = tris.iter().map(|t| (t[0] + t[1] + t[2]) / 3.0).min_by(|a, b| (*a - centroid).length().total_cmp(&(*b - centroid).length())).unwrap_or(centroid);
     let center = if planar { centroid_on_plane(centroid, center, normal) } else { center };
     FaceGeom { center, normal, planar, area }
 }
@@ -1315,13 +1307,7 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
     if !mesher.IsDone() {
         return Err("meshing failed".into());
     }
-    let mut out = BodyMesh {
-        bbox: [bb.min().into(), bb.max().into()],
-        volume: volume(shape),
-        area: surface_area(shape),
-        centroid: centroid(shape).into(),
-        ..Default::default()
-    };
+    let mut out = BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), ..Default::default() };
     for (fi, face) in unique_faces(shape).into_iter().enumerate() {
         let mut loc = ffi::top_loc::Location_new();
         let th = ffi::b_rep::BRep_Tool_Triangulation(&face.inner, loc.pin_mut());
@@ -1381,11 +1367,7 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
         }
         let ty = e.edge_type();
         let circular = ty == opencascade::primitives::EdgeType::Circle;
-        let circle = if circular && pts.len() >= 3 {
-            circle_from_points(&pts).map(|(c, n)| (c.into(), n.into(), (pts[0] - c).length()))
-        } else {
-            None
-        };
+        let circle = if circular && pts.len() >= 3 { circle_from_points(&pts).map(|(c, n)| (c.into(), n.into(), (pts[0] - c).length())) } else { None };
         out.edges.push(EdgeInfo {
             pts: pts.iter().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect(),
             mid: mid.into(),
@@ -1753,11 +1735,7 @@ pub struct ProjView {
 }
 
 fn polylines_2d(s: &Shape) -> Vec<Vec<[f64; 2]>> {
-    unique_edges(s)
-        .iter()
-        .map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>())
-        .filter(|p| p.len() >= 2)
-        .collect()
+    unique_edges(s).iter().map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>()).filter(|p| p.len() >= 2).collect()
 }
 
 /// Hidden-line projections of a Part Studio's parts, one per (direction, up) pair.

@@ -37,11 +37,12 @@ pub fn pdf(prims: &[Prim], size: [f64; 2]) -> Vec<u8> {
                 let pt = size * k;
                 // Helvetica averages ~0.5 em per character
                 let wdt = text.chars().count() as f64 * pt * 0.5;
-                let x = at[0] * k - match anchor {
-                    1 => wdt / 2.0,
-                    2 => wdt,
-                    _ => 0.0,
-                };
+                let x = at[0] * k
+                    - match anchor {
+                        1 => wdt / 2.0,
+                        2 => wdt,
+                        _ => 0.0,
+                    };
                 c.push_str(&format!(
                     "{:.3} {:.3} {:.3} rg BT /F1 {:.2} Tf {:.3} {:.3} Td ({}) Tj ET\n",
                     color[0] as f64 / 255.0,
@@ -82,14 +83,7 @@ pub fn dxf(prims: &[Prim]) -> String {
     for p in prims {
         match p {
             Prim::Line { a, b, dashed, .. } => {
-                s.push_str(&format!(
-                    "0\nLINE\n8\n{}\n10\n{:.4}\n20\n{:.4}\n30\n0\n11\n{:.4}\n21\n{:.4}\n31\n0\n",
-                    if *dashed { "HIDDEN" } else { "0" },
-                    a[0],
-                    a[1],
-                    b[0],
-                    b[1]
-                ));
+                s.push_str(&format!("0\nLINE\n8\n{}\n10\n{:.4}\n20\n{:.4}\n30\n0\n11\n{:.4}\n21\n{:.4}\n31\n0\n", if *dashed { "HIDDEN" } else { "0" }, a[0], a[1], b[0], b[1]));
             }
             Prim::Text { at, size, text, anchor, .. } => {
                 let h = match anchor {
@@ -97,7 +91,10 @@ pub fn dxf(prims: &[Prim]) -> String {
                     2 => 2,
                     _ => 0,
                 };
-                s.push_str(&format!("0\nTEXT\n8\nTEXT\n10\n{:.4}\n20\n{:.4}\n30\n0\n40\n{:.3}\n1\n{}\n72\n{h}\n11\n{:.4}\n21\n{:.4}\n31\n0\n", at[0], at[1], size, text, at[0], at[1]));
+                s.push_str(&format!(
+                    "0\nTEXT\n8\nTEXT\n10\n{:.4}\n20\n{:.4}\n30\n0\n40\n{:.3}\n1\n{}\n72\n{h}\n11\n{:.4}\n21\n{:.4}\n31\n0\n",
+                    at[0], at[1], size, text, at[0], at[1]
+                ));
             }
         }
     }

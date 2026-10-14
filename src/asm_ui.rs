@@ -10,7 +10,7 @@ use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose}
 use crate::drawing::Drawing;
 use crate::icons;
 use crate::render::{MeshVertex, SceneData, ViewportCallback};
-use crate::theme::{self, vp, BORDER, MUTED, TEXT};
+use crate::theme::{self, BORDER, MUTED, TEXT, vp};
 use crate::workspace::Tab;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,11 +116,7 @@ fn mesh_of<'a>(app: &'a App, inst: &Instance) -> Option<&'a crate::kernel::BodyM
 }
 
 fn part_color(app: &App, inst: &Instance) -> Color32 {
-    app.studio_doc(inst.studio)
-        .and_then(|d| d.parts.get(&crate::doc::body_key(inst.body)))
-        .and_then(|p| p.color)
-        .map(|c| Color32::from_rgb(c[0], c[1], c[2]))
-        .unwrap_or(vp::BODY)
+    app.studio_doc(inst.studio).and_then(|d| d.parts.get(&crate::doc::body_key(inst.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::BODY)
 }
 
 fn centroid_local(app: &App, inst: &Instance) -> DVec3 {
@@ -327,11 +323,7 @@ fn insert_panel(app: &mut App, ui: &mut Ui) {
             ui.label(RichText::new("  (no parts yet)").color(MUTED).italics().size(12.0));
         }
         for b in bodies {
-            let name = app
-                .studio_doc(si)
-                .and_then(|d| d.parts.get(&crate::doc::body_key(b.id)))
-                .and_then(|p| p.name.clone())
-                .unwrap_or_else(|| b.name.clone());
+            let name = app.studio_doc(si).and_then(|d| d.parts.get(&crate::doc::body_key(b.id))).and_then(|p| p.name.clone()).unwrap_or_else(|| b.name.clone());
             if ui.add(egui::Button::image_and_text(icons::image("extrude", 14.0).tint(TEXT), RichText::new(&name).size(12.5))).on_hover_text("Insert an instance").clicked() {
                 add = Some((si, b.id, name));
             }
@@ -417,7 +409,13 @@ fn mates(app: &mut App, ui: &mut Ui) {
     for (id, name, kind, suppressed) in rows {
         let failed = app.asm.failed.contains(&id);
         let picked = app.asm.sel_mate == Some(id) || app.asm.dialog.as_ref().map(|d| d.mate == id).unwrap_or(false);
-        let col = if failed { theme::ERROR_SOFT } else if suppressed { MUTED } else { TEXT };
+        let col = if failed {
+            theme::ERROR_SOFT
+        } else if suppressed {
+            MUTED
+        } else {
+            TEXT
+        };
         let r = ui.add(
             egui::Button::image_and_text(icons::image(kind.icon(), 14.0).tint(col), RichText::new(&name).size(12.5).color(col))
                 .selected(picked)
@@ -619,14 +617,10 @@ fn connector_for(app: &App, h: &Hit) -> Option<Connector> {
 fn build_scene(app: &App) -> SceneData {
     let mut s = SceneData::default();
     let Some(a) = asm(app) else { return s };
-    let dialog_conns: Vec<Connector> = app
-        .asm
-        .dialog
-        .as_ref()
-        .and_then(|d| a.mates.iter().find(|m| m.id == d.mate))
-        .map(|m| m.a.iter().chain(m.b.iter()).copied().collect())
-        .unwrap_or_default();
-    let mate_insts: Vec<u64> = app.asm.sel_mate.and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
+    let dialog_conns: Vec<Connector> =
+        app.asm.dialog.as_ref().and_then(|d| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.iter().chain(m.b.iter()).copied().collect()).unwrap_or_default();
+    let mate_insts: Vec<u64> =
+        app.asm.sel_mate.and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
     for x in a.instances.iter().filter(|x| !x.hidden) {
         let Some(m) = mesh_of(app, x) else { continue };
         let sel = app.asm.sel.contains(&x.id) || mate_insts.contains(&x.id);
@@ -664,7 +658,13 @@ fn build_scene(app: &App) -> SceneData {
         if let Some((o, z, xx)) = a.world(c) {
             let y = z.cross(xx);
             for (d, col) in [(xx, vp::AXIS_X), (y, vp::AXIS_Y), (z, vp::AXIS_Z)] {
-                s.lines_top.push(crate::render::LineInst { a: o.as_vec3().into(), b: (o + d * size).as_vec3().into(), width: 2.5, bias: 0.0, color: crate::viewport::rgba(col, 1.0) });
+                s.lines_top.push(crate::render::LineInst {
+                    a: o.as_vec3().into(),
+                    b: (o + d * size).as_vec3().into(),
+                    width: 2.5,
+                    bias: 0.0,
+                    color: crate::viewport::rgba(col, 1.0),
+                });
             }
             s.point(o.as_vec3(), 8.0, crate::viewport::rgba(vp::SNAP, 1.0));
         }
@@ -865,7 +865,11 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                     ui.end_row();
                     for (i, (label, n)) in [("First", &na), ("Second", &nb)].into_iter().enumerate() {
                         ui.label(RichText::new(label).color(MUTED));
-                        let fr = egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0, if active == i { theme::ACCENT } else { BORDER })).corner_radius(5).inner_margin(Margin::symmetric(6, 3));
+                        let fr = egui::Frame::new()
+                            .fill(theme::BG)
+                            .stroke(Stroke::new(1.0, if active == i { theme::ACCENT } else { BORDER }))
+                            .corner_radius(5)
+                            .inner_margin(Margin::symmetric(6, 3));
                         let r = fr
                             .show(ui, |ui| {
                                 ui.set_width(180.0);

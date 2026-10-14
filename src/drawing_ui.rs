@@ -157,11 +157,7 @@ fn nice_scale(raw: f64) -> f64 {
 }
 
 fn fmt_scale(s: f64) -> String {
-    if s >= 1.0 {
-        format!("{}:1", crate::expr::trim(s, 2))
-    } else {
-        format!("1:{}", crate::expr::trim(1.0 / s, 2))
-    }
+    if s >= 1.0 { format!("{}:1", crate::expr::trim(s, 2)) } else { format!("1:{}", crate::expr::trim(1.0 / s, 2)) }
 }
 
 /// Where a view's model point lands on the sheet.
@@ -567,7 +563,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                             Some((v0, a)) if v0 == vid && (a[0] - q[0]).abs() + (a[1] - q[1]).abs() > 1e-9 => {
                                 // horizontal/vertical when nearly axis aligned in the view
                                 let (dx, dy) = ((q[0] - a[0]).abs(), (q[1] - a[1]).abs());
-                                let kind = if dy < 1e-6 * (1.0 + dx) { 1 } else if dx < 1e-6 * (1.0 + dy) { 2 } else { 0 };
+                                let kind = if dy < 1e-6 * (1.0 + dx) {
+                                    1
+                                } else if dx < 1e-6 * (1.0 + dy) {
+                                    2
+                                } else {
+                                    0
+                                };
                                 checkpoint(app);
                                 if let Some(dd) = dwg_mut(app) {
                                     dd.next_id += 1;

@@ -424,11 +424,7 @@ impl App {
 
     /// Meshes of a Part Studio's parts.
     pub fn studio_bodies(&self, studio: usize) -> &[crate::kernel::BodyMesh] {
-        if studio == self.cur_studio {
-            &self.result.bodies
-        } else {
-            self.studio_results.get(&studio).map(|r| r.bodies.as_slice()).unwrap_or(&[])
-        }
+        if studio == self.cur_studio { &self.result.bodies } else { self.studio_results.get(&studio).map(|r| r.bodies.as_slice()).unwrap_or(&[]) }
     }
 
     pub fn studio_doc(&self, studio: usize) -> Option<&Document> {
@@ -454,11 +450,7 @@ impl App {
     }
 
     pub fn save(&mut self, ask: bool) {
-        let path = if ask || self.path.is_none() {
-            rfd::FileDialog::new().add_filter("Part", &["json"]).set_file_name("part.json").save_file()
-        } else {
-            self.path.clone()
-        };
+        let path = if ask || self.path.is_none() { rfd::FileDialog::new().add_filter("Part", &["json"]).set_file_name("part.json").save_file() } else { self.path.clone() };
         if let Some(p) = path {
             self.sync_ws();
             match std::fs::write(&p, self.ws.to_json()) {
@@ -782,7 +774,8 @@ impl App {
             if self.sketch.is_some() {
                 Self::group(ui, |ui| {
                     let label = if self.phone { "Finish" } else { "Finish sketch" };
-                    let b = egui::Button::image_and_text(icons::image("check", 18.0).tint(Color32::WHITE), RichText::new(label).color(Color32::WHITE).size(12.0)).fill(theme::FINISH);
+                    let b =
+                        egui::Button::image_and_text(icons::image("check", 18.0).tint(Color32::WHITE), RichText::new(label).color(Color32::WHITE).size(12.0)).fill(theme::FINISH);
                     if ui.add(b).on_hover_text("Finish sketch (Enter)").clicked() {
                         crate::sketcher::finish(self);
                     }
@@ -835,40 +828,40 @@ impl App {
     }
 
     pub fn section_ui(&mut self, ui: &mut Ui) {
-            let label = |s: &Option<Section>| match s {
-                None => "No section".to_string(),
-                Some(s) => format!("Section: {}{}", ["Top", "Front", "Right"][s.plane as usize], if s.flip { " (flipped)" } else { "" }),
-            };
-            let mut sec = self.section;
-            egui::ComboBox::from_id_salt("section")
-                .selected_text(label(&sec))
-                .width(200.0)
-                .show_ui(ui, |ui| {
-                    ui.selectable_value(&mut sec, None, "No section");
-                    for p in 0..3u8 {
-                        for flip in [false, true] {
-                            let off = self.section.map(|s| s.offset).unwrap_or(0.0);
-                            let v = Some(Section { plane: p, flip, offset: off });
-                            let l = label(&v);
-                            if ui.selectable_label(sec.map(|s| s.plane == p && s.flip == flip).unwrap_or(false), l).clicked() {
-                                sec = v;
-                            }
+        let label = |s: &Option<Section>| match s {
+            None => "No section".to_string(),
+            Some(s) => format!("Section: {}{}", ["Top", "Front", "Right"][s.plane as usize], if s.flip { " (flipped)" } else { "" }),
+        };
+        let mut sec = self.section;
+        egui::ComboBox::from_id_salt("section")
+            .selected_text(label(&sec))
+            .width(200.0)
+            .show_ui(ui, |ui| {
+                ui.selectable_value(&mut sec, None, "No section");
+                for p in 0..3u8 {
+                    for flip in [false, true] {
+                        let off = self.section.map(|s| s.offset).unwrap_or(0.0);
+                        let v = Some(Section { plane: p, flip, offset: off });
+                        let l = label(&v);
+                        if ui.selectable_label(sec.map(|s| s.plane == p && s.flip == flip).unwrap_or(false), l).clicked() {
+                            sec = v;
                         }
                     }
-                })
-                .response
-                .on_hover_text("Section view");
-            if sec != self.section {
-                self.section = sec;
+                }
+            })
+            .response
+            .on_hover_text("Section view");
+        if sec != self.section {
+            self.section = sec;
+            self.scene_dirty = true;
+        }
+        if let Some(s) = &mut self.section {
+            let mut v = s.offset;
+            if ui.add(egui::DragValue::new(&mut v).speed(0.5)).on_hover_text("Section offset (mm)").changed() {
+                s.offset = v;
                 self.scene_dirty = true;
             }
-            if let Some(s) = &mut self.section {
-                let mut v = s.offset;
-                if ui.add(egui::DragValue::new(&mut v).speed(0.5)).on_hover_text("Section offset (mm)").changed() {
-                    s.offset = v;
-                    self.scene_dirty = true;
-                }
-            }
+        }
     }
 
     fn view_menu(&mut self, ui: &mut Ui) {
@@ -1087,7 +1080,6 @@ impl App {
                 _ => {}
             }
         }
-
     }
 
     pub fn part_props(&self, id: doc::BodyId) -> doc::PartProps {
@@ -1456,9 +1448,12 @@ impl App {
                     }
                 }
                 let active = self.tab == t;
-                let b = egui::Button::image_and_text(icons::image(icon, 14.0).tint(if active { theme::ACTIVE_TEXT } else { MUTED }), RichText::new(&name).size(12.0).color(if active { TEXT } else { MUTED }))
-                    .fill(if active { PANEL_2 } else { Color32::TRANSPARENT })
-                    .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 });
+                let b = egui::Button::image_and_text(
+                    icons::image(icon, 14.0).tint(if active { theme::ACTIVE_TEXT } else { MUTED }),
+                    RichText::new(&name).size(12.0).color(if active { TEXT } else { MUTED }),
+                )
+                .fill(if active { PANEL_2 } else { Color32::TRANSPARENT })
+                .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 });
                 let r = ui.add(b);
                 if r.clicked() {
                     switch = Some(t);
@@ -1695,16 +1690,11 @@ impl eframe::App for App {
             egui::Panel::bottom("dock").frame(Frame::new().fill(PANEL).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
         }
         if self.sidebar_open {
-            egui::Panel::left("sidebar")
-                .frame(Frame::new().fill(PANEL))
-                .resizable(true)
-                .default_size(270.0)
-                .min_size(200.0)
-                .show(ui, |ui| match self.tab {
-                    crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
-                    crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
-                    _ => self.sidebar(ui),
-                });
+            egui::Panel::left("sidebar").frame(Frame::new().fill(PANEL)).resizable(true).default_size(270.0).min_size(200.0).show(ui, |ui| match self.tab {
+                crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
+                crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
+                _ => self.sidebar(ui),
+            });
         }
         egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
@@ -1717,10 +1707,7 @@ impl eframe::App for App {
             }
         });
         self.toast_ui(&ctx);
-        let title = format!(
-            "cad-app · {}",
-            self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sketcher".into())
-        );
+        let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sketcher".into()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 }
@@ -1806,7 +1793,9 @@ fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
 fn is_ident(s: &str) -> bool {
     let s = s.trim();
     let mut c = s.chars();
-    matches!(c.next(), Some(ch) if ch.is_alphabetic() || ch == '_') && c.all(|ch| ch.is_alphanumeric() || ch == '_') && !["pi", "e", "mm", "cm", "m", "in", "ft", "deg", "rad"].contains(&s)
+    matches!(c.next(), Some(ch) if ch.is_alphabetic() || ch == '_')
+        && c.all(|ch| ch.is_alphanumeric() || ch == '_')
+        && !["pi", "e", "mm", "cm", "m", "in", "ft", "deg", "rad"].contains(&s)
 }
 
 pub fn fmt_volume(mm3: f64, u: Units) -> String {

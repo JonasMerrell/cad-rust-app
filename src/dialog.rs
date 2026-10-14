@@ -4,7 +4,7 @@
 use egui::{Color32, Margin, RichText, Stroke, Ui};
 
 use crate::app::App;
-use crate::doc::{kind_label, BoolOp, BooleanKind, Document, EndType, HoleType, Op, Ref};
+use crate::doc::{BoolOp, BooleanKind, Document, EndType, HoleType, Op, Ref, kind_label};
 use crate::expr::Kind;
 use crate::icons;
 use crate::theme::{self, ACCENT, BORDER, MUTED, TEXT};
@@ -93,14 +93,12 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
             ("Direction", Axis, Slot::One(direction)),
             ("Second direction", Axis, Slot::One(second)),
         ],
-        Op::CircularPattern { kind, bodies, axis, .. } => vec![
-            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
-            ("Axis", Axis, Slot::One(axis)),
-        ],
-        Op::Mirror { kind, bodies, plane } => vec![
-            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
-            ("Mirror plane", Planar, Slot::One(plane)),
-        ],
+        Op::CircularPattern { kind, bodies, axis, .. } => {
+            vec![if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) }, ("Axis", Axis, Slot::One(axis))]
+        }
+        Op::Mirror { kind, bodies, plane } => {
+            vec![if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) }, ("Mirror plane", Planar, Slot::One(plane))]
+        }
         Op::Thicken { faces, .. } => vec![("Faces", Profiles, Slot::Many(faces))],
         Op::Helix { axis, .. } => vec![("Axis", Axis, Slot::One(axis))],
         Op::Transform { bodies, mode, direction, axis, .. } => {
@@ -232,11 +230,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut export_flat = false;
 
     let area = egui::Area::new(egui::Id::new("feature-dialog")).order(egui::Order::Middle);
-    let area = if phone {
-        area.pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(egui::pos2(rect.left(), rect.bottom()))
-    } else {
-        area.fixed_pos(rect.min + egui::vec2(10.0, 10.0))
-    };
+    let area = if phone { area.pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(egui::pos2(rect.left(), rect.bottom())) } else { area.fixed_pos(rect.min + egui::vec2(10.0, 10.0)) };
     area.show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(Color32::from_rgba_unmultiplied(0x1f, 0x24, 0x2b, 0xf7))
@@ -341,13 +335,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 match &mut op {
                     Op::Plane { offset, mode, angle, flip, .. } => {
                         let mut m = mode.clone();
-                        combo(ui, "Type", &mut m, &[
-                            ("offset".to_string(), "Offset"),
-                            ("angle".to_string(), "Angle"),
-                            ("threePoint".to_string(), "Three points"),
-                            ("normalToCurve".to_string(), "Normal to curve"),
-                            ("midPlane".to_string(), "Mid plane"),
-                        ], &mut changed);
+                        combo(
+                            ui,
+                            "Type",
+                            &mut m,
+                            &[
+                                ("offset".to_string(), "Offset"),
+                                ("angle".to_string(), "Angle"),
+                                ("threePoint".to_string(), "Three points"),
+                                ("normalToCurve".to_string(), "Normal to curve"),
+                                ("midPlane".to_string(), "Mid plane"),
+                            ],
+                            &mut changed,
+                        );
                         *mode = m;
                         match mode.as_str() {
                             "offset" => val(ui, "Distance", offset, Kind::Length, &mut changed),
@@ -423,7 +423,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 }
                             });
                         });
-                        combo(ui, "Hole type", hole_type, &[(HoleType::Simple, "Simple"), (HoleType::Counterbore, "Counterbore"), (HoleType::Countersink, "Countersink")], &mut changed);
+                        combo(
+                            ui,
+                            "Hole type",
+                            hole_type,
+                            &[(HoleType::Simple, "Simple"), (HoleType::Counterbore, "Counterbore"), (HoleType::Countersink, "Countersink")],
+                            &mut changed,
+                        );
                         val(ui, "Diameter", diameter, Kind::Length, &mut changed);
                         check(ui, "Through all", through, &mut changed);
                         if !*through {

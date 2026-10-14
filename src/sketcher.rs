@@ -10,10 +10,10 @@ use crate::app::{App, ToastKind};
 use crate::doc::{Document, FeatId, Op, OriginPlane, Ref};
 use crate::expr::{self, Env, Kind};
 use crate::icons;
-use crate::regions::{self, find_regions, Region};
+use crate::regions::{self, Region, find_regions};
 use crate::render::SceneData;
-use crate::sketch::{arc_angles, Constraint, Curve, Dim, Frame, Geom, Id, SolveStatus, Sketch};
-use crate::theme::{self, to_rgba, vp, MUTED, TEXT};
+use crate::sketch::{Constraint, Curve, Dim, Frame, Geom, Id, Sketch, SolveStatus, arc_angles};
+use crate::theme::{self, MUTED, TEXT, to_rgba, vp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -95,10 +95,20 @@ pub enum Snap {
 
 pub enum Drag {
     /// Moving points; `start` is the sketch cursor where the drag began.
-    Geometry { points: Vec<(Id, DVec2)>, start: DVec2, radius: Option<(Id, f64)> },
+    Geometry {
+        points: Vec<(Id, DVec2)>,
+        start: DVec2,
+        radius: Option<(Id, f64)>,
+    },
     /// Moving a dimension label.
-    Label { idx: usize, start: DVec2, offset: [f64; 2] },
-    Box { start: Pos2 },
+    Label {
+        idx: usize,
+        start: DVec2,
+        offset: [f64; 2],
+    },
+    Box {
+        start: Pos2,
+    },
 }
 
 pub struct SketchSession {
@@ -536,7 +546,13 @@ fn grid_step(app: &App) -> f64 {
     let t = target / units;
     let p = 10f64.powf(t.log10().floor());
     let m = t / p;
-    let step = if m < 2.0 { 2.0 } else if m < 5.0 { 5.0 } else { 10.0 };
+    let step = if m < 2.0 {
+        2.0
+    } else if m < 5.0 {
+        5.0
+    } else {
+        10.0
+    };
     step * p * units
 }
 
@@ -906,11 +922,7 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
                     let mut q = p;
                     let hv = if matches!(snp, Some(Snap::Point(_))) { None } else { hv_infer(app, pa, p) };
                     if let Some(h) = hv {
-                        if h {
-                            q.y = pa.y
-                        } else {
-                            q.x = pa.x
-                        }
+                        if h { q.y = pa.y } else { q.x = pa.x }
                     }
                     if (q - pa).length() < 1e-9 {
                         return;
@@ -1093,7 +1105,13 @@ fn make_rect(app: &mut App, a: DVec2, b: DVec2, sa: Option<Snap>, sb: Option<Sna
         .iter()
         .enumerate()
         .map(|(i, c)| {
-            let sn = if !centered && i == 0 { sa } else if i == 2 { sb } else { None };
+            let sn = if !centered && i == 0 {
+                sa
+            } else if i == 2 {
+                sb
+            } else {
+                None
+            };
             point_at(app, *c, sn)
         })
         .collect();
@@ -1521,7 +1539,8 @@ fn offset_selection(app: &mut App, side: DVec2, d: f64) {
 fn mirror_selection(app: &mut App) {
     let sess = app.sketch.as_ref().unwrap();
     let (sk, _) = app.sk();
-    let lines: Vec<Id> = sess.sel.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).filter(|c| matches!(sk.curve(*c).map(|x| &x.geom), Some(Geom::Line { .. }))).collect();
+    let lines: Vec<Id> =
+        sess.sel.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).filter(|c| matches!(sk.curve(*c).map(|x| &x.geom), Some(Geom::Line { .. }))).collect();
     let Some(&axis) = lines.iter().max_by_key(|c| sk.curve(**c).map(|x| x.construction as u8).unwrap_or(0)) else {
         app.flash("Select the curves to mirror and a line to mirror across", ToastKind::Info);
         return;
@@ -1589,11 +1608,14 @@ fn delete_selection(app: &mut App) {
         return;
     }
     app.sk_checkpoint();
-    let ids: HashSet<Id> = sel.iter().filter_map(|s| match s {
-        Sel::Point(p) => Some(*p),
-        Sel::Curve(c) => Some(*c),
-        _ => None,
-    }).collect();
+    let ids: HashSet<Id> = sel
+        .iter()
+        .filter_map(|s| match s {
+            Sel::Point(p) => Some(*p),
+            Sel::Curve(c) => Some(*c),
+            _ => None,
+        })
+        .collect();
     let cons: HashSet<usize> = sel.iter().filter_map(|s| if let Sel::Constraint(i) = s { Some(*i) } else { None }).collect();
     app.sk_mut().delete(&ids, &cons);
     app.sketch.as_mut().unwrap().sel.clear();
@@ -2113,10 +2135,14 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
                     let u = sess.clicks[1] - m;
                     let rmin = ((c - m).perp_dot(u.normalize_or_zero())).abs();
                     let v = u.perp().normalize_or_zero() * rmin;
-                    poly((0..=72).map(|i| {
-                        let t = i as f64 / 72.0 * std::f64::consts::TAU;
-                        m + u * t.cos() + v * t.sin()
-                    }).collect());
+                    poly(
+                        (0..=72)
+                            .map(|i| {
+                                let t = i as f64 / 72.0 * std::f64::consts::TAU;
+                                m + u * t.cos() + v * t.sin()
+                            })
+                            .collect(),
+                    );
                 }
             }
             Tool::Spline if !sess.clicks.is_empty() => {
@@ -2136,9 +2162,13 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
                         let ctr = s0 + n * r;
                         let (a0, mut a1) = ((s0 - ctr).to_angle(), (c - ctr).to_angle());
                         if r > 0.0 {
-                            while a1 < a0 { a1 += std::f64::consts::TAU; }
+                            while a1 < a0 {
+                                a1 += std::f64::consts::TAU;
+                            }
                         } else {
-                            while a1 > a0 { a1 -= std::f64::consts::TAU; }
+                            while a1 > a0 {
+                                a1 -= std::f64::consts::TAU;
+                            }
                         }
                         poly((0..=48).map(|i| ctr + DVec2::from_angle(a0 + (a1 - a0) * i as f64 / 48.0) * r.abs()).collect());
                     } else {
@@ -2202,7 +2232,8 @@ fn label_pos(app: &App, sk: &Sketch, fr: &Frame, rect: egui::Rect, c: &Constrain
     }
     // glyphs sit next to the first referenced curve's midpoint (or point)
     let r = c.refs();
-    let base = r.iter().find_map(|id| sk.curve(*id).map(|cv| sk.tessellate(cv, 1.0)).map(|pts| pts[pts.len() / 2])).or_else(|| r.iter().find_map(|id| sk.point(*id).map(|p| p.v())))?;
+    let base =
+        r.iter().find_map(|id| sk.curve(*id).map(|cv| sk.tessellate(cv, 1.0)).map(|pts| pts[pts.len() / 2])).or_else(|| r.iter().find_map(|id| sk.point(*id).map(|p| p.v())))?;
     let s = to_screen(app, fr, rect, base);
     // spread glyphs on the same spot
     let k = sk.constraints[..i].iter().filter(|o| o.dim().is_none() && o.refs().first() == r.first()).count();
@@ -2235,7 +2266,13 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
                 if let Some(p) = label_pos(app, sk, fr, rect, c, i) {
                     let r = egui::Rect::from_center_size(p, egui::vec2(15.0, 15.0));
                     painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(0x15, 0x18, 0x1c, 0xc0));
-                    let tint = if sel { vp::PICKED } else if hov { vp::HOVER } else { MUTED };
+                    let tint = if sel {
+                        vp::PICKED
+                    } else if hov {
+                        vp::HOVER
+                    } else {
+                        MUTED
+                    };
                     if let Some(ui) = ui {
                         icons::image(c.icon(), 13.0).tint(tint).paint_at(ui, r.shrink(1.0));
                     }
@@ -2388,7 +2425,9 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                     Some(format!("{} × {}", u.fmt(2.0 * d.x.abs()), u.fmt(2.0 * d.y.abs())))
                 }
                 Tool::Circle | Tool::Polygon if sess.clicks.len() == 1 => Some(format!("Ø {}", u.fmt(2.0 * (c - sess.clicks[0]).length()))),
-                Tool::Arc if sess.clicks.len() >= 1 => Some(format!("R {}", u.fmt((sess.clicks.last().copied().unwrap_or(c) - sess.clicks[0]).length().max((c - sess.clicks[0]).length())))),
+                Tool::Arc if sess.clicks.len() >= 1 => {
+                    Some(format!("R {}", u.fmt((sess.clicks.last().copied().unwrap_or(c) - sess.clicks[0]).length().max((c - sess.clicks[0]).length()))))
+                }
                 Tool::Select => None,
                 _ => None,
             };

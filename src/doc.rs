@@ -40,21 +40,49 @@ impl OriginPlane {
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ref {
-    OriginPlane { plane: OriginPlane },
+    OriginPlane {
+        plane: OriginPlane,
+    },
     /// A Plane feature or a sketch's plane.
-    FeaturePlane { feature: FeatId },
-    Face { point: [f64; 3], normal: [f64; 3] },
-    Edge { point: [f64; 3] },
-    Vertex { point: [f64; 3] },
-    Region { sketch: FeatId, point: [f64; 2] },
-    SketchCurve { sketch: FeatId, curve: SkId },
-    SketchPoint { sketch: FeatId, point: SkId },
-    Body { body: BodyId },
-    Axis { axis: u8 },
+    FeaturePlane {
+        feature: FeatId,
+    },
+    Face {
+        point: [f64; 3],
+        normal: [f64; 3],
+    },
+    Edge {
+        point: [f64; 3],
+    },
+    Vertex {
+        point: [f64; 3],
+    },
+    Region {
+        sketch: FeatId,
+        point: [f64; 2],
+    },
+    SketchCurve {
+        sketch: FeatId,
+        curve: SkId,
+    },
+    SketchPoint {
+        sketch: FeatId,
+        point: SkId,
+    },
+    Body {
+        body: BodyId,
+    },
+    Axis {
+        axis: u8,
+    },
     /// A whole feature (picked in the feature list), e.g. for feature patterns.
-    Feature { feature: FeatId },
+    Feature {
+        feature: FeatId,
+    },
     /// A curve produced by a feature (e.g. a helix).
-    Curve { feature: FeatId },
+    Curve {
+        feature: FeatId,
+    },
 }
 
 impl Ref {
@@ -350,17 +378,9 @@ impl Op {
             "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
             "deleteFace" => Op::DeleteFace { faces: vec![] },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
-            "extrude" => Op::Extrude {
-                profiles: vec![],
-                end: EndType::Blind,
-                depth: s("10"),
-                opposite: false,
-                second: false,
-                depth2: s("10"),
-                up_to: None,
-                op: BoolOp::New,
-                draft: s("0"),
-            },
+            "extrude" => {
+                Op::Extrude { profiles: vec![], end: EndType::Blind, depth: s("10"), opposite: false, second: false, depth2: s("10"), up_to: None, op: BoolOp::New, draft: s("0") }
+            }
             "revolve" => Op::Revolve { profiles: vec![], axis: None, mode: s("full"), angle: s("360"), op: BoolOp::New },
             "sweep" => Op::Sweep { profiles: vec![], path: vec![], op: BoolOp::New },
             "loft" => Op::Loft { profiles: vec![], ruled: false, op: BoolOp::New },
@@ -380,16 +400,9 @@ impl Op {
                 tapped: false,
             },
             "draft" => Op::Draft { faces: vec![], neutral: None, angle: s("3") },
-            "linearPattern" => Op::LinearPattern {
-                kind: s("part"),
-                bodies: vec![],
-                direction: None,
-                spacing: s("20"),
-                count: s("3"),
-                second: None,
-                spacing2: s("20"),
-                count2: s("1"),
-            },
+            "linearPattern" => {
+                Op::LinearPattern { kind: s("part"), bodies: vec![], direction: None, spacing: s("20"), count: s("3"), second: None, spacing2: s("20"), count2: s("1") }
+            }
             "circularPattern" => Op::CircularPattern { kind: s("part"), bodies: vec![], axis: None, count: s("4"), angle: s("360") },
             "mirror" => Op::Mirror { kind: s("part"), bodies: vec![], plane: None },
             "boolean" => Op::Boolean { kind: BooleanKind::Union, target: None, tools: vec![], keep_tools: false },
@@ -505,7 +518,17 @@ pub struct Config {
 
 impl Default for Document {
     fn default() -> Self {
-        Document { format: "cad-rust-app/1".into(), units: Units::Mm, variables: vec![], features: vec![], rollback: None, next_id: 0, parts: Default::default(), configs: vec![], active_config: None }
+        Document {
+            format: "cad-rust-app/1".into(),
+            units: Units::Mm,
+            variables: vec![],
+            features: vec![],
+            rollback: None,
+            next_id: 0,
+            parts: Default::default(),
+            configs: vec![],
+            active_config: None,
+        }
     }
 }
 
@@ -551,11 +574,8 @@ impl Document {
 
     pub fn var_values(&self) -> (HashMap<String, f64>, Vec<Option<String>>) {
         let cfg = self.active_config.and_then(|i| self.configs.get(i));
-        let pairs: Vec<(String, String)> = self
-            .variables
-            .iter()
-            .map(|v| (v.name.clone(), cfg.and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone())))
-            .collect();
+        let pairs: Vec<(String, String)> =
+            self.variables.iter().map(|v| (v.name.clone(), cfg.and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone()))).collect();
         expr::resolve_vars(&pairs, self.units)
     }
 
