@@ -2000,7 +2000,7 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
             Ok(v) => {
                 let s = u.fmt(v);
                 match c {
-                    Constraint::Diameter { .. } => format!("⌀{s}"),
+                    Constraint::Diameter { .. } => format!("Ø{s}"),
                     Constraint::Radius { .. } => format!("R{s}"),
                     _ => s,
                 }
@@ -2104,11 +2104,11 @@ fn arrow_line(painter: &egui::Painter, a: Pos2, b: Pos2, stroke: Stroke) {
 }
 
 /// Labels, glyphs, box selection, the cursor read-out and the dimension editor.
-pub fn overlay(app: &mut App, sess: &SketchSession, ui: &Ui, painter: &egui::Painter, rect: egui::Rect) {
+pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect) {
     if let Some(p) = painter.ctx().pointer_latest_pos() {
         LAST_POINTER.with(|c| c.set(p));
     }
-    // other sketches' dimensions stay visible
+    let Some(sess) = app.sketch.as_ref() else { return };
     let Some((sk, fr)) = sketch_of(&app.doc, sess.feature) else { return };
     let sk = sk.clone();
     draw_dims(app, &sk, &fr, painter, rect, Some(sess), Some(ui));
@@ -2136,7 +2136,7 @@ pub fn overlay(app: &mut App, sess: &SketchSession, ui: &Ui, painter: &egui::Pai
                     let d = c - sess.clicks[0];
                     Some(format!("{} × {}", u.fmt(2.0 * d.x.abs()), u.fmt(2.0 * d.y.abs())))
                 }
-                Tool::Circle | Tool::Polygon if sess.clicks.len() == 1 => Some(format!("⌀ {}", u.fmt(2.0 * (c - sess.clicks[0]).length()))),
+                Tool::Circle | Tool::Polygon if sess.clicks.len() == 1 => Some(format!("Ø {}", u.fmt(2.0 * (c - sess.clicks[0]).length()))),
                 Tool::Arc if sess.clicks.len() >= 1 => Some(format!("R {}", u.fmt((sess.clicks.last().copied().unwrap_or(c) - sess.clicks[0]).length().max((c - sess.clicks[0]).length())))),
                 Tool::Select => None,
                 _ => None,
@@ -2163,9 +2163,14 @@ pub fn overlay(app: &mut App, sess: &SketchSession, ui: &Ui, painter: &egui::Pai
         egui::Area::new(egui::Id::new("dim-edit")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_CENTER).fixed_pos(pos).show(painter.ctx(), |ui| {
             egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(4).inner_margin(2).show(ui, |ui| {
                 let ok = expr::eval(&text, if angle { Kind::Angle } else { Kind::Length }, &Env { vars: &vars, units }).is_ok();
-                let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { TEXT } else { theme::ERROR_SOFT }));
+                let out = egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { TEXT } else { theme::ERROR_SOFT }).show(ui);
+                let r = out.response;
                 if !r.has_focus() && !r.lost_focus() {
+                    // first frame: focus and select the current value so typing replaces it
                     r.request_focus();
+                    let mut st = out.state;
+                    st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()))));
+                    st.store(ui.ctx(), r.id);
                 }
                 if ui.input(|i| i.key_pressed(Key::Enter)) && ok {
                     done = Some(true);

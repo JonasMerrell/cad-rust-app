@@ -353,11 +353,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         }
                         match hole_type {
                             HoleType::Counterbore => {
-                                val(ui, "Counterbore ⌀", cb_diameter, Kind::Length, &mut changed);
+                                val(ui, "Counterbore Ø", cb_diameter, Kind::Length, &mut changed);
                                 val(ui, "Counterbore depth", cb_depth, Kind::Length, &mut changed);
                             }
                             HoleType::Countersink => {
-                                val(ui, "Countersink ⌀", cs_diameter, Kind::Length, &mut changed);
+                                val(ui, "Countersink Ø", cs_diameter, Kind::Length, &mut changed);
                                 val(ui, "Countersink angle", cs_angle, Kind::Angle, &mut changed);
                             }
                             HoleType::Simple => {}

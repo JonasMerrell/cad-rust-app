@@ -85,9 +85,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     // 2D overlays
     let painter = ui.painter_at(rect);
-    if let Some(s) = app.sketch.take() {
-        crate::sketcher::overlay(app, &s, ui, &painter, rect);
-        app.sketch = Some(s);
+    if app.sketch.is_some() {
+        crate::sketcher::overlay(app, ui, &painter, rect);
     } else {
         model_overlay(app, &painter, rect);
     }
