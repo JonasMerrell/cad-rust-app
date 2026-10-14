@@ -13,7 +13,7 @@ Files saved with `save_document` open in the GUI (`cad-app part.json`).
 
 Claude Code (user-wide):
 
-    claude mcp add --scope user cad -- /home/jonas/.local/bin/cad-app mcp
+    claude mcp add --scope user cad -- cad-app mcp
 
 Or use the `.mcp.json` in this repository, which Claude Code picks up when it
 runs in this folder. Other MCP clients start the same command
