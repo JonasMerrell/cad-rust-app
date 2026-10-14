@@ -20,6 +20,7 @@ pub enum Request {
     Ping,
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
+    Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3])> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -28,6 +29,7 @@ pub enum Reply {
     Progress { id: u64, feature: FeatId },
     Rebuilt { id: u64, tag: usize, result: RebuildResult },
     Exported { id: u64, error: Option<String> },
+    Projected { id: u64, tag: usize, key: String, views: Vec<kernel::ProjView> },
 }
 
 /// Entry point of the worker process.
@@ -51,6 +53,10 @@ pub fn worker_main() {
                 let error = kernel::export(&doc, &format, &path).err();
                 send(&Reply::Exported { id, error });
             }
+            Request::Project { id, tag, key, doc, views } => {
+                let views = kernel::project(&doc, &views);
+                send(&Reply::Projected { id, tag, key, views });
+            }
         }
     }
 }
@@ -67,6 +73,8 @@ pub enum Outcome {
     /// (part studio index, result)
     Rebuilt(usize, RebuildResult),
     Exported(Option<String>, String),
+    /// (part studio, request key, projections)
+    Projected(usize, String, Vec<kernel::ProjView>),
 }
 
 enum Ev {
@@ -178,6 +186,12 @@ impl KernelClient {
         self.state = KernelState::Busy;
     }
 
+    pub fn project(&mut self, tag: usize, key: String, doc: &Document, views: Vec<([f64; 3], [f64; 3])>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&Request::Project { id, tag, key, doc: doc.clone(), views });
+    }
+
     pub fn export(&mut self, doc: &Document, format: &str, path: String) {
         let id = self.next_id;
         self.next_id += 1;
@@ -219,6 +233,7 @@ impl KernelClient {
                         self.start_next();
                     }
                 }
+                Ev::Reply(Reply::Projected { tag, key, views, .. }) => out.push(Outcome::Projected(tag, key, views)),
                 Ev::Reply(Reply::Exported { id, error }) => {
                     if let Some((eid, path)) = self.export.take() {
                         if eid == id {

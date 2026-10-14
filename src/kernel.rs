@@ -1724,3 +1724,83 @@ mod freeform_tests {
         assert!(r.bodies.len() >= 4, "ellipse, spline, H, i(+dot): {}", r.bodies.len());
     }
 }
+
+// ------------------------------------------------------------------ drawings
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct ProjView {
+    /// Polylines in the view's 2D coordinates (model mm).
+    pub visible: Vec<Vec<[f64; 2]>>,
+    pub hidden: Vec<Vec<[f64; 2]>>,
+    pub bbox: [[f64; 2]; 2],
+}
+
+fn polylines_2d(s: &Shape) -> Vec<Vec<[f64; 2]>> {
+    unique_edges(s)
+        .iter()
+        .map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>())
+        .filter(|p| p.len() >= 2)
+        .collect()
+}
+
+/// Hidden-line projections of a Part Studio's parts, one per (direction, up) pair.
+pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3])]) -> Vec<ProjView> {
+    let bodies = build_bodies(doc);
+    let shapes: Vec<&Shape> = bodies.iter().map(|b| &b.shape).collect();
+    let Ok(all) = occ::compound(&shapes) else { return vec![ProjView::default(); views.len()] };
+    views
+        .iter()
+        .map(|(d, u)| {
+            let (d, u) = (DVec3::from(*d), DVec3::from(*u));
+            let mut v = ProjView::default();
+            for kind in [0, 1, 2] {
+                if let Ok(s) = occ::hlr(&all, d, u, kind) {
+                    v.visible.extend(polylines_2d(&s));
+                }
+            }
+            for kind in [3, 4] {
+                if let Ok(s) = occ::hlr(&all, d, u, kind) {
+                    v.hidden.extend(polylines_2d(&s));
+                }
+            }
+            let mut lo = [f64::INFINITY; 2];
+            let mut hi = [f64::NEG_INFINITY; 2];
+            for p in v.visible.iter().flatten() {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            v.bbox = if lo[0].is_finite() { [lo, hi] } else { [[0.0; 2]; 2] };
+            v
+        })
+        .collect()
+}
+
+#[cfg(test)]
+mod projection_tests {
+    use super::*;
+
+    #[test]
+    fn front_view_of_a_box() {
+        let mut doc = Document::default();
+        doc.insert("I".into(), Op::Import { name: "box".into(), step: String::new() });
+        // build a box through a sketch + extrude instead of STEP
+        let mut doc = Document::default();
+        let mut s = crate::sketch::Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(crate::sketch::Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+            *depth = "10".into();
+        }
+        doc.insert("E".into(), e);
+        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0])]);
+        let b = v[0].bbox;
+        assert!((b[1][0] - b[0][0] - 40.0).abs() < 1e-6, "{b:?}");
+        assert!((b[1][1] - b[0][1] - 10.0).abs() < 1e-6, "{b:?}");
+        assert!(v[0].visible.len() >= 4);
+    }
+}

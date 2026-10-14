@@ -544,6 +544,7 @@ impl App {
                         self.fit_view();
                     }
                 }
+                Outcome::Projected(tag, key, views) => crate::drawing_ui::projected(self, tag, key, views),
                 Outcome::Exported(err, path) => match err {
                     None => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
                     Some(e) => self.flash(format!("Export failed: {e}"), ToastKind::Error),

@@ -1,4 +1,5 @@
 mod app;
+mod drawing_export;
 mod drawing_ui;
 mod asm_ui;
 mod workspace;
