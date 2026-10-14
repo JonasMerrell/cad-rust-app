@@ -1,0 +1,964 @@
+//! 2D sketch data model and geometric constraint solver.
+//!
+//! Points carry two parameters each and circles carry their radius; arcs are
+//! defined by centre, start and end points (counter-clockwise) with an implicit
+//! equal-radius condition. Constraints and dimensions are residual functions,
+//! solved with a damped minimum-norm Gauss-Newton step so unconstrained
+//! geometry moves as little as possible (and the dragged point is held).
+
+use std::collections::{HashMap, HashSet};
+
+use glam::DVec2;
+use serde::{Deserialize, Serialize};
+
+use crate::expr::{self, Env, Kind};
+
+pub type Id = u32;
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Point {
+    pub id: Id,
+    pub x: f64,
+    pub y: f64,
+}
+
+impl Point {
+    pub fn v(&self) -> DVec2 {
+        DVec2::new(self.x, self.y)
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(tag = "type", rename_all = "lowercase")]
+pub enum Geom {
+    Line { a: Id, b: Id },
+    Circle { c: Id, r: f64 },
+    /// Counter-clockwise from `a` to `b` around `c`.
+    Arc { c: Id, a: Id, b: Id },
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Curve {
+    pub id: Id,
+    #[serde(flatten)]
+    pub geom: Geom,
+    #[serde(default)]
+    pub construction: bool,
+}
+
+/// A driving dimension: the value is an expression in document units.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Dim {
+    pub expr: String,
+    /// Label offset from the dimension's anchor, in sketch units.
+    #[serde(default)]
+    pub offset: [f64; 2],
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "snake_case")]
+pub enum Constraint {
+    PointOnLine { p: Id, l: Id },
+    PointOnCircle { p: Id, c: Id },
+    Horizontal { l: Id },
+    Vertical { l: Id },
+    HorizontalPts { a: Id, b: Id },
+    VerticalPts { a: Id, b: Id },
+    Parallel { a: Id, b: Id },
+    Perpendicular { a: Id, b: Id },
+    /// Line–circle or circle–circle tangency; `inner` for internal circle tangency.
+    Tangent { a: Id, b: Id, #[serde(default)] inner: bool },
+    Equal { a: Id, b: Id },
+    Midpoint { p: Id, l: Id },
+    Fix { p: Id, x: f64, y: f64 },
+    /// Point-to-point distance.
+    Distance { a: Id, b: Id, dim: Dim },
+    /// Horizontal (`axis` 0) or vertical (1) distance between two points.
+    AxisDistance { a: Id, b: Id, axis: u8, dim: Dim },
+    PointLineDistance { p: Id, l: Id, dim: Dim },
+    Length { l: Id, dim: Dim },
+    Radius { c: Id, dim: Dim },
+    Diameter { c: Id, dim: Dim },
+    /// Angle from line `a` to line `b` in degrees.
+    Angle { a: Id, b: Id, dim: Dim },
+}
+
+impl Constraint {
+    pub fn dim(&self) -> Option<&Dim> {
+        use Constraint::*;
+        match self {
+            Distance { dim, .. }
+            | AxisDistance { dim, .. }
+            | PointLineDistance { dim, .. }
+            | Length { dim, .. }
+            | Radius { dim, .. }
+            | Diameter { dim, .. }
+            | Angle { dim, .. } => Some(dim),
+            _ => None,
+        }
+    }
+
+    pub fn dim_mut(&mut self) -> Option<&mut Dim> {
+        use Constraint::*;
+        match self {
+            Distance { dim, .. }
+            | AxisDistance { dim, .. }
+            | PointLineDistance { dim, .. }
+            | Length { dim, .. }
+            | Radius { dim, .. }
+            | Diameter { dim, .. }
+            | Angle { dim, .. } => Some(dim),
+            _ => None,
+        }
+    }
+
+    pub fn is_angle(&self) -> bool {
+        matches!(self, Constraint::Angle { .. })
+    }
+
+    /// Ids this constraint refers to (points or curves).
+    pub fn refs(&self) -> Vec<Id> {
+        use Constraint::*;
+        match *self {
+            PointOnLine { p, l } | Midpoint { p, l } | PointLineDistance { p, l, .. } => vec![p, l],
+            PointOnCircle { p, c } => vec![p, c],
+            Horizontal { l } | Vertical { l } | Length { l, .. } => vec![l],
+            Radius { c, .. } | Diameter { c, .. } => vec![c],
+            Fix { p, .. } => vec![p],
+            HorizontalPts { a, b }
+            | VerticalPts { a, b }
+            | Parallel { a, b }
+            | Perpendicular { a, b }
+            | Tangent { a, b, .. }
+            | Equal { a, b }
+            | Distance { a, b, .. }
+            | AxisDistance { a, b, .. }
+            | Angle { a, b, .. } => vec![a, b],
+        }
+    }
+
+    pub fn icon(&self) -> &'static str {
+        use Constraint::*;
+        match self {
+            PointOnLine { .. } | PointOnCircle { .. } => "coincident",
+            Horizontal { .. } | HorizontalPts { .. } => "horizontal",
+            Vertical { .. } | VerticalPts { .. } => "vertical",
+            Parallel { .. } => "parallel",
+            Perpendicular { .. } => "perpendicular",
+            Tangent { .. } => "tangent",
+            Equal { .. } => "equal",
+            Midpoint { .. } => "midpoint",
+            Fix { .. } => "fix",
+            _ => "dimension",
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Frame {
+    pub origin: [f64; 3],
+    pub x: [f64; 3],
+    pub y: [f64; 3],
+    pub normal: [f64; 3],
+}
+
+impl Frame {
+    pub fn to_world(&self, p: DVec2) -> glam::DVec3 {
+        glam::DVec3::from(self.origin) + glam::DVec3::from(self.x) * p.x + glam::DVec3::from(self.y) * p.y
+    }
+    pub fn to_local(&self, w: glam::DVec3) -> DVec2 {
+        let d = w - glam::DVec3::from(self.origin);
+        DVec2::new(d.dot(self.x.into()), d.dot(self.y.into()))
+    }
+    pub fn normal(&self) -> glam::DVec3 {
+        self.normal.into()
+    }
+    pub const TOP: Frame = Frame { origin: [0.0; 3], x: [1.0, 0.0, 0.0], y: [0.0, 1.0, 0.0], normal: [0.0, 0.0, 1.0] };
+    pub const FRONT: Frame = Frame { origin: [0.0; 3], x: [1.0, 0.0, 0.0], y: [0.0, 0.0, 1.0], normal: [0.0, -1.0, 0.0] };
+    pub const RIGHT: Frame = Frame { origin: [0.0; 3], x: [0.0, 1.0, 0.0], y: [0.0, 0.0, 1.0], normal: [1.0, 0.0, 0.0] };
+
+    /// Intersect a world ray with this plane; returns local coordinates.
+    pub fn ray_hit(&self, o: glam::DVec3, d: glam::DVec3) -> Option<DVec2> {
+        let n = self.normal();
+        let den = d.dot(n);
+        if den.abs() < 1e-9 {
+            return None;
+        }
+        let t = (glam::DVec3::from(self.origin) - o).dot(n) / den;
+        Some(self.to_local(o + d * t))
+    }
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct Sketch {
+    pub points: Vec<Point>,
+    pub curves: Vec<Curve>,
+    pub constraints: Vec<Constraint>,
+    pub next_id: Id,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct SolveStatus {
+    pub ok: bool,
+    /// Remaining degrees of freedom (0 = fully defined).
+    pub dof: usize,
+    /// Points whose position is fully determined.
+    pub fixed_points: HashSet<Id>,
+    /// Curves whose parameters are all determined.
+    pub fixed_curves: HashSet<Id>,
+    pub error: Option<String>,
+    /// Constraint indices whose dimension expression failed.
+    pub bad_dims: Vec<usize>,
+}
+
+impl Sketch {
+    pub fn new_id(&mut self) -> Id {
+        self.next_id += 1;
+        self.next_id
+    }
+
+    pub fn add_point(&mut self, p: DVec2) -> Id {
+        let id = self.new_id();
+        self.points.push(Point { id, x: p.x, y: p.y });
+        id
+    }
+
+    pub fn add_curve(&mut self, geom: Geom, construction: bool) -> Id {
+        let id = self.new_id();
+        self.curves.push(Curve { id, geom, construction });
+        id
+    }
+
+    pub fn point(&self, id: Id) -> Option<&Point> {
+        self.points.iter().find(|p| p.id == id)
+    }
+
+    pub fn point_mut(&mut self, id: Id) -> Option<&mut Point> {
+        self.points.iter_mut().find(|p| p.id == id)
+    }
+
+    pub fn pv(&self, id: Id) -> DVec2 {
+        self.point(id).map(|p| p.v()).unwrap_or(DVec2::ZERO)
+    }
+
+    pub fn curve(&self, id: Id) -> Option<&Curve> {
+        self.curves.iter().find(|c| c.id == id)
+    }
+
+    pub fn is_point(&self, id: Id) -> bool {
+        self.point(id).is_some()
+    }
+
+    /// Points that are referenced by curves (endpoints and centres).
+    pub fn curve_points(c: &Geom) -> Vec<Id> {
+        match *c {
+            Geom::Line { a, b } => vec![a, b],
+            Geom::Circle { c, .. } => vec![c],
+            Geom::Arc { c, a, b } => vec![c, a, b],
+        }
+    }
+
+    /// Replace every reference to point `from` by `to` and remove `from`.
+    pub fn merge_point(&mut self, from: Id, to: Id) {
+        if from == to {
+            return;
+        }
+        let sub = |x: &mut Id| {
+            if *x == from {
+                *x = to
+            }
+        };
+        for c in &mut self.curves {
+            match &mut c.geom {
+                Geom::Line { a, b } => {
+                    sub(a);
+                    sub(b)
+                }
+                Geom::Circle { c, .. } => sub(c),
+                Geom::Arc { c, a, b } => {
+                    sub(c);
+                    sub(a);
+                    sub(b)
+                }
+            }
+        }
+        for k in &mut self.constraints {
+            use Constraint::*;
+            match k {
+                PointOnLine { p, .. } | PointOnCircle { p, .. } | Midpoint { p, .. } | PointLineDistance { p, .. } | Fix { p, .. } => sub(p),
+                HorizontalPts { a, b } | VerticalPts { a, b } | Distance { a, b, .. } | AxisDistance { a, b, .. } => {
+                    sub(a);
+                    sub(b)
+                }
+                _ => {}
+            }
+        }
+        self.points.retain(|p| p.id != from);
+        // Drop constraints that became degenerate (e.g. distance between a point and itself).
+        self.constraints.retain(|k| match k {
+            Constraint::HorizontalPts { a, b } | Constraint::VerticalPts { a, b } | Constraint::Distance { a, b, .. } | Constraint::AxisDistance { a, b, .. } => a != b,
+            _ => true,
+        });
+        self.dedupe_points_on_curves();
+    }
+
+    fn dedupe_points_on_curves(&mut self) {
+        // A point-on-curve constraint whose point is already an endpoint of the curve is redundant.
+        let curves = self.curves.clone();
+        self.constraints.retain(|k| match *k {
+            Constraint::PointOnLine { p, l } | Constraint::PointOnCircle { p, c: l } => curves
+                .iter()
+                .find(|c| c.id == l)
+                .map(|c| match c.geom {
+                    Geom::Line { a, b } => a != p && b != p,
+                    Geom::Arc { a, b, c, .. } => a != p && b != p && c != p,
+                    Geom::Circle { c, .. } => c != p,
+                })
+                .unwrap_or(false),
+            _ => true,
+        });
+    }
+
+    /// Delete the given points/curves/constraints (by id / index) and anything depending on them.
+    pub fn delete(&mut self, ids: &HashSet<Id>, constraint_idx: &HashSet<usize>) {
+        let mut dead: HashSet<Id> = ids.clone();
+        for c in &self.curves {
+            if Self::curve_points(&c.geom).iter().any(|p| dead.contains(p)) {
+                dead.insert(c.id);
+            }
+        }
+        // endpoints/centres of deleted curves go too, unless another curve still uses them
+        let freed: HashSet<Id> = self.curves.iter().filter(|c| dead.contains(&c.id)).flat_map(|c| Self::curve_points(&c.geom)).collect();
+        self.curves.retain(|c| !dead.contains(&c.id));
+        let used: HashSet<Id> = self.curves.iter().flat_map(|c| Self::curve_points(&c.geom)).collect();
+        self.points.retain(|p| !dead.contains(&p.id) && (used.contains(&p.id) || !freed.contains(&p.id)));
+        let alive: HashSet<Id> = self.points.iter().map(|p| p.id).chain(self.curves.iter().map(|c| c.id)).collect();
+        let mut i = 0;
+        self.constraints.retain(|k| {
+            let keep = !constraint_idx.contains(&i) && k.refs().iter().all(|r| alive.contains(r));
+            i += 1;
+            keep
+        });
+    }
+
+    // ---------------------------------------------------------------- solver
+
+    /// Solve all constraints, keeping the points in `hold` (e.g. the dragged one) as still as possible.
+    pub fn solve(&mut self, env: &Env, hold: &[Id]) -> SolveStatus {
+        let sys = System::build(self, env);
+        let mut st = SolveStatus { bad_dims: sys.bad_dims.clone(), ..Default::default() };
+        let mut x = sys.x0.clone();
+        let mut w = vec![1.0; x.len()];
+        for h in hold {
+            if let Some(&i) = sys.pidx.get(h) {
+                w[i] = 1e4;
+                w[i + 1] = 1e4;
+            }
+        }
+        let mut ok = false;
+        for _ in 0..60 {
+            let r = sys.residuals(&x);
+            let norm = norm2(&r);
+            if norm < 1e-10 {
+                ok = true;
+                break;
+            }
+            let j = sys.jacobian(&x);
+            let dx = min_norm_step(&j, &r, &w, x.len());
+            // backtracking
+            let mut t = 1.0;
+            let mut improved = false;
+            for _ in 0..12 {
+                let xn: Vec<f64> = x.iter().zip(&dx).map(|(a, d)| a + t * d).collect();
+                if norm2(&sys.residuals(&xn)) < norm {
+                    x = xn;
+                    improved = true;
+                    break;
+                }
+                t *= 0.5;
+            }
+            if !improved {
+                break;
+            }
+        }
+        if !ok {
+            ok = norm2(&sys.residuals(&x)) < 1e-8;
+        }
+        // DOF analysis at the solution
+        let j = sys.jacobian(&x);
+        let (rank, null) = null_space(&j, x.len());
+        st.dof = x.len() - rank;
+        let determined = |i: usize| null.iter().all(|v| v[i].abs() < 1e-7);
+        for (&id, &i) in &sys.pidx {
+            if determined(i) && determined(i + 1) {
+                st.fixed_points.insert(id);
+            }
+        }
+        for c in &self.curves {
+            let pts_ok = Self::curve_points(&c.geom).iter().all(|p| st.fixed_points.contains(p));
+            let r_ok = sys.ridx.get(&c.id).map(|&i| determined(i)).unwrap_or(true);
+            if pts_ok && r_ok {
+                st.fixed_curves.insert(c.id);
+            }
+        }
+        if ok {
+            sys.write_back(self, &x);
+        } else {
+            st.error = Some("Sketch constraints conflict".into());
+        }
+        st.ok = ok;
+        st
+    }
+}
+
+fn norm2(r: &[f64]) -> f64 {
+    r.iter().map(|v| v * v).sum::<f64>()
+}
+
+/// Residual of one constraint as a closure over parameter indices.
+enum Res {
+    Fix(usize, f64),
+    /// cross((b-a),(p-a))/|b-a|
+    PointLine { p: usize, a: usize, b: usize },
+    /// |p-c| - r  where r is param `r` or |q-c|
+    PointCircle { p: usize, c: usize, r: RIdx },
+    Horiz(usize, usize),
+    Vert(usize, usize),
+    Parallel(usize, usize, usize, usize),
+    Perp(usize, usize, usize, usize),
+    Angle(usize, usize, usize, usize, f64),
+    LineCircleTangent { a: usize, b: usize, c: usize, r: RIdx },
+    CircleCircle { c1: usize, r1: RIdx, c2: usize, r2: RIdx, inner: bool },
+    EqualLen(usize, usize, usize, usize),
+    EqualR(RIdx, RIdx),
+    MidX { p: usize, a: usize, b: usize },
+    Dist(usize, usize, f64),
+    AxisDist(usize, usize, usize, f64),
+    PointLineDist { p: usize, a: usize, b: usize, d: f64 },
+    RadiusIs(RIdx, f64),
+}
+
+#[derive(Clone, Copy)]
+enum RIdx {
+    Param(usize),
+    /// radius as distance between centre (first) and a point (second)
+    Pts(usize, usize),
+}
+
+struct System {
+    x0: Vec<f64>,
+    pidx: HashMap<Id, usize>,
+    ridx: HashMap<Id, usize>,
+    res: Vec<Res>,
+    bad_dims: Vec<usize>,
+}
+
+fn p2(x: &[f64], i: usize) -> DVec2 {
+    DVec2::new(x[i], x[i + 1])
+}
+
+fn rad(x: &[f64], r: RIdx) -> f64 {
+    match r {
+        RIdx::Param(i) => x[i],
+        RIdx::Pts(c, p) => (p2(x, p) - p2(x, c)).length(),
+    }
+}
+
+impl Res {
+    fn eval(&self, x: &[f64], out: &mut Vec<f64>) {
+        match *self {
+            Res::Fix(i, v) => out.push(x[i] - v),
+            Res::PointLine { p, a, b } => {
+                let d = p2(x, b) - p2(x, a);
+                let l = d.length().max(1e-9);
+                out.push(d.perp_dot(p2(x, p) - p2(x, a)) / l)
+            }
+            Res::PointCircle { p, c, r } => out.push((p2(x, p) - p2(x, c)).length() - rad(x, r)),
+            Res::Horiz(a, b) => out.push(x[a + 1] - x[b + 1]),
+            Res::Vert(a, b) => out.push(x[a] - x[b]),
+            Res::Parallel(a, b, c, d) => {
+                let u = (p2(x, b) - p2(x, a)).normalize_or_zero();
+                let v = (p2(x, d) - p2(x, c)).normalize_or_zero();
+                out.push(u.perp_dot(v) * 10.0)
+            }
+            Res::Perp(a, b, c, d) => {
+                let u = (p2(x, b) - p2(x, a)).normalize_or_zero();
+                let v = (p2(x, d) - p2(x, c)).normalize_or_zero();
+                out.push(u.dot(v) * 10.0)
+            }
+            Res::Angle(a, b, c, d, deg) => {
+                let u = (p2(x, b) - p2(x, a)).normalize_or_zero();
+                let v = (p2(x, d) - p2(x, c)).normalize_or_zero();
+                let t = deg.to_radians();
+                // sin(theta - t) where theta is the angle from u to v
+                out.push((u.perp_dot(v) * t.cos() - u.dot(v) * t.sin()) * 10.0)
+            }
+            Res::LineCircleTangent { a, b, c, r } => {
+                let d = p2(x, b) - p2(x, a);
+                let l = d.length().max(1e-9);
+                out.push((d.perp_dot(p2(x, c) - p2(x, a)) / l).abs() - rad(x, r))
+            }
+            Res::CircleCircle { c1, r1, c2, r2, inner } => {
+                let dist = (p2(x, c2) - p2(x, c1)).length();
+                let want = if inner { (rad(x, r1) - rad(x, r2)).abs() } else { rad(x, r1) + rad(x, r2) };
+                out.push(dist - want)
+            }
+            Res::EqualLen(a, b, c, d) => out.push((p2(x, b) - p2(x, a)).length() - (p2(x, d) - p2(x, c)).length()),
+            Res::EqualR(a, b) => out.push(rad(x, a) - rad(x, b)),
+            Res::MidX { p, a, b } => {
+                let m = (p2(x, a) + p2(x, b)) * 0.5;
+                out.push(x[p] - m.x);
+                out.push(x[p + 1] - m.y);
+            }
+            Res::Dist(a, b, d) => out.push((p2(x, b) - p2(x, a)).length() - d),
+            Res::AxisDist(a, b, axis, d) => out.push((x[b + axis] - x[a + axis]).abs() - d),
+            Res::PointLineDist { p, a, b, d } => {
+                let dd = p2(x, b) - p2(x, a);
+                let l = dd.length().max(1e-9);
+                out.push((dd.perp_dot(p2(x, p) - p2(x, a)) / l).abs() - d)
+            }
+            Res::RadiusIs(r, v) => out.push(rad(x, r) - v),
+        }
+    }
+
+    fn deps(&self) -> Vec<usize> {
+        let pt = |i: usize| [i, i + 1];
+        let r = |r: RIdx| match r {
+            RIdx::Param(i) => vec![i],
+            RIdx::Pts(c, p) => vec![c, c + 1, p, p + 1],
+        };
+        let mut v: Vec<usize> = match *self {
+            Res::Fix(i, _) => vec![i],
+            Res::PointLine { p, a, b } | Res::MidX { p, a, b } | Res::PointLineDist { p, a, b, .. } => [pt(p), pt(a), pt(b)].concat(),
+            Res::PointCircle { p, c, r: rr } => [pt(p).to_vec(), pt(c).to_vec(), r(rr)].concat(),
+            Res::Horiz(a, b) | Res::Vert(a, b) | Res::Dist(a, b, _) | Res::AxisDist(a, b, _, _) => [pt(a), pt(b)].concat(),
+            Res::Parallel(a, b, c, d) | Res::Perp(a, b, c, d) | Res::Angle(a, b, c, d, _) | Res::EqualLen(a, b, c, d) => [pt(a), pt(b), pt(c), pt(d)].concat(),
+            Res::LineCircleTangent { a, b, c, r: rr } => [pt(a).to_vec(), pt(b).to_vec(), pt(c).to_vec(), r(rr)].concat(),
+            Res::CircleCircle { c1, r1, c2, r2, .. } => [pt(c1).to_vec(), r(r1), pt(c2).to_vec(), r(r2)].concat(),
+            Res::EqualR(a, b) => [r(a), r(b)].concat(),
+            Res::RadiusIs(rr, _) => r(rr),
+        };
+        v.sort_unstable();
+        v.dedup();
+        v
+    }
+}
+
+impl System {
+    fn build(s: &Sketch, env: &Env) -> System {
+        let mut x0 = vec![];
+        let mut pidx = HashMap::new();
+        let mut ridx = HashMap::new();
+        for p in &s.points {
+            pidx.insert(p.id, x0.len());
+            x0.push(p.x);
+            x0.push(p.y);
+        }
+        for c in &s.curves {
+            if let Geom::Circle { r, .. } = c.geom {
+                ridx.insert(c.id, x0.len());
+                x0.push(r);
+            }
+        }
+        let mut res = vec![];
+        let curve = |id: Id| s.curve(id).map(|c| c.geom.clone());
+        let line = |id: Id| match curve(id) {
+            Some(Geom::Line { a, b }) => Some((pidx[&a], pidx[&b])),
+            _ => None,
+        };
+        let circ = |id: Id| match curve(id) {
+            Some(Geom::Circle { c, .. }) => Some((pidx[&c], RIdx::Param(ridx[&id]))),
+            Some(Geom::Arc { c, a, .. }) => Some((pidx[&c], RIdx::Pts(pidx[&c], pidx[&a]))),
+            _ => None,
+        };
+        // arcs: implicit equal radius of both ends
+        for c in &s.curves {
+            if let Geom::Arc { c, a, b } = c.geom {
+                res.push(Res::PointCircle { p: pidx[&b], c: pidx[&c], r: RIdx::Pts(pidx[&c], pidx[&a]) });
+            }
+        }
+        let mut bad_dims = vec![];
+        for (ki, k) in s.constraints.iter().enumerate() {
+            let val = |d: &Dim, kind: Kind| -> Option<f64> { expr::eval(&d.expr, kind, env).ok() };
+            let pi = |id: Id| pidx.get(&id).copied();
+            use Constraint::*;
+            let r: Option<Vec<Res>> = (|| {
+                Some(match k {
+                    PointOnLine { p, l } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::PointLine { p: pi(*p)?, a, b }]
+                    }
+                    PointOnCircle { p, c } => {
+                        let (cc, r) = circ(*c)?;
+                        vec![Res::PointCircle { p: pi(*p)?, c: cc, r }]
+                    }
+                    Horizontal { l } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::Horiz(a, b)]
+                    }
+                    Vertical { l } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::Vert(a, b)]
+                    }
+                    HorizontalPts { a, b } => vec![Res::Horiz(pi(*a)?, pi(*b)?)],
+                    VerticalPts { a, b } => vec![Res::Vert(pi(*a)?, pi(*b)?)],
+                    Parallel { a, b } => {
+                        let (p, q) = line(*a)?;
+                        let (r, t) = line(*b)?;
+                        vec![Res::Parallel(p, q, r, t)]
+                    }
+                    Perpendicular { a, b } => {
+                        let (p, q) = line(*a)?;
+                        let (r, t) = line(*b)?;
+                        vec![Res::Perp(p, q, r, t)]
+                    }
+                    Tangent { a, b, inner } => {
+                        if let Some((la, lb)) = line(*a) {
+                            let (c, r) = circ(*b)?;
+                            vec![Res::LineCircleTangent { a: la, b: lb, c, r }]
+                        } else if let Some((la, lb)) = line(*b) {
+                            let (c, r) = circ(*a)?;
+                            vec![Res::LineCircleTangent { a: la, b: lb, c, r }]
+                        } else {
+                            let (c1, r1) = circ(*a)?;
+                            let (c2, r2) = circ(*b)?;
+                            vec![Res::CircleCircle { c1, r1, c2, r2, inner: *inner }]
+                        }
+                    }
+                    Equal { a, b } => {
+                        if let (Some((p, q)), Some((r, t))) = (line(*a), line(*b)) {
+                            vec![Res::EqualLen(p, q, r, t)]
+                        } else {
+                            vec![Res::EqualR(circ(*a)?.1, circ(*b)?.1)]
+                        }
+                    }
+                    Midpoint { p, l } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::MidX { p: pi(*p)?, a, b }]
+                    }
+                    Fix { p, x, y } => {
+                        let i = pi(*p)?;
+                        vec![Res::Fix(i, *x), Res::Fix(i + 1, *y)]
+                    }
+                    Distance { a, b, dim } => vec![Res::Dist(pi(*a)?, pi(*b)?, val(dim, Kind::Length)?)],
+                    AxisDistance { a, b, axis, dim } => vec![Res::AxisDist(pi(*a)?, pi(*b)?, *axis as usize, val(dim, Kind::Length)?)],
+                    PointLineDistance { p, l, dim } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::PointLineDist { p: pi(*p)?, a, b, d: val(dim, Kind::Length)? }]
+                    }
+                    Length { l, dim } => {
+                        let (a, b) = line(*l)?;
+                        vec![Res::Dist(a, b, val(dim, Kind::Length)?)]
+                    }
+                    Radius { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)?)],
+                    Diameter { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)? / 2.0)],
+                    Angle { a, b, dim } => {
+                        let (p, q) = line(*a)?;
+                        let (r, t) = line(*b)?;
+                        vec![Res::Angle(p, q, r, t, val(dim, Kind::Angle)?)]
+                    }
+                })
+            })();
+            match r {
+                Some(r) => res.extend(r),
+                None => {
+                    if k.dim().is_some() {
+                        bad_dims.push(ki)
+                    }
+                }
+            }
+        }
+        System { x0, pidx, ridx, res, bad_dims }
+    }
+
+    fn residuals(&self, x: &[f64]) -> Vec<f64> {
+        let mut out = Vec::with_capacity(self.res.len());
+        for r in &self.res {
+            r.eval(x, &mut out);
+        }
+        out
+    }
+
+    /// Dense Jacobian (rows = residuals) by central differences per dependency.
+    fn jacobian(&self, x: &[f64]) -> Vec<Vec<f64>> {
+        let n = x.len();
+        let mut rows = vec![];
+        let mut xp = x.to_vec();
+        let mut buf = vec![];
+        for r in &self.res {
+            buf.clear();
+            r.eval(x, &mut buf);
+            let m = buf.len();
+            let mut local = vec![vec![0.0; n]; m];
+            for i in r.deps() {
+                let h = 1e-7 * (1.0 + x[i].abs());
+                xp[i] = x[i] + h;
+                let mut fp = vec![];
+                r.eval(&xp, &mut fp);
+                xp[i] = x[i] - h;
+                let mut fm = vec![];
+                r.eval(&xp, &mut fm);
+                xp[i] = x[i];
+                for k in 0..m {
+                    local[k][i] = (fp[k] - fm[k]) / (2.0 * h);
+                }
+            }
+            rows.extend(local);
+        }
+        rows
+    }
+
+    fn write_back(&self, s: &mut Sketch, x: &[f64]) {
+        for p in &mut s.points {
+            let i = self.pidx[&p.id];
+            p.x = x[i];
+            p.y = x[i + 1];
+        }
+        for c in &mut s.curves {
+            if let Geom::Circle { r, .. } = &mut c.geom {
+                *r = x[self.ridx[&c.id]].abs();
+            }
+        }
+    }
+}
+
+/// dx = -W⁻¹Jᵀ (J W⁻¹ Jᵀ + μI)⁻¹ r
+fn min_norm_step(j: &[Vec<f64>], r: &[f64], w: &[f64], n: usize) -> Vec<f64> {
+    let m = j.len();
+    if m == 0 {
+        return vec![0.0; n];
+    }
+    let mut a = vec![vec![0.0; m]; m];
+    for p in 0..m {
+        for q in p..m {
+            let mut s = 0.0;
+            for k in 0..n {
+                if j[p][k] != 0.0 && j[q][k] != 0.0 {
+                    s += j[p][k] * j[q][k] / w[k];
+                }
+            }
+            a[p][q] = s;
+            a[q][p] = s;
+        }
+    }
+    let tr: f64 = (0..m).map(|i| a[i][i]).sum::<f64>() / m as f64;
+    for i in 0..m {
+        a[i][i] += 1e-10 * (1.0 + tr);
+    }
+    let y = solve_dense(a, r.to_vec());
+    let mut dx = vec![0.0; n];
+    for p in 0..m {
+        for k in 0..n {
+            dx[k] -= j[p][k] * y[p] / w[k];
+        }
+    }
+    dx
+}
+
+fn solve_dense(mut a: Vec<Vec<f64>>, mut b: Vec<f64>) -> Vec<f64> {
+    let n = b.len();
+    for c in 0..n {
+        let piv = (c..n).max_by(|&i, &k| a[i][c].abs().total_cmp(&a[k][c].abs())).unwrap();
+        a.swap(c, piv);
+        b.swap(c, piv);
+        let d = a[c][c];
+        if d.abs() < 1e-14 {
+            continue;
+        }
+        for r in c + 1..n {
+            let f = a[r][c] / d;
+            if f != 0.0 {
+                for k in c..n {
+                    a[r][k] -= f * a[c][k];
+                }
+                b[r] -= f * b[c];
+            }
+        }
+    }
+    let mut x = vec![0.0; n];
+    for c in (0..n).rev() {
+        let mut s = b[c];
+        for k in c + 1..n {
+            s -= a[c][k] * x[k];
+        }
+        x[c] = if a[c][c].abs() < 1e-14 { 0.0 } else { s / a[c][c] };
+    }
+    x
+}
+
+/// Rank of J and an orthonormal-ish basis of its null space (via RREF).
+fn null_space(j: &[Vec<f64>], n: usize) -> (usize, Vec<Vec<f64>>) {
+    let mut a: Vec<Vec<f64>> = j.to_vec();
+    // normalise rows for a scale-independent tolerance
+    for r in &mut a {
+        let l = r.iter().map(|v| v * v).sum::<f64>().sqrt();
+        if l > 0.0 {
+            r.iter_mut().for_each(|v| *v /= l);
+        }
+    }
+    let m = a.len();
+    let mut pivots = vec![];
+    let mut row = 0;
+    for c in 0..n {
+        if row >= m {
+            break;
+        }
+        let piv = (row..m).max_by(|&i, &k| a[i][c].abs().total_cmp(&a[k][c].abs())).unwrap();
+        if a[piv][c].abs() < 1e-8 {
+            continue;
+        }
+        a.swap(row, piv);
+        let d = a[row][c];
+        a[row].iter_mut().for_each(|v| *v /= d);
+        for r in 0..m {
+            if r != row {
+                let f = a[r][c];
+                if f != 0.0 {
+                    for k in 0..n {
+                        a[r][k] -= f * a[row][k];
+                    }
+                }
+            }
+        }
+        pivots.push(c);
+        row += 1;
+    }
+    let rank = pivots.len();
+    let piv_set: HashSet<usize> = pivots.iter().copied().collect();
+    let mut basis = vec![];
+    for f in (0..n).filter(|c| !piv_set.contains(c)) {
+        let mut v = vec![0.0; n];
+        v[f] = 1.0;
+        for (r, &pc) in pivots.iter().enumerate() {
+            v[pc] = -a[r][f];
+        }
+        basis.push(v);
+    }
+    (rank, basis)
+}
+
+// ------------------------------------------------------------- geometry helpers
+
+pub fn arc_angles(c: DVec2, a: DVec2, b: DVec2) -> (f64, f64) {
+    let a0 = (a - c).to_angle();
+    let mut a1 = (b - c).to_angle();
+    while a1 <= a0 {
+        a1 += std::f64::consts::TAU;
+    }
+    (a0, a1)
+}
+
+impl Sketch {
+    /// Polyline approximation of a curve in sketch coordinates.
+    pub fn tessellate(&self, c: &Curve, seg_len: f64) -> Vec<DVec2> {
+        match c.geom {
+            Geom::Line { a, b } => vec![self.pv(a), self.pv(b)],
+            Geom::Circle { c: cc, r } => {
+                let ctr = self.pv(cc);
+                let n = ((std::f64::consts::TAU * r / seg_len).ceil() as usize).clamp(24, 256);
+                (0..=n).map(|i| ctr + DVec2::from_angle(i as f64 / n as f64 * std::f64::consts::TAU) * r).collect()
+            }
+            Geom::Arc { c: cc, a, b } => {
+                let ctr = self.pv(cc);
+                let r = (self.pv(a) - ctr).length();
+                let (a0, a1) = arc_angles(ctr, self.pv(a), self.pv(b));
+                let n = (((a1 - a0) * r / seg_len).ceil() as usize).clamp(8, 256);
+                (0..=n).map(|i| ctr + DVec2::from_angle(a0 + (a1 - a0) * i as f64 / n as f64) * r).collect()
+            }
+        }
+    }
+
+    /// Distance from `p` to the curve.
+    pub fn curve_distance(&self, c: &Curve, p: DVec2) -> f64 {
+        match c.geom {
+            Geom::Line { a, b } => seg_dist(p, self.pv(a), self.pv(b)),
+            Geom::Circle { c: cc, r } => ((p - self.pv(cc)).length() - r).abs(),
+            Geom::Arc { c: cc, a, b } => {
+                let ctr = self.pv(cc);
+                let r = (self.pv(a) - ctr).length();
+                let (a0, a1) = arc_angles(ctr, self.pv(a), self.pv(b));
+                let mut t = (p - ctr).to_angle();
+                while t < a0 {
+                    t += std::f64::consts::TAU;
+                }
+                if t <= a1 {
+                    ((p - ctr).length() - r).abs()
+                } else {
+                    (p - self.pv(a)).length().min((p - self.pv(b)).length())
+                }
+            }
+        }
+    }
+
+    pub fn bounds(&self) -> Option<(DVec2, DVec2)> {
+        let mut lo = DVec2::splat(f64::INFINITY);
+        let mut hi = DVec2::splat(f64::NEG_INFINITY);
+        for c in &self.curves {
+            for p in self.tessellate(c, 5.0) {
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+        }
+        for p in &self.points {
+            lo = lo.min(p.v());
+            hi = hi.max(p.v());
+        }
+        lo.x.is_finite().then_some((lo, hi))
+    }
+}
+
+pub fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {
+    let d = b - a;
+    let t = if d.length_squared() < 1e-18 { 0.0 } else { ((p - a).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
+    (a + d * t - p).length()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::expr::Units;
+
+    #[test]
+    fn rectangle_with_dims() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let p: Vec<Id> = [(0.0, 0.0), (10.0, 1.0), (11.0, 7.0), (-1.0, 6.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        let l: Vec<Id> = (0..4).map(|i| s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false)).collect();
+        s.constraints.push(Constraint::Horizontal { l: l[0] });
+        s.constraints.push(Constraint::Horizontal { l: l[2] });
+        s.constraints.push(Constraint::Vertical { l: l[1] });
+        s.constraints.push(Constraint::Vertical { l: l[3] });
+        s.constraints.push(Constraint::Fix { p: p[0], x: 0.0, y: 0.0 });
+        s.constraints.push(Constraint::Length { l: l[0], dim: Dim { expr: "40".into(), offset: [0.0; 2] } });
+        let st = s.solve(&env, &[]);
+        assert!(st.ok);
+        assert_eq!(st.dof, 1);
+        s.constraints.push(Constraint::Length { l: l[1], dim: Dim { expr: "20".into(), offset: [0.0; 2] } });
+        let st = s.solve(&env, &[]);
+        assert!(st.ok);
+        assert_eq!(st.dof, 0);
+        assert!((s.pv(p[2]) - DVec2::new(40.0, 20.0)).length() < 1e-6);
+        assert_eq!(st.fixed_curves.len(), 4);
+    }
+
+    #[test]
+    fn circle_tangent_line() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        let b = s.add_point(DVec2::new(20.0, 0.0));
+        let l = s.add_curve(Geom::Line { a, b }, false);
+        let c = s.add_point(DVec2::new(10.0, 7.0));
+        let ci = s.add_curve(Geom::Circle { c, r: 3.0 }, false);
+        s.constraints.push(Constraint::Tangent { a: l, b: ci, inner: false });
+        assert!(s.solve(&env, &[]).ok);
+        let r = match s.curve(ci).unwrap().geom {
+            Geom::Circle { r, .. } => r,
+            _ => 0.0,
+        };
+        let d = (s.pv(c).y - s.pv(a).y).abs();
+        assert!((d - r).abs() < 1e-6, "{d} {r}");
+    }
+}
