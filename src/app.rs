@@ -472,7 +472,7 @@ impl App {
     }
 
     pub fn import_step(&mut self) {
-        let Some(p) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp", "STEP", "STP"]).pick_file() else { return };
+        let Some(p) = rfd::FileDialog::new().add_filter("STEP / IGES", &["step", "stp", "STEP", "STP", "igs", "iges", "IGS", "IGES"]).pick_file() else { return };
         match std::fs::read_to_string(&p) {
             Ok(step) => {
                 self.checkpoint();
@@ -485,8 +485,36 @@ impl App {
         }
     }
 
+    pub fn export_obj(&mut self) {
+        let Some(p) = rfd::FileDialog::new().add_filter("OBJ", &["obj"]).set_file_name("part.obj").save_file() else { return };
+        let mut out = String::from("# cad-app\n");
+        let mut base = 1usize;
+        for b in &self.result.bodies {
+            out.push_str(&format!("o {}\n", self.part_name(b.id).replace(' ', "_")));
+            for v in b.positions.chunks(3) {
+                out.push_str(&format!("v {} {} {}\n", v[0], v[1], v[2]));
+            }
+            for n in b.normals.chunks(3) {
+                out.push_str(&format!("vn {} {} {}\n", n[0], n[1], n[2]));
+            }
+            for t in b.indices.chunks(3) {
+                let (a, bb, c) = (t[0] as usize + base, t[1] as usize + base, t[2] as usize + base);
+                out.push_str(&format!("f {a}//{a} {bb}//{bb} {c}//{c}\n"));
+            }
+            base += b.positions.len() / 3;
+        }
+        match std::fs::write(&p, out) {
+            Ok(()) => self.flash_info(format!("Exported {}", p.display()), Some(Duration::from_secs(3))),
+            Err(e) => self.flash(format!("Could not export: {e}"), ToastKind::Error),
+        }
+    }
+
     pub fn export(&mut self, format: &str) {
-        let ext = if format == "step" { "step" } else { "stl" };
+        let ext = match format {
+            "step" => "step",
+            "iges" => "igs",
+            _ => "stl",
+        };
         let Some(p) = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("part.{ext}")).save_file() else { return };
         self.kernel.export(&self.doc, format, p.to_string_lossy().to_string());
         self.flash_info(format!("Exporting {}…", p.display()), None);
@@ -802,6 +830,11 @@ impl App {
             if self.tool_button(ui, "measure", "Measure", "Measure (M)", false, self.measure.is_some(), true).clicked() {
                 self.toggle_measure();
             }
+            self.section_ui(ui);
+        });
+    }
+
+    pub fn section_ui(&mut self, ui: &mut Ui) {
             let label = |s: &Option<Section>| match s {
                 None => "No section".to_string(),
                 Some(s) => format!("Section: {}{}", ["Top", "Front", "Right"][s.plane as usize], if s.flip { " (flipped)" } else { "" }),
@@ -836,7 +869,6 @@ impl App {
                     self.scene_dirty = true;
                 }
             }
-        });
     }
 
     fn view_menu(&mut self, ui: &mut Ui) {
@@ -876,9 +908,11 @@ impl App {
                     ("new", "New part"),
                     ("open", "Open .json…"),
                     ("json", "Save .json (Ctrl+S)"),
-                    ("import", "Import STEP…"),
+                    ("import", "Import STEP / IGES…"),
                     ("step", "Export STEP"),
+                    ("iges", "Export IGES"),
                     ("stl", "Export STL"),
+                    ("obj", "Export OBJ"),
                     ("png", "Screenshot PNG"),
                 ] {
                     if ui.selectable_label(false, l).clicked() {
@@ -893,7 +927,8 @@ impl App {
             Some("open") => self.open_dialog(),
             Some("json") => self.save(false),
             Some("import") => self.import_step(),
-            Some(f @ ("step" | "stl")) => self.export(f),
+            Some(f @ ("step" | "stl" | "iges")) => self.export(f),
+            Some("obj") => self.export_obj(),
             Some("png") => self.screenshot(ui.ctx()),
             _ => {}
         }
@@ -1316,7 +1351,15 @@ impl App {
     fn statusbar(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 16.0;
-            let msg = if let Some(s) = &self.sketch {
+            let msg = if let crate::workspace::Tab::Assembly(_) = self.tab {
+                if self.asm.dialog.is_some() {
+                    "Click a face, edge or circular edge on each of the two parts · Enter to accept".to_string()
+                } else {
+                    "Insert parts, then pick a mate type · drag parts to move them, Shift+drag rotates".to_string()
+                }
+            } else if let crate::workspace::Tab::Drawing(_) = self.tab {
+                "Insert views, add dimensions and notes, then export".to_string()
+            } else if let Some(s) = &self.sketch {
                 crate::sketcher::status_text(self, s)
             } else if let Some(m) = &self.measure {
                 crate::viewport::measure_text(self, m)
@@ -1619,7 +1662,11 @@ impl App {
     fn dock(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
-                if self.sketch.is_some() {
+                if let crate::workspace::Tab::Assembly(_) = self.tab {
+                    crate::asm_ui::toolbar(self, ui);
+                } else if let crate::workspace::Tab::Drawing(_) = self.tab {
+                    crate::drawing_ui::toolbar(self, ui);
+                } else if self.sketch.is_some() {
                     crate::sketcher::toolbar(self, ui);
                 } else {
                     self.model_tools(ui);

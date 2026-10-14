@@ -171,6 +171,13 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        let before = app.section;
+        app.section_ui(ui);
+        if before != app.section {
+            app.asm.scene_dirty = true;
+        }
+    });
+    App::group(ui, |ui| {
         let on = app.asm.explode > 0.0;
         if app.tool_button(ui, "transform", "Explode", "Exploded view", false, on, true).clicked() {
             app.asm.explode = if on { 0.0 } else { 0.8 };
@@ -790,7 +797,14 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         scene: app.scene.clone(),
         view_proj: app.camera.view_proj(),
         eye_dir: app.camera.back,
-        clip: [0.0; 4],
+        clip: match app.section {
+            Some(sec) => {
+                let n = [Vec3::Z, -Vec3::Y, Vec3::X][sec.plane as usize];
+                let (n, w) = if sec.flip { (-n, -(sec.offset as f32)) } else { (n, sec.offset as f32) };
+                [n.x, n.y, n.z, w]
+            }
+            None => [0.0; 4],
+        },
         size_px: [rect.width() * ppp, rect.height() * ppp],
         pixels_per_point: ppp,
     };

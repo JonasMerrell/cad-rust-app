@@ -400,6 +400,29 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     Op::Chamfer { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
                     Op::Shell { thickness, .. } => val(ui, "Thickness", thickness, Kind::Length, &mut changed),
                     Op::Hole { hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, tapped, .. } => {
+                        ui.horizontal(|ui| {
+                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new("ISO size").color(MUTED)));
+                            egui::ComboBox::from_id_salt("iso-hole").selected_text("Choose…").show_ui(ui, |ui| {
+                                // (size, clearance (normal), tap drill, counterbore Ø, counterbore depth, countersink Ø)
+                                for (m, clr, tap, cbd, cbh, csd) in ISO_HOLES {
+                                    if ui.selectable_label(false, format!("M{m} clearance")).clicked() {
+                                        *diameter = format!("{clr} mm");
+                                        *cb_diameter = format!("{cbd} mm");
+                                        *cb_depth = format!("{cbh} mm");
+                                        *cs_diameter = format!("{csd} mm");
+                                        *cs_angle = "90".into();
+                                        *tapped = false;
+                                        changed = true;
+                                    }
+                                    if ui.selectable_label(false, format!("M{m} tapped")).clicked() {
+                                        *diameter = format!("{tap} mm");
+                                        *tapped = true;
+                                        *hole_type = HoleType::Simple;
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
                         combo(ui, "Hole type", hole_type, &[(HoleType::Simple, "Simple"), (HoleType::Counterbore, "Counterbore"), (HoleType::Countersink, "Countersink")], &mut changed);
                         val(ui, "Diameter", diameter, Kind::Length, &mut changed);
                         check(ui, "Through all", through, &mut changed);
@@ -517,6 +540,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         app.dialog_cancel();
     }
 }
+
+/// ISO metric: (size, normal clearance Ø, tap drill Ø, counterbore Ø, counterbore depth, countersink Ø)
+const ISO_HOLES: &[(&str, f64, f64, f64, f64, f64)] = &[
+    ("2", 2.4, 1.6, 4.4, 2.0, 4.4),
+    ("2.5", 2.9, 2.05, 5.4, 2.5, 5.5),
+    ("3", 3.4, 2.5, 6.5, 3.3, 6.3),
+    ("4", 4.5, 3.3, 8.0, 4.4, 9.4),
+    ("5", 5.5, 4.2, 10.0, 5.4, 10.4),
+    ("6", 6.6, 5.0, 11.0, 6.4, 12.6),
+    ("8", 9.0, 6.8, 15.0, 8.6, 17.3),
+    ("10", 11.0, 8.5, 18.0, 10.6, 20.0),
+    ("12", 13.5, 10.2, 20.0, 12.6, 24.0),
+    ("16", 17.5, 14.0, 26.0, 16.6, 31.0),
+    ("20", 22.0, 17.5, 33.0, 20.6, 38.0),
+];
 
 thread_local! {
     static ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };

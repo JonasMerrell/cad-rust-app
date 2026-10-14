@@ -660,9 +660,10 @@ impl<'a> Model<'a> {
                 Ok(())
             }
             Op::Import { step, .. } => {
-                let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{fid}.step", std::process::id()));
+                let iges = step.trim_start().len() > 72 && step.lines().next().map(|l| l.len() >= 73 && l.as_bytes()[72] == b'S').unwrap_or(false);
+                let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{fid}.{}", std::process::id(), if iges { "igs" } else { "step" }));
                 std::fs::write(&path, step).map_err(|e| e.to_string())?;
-                let s = Shape::read_step(&path).map_err(|e| format!("could not read STEP: {e:?}"));
+                let s = if iges { Shape::read_iges(&path) } else { Shape::read_step(&path) }.map_err(|e| format!("could not read the file: {e:?}"));
                 let _ = std::fs::remove_file(&path);
                 let s = s?;
                 for (i, so) in solids_of(&s).into_iter().enumerate() {
@@ -962,6 +963,7 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
     match format {
         "step" => shape.write_step(path).map_err(|e| format!("{e:?}")),
         "stl" => shape.write_stl_with_tolerance(path, 0.01).map_err(|e| format!("{e:?}")),
+        "iges" => shape.write_iges(path).map_err(|e| format!("{e:?}")),
         _ => Err("unknown format".into()),
     }
 }
