@@ -14,6 +14,9 @@ pub struct DrawView {
     pub scale: f64,
     #[serde(default)]
     pub hidden_lines: bool,
+    /// Detail view: (source view id, centre in the source view's model coordinates, radius in mm).
+    #[serde(default)]
+    pub detail: Option<(u64, [f64; 2], f64)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -27,6 +30,9 @@ pub struct Drawing {
     #[serde(default)]
     pub notes: Vec<Note>,
     pub next_id: u64,
+    /// Bill of materials table: (assembly index, top-left on the sheet).
+    #[serde(default)]
+    pub bom: Option<(usize, [f64; 2])>,
 }
 
 /// A dimension between two points on the sheet (mm), measured in model units through the view scale.

@@ -321,6 +321,17 @@ pub enum Op {
     DeleteFace {
         faces: Vec<Ref>,
     },
+    /// Push or pull planar faces along their normals.
+    MoveFace {
+        faces: Vec<Ref>,
+        distance: String,
+    },
+    /// Rib from sketch lines: thickness about the sketch plane, filled towards the part.
+    Rib {
+        profile: Vec<Ref>,
+        thickness: String,
+        flip: bool,
+    },
     /// Sheet metal part from a chain of sketch lines (bent) or a region (flat plate).
     SheetMetal {
         profile: Vec<Ref>,
@@ -365,6 +376,8 @@ impl Op {
             Op::Transform { .. } => "transform",
             Op::DeleteFace { .. } => "deleteFace",
             Op::SheetMetal { .. } => "sheetMetal",
+            Op::MoveFace { .. } => "moveFace",
+            Op::Rib { .. } => "rib",
         }
     }
 
@@ -377,6 +390,8 @@ impl Op {
             "helix" => Op::Helix { axis: None, radius: s("10"), pitch: s("5"), turns: s("4"), left: false },
             "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
             "deleteFace" => Op::DeleteFace { faces: vec![] },
+            "moveFace" => Op::MoveFace { faces: vec![], distance: s("2") },
+            "rib" => Op::Rib { profile: vec![], thickness: s("2"), flip: false },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
             "extrude" => {
                 Op::Extrude { profiles: vec![], end: EndType::Blind, depth: s("10"), opposite: false, second: false, depth2: s("10"), up_to: None, op: BoolOp::New, draft: s("0") }
@@ -438,6 +453,8 @@ pub fn kind_label(kind: &str) -> &'static str {
         "transform" => "Transform",
         "deleteFace" => "Delete face",
         "sheetMetal" => "Sheet metal",
+        "moveFace" => "Move face",
+        "rib" => "Rib",
         _ => "Feature",
     }
 }

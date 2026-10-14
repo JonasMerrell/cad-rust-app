@@ -110,6 +110,8 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         }
         Op::DeleteFace { faces } => vec![("Faces", Faces, Slot::Many(faces))],
         Op::SheetMetal { profile, .. } => vec![("Profile", SheetProfile, Slot::Many(profile))],
+        Op::MoveFace { faces, .. } => vec![("Faces", Faces, Slot::Many(faces))],
+        Op::Rib { profile, .. } => vec![("Lines", Path, Slot::Many(profile))],
         Op::Boolean { target, tools, .. } => vec![("Target body", Bodies, Slot::One(target)), ("Tool bodies", Bodies, Slot::Many(tools))],
         Op::Split { target, plane } => vec![("Target body", Bodies, Slot::One(target)), ("Split plane", Planar, Slot::One(plane))],
         Op::DeleteBody { bodies } => vec![("Bodies", Bodies, Slot::Many(bodies))],
@@ -466,6 +468,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         val(ui, "Total angle (°)", angle, Kind::Angle, &mut changed);
                     }
                     Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
+                    Op::MoveFace { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
+                    Op::Rib { thickness, flip, .. } => {
+                        val(ui, "Thickness", thickness, Kind::Length, &mut changed);
+                        check(ui, "Other side of the line", flip, &mut changed);
+                    }
                     Op::SheetMetal { thickness, radius, k_factor, depth, flip, op: bop, .. } => {
                         combo(ui, "Operation", bop, &bool_ops, &mut changed);
                         val(ui, "Thickness", thickness, Kind::Length, &mut changed);

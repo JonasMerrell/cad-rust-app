@@ -20,7 +20,7 @@ pub enum Request {
     Ping,
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
-    Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3])> },
+    Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3], bool)> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -186,7 +186,7 @@ impl KernelClient {
         self.state = KernelState::Busy;
     }
 
-    pub fn project(&mut self, tag: usize, key: String, doc: &Document, views: Vec<([f64; 3], [f64; 3])>) {
+    pub fn project(&mut self, tag: usize, key: String, doc: &Document, views: Vec<([f64; 3], [f64; 3], bool)>) {
         let id = self.next_id;
         self.next_id += 1;
         self.send(&Request::Project { id, tag, key, doc: doc.clone(), views });

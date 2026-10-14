@@ -45,11 +45,26 @@ pub struct DrawUi {
     pub hover_pt: Option<(u64, [f64; 2])>,
 }
 
-pub const DIRS: &[(&str, &str)] = &[("front", "Front"), ("top", "Top"), ("right", "Right"), ("back", "Back"), ("bottom", "Bottom"), ("left", "Left"), ("iso", "Isometric")];
+pub const DIRS: &[(&str, &str)] = &[
+    ("front", "Front"),
+    ("top", "Top"),
+    ("right", "Right"),
+    ("back", "Back"),
+    ("bottom", "Bottom"),
+    ("left", "Left"),
+    ("iso", "Isometric"),
+    ("section:front", "Section (front)"),
+    ("section:top", "Section (top)"),
+    ("section:right", "Section (right)"),
+];
+
+fn base_dir(dir: &str) -> &str {
+    dir.strip_prefix("section:").unwrap_or(dir)
+}
 
 pub fn dir_vectors(dir: &str) -> ([f64; 3], [f64; 3]) {
     let s = 1.0 / 3f64.sqrt();
-    match dir {
+    match base_dir(dir) {
         "top" => ([0.0, 0.0, 1.0], [0.0, 1.0, 0.0]),
         "right" => ([1.0, 0.0, 0.0], [0.0, 0.0, 1.0]),
         "back" => ([0.0, 1.0, 0.0], [0.0, 0.0, 1.0]),
@@ -114,7 +129,8 @@ fn request_projections(app: &mut App) {
         }
         let Some(doc) = app.studio_doc(studio).cloned() else { continue };
         app.dwg.requested.insert((studio, dir.clone()));
-        app.kernel.project(studio, dir.clone(), &doc, vec![dir_vectors(&dir)]);
+        let (d, u) = dir_vectors(&dir);
+        app.kernel.project(studio, dir.clone(), &doc, vec![(d, u, dir.starts_with("section:"))]);
     }
 }
 
@@ -146,7 +162,7 @@ pub fn add_standard_views(app: &mut App) {
     ] {
         d.next_id += 1;
         let id = d.next_id;
-        d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, hidden_lines: false });
+        d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, hidden_lines: false, detail: None });
     }
     app.dwg.fitted = false;
 }
@@ -208,6 +224,10 @@ pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
     out.push(Prim::Text { at: [w - m - 4.0, ty + 24.0], size: 3.0, text: "cad-app".into(), anchor: 2, color: [110, 110, 110] });
 
     for v in &d.views {
+        if let Some((src, c, r)) = v.detail {
+            detail_prims(app, d, v, src, c, r, &mut out);
+            continue;
+        }
         let proj = app.dwg.proj.get(&(v.studio, v.dir.clone()));
         let Some(p) = proj else {
             out.push(Prim::Text { at: v.pos, size: 4.0, text: "projecting…".into(), anchor: 1, color: [130, 130, 130] });
@@ -225,6 +245,9 @@ pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
                 }
             }
         }
+        for h in &p.hatch {
+            out.push(Prim::Line { a: to_sheet(v, Some(p), h[0]), b: to_sheet(v, Some(p), h[1]), w: 0.18, dashed: false, color: [70, 70, 70] });
+        }
         let label = DIRS.iter().find(|x| x.0 == v.dir).map(|x| x.1).unwrap_or("");
         let bottom = to_sheet(v, Some(p), [0.0, p.bbox[0][1]])[1];
         out.push(Prim::Text { at: [v.pos[0], bottom - 7.0], size: 3.2, text: format!("{} ({})", label.to_uppercase(), fmt_scale(v.scale)), anchor: 1, color: [80, 80, 80] });
@@ -239,7 +262,83 @@ pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
     for n in &d.notes {
         out.push(Prim::Text { at: n.pos, size: 3.5, text: n.text.clone(), anchor: 0, color: INK });
     }
+    if let Some((ai, pos)) = d.bom {
+        if let Some(a) = app.ws.assemblies.get(ai) {
+            bom_prims(app, a, pos, &mut out);
+        }
+    }
     out
+}
+
+fn bom_prims(app: &App, a: &crate::assembly::Assembly, pos: [f64; 2], out: &mut Vec<Prim>) {
+    let rows = crate::asm_ui::bom(app, a);
+    let cols = [12.0, 60.0, 14.0, 34.0];
+    let rh = 6.0;
+    let w: f64 = cols.iter().sum();
+    let n = rows.len() + 1;
+    let (x0, y0) = (pos[0], pos[1]);
+    for i in 0..=n {
+        let y = y0 - i as f64 * rh;
+        out.push(Prim::Line { a: [x0, y], b: [x0 + w, y], w: if i <= 1 { 0.35 } else { 0.2 }, dashed: false, color: INK });
+    }
+    let mut x = x0;
+    for c in cols.iter().chain(std::iter::once(&0.0)) {
+        out.push(Prim::Line { a: [x, y0], b: [x, y0 - n as f64 * rh], w: 0.25, dashed: false, color: INK });
+        x += c;
+    }
+    let cells = |i: usize, vals: [String; 4], out: &mut Vec<Prim>| {
+        let mut x = x0;
+        for (k, v) in vals.into_iter().enumerate() {
+            out.push(Prim::Text { at: [x + 1.5, y0 - (i as f64 + 1.0) * rh + 1.7], size: 3.0, text: v, anchor: 0, color: INK });
+            x += cols[k];
+        }
+    };
+    cells(0, ["ITEM".into(), "PART".into(), "QTY".into(), "MATERIAL".into()], out);
+    for (i, (item, name, q, m, _)) in rows.iter().enumerate() {
+        cells(i + 1, [item.to_string(), name.clone(), q.to_string(), m.clone()], out);
+    }
+}
+
+/// A detail view: part of another view, clipped to a circle and enlarged.
+fn detail_prims(app: &App, d: &Drawing, v: &DrawView, src: u64, c: [f64; 2], r: f64, out: &mut Vec<Prim>) {
+    let Some(sv) = d.views.iter().find(|x| x.id == src) else { return };
+    let Some(p) = app.dwg.proj.get(&(sv.studio, sv.dir.clone())) else { return };
+    let cc = glam::DVec2::from(c);
+    let map = |q: glam::DVec2| -> [f64; 2] { [v.pos[0] + (q.x - cc.x) * v.scale, v.pos[1] + (q.y - cc.y) * v.scale] };
+    for pl in &p.visible {
+        for s in pl.windows(2) {
+            let (a, b) = (glam::DVec2::from(s[0]), glam::DVec2::from(s[1]));
+            if let Some((a, b)) = clip_circle(a, b, cc, r) {
+                out.push(Prim::Line { a: map(a), b: map(b), w: 0.5, dashed: false, color: INK });
+            }
+        }
+    }
+    // boundary circle here and on the source view
+    let n = 64;
+    for i in 0..n {
+        let t0 = i as f64 / n as f64 * std::f64::consts::TAU;
+        let t1 = (i + 1) as f64 / n as f64 * std::f64::consts::TAU;
+        let (q0, q1) = (cc + glam::DVec2::from_angle(t0) * r, cc + glam::DVec2::from_angle(t1) * r);
+        out.push(Prim::Line { a: map(q0), b: map(q1), w: 0.25, dashed: true, color: [90, 90, 90] });
+        out.push(Prim::Line { a: to_sheet(sv, Some(p), q0.into()), b: to_sheet(sv, Some(p), q1.into()), w: 0.25, dashed: true, color: [90, 90, 90] });
+    }
+    out.push(Prim::Text { at: [v.pos[0], v.pos[1] - r * v.scale - 7.0], size: 3.2, text: format!("DETAIL ({})", fmt_scale(v.scale)), anchor: 1, color: [80, 80, 80] });
+}
+
+fn clip_circle(a: glam::DVec2, b: glam::DVec2, c: glam::DVec2, r: f64) -> Option<(glam::DVec2, glam::DVec2)> {
+    let d = b - a;
+    let f = a - c;
+    let (qa, qb, qc) = (d.dot(d), 2.0 * f.dot(d), f.dot(f) - r * r);
+    if qa < 1e-18 {
+        return (qc <= 0.0).then_some((a, b));
+    }
+    let disc = qb * qb - 4.0 * qa * qc;
+    if disc <= 0.0 {
+        return None;
+    }
+    let sq = disc.sqrt();
+    let (t0, t1) = (((-qb - sq) / (2.0 * qa)).max(0.0), ((-qb + sq) / (2.0 * qa)).min(1.0));
+    (t0 < t1).then(|| (a + d * t0, a + d * t1))
 }
 
 fn dim_prims(out: &mut Vec<Prim>, a: [f64; 2], b: [f64; 2], kind: u8, offset: f64, fmt: impl Fn(f64) -> String) {
@@ -299,6 +398,24 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
                 add_standard_views(app);
                 ui.close();
             }
+            if ui.button("Detail of selected view").on_hover_text("Select a view first; the detail is centred on it at twice the scale").clicked() {
+                add_detail(app);
+                ui.close();
+            }
+            if !app.ws.assemblies.is_empty() {
+                ui.separator();
+                for (i, a) in app.ws.assemblies.iter().enumerate() {
+                    if ui.button(format!("BOM table: {}", a.name)).clicked() {
+                        let sheet = dwg(app).map(|d| sheet_size(&d.sheet)).unwrap_or([420.0, 297.0]);
+                        checkpoint(app);
+                        if let Some(d) = dwg_mut(app) {
+                            d.bom = Some((i, [sheet[0] - 10.0 - 120.0, sheet[1] - 10.0]));
+                        }
+                        ui.close();
+                        break;
+                    }
+                }
+            }
         });
     });
     App::group(ui, |ui| {
@@ -329,6 +446,26 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     });
 }
 
+fn add_detail(app: &mut App) {
+    let Some(DSel::View(src)) = app.dwg.sel else {
+        app.flash("Select a view to take the detail from", ToastKind::Info);
+        return;
+    };
+    let Some(d) = dwg(app) else { return };
+    let Some(sv) = d.views.iter().find(|v| v.id == src).cloned() else { return };
+    let Some(p) = app.dwg.proj.get(&(sv.studio, sv.dir.clone())).cloned() else { return };
+    let c = [(p.bbox[0][0] + p.bbox[1][0]) / 2.0, (p.bbox[0][1] + p.bbox[1][1]) / 2.0];
+    let r = ((p.bbox[1][0] - p.bbox[0][0]).max(p.bbox[1][1] - p.bbox[0][1]) * 0.2).max(1.0);
+    checkpoint(app);
+    if let Some(d) = dwg_mut(app) {
+        d.next_id += 1;
+        let id = d.next_id;
+        let pos = [sv.pos[0] + (p.bbox[1][0] - p.bbox[0][0]) * sv.scale * 0.5 + r * sv.scale * 2.0 + 20.0, sv.pos[1]];
+        d.views.push(DrawView { id, studio: sv.studio, dir: sv.dir.clone(), pos, scale: sv.scale * 2.0, hidden_lines: false, detail: Some((src, c, r)) });
+        app.dwg.sel = Some(DSel::View(id));
+    }
+}
+
 fn insert_view(app: &mut App, studio: usize, dir: &str) {
     checkpoint(app);
     let center = app.dwg.center;
@@ -336,7 +473,7 @@ fn insert_view(app: &mut App, studio: usize, dir: &str) {
     if let Some(d) = dwg_mut(app) {
         d.next_id += 1;
         let id = d.next_id;
-        d.views.push(DrawView { id, studio, dir: dir.into(), pos: center, scale, hidden_lines: false });
+        d.views.push(DrawView { id, studio, dir: dir.into(), pos: center, scale, hidden_lines: false, detail: None });
         app.dwg.sel = Some(DSel::View(id));
     }
 }
@@ -492,6 +629,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 
     // selection highlight
     let view_rect = |v: &DrawView| -> Option<egui::Rect> {
+        if let Some((_, _, r)) = v.detail {
+            let rr = r * v.scale;
+            return Some(egui::Rect::from_two_pos(to_screen([v.pos[0] - rr, v.pos[1] - rr]), to_screen([v.pos[0] + rr, v.pos[1] + rr])));
+        }
         let p = app.dwg.proj.get(&(v.studio, v.dir.clone()))?;
         Some(egui::Rect::from_two_pos(to_screen(to_sheet(v, Some(p), p.bbox[0])), to_screen(to_sheet(v, Some(p), p.bbox[1]))).expand(6.0))
     };

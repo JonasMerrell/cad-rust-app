@@ -90,4 +90,6 @@ pub const ICONS: &[(&str, &str)] = &[
     ("matePlanar", "M3 15l9-5 9 5-9 5zM12 3v7"),
     ("mateBall", "M12 12m-6 0a6 6 0 1 0 12 0a6 6 0 1 0 -12 0M6 12h12M12 6c3 2 3 10 0 12"),
     ("sheetMetal", "M3 17l6-6h12M3 17v3M9 11v3l-6 6M21 11v3H9"),
+    ("rib", "M3 20h18M5 20V6M5 6l14 14M9 20l-4-4"),
+    ("moveFace", "M4 14h16v6H4zM12 3v8M8 7l4-4 4 4"),
 ];

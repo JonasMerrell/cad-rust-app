@@ -469,6 +469,67 @@ impl<'a> Model<'a> {
                 self.face_op(faces, |shape, fs| occ::draft(shape, fs, n, a, p, n))
             }
             Op::DeleteFace { faces } => self.face_op(faces, occ::delete_faces),
+            Op::MoveFace { faces, distance } => {
+                let d = self.len(distance)?;
+                let mut by_body: HashMap<usize, Vec<Face>> = HashMap::new();
+                for r in faces {
+                    let (f, bi) = self.find_face_ref(r)?;
+                    by_body.entry(bi).or_default().push(f);
+                }
+                if by_body.is_empty() {
+                    return Err("select faces".into());
+                }
+                for (bi, fs) in by_body {
+                    let mut shape = dup(&self.bodies[bi].shape);
+                    for f in &fs {
+                        let g = face_geom(f);
+                        if !g.planar {
+                            return Err("only flat faces can be moved".into());
+                        }
+                        let prism = occ::prism(&Shape::from(f), g.normal * d)?;
+                        shape = if d >= 0.0 { occ::fuse(&shape, &prism)? } else { occ::cut(&shape, &prism)? };
+                    }
+                    self.bodies[bi].shape = shape;
+                }
+                Ok(())
+            }
+            Op::Rib { profile, thickness, flip } => {
+                let t = self.len(thickness)?;
+                if self.bodies.is_empty() {
+                    return Err("a rib needs a part to attach to".into());
+                }
+                let size = self.model_size() * 2.0;
+                let mut tools = vec![];
+                for r in profile {
+                    let Ref::SketchCurve { sketch, curve } = r else { return Err("select sketch lines".into()) };
+                    let (sk, fr) = self.sketch(*sketch)?;
+                    let Some(crate::sketch::Geom::Line { a, b }) = sk.curve(*curve).map(|c| c.geom.clone()) else {
+                        return Err("ribs are made from sketch lines".into());
+                    };
+                    let (pa, pb) = (sk.pv(a), sk.pv(b));
+                    let dir = (pb - pa).normalize();
+                    let n = dir.perp() * if *flip { -1.0 } else { 1.0 };
+                    // the half-plane beside the line, long enough to reach the part, thickened about the sketch plane
+                    let quad = [pa - dir * size, pb + dir * size, pb + dir * size + n * size, pa - dir * size + n * size];
+                    let pts: Vec<DVec3> = quad.iter().map(|p| fr.to_world(*p) - fr.normal() * (t / 2.0)).collect();
+                    let w = Wire::from_ordered_points(pts).map_err(|e| format!("{e:?}"))?;
+                    let slab = occ::prism(&Shape::from(&Face::from_wire(&w)), fr.normal() * t)?;
+                    // keep only what lies within the parts' bounding box in the sketch plane
+                    let mut lo = DVec3::splat(f64::INFINITY);
+                    let mut hi = DVec3::splat(f64::NEG_INFINITY);
+                    for b in &self.bodies {
+                        let bb = opencascade::bounding_box::aabb(&b.shape);
+                        lo = lo.min(bb.min());
+                        hi = hi.max(bb.max());
+                    }
+                    let bbox = Shape::box_from_corners(lo, hi);
+                    tools.push(occ::common(&slab, &bbox)?);
+                }
+                if tools.is_empty() {
+                    return Err("select the rib lines".into());
+                }
+                self.apply(fid, tools, BoolOp::Add)
+            }
             Op::SheetMetal { profile, thickness, radius, k_factor, depth, flip, op } => {
                 let t = self.len(thickness)?;
                 let r = self.len(radius)?;
@@ -1731,6 +1792,9 @@ pub struct ProjView {
     /// Polylines in the view's 2D coordinates (model mm).
     pub visible: Vec<Vec<[f64; 2]>>,
     pub hidden: Vec<Vec<[f64; 2]>>,
+    /// Section hatching segments.
+    #[serde(default)]
+    pub hatch: Vec<[[f64; 2]; 2]>,
     pub bbox: [[f64; 2]; 2],
 }
 
@@ -1738,23 +1802,48 @@ fn polylines_2d(s: &Shape) -> Vec<Vec<[f64; 2]>> {
     unique_edges(s).iter().map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>()).filter(|p| p.len() >= 2).collect()
 }
 
-/// Hidden-line projections of a Part Studio's parts, one per (direction, up) pair.
-pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3])]) -> Vec<ProjView> {
+/// Hidden-line projections of a Part Studio's parts, one per (direction, up, section) entry.
+/// Section views cut the parts through their centre, square to the view, and hatch the cut.
+pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3], bool)]) -> Vec<ProjView> {
     let bodies = build_bodies(doc);
     let shapes: Vec<&Shape> = bodies.iter().map(|b| &b.shape).collect();
     let Ok(all) = occ::compound(&shapes) else { return vec![ProjView::default(); views.len()] };
     views
         .iter()
-        .map(|(d, u)| {
+        .map(|(d, u, section)| {
             let (d, u) = (DVec3::from(*d), DVec3::from(*u));
             let mut v = ProjView::default();
+            let mut shape = dup(&all);
+            if *section {
+                let bb = opencascade::bounding_box::aabb(&all);
+                let c = (bb.min() + bb.max()) / 2.0;
+                let size = (bb.max() - bb.min()).length() * 2.0 + 10.0;
+                // remove the half towards the viewer
+                if let Ok(h) = half_space(c, d, size) {
+                    if let Ok(cut) = occ::cut(&all, &h) {
+                        shape = cut;
+                    }
+                }
+                // hatch the faces lying on the cutting plane
+                let vx = u.cross(d).normalize();
+                let vy = d.cross(vx);
+                let to2 = |p: DVec3| glam::DVec2::new(p.dot(vx), p.dot(vy));
+                for f in unique_faces(&shape) {
+                    let g = face_geom(&f);
+                    if !(g.planar && g.normal.dot(d) > 0.999 && (g.center - c).dot(d).abs() < 1e-4 * size.max(1.0)) {
+                        continue;
+                    }
+                    let tris: Vec<[glam::DVec2; 3]> = face_tris(&f).iter().map(|t| t.map(to2)).collect();
+                    v.hatch.extend(hatch_triangles(&tris, 2.0));
+                }
+            }
             for kind in [0, 1, 2] {
-                if let Ok(s) = occ::hlr(&all, d, u, kind) {
+                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
                     v.visible.extend(polylines_2d(&s));
                 }
             }
             for kind in [3, 4] {
-                if let Ok(s) = occ::hlr(&all, d, u, kind) {
+                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
                     v.hidden.extend(polylines_2d(&s));
                 }
             }
@@ -1770,15 +1859,39 @@ pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3])]) -> Vec<ProjView> 
         .collect()
 }
 
+/// 45° hatch segments (spacing in mm) covering a set of triangles.
+fn hatch_triangles(tris: &[[glam::DVec2; 3]], spacing: f64) -> Vec<[[f64; 2]; 2]> {
+    let mut out = vec![];
+    // lines x - y = k
+    for t in tris {
+        let ks: Vec<f64> = t.iter().map(|p| p.x - p.y).collect();
+        let (k0, k1) = (ks.iter().cloned().fold(f64::INFINITY, f64::min), ks.iter().cloned().fold(f64::NEG_INFINITY, f64::max));
+        let mut k = (k0 / spacing).ceil() * spacing;
+        while k <= k1 {
+            let mut pts = vec![];
+            for i in 0..3 {
+                let (a, b) = (t[i], t[(i + 1) % 3]);
+                let (fa, fb) = (a.x - a.y - k, b.x - b.y - k);
+                if (fa <= 0.0) != (fb <= 0.0) {
+                    let s = fa / (fa - fb);
+                    pts.push(a.lerp(b, s));
+                }
+            }
+            if pts.len() == 2 {
+                out.push([[pts[0].x, pts[0].y], [pts[1].x, pts[1].y]]);
+            }
+            k += spacing;
+        }
+    }
+    out
+}
+
 #[cfg(test)]
 mod projection_tests {
     use super::*;
 
     #[test]
     fn front_view_of_a_box() {
-        let mut doc = Document::default();
-        doc.insert("I".into(), Op::Import { name: "box".into(), step: String::new() });
-        // build a box through a sketch + extrude instead of STEP
         let mut doc = Document::default();
         let mut s = crate::sketch::Sketch::default();
         let p: Vec<_> = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
@@ -1792,7 +1905,9 @@ mod projection_tests {
             *depth = "10".into();
         }
         doc.insert("E".into(), e);
-        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0])]);
+        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false)]);
+        let sec = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], true)]);
+        assert!(!sec[0].hatch.is_empty());
         let b = v[0].bbox;
         assert!((b[1][0] - b[0][0] - 40.0).abs() < 1e-6, "{b:?}");
         assert!((b[1][1] - b[0][1] - 10.0).abs() < 1e-6, "{b:?}");
@@ -2053,5 +2168,59 @@ mod sheet_metal_tests {
         let want = flat.size[0] * 2.0 * 50.0;
         assert!((r.bodies[0].volume - want).abs() / want < 0.01, "{} vs {want}", r.bodies[0].volume);
         assert_eq!(flat.bends.len(), 2);
+    }
+}
+
+#[cfg(test)]
+mod face_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    #[test]
+    fn move_face_and_rib() {
+        let mut doc = Document::default();
+        let mut s = Sketch::default();
+        // L section in the Front plane, extruded 10 along -Y... the front plane normal is -Y
+        let pts = [(0.0, 0.0), (40.0, 0.0), (40.0, 5.0), (5.0, 5.0), (5.0, 40.0), (0.0, 40.0)];
+        let p: Vec<_> = pts.iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..6 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 6] }, false);
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Front }, sketch: s, frame: Frame::FRONT });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [2.0, 2.0] });
+            *depth = "20".into();
+        }
+        doc.insert("E".into(), e);
+        let base = 20.0 * (40.0 * 5.0 + 35.0 * 5.0);
+        // push the top of the vertical leg up by 5
+        let mut mf = Op::new_default("moveFace").unwrap();
+        if let Op::MoveFace { faces, distance } = &mut mf {
+            faces.push(Ref::Face { point: [2.5, -10.0, 40.0], normal: [0.0, 0.0, 1.0] });
+            *distance = "5".into();
+        }
+        doc.insert("MF".into(), mf);
+        // rib across the inside corner, in a mid plane 10 mm behind the front
+        let mut rs = Sketch::default();
+        let a = rs.add_point(DVec2::new(25.0, 5.0));
+        let b = rs.add_point(DVec2::new(5.0, 25.0));
+        let l = rs.add_curve(Geom::Line { a, b }, false);
+        // on the Front plane, i.e. the part's front face: half the rib thickness lands in the part's extent
+        let rsk = doc.insert("RS".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Front }, sketch: rs, frame: Frame::FRONT });
+        let mut rib = Op::new_default("rib").unwrap();
+        if let Op::Rib { profile, thickness, flip } = &mut rib {
+            profile.push(Ref::SketchCurve { sketch: rsk, curve: l });
+            *thickness = "2".into();
+            *flip = false;
+        }
+        doc.insert("Rib".into(), rib);
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        let moved = base + 5.0 * 5.0 * 20.0;
+        let rib_vol = 0.5 * 20.0 * 20.0 * 1.0;
+        assert!((r.bodies[0].volume - (moved + rib_vol)).abs() < 1.0, "{} vs {}", r.bodies[0].volume, moved + rib_vol);
     }
 }
