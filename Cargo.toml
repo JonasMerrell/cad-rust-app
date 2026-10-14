@@ -1,0 +1,9 @@
+[package]
+name = "cad-rust-app"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+eframe = { version = "0.36.2", default-features = false, features = ["wgpu", "default_fonts", "x11", "wayland"] }
+egui = "0.36.2"
+glam = "0.34.1"
