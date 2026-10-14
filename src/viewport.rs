@@ -483,7 +483,7 @@ fn build_scene(app: &App) -> SceneData {
             } else if hov_f == Some(fi) {
                 vp::HOVER
             } else {
-                vp::BODY
+                app.part_color(b.id)
             };
             let list = if transparent { &mut s.transparent } else { &mut s.opaque };
             for &i in tri {

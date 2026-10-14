@@ -426,6 +426,38 @@ pub struct Feature {
     pub op: Op,
 }
 
+/// Per-part settings, keyed by body id ("feature:index").
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct PartProps {
+    #[serde(default)]
+    pub name: Option<String>,
+    #[serde(default)]
+    pub color: Option<[u8; 3]>,
+    /// Material name from `MATERIALS`.
+    #[serde(default)]
+    pub material: Option<String>,
+}
+
+/// (name, density g/cm³)
+pub const MATERIALS: &[(&str, f64)] = &[
+    ("PLA", 1.24),
+    ("ABS", 1.04),
+    ("PETG", 1.27),
+    ("Nylon", 1.14),
+    ("Aluminium 6061", 2.70),
+    ("Steel", 7.85),
+    ("Stainless steel", 8.00),
+    ("Brass", 8.50),
+    ("Copper", 8.96),
+    ("Titanium", 4.43),
+    ("Oak", 0.75),
+    ("Pine", 0.50),
+];
+
+pub fn body_key(id: BodyId) -> String {
+    format!("{}:{}", id.0, id.1)
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Variable {
     pub name: String,
@@ -441,11 +473,13 @@ pub struct Document {
     /// Number of features that are active; later ones are rolled back.
     pub rollback: Option<usize>,
     pub next_id: FeatId,
+    #[serde(default)]
+    pub parts: std::collections::BTreeMap<String, PartProps>,
 }
 
 impl Default for Document {
     fn default() -> Self {
-        Document { format: "cad-rust-app/1".into(), units: Units::Mm, variables: vec![], features: vec![], rollback: None, next_id: 0 }
+        Document { format: "cad-rust-app/1".into(), units: Units::Mm, variables: vec![], features: vec![], rollback: None, next_id: 0, parts: Default::default() }
     }
 }
 

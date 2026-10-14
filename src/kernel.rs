@@ -49,6 +49,8 @@ pub struct BodyMesh {
     pub volume: f64,
     pub area: f64,
     pub bbox: [[f64; 3]; 2],
+    #[serde(default)]
+    pub centroid: [f64; 3],
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1297,6 +1299,7 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
         bbox: [bb.min().into(), bb.max().into()],
         volume: volume(shape),
         area: surface_area(shape),
+        centroid: centroid(shape).into(),
         ..Default::default()
     };
     for (fi, face) in unique_faces(shape).into_iter().enumerate() {

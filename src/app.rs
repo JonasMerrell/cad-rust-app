@@ -103,6 +103,7 @@ pub struct App {
     pub var_name: String,
     pub var_value: String,
     pub renaming: Option<(FeatId, String)>,
+    pub renaming_part: Option<(String, String)>,
     pub editing_var: Option<(usize, String)>,
     pub path: Option<std::path::PathBuf>,
     pub viewport_rect: egui::Rect,
@@ -145,6 +146,7 @@ impl App {
             var_name: String::new(),
             var_value: String::new(),
             renaming: None,
+            renaming_part: None,
             editing_var: None,
             path: None,
             viewport_rect: egui::Rect::NOTHING,
@@ -616,6 +618,9 @@ impl App {
             });
             // right-aligned part
             let mode = if self.phone { ("desktop", "Desktop", "Switch to desktop mode") } else { ("phone", "Phone", "Switch to phone mode") };
+            if ui.available_width() < 100.0 {
+                ui.end_row();
+            }
             if self.tool_button(ui, mode.0, mode.1, mode.2, true, false, true).clicked() {
                 self.phone = !self.phone;
                 self.sidebar_open = !self.phone;
@@ -632,6 +637,9 @@ impl App {
                     }
                 });
             } else {
+                if ui.available_width() < 270.0 {
+                    ui.end_row();
+                }
                 Self::group(ui, |ui| {
                     self.view_menu(ui);
                     self.file_menu(ui);
@@ -770,6 +778,10 @@ impl App {
     fn sidebar(&mut self, ui: &mut Ui) {
         egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
             section(ui, "Features", |ui| self.feature_tree(ui));
+            section(ui, "Parts", |ui| self.parts_list(ui));
+            if self.picks.iter().any(|r| matches!(r, Ref::Body { .. })) {
+                section(ui, "Mass properties", |ui| self.properties(ui));
+            }
             section(ui, "Variables", |ui| self.variables(ui));
         });
     }
@@ -914,25 +926,136 @@ impl App {
             }
         }
 
-        if !self.result.bodies.is_empty() {
-            ui.add_space(6.0);
-            let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 5.0), Sense::hover());
-            dashed_hline(ui, rect.top(), rect.x_range());
-            let units = self.doc.units;
-            let bodies: Vec<(doc::BodyId, String, f64, f64)> = self.result.bodies.iter().map(|b| (b.id, b.name.clone(), b.volume, b.area)).collect();
-            for (id, name, vol, area) in bodies {
-                let r = Ref::Body { body: id };
-                let picked = self.picks.contains(&r);
-                let resp = tree_row(ui, "extrude", &name, picked, false, false, false, None).on_hover_text(format!(
-                    "Volume {} · area {}",
-                    fmt_volume(vol, units),
-                    fmt_area(area, units)
-                ));
-                if resp.clicked() {
-                    self.pick_from_tree(r, ui.input(|i| i.modifiers.shift || i.modifiers.command));
+    }
+
+    pub fn part_props(&self, id: doc::BodyId) -> doc::PartProps {
+        self.doc.parts.get(&doc::body_key(id)).cloned().unwrap_or_default()
+    }
+
+    pub fn part_name(&self, id: doc::BodyId) -> String {
+        let p = self.part_props(id);
+        p.name.unwrap_or_else(|| self.result.bodies.iter().find(|b| b.id == id).map(|b| b.name.clone()).unwrap_or_default())
+    }
+
+    pub fn part_color(&self, id: doc::BodyId) -> Color32 {
+        self.part_props(id).color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(theme::vp::BODY)
+    }
+
+    fn set_part(&mut self, id: doc::BodyId, f: impl FnOnce(&mut doc::PartProps)) {
+        self.checkpoint();
+        let key = doc::body_key(id);
+        let mut p = self.doc.parts.get(&key).cloned().unwrap_or_default();
+        f(&mut p);
+        if p == doc::PartProps::default() {
+            self.doc.parts.remove(&key);
+        } else {
+            self.doc.parts.insert(key, p);
+        }
+        self.scene_dirty = true;
+    }
+
+    fn parts_list(&mut self, ui: &mut Ui) {
+        if self.result.bodies.is_empty() {
+            ui.label(RichText::new("No parts yet").color(MUTED).size(12.0));
+            return;
+        }
+        ui.spacing_mut().item_spacing.y = 1.0;
+        let ids: Vec<doc::BodyId> = self.result.bodies.iter().map(|b| b.id).collect();
+        for id in ids {
+            let r = Ref::Body { body: id };
+            let picked = self.picks.contains(&r);
+            let name = self.part_name(id);
+            if let Some((key, text)) = &mut self.renaming_part {
+                if *key == doc::body_key(id) {
+                    let resp = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width()));
+                    resp.request_focus();
+                    if resp.lost_focus() {
+                        let t = text.trim().to_string();
+                        self.renaming_part = None;
+                        self.set_part(id, |p| p.name = (!t.is_empty()).then_some(t));
+                    }
+                    continue;
                 }
             }
+            let resp = tree_row(ui, "extrude", &name, picked, false, false, false, None);
+            // colour swatch
+            let sw = egui::Rect::from_center_size(egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y), egui::vec2(10.0, 10.0));
+            ui.painter().rect_filled(sw, 2.0, self.part_color(id));
+            if resp.clicked() {
+                self.pick_from_tree(r, ui.input(|i| i.modifiers.shift || i.modifiers.command));
+            }
+            if resp.double_clicked() {
+                self.renaming_part = Some((doc::body_key(id), name.clone()));
+            }
+            resp.context_menu(|ui| {
+                ui.set_min_width(200.0);
+                if ui.button("Rename").clicked() {
+                    self.renaming_part = Some((doc::body_key(id), name.clone()));
+                    ui.close();
+                }
+                ui.menu_button("Appearance", |ui| {
+                    let mut c = self.part_color(id);
+                    if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
+                        self.set_part(id, |p| p.color = Some([c.r(), c.g(), c.b()]));
+                    }
+                    if ui.button("Default").clicked() {
+                        self.set_part(id, |p| p.color = None);
+                    }
+                });
+                ui.menu_button("Material", |ui| {
+                    let cur = self.part_props(id).material;
+                    if ui.selectable_label(cur.is_none(), "None").clicked() {
+                        self.set_part(id, |p| p.material = None);
+                    }
+                    for (m, _) in doc::MATERIALS {
+                        if ui.selectable_label(cur.as_deref() == Some(m), *m).clicked() {
+                            self.set_part(id, |p| p.material = Some(m.to_string()));
+                        }
+                    }
+                });
+            });
         }
+    }
+
+    fn properties(&mut self, ui: &mut Ui) {
+        let units = self.doc.units;
+        let ids: Vec<doc::BodyId> = self.picks.iter().filter_map(|r| if let Ref::Body { body } = r { Some(*body) } else { None }).collect();
+        let bodies: Vec<&crate::kernel::BodyMesh> = self.result.bodies.iter().filter(|b| ids.contains(&b.id)).collect();
+        if bodies.is_empty() {
+            return;
+        }
+        let vol: f64 = bodies.iter().map(|b| b.volume).sum();
+        let area: f64 = bodies.iter().map(|b| b.area).sum();
+        let mut mass = 0.0;
+        let mut all_mass = true;
+        let mut c = glam::DVec3::ZERO;
+        for b in &bodies {
+            c += glam::DVec3::from(b.centroid) * b.volume;
+            match self.part_props(b.id).material.and_then(|m| doc::MATERIALS.iter().find(|x| x.0 == m).map(|x| x.1)) {
+                Some(d) => mass += b.volume / 1000.0 * d,
+                None => all_mass = false,
+            }
+        }
+        let c = if vol > 0.0 { c / vol } else { c };
+        let mut lo = glam::DVec3::splat(f64::INFINITY);
+        let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+        for b in &bodies {
+            lo = lo.min(b.bbox[0].into());
+            hi = hi.max(b.bbox[1].into());
+        }
+        let size = hi - lo;
+        let row = |ui: &mut Ui, k: &str, v: String| {
+            ui.label(RichText::new(k).color(MUTED).size(12.0));
+            ui.label(RichText::new(v).size(12.0));
+            ui.end_row();
+        };
+        egui::Grid::new("props").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
+            row(ui, "Volume", fmt_volume(vol, units));
+            row(ui, "Surface area", fmt_area(area, units));
+            row(ui, "Mass", if all_mass { format!("{} g", crate::expr::trim(mass, 2)) } else { "set a material".into() });
+            row(ui, "Centre of mass", format!("{}, {}, {}", units.fmt(c.x), units.fmt(c.y), units.fmt(c.z)));
+            row(ui, "Size", format!("{} × {} × {} {}", units.fmt(size.x), units.fmt(size.y), units.fmt(size.z), units.label()));
+        });
     }
 
     pub fn pick_from_tree(&mut self, r: Ref, add: bool) {
