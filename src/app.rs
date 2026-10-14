@@ -23,6 +23,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["extrude", "revolve", "sweep", "loft"],
     &["fillet", "chamfer", "shell", "hole", "draft"],
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
+    &["thicken", "helix", "transform", "deleteFace"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
 pub const PRIMARY: &[&str] = &["sketch", "extrude", "revolve", "fillet", "hole"];
@@ -835,7 +836,11 @@ impl App {
             if resp.double_clicked() {
                 action = Some(("edit", id));
             } else if resp.clicked() {
-                if matches!(f.op, Op::Sketch { .. } | Op::Plane { .. }) {
+                if self.dialog.is_some() {
+                    if self.dialog.as_ref().map(|d| d.feature != id).unwrap_or(false) {
+                        crate::dialog::add_pick(self, Ref::Feature { feature: id });
+                    }
+                } else if matches!(f.op, Op::Sketch { .. } | Op::Plane { .. }) {
                     self.pick_from_tree(Ref::FeaturePlane { feature: id }, ui.input(|i| i.modifiers.shift || i.modifiers.command));
                 }
             }

@@ -5,6 +5,7 @@ const OCCT_VERSION: (u8, u8) = (7, 8);
 
 /// The list of used OpenCASCADE libraries which needs to be linked with.
 const OCCT_LIBS: &[&str] = &[
+    "TKHLR",
     "TKMath",
     "TKernel",
     "TKDE",
@@ -92,6 +93,7 @@ fn main() {
         "src/top_loc.rs",
         "src/top_tools.rs",
         "src/topo_ds.rs",
+        "src/extra.rs",
     ];
 
     let mut build = cxx_build::bridges(rust_bridges);
@@ -117,6 +119,9 @@ fn main() {
 
     for bridge in rust_bridges {
         println!("cargo:rerun-if-changed={bridge}");
+    }
+    for header in ["include/extra.hxx"] {
+        println!("cargo:rerun-if-changed={header}");
     }
 }
 

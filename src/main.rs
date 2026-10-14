@@ -6,6 +6,7 @@ mod expr;
 mod icon_paths;
 mod icons;
 mod kernel;
+mod occ;
 mod regions;
 mod render;
 mod sketch;

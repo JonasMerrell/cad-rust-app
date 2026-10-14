@@ -15,6 +15,8 @@ pub enum Seg {
     Line { a: DVec2, b: DVec2 },
     /// From angle `t0` to `t1` (t1 < t0 means clockwise).
     Arc { c: DVec2, r: f64, t0: f64, t1: f64 },
+    /// A free-form piece (spline, ellipse) through these points.
+    Poly { pts: Vec<DVec2>, closed: bool },
 }
 
 impl Seg {
@@ -22,12 +24,14 @@ impl Seg {
         match *self {
             Seg::Line { a, .. } => a,
             Seg::Arc { c, r, t0, .. } => c + DVec2::from_angle(t0) * r,
+            Seg::Poly { ref pts, .. } => pts[0],
         }
     }
     pub fn end(&self) -> DVec2 {
         match *self {
             Seg::Line { b, .. } => b,
             Seg::Arc { c, r, t1, .. } => c + DVec2::from_angle(t1) * r,
+            Seg::Poly { ref pts, closed } => if closed { pts[0] } else { pts[pts.len() - 1] },
         }
     }
     pub fn mid(&self) -> DVec2 {
@@ -37,16 +41,37 @@ impl Seg {
         match *self {
             Seg::Line { a, b } => a.lerp(b, u),
             Seg::Arc { c, r, t0, t1 } => c + DVec2::from_angle(t0 + (t1 - t0) * u) * r,
+            Seg::Poly { ref pts, closed } => {
+                let mut p = pts.clone();
+                if closed {
+                    p.push(pts[0]);
+                }
+                let f = u.clamp(0.0, 1.0) * (p.len() - 1) as f64;
+                let i = (f.floor() as usize).min(p.len() - 2);
+                p[i].lerp(p[i + 1], f - i as f64)
+            }
         }
     }
     pub fn reversed(&self) -> Seg {
         match *self {
             Seg::Line { a, b } => Seg::Line { a: b, b: a },
             Seg::Arc { c, r, t0, t1 } => Seg::Arc { c, r, t0: t1, t1: t0 },
+            Seg::Poly { ref pts, closed } => {
+                let mut p = pts.clone();
+                p.reverse();
+                if closed {
+                    p.rotate_right(1);
+                }
+                Seg::Poly { pts: p, closed }
+            }
         }
     }
     pub fn polyline(&self, out: &mut Vec<DVec2>) {
         match *self {
+            Seg::Poly { ref pts, closed } => {
+                let n = if closed { pts.len() } else { pts.len() - 1 };
+                out.extend_from_slice(&pts[..n]);
+            }
             Seg::Line { a, .. } => out.push(a),
             Seg::Arc { r, t0, t1, .. } => {
                 let n = (((t1 - t0).abs() * r.max(1.0)).sqrt() * 3.0).ceil().clamp(4.0, 128.0) as usize;

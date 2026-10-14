@@ -51,6 +51,10 @@ pub enum Ref {
     SketchPoint { sketch: FeatId, point: SkId },
     Body { body: BodyId },
     Axis { axis: u8 },
+    /// A whole feature (picked in the feature list), e.g. for feature patterns.
+    Feature { feature: FeatId },
+    /// A curve produced by a feature (e.g. a helix).
+    Curve { feature: FeatId },
 }
 
 impl Ref {
@@ -66,6 +70,8 @@ impl Ref {
             Ref::SketchPoint { .. } => "Sketch point".into(),
             Ref::Body { body } => format!("Body {}", body.1 + 1),
             Ref::Axis { axis } => ["X axis", "Y axis", "Z axis"][*axis as usize % 3].into(),
+            Ref::Feature { .. } => "Feature".into(),
+            Ref::Curve { .. } => "Curve".into(),
         }
     }
     pub fn is_planar(&self) -> bool {
@@ -150,6 +156,15 @@ pub enum Op {
     Plane {
         base: Option<Ref>,
         offset: String,
+        /// "offset", "angle" (about a line), "threePoint", "normalToCurve", "midPlane"
+        #[serde(default = "plane_mode")]
+        mode: String,
+        #[serde(default)]
+        refs: Vec<Ref>,
+        #[serde(default = "zero")]
+        angle: String,
+        #[serde(default)]
+        flip: bool,
     },
     Extrude {
         profiles: Vec<Ref>,
@@ -212,6 +227,9 @@ pub enum Op {
         angle: String,
     },
     LinearPattern {
+        /// "part" or "feature"
+        #[serde(default = "part")]
+        kind: String,
         bodies: Vec<Ref>,
         direction: Option<Ref>,
         spacing: String,
@@ -221,12 +239,16 @@ pub enum Op {
         count2: String,
     },
     CircularPattern {
+        #[serde(default = "part")]
+        kind: String,
         bodies: Vec<Ref>,
         axis: Option<Ref>,
         count: String,
         angle: String,
     },
     Mirror {
+        #[serde(default = "part")]
+        kind: String,
         bodies: Vec<Ref>,
         plane: Option<Ref>,
     },
@@ -242,6 +264,34 @@ pub enum Op {
     },
     DeleteBody {
         bodies: Vec<Ref>,
+    },
+    Thicken {
+        faces: Vec<Ref>,
+        thickness: String,
+        #[serde(default)]
+        opposite: bool,
+        op: BoolOp,
+    },
+    Helix {
+        axis: Option<Ref>,
+        radius: String,
+        pitch: String,
+        turns: String,
+        #[serde(default)]
+        left: bool,
+    },
+    Transform {
+        bodies: Vec<Ref>,
+        /// "translate" or "rotate"
+        mode: String,
+        direction: Option<Ref>,
+        distance: String,
+        axis: Option<Ref>,
+        angle: String,
+        copy: bool,
+    },
+    DeleteFace {
+        faces: Vec<Ref>,
     },
     Import {
         name: String,
@@ -271,6 +321,10 @@ impl Op {
             Op::Split { .. } => "split",
             Op::DeleteBody { .. } => "deleteBody",
             Op::Import { .. } => "import",
+            Op::Thicken { .. } => "thicken",
+            Op::Helix { .. } => "helix",
+            Op::Transform { .. } => "transform",
+            Op::DeleteFace { .. } => "deleteFace",
         }
     }
 
@@ -278,7 +332,11 @@ impl Op {
     pub fn new_default(kind: &str) -> Option<Op> {
         let s = |v: &str| v.to_string();
         Some(match kind {
-            "plane" => Op::Plane { base: None, offset: s("10") },
+            "plane" => Op::Plane { base: None, offset: s("10"), mode: s("offset"), refs: vec![], angle: s("45"), flip: false },
+            "thicken" => Op::Thicken { faces: vec![], thickness: s("2"), opposite: false, op: BoolOp::New },
+            "helix" => Op::Helix { axis: None, radius: s("10"), pitch: s("5"), turns: s("4"), left: false },
+            "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
+            "deleteFace" => Op::DeleteFace { faces: vec![] },
             "extrude" => Op::Extrude {
                 profiles: vec![],
                 end: EndType::Blind,
@@ -310,6 +368,7 @@ impl Op {
             },
             "draft" => Op::Draft { faces: vec![], neutral: None, angle: s("3") },
             "linearPattern" => Op::LinearPattern {
+                kind: s("part"),
                 bodies: vec![],
                 direction: None,
                 spacing: s("20"),
@@ -318,8 +377,8 @@ impl Op {
                 spacing2: s("20"),
                 count2: s("1"),
             },
-            "circularPattern" => Op::CircularPattern { bodies: vec![], axis: None, count: s("4"), angle: s("360") },
-            "mirror" => Op::Mirror { bodies: vec![], plane: None },
+            "circularPattern" => Op::CircularPattern { kind: s("part"), bodies: vec![], axis: None, count: s("4"), angle: s("360") },
+            "mirror" => Op::Mirror { kind: s("part"), bodies: vec![], plane: None },
             "boolean" => Op::Boolean { kind: BooleanKind::Union, target: None, tools: vec![], keep_tools: false },
             "split" => Op::Split { target: None, plane: None },
             "deleteBody" => Op::DeleteBody { bodies: vec![] },
@@ -348,6 +407,10 @@ pub fn kind_label(kind: &str) -> &'static str {
         "plane" => "Plane",
         "deleteBody" => "Delete body",
         "import" => "Import",
+        "thicken" => "Thicken",
+        "helix" => "Helix",
+        "transform" => "Transform",
+        "deleteFace" => "Delete face",
         _ => "Feature",
     }
 }
@@ -438,6 +501,16 @@ impl Document {
     pub fn from_json(s: &str) -> Result<Document, String> {
         serde_json::from_str(s).map_err(|e| e.to_string())
     }
+}
+
+fn plane_mode() -> String {
+    "offset".into()
+}
+fn zero() -> String {
+    "0".into()
+}
+fn part() -> String {
+    "part".into()
 }
 
 /// Evaluate a feature parameter.

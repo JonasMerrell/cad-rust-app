@@ -190,6 +190,20 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     if let Some((_, r)) = best {
         return Some(r);
     }
+    // curve features
+    let mut best: Option<(f32, Ref)> = None;
+    for c in &app.result.curves {
+        let pts: Vec<Vec2> = c.pts.iter().map(|p| cam.project(Vec3::from(*p))).collect();
+        for w in pts.windows(2) {
+            let d = seg_px(w[0], w[1]);
+            if d < px * 0.85 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, Ref::Curve { feature: c.feature }));
+            }
+        }
+    }
+    if let Some((_, r)) = best {
+        return Some(r);
+    }
     // sketch curves
     let mut best: Option<(f32, Ref)> = None;
     for f in &app.doc.features {
@@ -548,6 +562,14 @@ fn build_scene(app: &App) -> SceneData {
                 }
             }
         }
+    }
+
+    // curve features (helices)
+    for c in &app.result.curves {
+        let r = Ref::Curve { feature: c.feature };
+        let col = if is_picked(app, &r) { vp::PICKED } else if app.hover.as_ref() == Some(&r) { vp::HOVER } else { vp::SKETCH };
+        let pts: Vec<Vec3> = c.pts.iter().map(|p| Vec3::from(*p)).collect();
+        s.polyline(&pts, 2.0, rgba(col, 1.0), false);
     }
 
     // sketch curves picked as references

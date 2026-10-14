@@ -20,6 +20,8 @@ enum Accept {
     Points,
     Bodies,
     Path,
+    Features,
+    Curve,
 }
 
 impl Accept {
@@ -27,12 +29,14 @@ impl Accept {
         match self {
             Accept::Profiles => matches!(r, Ref::Region { .. } | Ref::Face { .. }),
             Accept::Planar => r.is_planar(),
-            Accept::Axis => matches!(r, Ref::Axis { .. } | Ref::SketchCurve { .. } | Ref::Edge { .. }),
+            Accept::Axis => matches!(r, Ref::Axis { .. } | Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::OriginPlane { .. } | Ref::FeaturePlane { .. } | Ref::Face { .. }),
             Accept::Edges => matches!(r, Ref::Edge { .. }),
             Accept::Faces | Accept::Face => matches!(r, Ref::Face { .. }),
-            Accept::Points => matches!(r, Ref::SketchPoint { .. }),
+            Accept::Points => matches!(r, Ref::SketchPoint { .. } | Ref::Vertex { .. }),
             Accept::Bodies => matches!(r, Ref::Body { .. } | Ref::Face { .. } | Ref::Edge { .. }),
-            Accept::Path => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. }),
+            Accept::Path => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
+            Accept::Features => matches!(r, Ref::Feature { .. }),
+            Accept::Curve => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
         }
     }
     fn hint(self) -> &'static str {
@@ -44,7 +48,9 @@ impl Accept {
             Accept::Faces | Accept::Face => "faces",
             Accept::Points => "sketch points",
             Accept::Bodies => "bodies (or a face of each)",
-            Accept::Path => "sketch curves or edges",
+            Accept::Path => "sketch curves, edges or a helix",
+            Accept::Features => "features in the feature list",
+            Accept::Curve => "a curve or edge",
         }
     }
 }
@@ -58,7 +64,13 @@ enum Slot<'a> {
 fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
     use Accept::*;
     match op {
-        Op::Plane { base, .. } => vec![("Base plane", Planar, Slot::One(base))],
+        Op::Plane { base, mode, refs, .. } => match mode.as_str() {
+            "angle" => vec![("Base plane", Planar, Slot::One(base)), ("Hinge line", Axis, Slot::Many(refs))],
+            "threePoint" => vec![("Points", Points, Slot::Many(refs))],
+            "normalToCurve" => vec![("Curve", Curve, Slot::Many(refs))],
+            "midPlane" => vec![("First plane", Planar, Slot::One(base)), ("Second plane", Planar, Slot::Many(refs))],
+            _ => vec![("Base plane", Planar, Slot::One(base))],
+        },
         Op::Extrude { profiles, up_to, end, .. } => {
             let mut v = vec![("Profiles", Profiles, Slot::Many(profiles))];
             if *end == EndType::UpToFace {
@@ -73,13 +85,29 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         Op::Shell { faces, .. } => vec![("Faces to remove", Faces, Slot::Many(faces))],
         Op::Hole { points, .. } => vec![("Hole points", Points, Slot::Many(points))],
         Op::Draft { faces, neutral, .. } => vec![("Faces", Faces, Slot::Many(faces)), ("Neutral plane", Planar, Slot::One(neutral))],
-        Op::LinearPattern { bodies, direction, second, .. } => vec![
-            ("Bodies", Bodies, Slot::Many(bodies)),
+        Op::LinearPattern { kind, bodies, direction, second, .. } => vec![
+            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
             ("Direction", Axis, Slot::One(direction)),
             ("Second direction", Axis, Slot::One(second)),
         ],
-        Op::CircularPattern { bodies, axis, .. } => vec![("Bodies", Bodies, Slot::Many(bodies)), ("Axis", Axis, Slot::One(axis))],
-        Op::Mirror { bodies, plane } => vec![("Bodies", Bodies, Slot::Many(bodies)), ("Mirror plane", Planar, Slot::One(plane))],
+        Op::CircularPattern { kind, bodies, axis, .. } => vec![
+            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
+            ("Axis", Axis, Slot::One(axis)),
+        ],
+        Op::Mirror { kind, bodies, plane } => vec![
+            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
+            ("Mirror plane", Planar, Slot::One(plane)),
+        ],
+        Op::Thicken { faces, .. } => vec![("Faces", Profiles, Slot::Many(faces))],
+        Op::Helix { axis, .. } => vec![("Axis", Axis, Slot::One(axis))],
+        Op::Transform { bodies, mode, direction, axis, .. } => {
+            if mode == "rotate" {
+                vec![("Bodies", Bodies, Slot::Many(bodies)), ("Axis", Axis, Slot::One(axis))]
+            } else {
+                vec![("Bodies", Bodies, Slot::Many(bodies)), ("Direction", Axis, Slot::One(direction))]
+            }
+        }
+        Op::DeleteFace { faces } => vec![("Faces", Faces, Slot::Many(faces))],
         Op::Boolean { target, tools, .. } => vec![("Target body", Bodies, Slot::One(target)), ("Tool bodies", Bodies, Slot::Many(tools))],
         Op::Split { target, plane } => vec![("Target body", Bodies, Slot::One(target)), ("Split plane", Planar, Slot::One(plane))],
         Op::DeleteBody { bodies } => vec![("Bodies", Bodies, Slot::Many(bodies))],
@@ -284,14 +312,19 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         *changed = true;
                     }
                 };
-                fn combo<T: PartialEq + Copy>(ui: &mut Ui, label: &str, v: &mut T, opts: &[(T, &str)], changed: &mut bool) {
+                fn pattern_kind(ui: &mut Ui, kind: &mut String, changed: &mut bool) {
+                    let mut k = kind.clone();
+                    combo(ui, "Pattern type", &mut k, &[("part".to_string(), "Part"), ("feature".to_string(), "Feature")], changed);
+                    *kind = k;
+                }
+                fn combo<T: PartialEq + Clone>(ui: &mut Ui, label: &str, v: &mut T, opts: &[(T, &str)], changed: &mut bool) {
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
                         let cur = opts.iter().find(|o| o.0 == *v).map(|o| o.1).unwrap_or("");
                         egui::ComboBox::from_id_salt(label).selected_text(cur).width(ui.available_width()).show_ui(ui, |ui| {
                             for (o, l) in opts {
                                 if ui.selectable_label(*v == *o, *l).clicked() {
-                                    *v = *o;
+                                    *v = o.clone();
                                     *changed = true;
                                 }
                             }
@@ -300,7 +333,23 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
                 let bool_ops: Vec<(BoolOp, &str)> = BoolOp::ALL.iter().map(|b| (*b, b.label())).collect();
                 match &mut op {
-                    Op::Plane { offset, .. } => val(ui, "Distance", offset, Kind::Length, &mut changed),
+                    Op::Plane { offset, mode, angle, flip, .. } => {
+                        let mut m = mode.clone();
+                        combo(ui, "Type", &mut m, &[
+                            ("offset".to_string(), "Offset"),
+                            ("angle".to_string(), "Angle"),
+                            ("threePoint".to_string(), "Three points"),
+                            ("normalToCurve".to_string(), "Normal to curve"),
+                            ("midPlane".to_string(), "Mid plane"),
+                        ], &mut changed);
+                        *mode = m;
+                        match mode.as_str() {
+                            "offset" => val(ui, "Distance", offset, Kind::Length, &mut changed),
+                            "angle" => val(ui, "Angle (°)", angle, Kind::Angle, &mut changed),
+                            _ => {}
+                        }
+                        check(ui, "Flip normal", flip, &mut changed);
+                    }
                     Op::Extrude { end, depth, opposite, second, depth2, op: bop, draft, .. } => {
                         combo(ui, "Operation", bop, &bool_ops, &mut changed);
                         let ends: Vec<(EndType, &str)> = EndType::ALL.iter().map(|e| (*e, e.label())).collect();
@@ -367,7 +416,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         }
                     }
                     Op::Draft { angle, .. } => val(ui, "Angle (°)", angle, Kind::Angle, &mut changed),
-                    Op::LinearPattern { spacing, count, second, spacing2, count2, .. } => {
+                    Op::LinearPattern { kind, spacing, count, second, spacing2, count2, .. } => {
+                        pattern_kind(ui, kind, &mut changed);
                         val(ui, "Spacing", spacing, Kind::Length, &mut changed);
                         val(ui, "Instances", count, Kind::Count, &mut changed);
                         if second.is_some() {
@@ -375,9 +425,33 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                             val(ui, "Instances (2nd)", count2, Kind::Count, &mut changed);
                         }
                     }
-                    Op::CircularPattern { count, angle, .. } => {
+                    Op::CircularPattern { kind, count, angle, .. } => {
+                        pattern_kind(ui, kind, &mut changed);
                         val(ui, "Instances", count, Kind::Count, &mut changed);
                         val(ui, "Total angle (°)", angle, Kind::Angle, &mut changed);
+                    }
+                    Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
+                    Op::Thicken { thickness, opposite, op: bop, .. } => {
+                        combo(ui, "Operation", bop, &bool_ops, &mut changed);
+                        val(ui, "Thickness", thickness, Kind::Length, &mut changed);
+                        check(ui, "Opposite direction", opposite, &mut changed);
+                    }
+                    Op::Helix { radius, pitch, turns, left, .. } => {
+                        val(ui, "Radius", radius, Kind::Length, &mut changed);
+                        val(ui, "Pitch", pitch, Kind::Length, &mut changed);
+                        val(ui, "Turns", turns, Kind::Count, &mut changed);
+                        check(ui, "Left-handed", left, &mut changed);
+                    }
+                    Op::Transform { mode, distance, angle, copy, .. } => {
+                        let mut m = mode.clone();
+                        combo(ui, "Type", &mut m, &[("translate".to_string(), "Translate"), ("rotate".to_string(), "Rotate")], &mut changed);
+                        *mode = m;
+                        if mode == "rotate" {
+                            val(ui, "Angle (°)", angle, Kind::Angle, &mut changed);
+                        } else {
+                            val(ui, "Distance", distance, Kind::Length, &mut changed);
+                        }
+                        check(ui, "Copy", copy, &mut changed);
                     }
                     Op::Boolean { kind, keep_tools, .. } => {
                         combo(ui, "Operation", kind, &[(BooleanKind::Union, "Union"), (BooleanKind::Subtract, "Subtract"), (BooleanKind::Intersect, "Intersect")], &mut changed);

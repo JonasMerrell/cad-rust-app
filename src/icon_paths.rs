@@ -77,4 +77,8 @@ pub const ICONS: &[(&str, &str)] = &[
     ("midpoint", "M3 12h18M12 8v8"),
     ("concentric", "M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0M12 12m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"),
     ("fix", "M12 3v10M8 13h8l-1 4H9zM12 17v4"),
+    ("thicken", "M4 8h16v4H4zM4 14h16v2H4zM12 3v3M12 18v3"),
+    ("helix", "M6 4c6 0 12 2 12 4s-12 2-12 4 12 2 12 4-12 2-12 4M12 2v20"),
+    ("transform", "M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"),
+    ("deleteFace", "M4 4h16v16H4zM8 8l8 8M16 8l-8 8"),
 ];
