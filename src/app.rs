@@ -118,6 +118,8 @@ pub struct App {
     pub asm: crate::asm_ui::AsmUi,
     pub dwg: crate::drawing_ui::DrawUi,
     pub renaming_tab: Option<(crate::workspace::Tab, String)>,
+    pub version_name: String,
+    pub restore_version: Option<usize>,
     pub screenshot_pending: Option<std::path::PathBuf>,
     pub context_menu: Option<(egui::Pos2, Option<Ref>)>,
 }
@@ -169,6 +171,8 @@ impl App {
             asm: Default::default(),
             dwg: Default::default(),
             renaming_tab: None,
+            version_name: String::new(),
+            restore_version: None,
             screenshot_pending: None,
             context_menu: None,
         };
@@ -905,6 +909,7 @@ impl App {
                 section(ui, "Mass properties", |ui| self.properties(ui));
             }
             section(ui, "Variables", |ui| self.variables(ui));
+            section(ui, "Configurations", |ui| self.configurations(ui));
         });
     }
 
@@ -1196,11 +1201,55 @@ impl App {
         self.scene_dirty = true;
     }
 
+    fn configurations(&mut self, ui: &mut Ui) {
+        let names: Vec<String> = self.doc.configs.iter().map(|c| c.name.clone()).collect();
+        let mut active = self.doc.active_config;
+        let label = active.and_then(|i| names.get(i)).cloned().unwrap_or_else(|| "Default".into());
+        ui.horizontal(|ui| {
+            egui::ComboBox::from_id_salt("config").selected_text(label).width(130.0).show_ui(ui, |ui| {
+                ui.selectable_value(&mut active, None, "Default");
+                for (i, n) in names.iter().enumerate() {
+                    ui.selectable_value(&mut active, Some(i), n);
+                }
+            });
+            if ui.button("New").on_hover_text("New configuration with the current values").clicked() {
+                self.checkpoint();
+                let n = self.doc.configs.len() + 1;
+                self.doc.configs.push(crate::doc::Config { name: format!("Config {n}"), values: Default::default() });
+                active = Some(self.doc.configs.len() - 1);
+            }
+            if let Some(i) = active {
+                if ui.button("Delete").clicked() {
+                    self.checkpoint();
+                    self.doc.configs.remove(i);
+                    active = None;
+                }
+            }
+        });
+        if let Some(i) = active {
+            if let Some(c) = self.doc.configs.get_mut(i) {
+                ui.horizontal(|ui| {
+                    ui.label(RichText::new("Name").color(MUTED).size(12.0));
+                    ui.text_edit_singleline(&mut c.name);
+                });
+            }
+            ui.label(RichText::new("Variable edits now apply to this configuration only.").color(MUTED).size(12.0));
+        } else {
+            ui.label(RichText::new("Configurations are named sets of variable values.").color(MUTED).size(12.0));
+        }
+        if active != self.doc.active_config {
+            self.doc.active_config = active;
+            self.changed();
+        }
+    }
+
     fn variables(&mut self, ui: &mut Ui) {
         let (_, errs) = self.doc.var_values();
         let mut remove = None;
         egui::Grid::new("vars").num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
+            let cfg = self.doc.active_config.and_then(|c| self.doc.configs.get(c)).cloned();
             for (i, v) in self.doc.variables.clone().iter().enumerate() {
+                let v = &crate::doc::Variable { name: v.name.clone(), expr: cfg.as_ref().and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone()) };
                 ui.label(RichText::new(&v.name).monospace());
                 let editing = self.editing_var.as_ref().map(|(k, _)| *k == i).unwrap_or(false);
                 if editing {
@@ -1211,7 +1260,14 @@ impl App {
                         let t = text.clone();
                         self.editing_var = None;
                         self.checkpoint();
-                        self.doc.variables[i].expr = t;
+                        match self.doc.active_config {
+                            // in a configuration, edits override the value for that configuration only
+                            Some(c) if c < self.doc.configs.len() => {
+                                let name = self.doc.variables[i].name.clone();
+                                self.doc.configs[c].values.insert(name, t);
+                            }
+                            _ => self.doc.variables[i].expr = t,
+                        }
                         self.changed();
                     }
                 } else {
@@ -1399,6 +1455,32 @@ impl App {
             })
             .response
             .on_hover_text("Add a Part Studio, Assembly or Drawing");
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.menu_button(RichText::new(format!("Versions ({})", self.ws.versions.len())).size(12.0), |ui| {
+                    ui.set_min_width(260.0);
+                    ui.horizontal(|ui| {
+                        ui.add(egui::TextEdit::singleline(&mut self.version_name).hint_text("Version name").desired_width(150.0));
+                        if ui.button("Create").clicked() {
+                            action = Some(("version", Tab::Studio(0)));
+                            ui.close();
+                        }
+                    });
+                    ui.separator();
+                    if self.ws.versions.is_empty() {
+                        ui.label(RichText::new("No versions yet").color(MUTED));
+                    }
+                    for (i, v) in self.ws.versions.iter().enumerate().rev() {
+                        ui.horizontal(|ui| {
+                            ui.label(RichText::new(&v.name).strong());
+                            ui.label(RichText::new(&v.created).color(MUTED).size(11.0));
+                            if ui.small_button("Restore").on_hover_text("Go back to this version (the current state stays in undo)").clicked() {
+                                self.restore_version = Some(i);
+                                ui.close();
+                            }
+                        });
+                    }
+                });
+            });
         });
         if let Some(t) = switch {
             if t != self.tab {
@@ -1407,6 +1489,19 @@ impl App {
         }
         if let Some((a, t)) = action {
             self.tab_action(a, t);
+        }
+        if let Some(i) = self.restore_version.take() {
+            self.sync_ws();
+            let mut ws = self.ws.clone();
+            match ws.restore(i) {
+                Ok(()) => {
+                    let path = self.path.clone();
+                    self.load_workspace(ws);
+                    self.path = path;
+                    self.flash_info("Restored the version", Some(Duration::from_secs(2)));
+                }
+                Err(e) => self.flash(format!("Could not restore: {e}"), ToastKind::Error),
+            }
         }
     }
 
@@ -1430,6 +1525,13 @@ impl App {
                         }
                     }
                 }
+            }
+            "version" => {
+                self.sync_ws();
+                let name = if self.version_name.trim().is_empty() { format!("V{}", self.ws.versions.len() + 1) } else { self.version_name.trim().to_string() };
+                self.ws.make_version(name.clone());
+                self.version_name.clear();
+                self.flash_info(format!("Created version {name}"), Some(Duration::from_secs(2)));
             }
             "new-studio" => {
                 self.sync_ws();

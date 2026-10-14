@@ -49,6 +49,8 @@ pub struct AsmUi {
     pub undo: Vec<Snap>,
     pub redo: Vec<Snap>,
     pub failed: Vec<u64>,
+    /// Exploded view distance factor (0 = assembled).
+    pub explode: f32,
 }
 
 fn asm_index(app: &App) -> Option<usize> {
@@ -94,6 +96,19 @@ pub fn redo(app: &mut App) {
         app.asm.scene_dirty = true;
         app.dwg.dirty = true;
     }
+}
+
+/// The pose an instance is drawn and picked at (moved outwards in an exploded view).
+fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
+    if app.asm.explode <= 0.0 {
+        return inst.pose;
+    }
+    let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
+    let c = cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64;
+    let mine = inst.pose.apply(centroid_local(app, inst));
+    let mut p = inst.pose;
+    p.t = (DVec3::from(p.t) + (mine - c) * app.asm.explode as f64).into();
+    p
 }
 
 fn mesh_of<'a>(app: &'a App, inst: &Instance) -> Option<&'a crate::kernel::BodyMesh> {
@@ -153,6 +168,16 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
         if app.tool_button(ui, "delete", "Delete", "Delete the selected instances (Del)", false, false, has || app.asm.sel_mate.is_some()).clicked() {
             delete_selection(app);
+        }
+    });
+    App::group(ui, |ui| {
+        let on = app.asm.explode > 0.0;
+        if app.tool_button(ui, "transform", "Explode", "Exploded view", false, on, true).clicked() {
+            app.asm.explode = if on { 0.0 } else { 0.8 };
+            app.asm.scene_dirty = true;
+        }
+        if on && ui.add(egui::Slider::new(&mut app.asm.explode, 0.05..=3.0).show_value(false)).on_hover_text("Explode distance").changed() {
+            app.asm.scene_dirty = true;
         }
     });
 }
@@ -270,6 +295,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         section(ui, "Instances", |ui| instances(app, ui));
         section(ui, "Mates", |ui| mates(app, ui));
+        section(ui, "Bill of materials", |ui| bom_ui(app, ui));
     });
 }
 
@@ -442,6 +468,66 @@ fn mates(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// (item, part name, quantity, material, mass each in g)
+pub fn bom(app: &App, a: &Assembly) -> Vec<(usize, String, usize, String, Option<f64>)> {
+    let mut rows: Vec<((usize, crate::doc::BodyId), String, usize, String, Option<f64>)> = vec![];
+    for x in &a.instances {
+        let key = (x.studio, x.body);
+        if let Some(r) = rows.iter_mut().find(|r| r.0 == key) {
+            r.2 += 1;
+            continue;
+        }
+        let props = app.studio_doc(x.studio).and_then(|d| d.parts.get(&crate::doc::body_key(x.body))).cloned().unwrap_or_default();
+        let mesh = mesh_of(app, x);
+        let name = props.name.clone().or_else(|| mesh.map(|m| m.name.clone())).unwrap_or_else(|| x.name.clone());
+        let density = props.material.as_ref().and_then(|m| crate::doc::MATERIALS.iter().find(|q| q.0 == m)).map(|q| q.1);
+        let mass = match (density, mesh) {
+            (Some(d), Some(m)) => Some(m.volume / 1000.0 * d),
+            _ => None,
+        };
+        rows.push((key, name, 1, props.material.unwrap_or_default(), mass));
+    }
+    rows.into_iter().enumerate().map(|(i, r)| (i + 1, r.1, r.2, r.3, r.4)).collect()
+}
+
+fn bom_ui(app: &mut App, ui: &mut Ui) {
+    let Some(a) = asm(app) else { return };
+    let rows = bom(app, a);
+    if rows.is_empty() {
+        ui.label(RichText::new("Empty").color(MUTED).size(12.0));
+        return;
+    }
+    egui::Grid::new("bom").num_columns(4).striped(true).spacing([8.0, 3.0]).show(ui, |ui| {
+        for h in ["#", "Part", "Qty", "Material"] {
+            ui.label(RichText::new(h).color(MUTED).size(11.5));
+        }
+        ui.end_row();
+        for (i, n, q, m, _) in &rows {
+            ui.label(RichText::new(i.to_string()).size(12.0));
+            ui.label(RichText::new(n).size(12.0));
+            ui.label(RichText::new(q.to_string()).size(12.0));
+            ui.label(RichText::new(if m.is_empty() { "—" } else { m }).size(12.0));
+            ui.end_row();
+        }
+    });
+    let total: f64 = rows.iter().filter_map(|r| r.4.map(|m| m * r.2 as f64)).sum();
+    if total > 0.0 {
+        ui.label(RichText::new(format!("Total mass {} g", crate::expr::trim(total, 1))).color(MUTED).size(12.0));
+    }
+    if ui.button("Export CSV…").clicked() {
+        let mut csv = String::from("Item,Part,Quantity,Material,Mass each (g)\n");
+        for (i, n, q, m, mass) in &rows {
+            csv.push_str(&format!("{i},\"{}\",{q},{m},{}\n", n.replace('"', "'"), mass.map(|v| format!("{v:.2}")).unwrap_or_default()));
+        }
+        if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("bom.csv").save_file() {
+            match std::fs::write(&p, csv) {
+                Ok(()) => app.flash_info(format!("Exported {}", p.display()), Some(std::time::Duration::from_secs(3))),
+                Err(e) => app.flash(format!("Could not export: {e}"), ToastKind::Error),
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- viewport
 
 fn world_tri(inst: &Instance, m: &crate::kernel::BodyMesh, t: &[u32]) -> [DVec3; 3] {
@@ -456,8 +542,9 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let mut best: Option<(f32, Hit)> = None;
     for x in a.instances.iter().filter(|x| !x.hidden) {
         let Some(m) = mesh_of(app, x) else { continue };
+        let pose = display_pose(app, a, x);
         for (ei, e) in m.edges.iter().enumerate() {
-            let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(x.pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3())).collect();
+            let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3())).collect();
             for w in pts.windows(2) {
                 let d = w[1] - w[0];
                 let t = if d.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
@@ -477,8 +564,9 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     for x in a.instances.iter().filter(|x| !x.hidden) {
         let Some(m) = mesh_of(app, x) else { continue };
         // ray into the instance's coordinates
-        let lo = x.pose.inverse_apply(o);
-        let ld = x.pose.inverse_dir(d);
+        let pose = display_pose(app, a, x);
+        let lo = pose.inverse_apply(o);
+        let ld = pose.inverse_dir(d);
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
             if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
@@ -537,7 +625,8 @@ fn build_scene(app: &App) -> SceneData {
         let sel = app.asm.sel.contains(&x.id) || mate_insts.contains(&x.id);
         let base = part_color(app, x);
         let hov_face = app.asm.hover.filter(|h| h.inst == x.id).and_then(|h| h.face);
-        let rot = x.pose.m().as_mat3();
+        let pose = display_pose(app, a, x);
+        let rot = pose.m().as_mat3();
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let fi = m.tri_face[ti] as usize;
             let col = if hov_face == Some(fi) {
@@ -549,14 +638,14 @@ fn build_scene(app: &App) -> SceneData {
             };
             for &i in t {
                 let i = i as usize;
-                let p = x.pose.apply(DVec3::new(m.positions[3 * i] as f64, m.positions[3 * i + 1] as f64, m.positions[3 * i + 2] as f64));
+                let p = pose.apply(DVec3::new(m.positions[3 * i] as f64, m.positions[3 * i + 1] as f64, m.positions[3 * i + 2] as f64));
                 let n = rot * Vec3::new(m.normals[3 * i], m.normals[3 * i + 1], m.normals[3 * i + 2]);
                 s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0) });
             }
         }
         let hov_edge = app.asm.hover.filter(|h| h.inst == x.id).and_then(|h| h.edge);
         for (ei, e) in m.edges.iter().enumerate() {
-            let pts: Vec<Vec3> = e.pts.iter().map(|p| x.pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
+            let pts: Vec<Vec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
             let hov = hov_edge == Some(ei);
             s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::HOVER } else { vp::EDGE }, 1.0), hov);
         }

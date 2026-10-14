@@ -489,11 +489,23 @@ pub struct Document {
     pub next_id: FeatId,
     #[serde(default)]
     pub parts: std::collections::BTreeMap<String, PartProps>,
+    /// Named sets of variable values; the active one overrides the variables.
+    #[serde(default)]
+    pub configs: Vec<Config>,
+    #[serde(default)]
+    pub active_config: Option<usize>,
+}
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct Config {
+    pub name: String,
+    /// variable name -> expression
+    pub values: std::collections::BTreeMap<String, String>,
 }
 
 impl Default for Document {
     fn default() -> Self {
-        Document { format: "cad-rust-app/1".into(), units: Units::Mm, variables: vec![], features: vec![], rollback: None, next_id: 0, parts: Default::default() }
+        Document { format: "cad-rust-app/1".into(), units: Units::Mm, variables: vec![], features: vec![], rollback: None, next_id: 0, parts: Default::default(), configs: vec![], active_config: None }
     }
 }
 
@@ -538,7 +550,12 @@ impl Document {
     }
 
     pub fn var_values(&self) -> (HashMap<String, f64>, Vec<Option<String>>) {
-        let pairs: Vec<(String, String)> = self.variables.iter().map(|v| (v.name.clone(), v.expr.clone())).collect();
+        let cfg = self.active_config.and_then(|i| self.configs.get(i));
+        let pairs: Vec<(String, String)> = self
+            .variables
+            .iter()
+            .map(|v| (v.name.clone(), cfg.and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone())))
+            .collect();
         expr::resolve_vars(&pairs, self.units)
     }
 
