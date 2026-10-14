@@ -196,7 +196,8 @@ impl<'a> Model<'a> {
                         let (pa, pb) = (fr.to_world(sk.pv(a)), fr.to_world(sk.pv(b)));
                         Ok((pa, (pb - pa).normalize()))
                     }
-                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) => Ok((fr.to_world(sk.pv(c)), fr.normal())),
+                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) | Some(crate::sketch::Geom::Ellipse { c, .. }) => Ok((fr.to_world(sk.pv(c)), fr.normal())),
+                    Some(_) => Err("use a line, circle or arc as the axis".into()),
                     None => Err("the axis curve no longer exists".into()),
                 }
             }
@@ -1664,5 +1665,49 @@ mod more_feature_tests {
         let want = 100.0 * 20.0 * 10.0 - 4.0 * 25.0 * 10.0;
         assert!((r.bodies[0].volume - want).abs() < 1e-3, "{} vs {want}", r.bodies[0].volume);
         assert!((r.frames[&pid].origin[2] - 5.0).abs() < 1e-6, "{:?}", r.frames[&pid]);
+    }
+}
+
+#[cfg(test)]
+mod freeform_tests {
+    use super::*;
+    use crate::doc::{Document, Op, OriginPlane, Ref};
+    use crate::sketch::{Geom, Sketch};
+
+    fn extrude_all(doc: &mut Document, sk: FeatId, s: &Sketch) {
+        let regions = find_regions(s);
+        assert!(!regions.is_empty(), "no regions");
+        let mut o = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut o {
+            for r in &regions {
+                profiles.push(Ref::Region { sketch: sk, point: r.sample.into() });
+            }
+            *depth = "2".into();
+        }
+        doc.insert("E".into(), o);
+    }
+
+    #[test]
+    fn ellipse_spline_and_text_extrude() {
+        let mut s = Sketch::default();
+        let c = s.add_point(DVec2::new(0.0, 0.0));
+        let a = s.add_point(DVec2::new(20.0, 0.0));
+        s.add_curve(Geom::Ellipse { c, a, rmin: 10.0 }, false);
+        let pts: Vec<_> = [(50.0, 0.0), (70.0, 10.0), (60.0, 30.0), (45.0, 15.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        s.add_curve(Geom::Spline { pts, closed: true }, false);
+        for c in crate::text::outlines("Hi", DVec2::new(0.0, 40.0), 10.0) {
+            s.add_curve(Geom::Poly { pts: c.iter().map(|p| (*p).into()).collect(), closed: true }, false);
+        }
+        let mut doc = Document::default();
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s.clone(), frame: Frame::TOP });
+        extrude_all(&mut doc, sk, &s);
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        let total: f64 = r.bodies.iter().map(|b| b.volume).sum();
+        let ellipse = std::f64::consts::PI * 20.0 * 10.0 * 2.0;
+        assert!(total > ellipse, "{total}");
+        assert!(r.bodies.len() >= 4, "ellipse, spline, H, i(+dot): {}", r.bodies.len());
     }
 }

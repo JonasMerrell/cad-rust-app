@@ -35,6 +35,12 @@ pub enum Geom {
     Circle { c: Id, r: f64 },
     /// Counter-clockwise from `a` to `b` around `c`.
     Arc { c: Id, a: Id, b: Id },
+    /// Full ellipse: centre, end of the major axis, minor radius.
+    Ellipse { c: Id, a: Id, rmin: f64 },
+    /// Smooth curve through the points.
+    Spline { pts: Vec<Id>, #[serde(default)] closed: bool },
+    /// Fixed outline (e.g. from text); not driven by the solver.
+    Poly { pts: Vec<[f64; 2]>, closed: bool },
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -71,6 +77,8 @@ pub enum Constraint {
     Equal { a: Id, b: Id },
     Midpoint { p: Id, l: Id },
     Fix { p: Id, x: f64, y: f64 },
+    /// Points `a` and `b` mirror each other across line `l`.
+    Symmetric { a: Id, b: Id, l: Id },
     /// Point-to-point distance.
     Distance { a: Id, b: Id, dim: Dim },
     /// Horizontal (`axis` 0) or vertical (1) distance between two points.
@@ -125,6 +133,7 @@ impl Constraint {
             Horizontal { l } | Vertical { l } | Length { l, .. } => vec![l],
             Radius { c, .. } | Diameter { c, .. } => vec![c],
             Fix { p, .. } => vec![p],
+            Symmetric { a, b, l } => vec![a, b, l],
             HorizontalPts { a, b }
             | VerticalPts { a, b }
             | Parallel { a, b }
@@ -149,6 +158,7 @@ impl Constraint {
             Equal { .. } => "equal",
             Midpoint { .. } => "midpoint",
             Fix { .. } => "fix",
+            Symmetric { .. } => "mirrorSketch",
             _ => "dimension",
         }
     }
@@ -255,6 +265,9 @@ impl Sketch {
             Geom::Line { a, b } => vec![a, b],
             Geom::Circle { c, .. } => vec![c],
             Geom::Arc { c, a, b } => vec![c, a, b],
+            Geom::Ellipse { c, a, .. } => vec![c, a],
+            Geom::Spline { ref pts, .. } => pts.clone(),
+            Geom::Poly { .. } => vec![],
         }
     }
 
@@ -280,13 +293,19 @@ impl Sketch {
                     sub(a);
                     sub(b)
                 }
+                Geom::Ellipse { c, a, .. } => {
+                    sub(c);
+                    sub(a)
+                }
+                Geom::Spline { pts, .. } => pts.iter_mut().for_each(sub),
+                Geom::Poly { .. } => {}
             }
         }
         for k in &mut self.constraints {
             use Constraint::*;
             match k {
                 PointOnLine { p, .. } | PointOnCircle { p, .. } | Midpoint { p, .. } | PointLineDistance { p, .. } | Fix { p, .. } => sub(p),
-                HorizontalPts { a, b } | VerticalPts { a, b } | Distance { a, b, .. } | AxisDistance { a, b, .. } => {
+                HorizontalPts { a, b } | VerticalPts { a, b } | Distance { a, b, .. } | AxisDistance { a, b, .. } | Symmetric { a, b, .. } => {
                     sub(a);
                     sub(b)
                 }
@@ -309,11 +328,7 @@ impl Sketch {
             Constraint::PointOnLine { p, l } | Constraint::PointOnCircle { p, c: l } => curves
                 .iter()
                 .find(|c| c.id == l)
-                .map(|c| match c.geom {
-                    Geom::Line { a, b } => a != p && b != p,
-                    Geom::Arc { a, b, c, .. } => a != p && b != p && c != p,
-                    Geom::Circle { c, .. } => c != p,
-                })
+                .map(|c| !Self::curve_points(&c.geom).contains(&p))
                 .unwrap_or(false),
             _ => true,
         });
@@ -436,6 +451,8 @@ enum Res {
     AxisDist(usize, usize, usize, f64),
     PointLineDist { p: usize, a: usize, b: usize, d: f64 },
     RadiusIs(RIdx, f64),
+    /// midpoint of p,q on line a-b and p-q perpendicular to it
+    Symmetric { p: usize, q: usize, a: usize, b: usize },
 }
 
 #[derive(Clone, Copy)]
@@ -518,6 +535,13 @@ impl Res {
                 out.push((dd.perp_dot(p2(x, p) - p2(x, a)) / l).abs() - d)
             }
             Res::RadiusIs(r, v) => out.push(rad(x, r) - v),
+            Res::Symmetric { p, q, a, b } => {
+                let d = p2(x, b) - p2(x, a);
+                let l = d.length().max(1e-9);
+                let m = (p2(x, p) + p2(x, q)) * 0.5;
+                out.push(d.perp_dot(m - p2(x, a)) / l);
+                out.push(d.dot(p2(x, q) - p2(x, p)) / l);
+            }
         }
     }
 
@@ -537,6 +561,7 @@ impl Res {
             Res::CircleCircle { c1, r1, c2, r2, .. } => [pt(c1).to_vec(), r(r1), pt(c2).to_vec(), r(r2)].concat(),
             Res::EqualR(a, b) => [r(a), r(b)].concat(),
             Res::RadiusIs(rr, _) => r(rr),
+            Res::Symmetric { p, q, a, b } => [pt(p), pt(q), pt(a), pt(b)].concat(),
         };
         v.sort_unstable();
         v.dedup();
@@ -555,7 +580,7 @@ impl System {
             x0.push(p.y);
         }
         for c in &s.curves {
-            if let Geom::Circle { r, .. } = c.geom {
+            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } = c.geom {
                 ridx.insert(c.id, x0.len());
                 x0.push(r);
             }
@@ -640,6 +665,10 @@ impl System {
                         let i = pi(*p)?;
                         vec![Res::Fix(i, *x), Res::Fix(i + 1, *y)]
                     }
+                    Symmetric { a, b, l } => {
+                        let (la, lb) = line(*l)?;
+                        vec![Res::Symmetric { p: pi(*a)?, q: pi(*b)?, a: la, b: lb }]
+                    }
                     Distance { a, b, dim } => vec![Res::Dist(pi(*a)?, pi(*b)?, val(dim, Kind::Length)?)],
                     AxisDistance { a, b, axis, dim } => vec![Res::AxisDist(pi(*a)?, pi(*b)?, *axis as usize, val(dim, Kind::Length)?)],
                     PointLineDistance { p, l, dim } => {
@@ -715,7 +744,7 @@ impl System {
             p.y = x[i + 1];
         }
         for c in &mut s.curves {
-            if let Geom::Circle { r, .. } = &mut c.geom {
+            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } = &mut c.geom {
                 *r = x[self.ridx[&c.id]].abs();
             }
         }
@@ -865,6 +894,27 @@ impl Sketch {
                 let n = (((a1 - a0) * r / seg_len).ceil() as usize).clamp(8, 256);
                 (0..=n).map(|i| ctr + DVec2::from_angle(a0 + (a1 - a0) * i as f64 / n as f64) * r).collect()
             }
+            Geom::Ellipse { c: cc, a, rmin } => {
+                let ctr = self.pv(cc);
+                let u = self.pv(a) - ctr;
+                let v = u.perp().normalize_or_zero() * rmin;
+                let n = ((std::f64::consts::TAU * u.length().max(rmin) / seg_len).ceil() as usize).clamp(32, 360);
+                (0..=n).map(|i| {
+                    let t = i as f64 / n as f64 * std::f64::consts::TAU;
+                    ctr + u * t.cos() + v * t.sin()
+                }).collect()
+            }
+            Geom::Spline { ref pts, closed } => {
+                let p: Vec<DVec2> = pts.iter().map(|id| self.pv(*id)).collect();
+                catmull_rom(&p, closed, 16)
+            }
+            Geom::Poly { ref pts, closed } => {
+                let mut v: Vec<DVec2> = pts.iter().map(|p| DVec2::from(*p)).collect();
+                if closed && !v.is_empty() {
+                    v.push(v[0]);
+                }
+                v
+            }
         }
     }
 
@@ -887,6 +937,10 @@ impl Sketch {
                     (p - self.pv(a)).length().min((p - self.pv(b)).length())
                 }
             }
+            _ => {
+                let pts = self.tessellate(c, 0.5);
+                pts.windows(2).map(|w| seg_dist(p, w[0], w[1])).fold(f64::INFINITY, f64::min)
+            }
         }
     }
 
@@ -905,6 +959,45 @@ impl Sketch {
         }
         lo.x.is_finite().then_some((lo, hi))
     }
+}
+
+/// Centripetal Catmull-Rom curve through `p` with `per` samples per span.
+pub fn catmull_rom(p: &[DVec2], closed: bool, per: usize) -> Vec<DVec2> {
+    let n = p.len();
+    if n < 2 {
+        return p.to_vec();
+    }
+    let get = |i: isize| -> DVec2 {
+        if closed {
+            p[i.rem_euclid(n as isize) as usize]
+        } else if i < 0 {
+            p[0] * 2.0 - p[1]
+        } else if i as usize >= n {
+            p[n - 1] * 2.0 - p[n - 2]
+        } else {
+            p[i as usize]
+        }
+    };
+    let spans = if closed { n } else { n - 1 };
+    let mut out = vec![];
+    for s in 0..spans as isize {
+        let (p0, p1, p2, p3) = (get(s - 1), get(s), get(s + 1), get(s + 2));
+        let kt = |a: DVec2, b: DVec2| (b - a).length().sqrt().max(1e-9);
+        let t1 = kt(p0, p1);
+        let t2 = t1 + kt(p1, p2);
+        let t3 = t2 + kt(p2, p3);
+        for k in 0..per {
+            let t = t1 + (t2 - t1) * k as f64 / per as f64;
+            let a1 = p0 * ((t1 - t) / t1) + p1 * (t / t1);
+            let a2 = p1 * ((t2 - t) / (t2 - t1)) + p2 * ((t - t1) / (t2 - t1));
+            let a3 = p2 * ((t3 - t) / (t3 - t2)) + p3 * ((t - t2) / (t3 - t2));
+            let b1 = a1 * ((t2 - t) / t2) + a2 * (t / t2);
+            let b2 = a2 * ((t3 - t) / (t3 - t1)) + a3 * ((t - t1) / (t3 - t1));
+            out.push(b1 * ((t2 - t) / (t2 - t1)) + b2 * ((t - t1) / (t2 - t1)));
+        }
+    }
+    out.push(if closed { p[0] } else { p[n - 1] });
+    out
 }
 
 pub fn seg_dist(p: DVec2, a: DVec2, b: DVec2) -> f64 {

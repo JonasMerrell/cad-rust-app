@@ -26,6 +26,7 @@ pub enum Tool {
     Arc,
     Arc3,
     Slot,
+    TangentArc,
     Polygon,
     Ellipse,
     Spline,
@@ -48,6 +49,7 @@ pub const TOOLS: &[(Tool, &str, &str, Option<&str>)] = &[
     (Tool::Circle, "circle", "Circle", Some("C")),
     (Tool::Arc, "arc", "Center arc", Some("A")),
     (Tool::Arc3, "arc3", "3-point arc", None),
+    (Tool::TangentArc, "arc", "Tangent arc", None),
     (Tool::Slot, "slot", "Slot", None),
     (Tool::Polygon, "polygon", "Polygon", None),
     (Tool::Ellipse, "ellipse", "Ellipse", None),
@@ -73,6 +75,7 @@ pub const CONSTRAINTS: &[(&str, &str, Option<&str>, &str)] = &[
     ("midpoint", "Midpoint", Some("M"), "a point and a line"),
     ("concentric", "Concentric", None, "two circles/arcs"),
     ("fix", "Fix", Some("X"), "points or curves"),
+    ("symmetric", "Symmetric", None, "two points and the line between them"),
 ];
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Hash)]
@@ -125,6 +128,11 @@ pub struct SketchSession {
     /// (constraint index, text being typed)
     pub dim_edit: Option<(usize, String)>,
     pub box_end: Option<Pos2>,
+    pub text_height: f64,
+    /// Text being typed for the Text tool: (baseline start, text).
+    pub text_edit: Option<(DVec2, String)>,
+    /// Sketch pattern popup: (circular?, count, spacing x / angle, spacing y).
+    pub pattern: Option<(bool, u32, f64, f64)>,
 }
 
 // ---------------------------------------------------------------- access
@@ -230,6 +238,9 @@ impl App {
             dim_pending: vec![],
             dim_edit: None,
             box_end: None,
+            text_height: 10.0,
+            text_edit: None,
+            pattern: None,
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
             view_normal(self, &fr);
@@ -328,7 +339,16 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             Tool::Offset => {
                 ui.add(egui::DragValue::new(&mut s.offset_dist).range(0.001..=1e5).speed(0.1)).on_hover_text("Offset distance");
             }
+            Tool::Text => {
+                ui.add(egui::DragValue::new(&mut s.text_height).range(0.01..=1e5).speed(0.1)).on_hover_text("Text height");
+            }
             _ => {}
+        }
+        if app.tool_button(ui, "linearPattern", "Linear pattern", "Linear pattern of the selection", false, false, has_sel).clicked() {
+            app.sketch.as_mut().unwrap().pattern = Some((false, 3, 20.0, 0.0));
+        }
+        if app.tool_button(ui, "circularPattern", "Circular pattern", "Circular pattern of the selection about the origin (or a selected point)", false, false, has_sel).clicked() {
+            app.sketch.as_mut().unwrap().pattern = Some((true, 6, 360.0, 0.0));
         }
         if app.tool_button(ui, "mirrorSketch", "Mirror", "Mirror selection across a selected line", false, false, true).clicked() {
             mirror_selection(app);
@@ -382,10 +402,6 @@ fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
 }
 
 pub fn set_tool(app: &mut App, t: Tool) {
-    if matches!(t, Tool::Ellipse | Tool::Spline | Tool::Text) {
-        app.flash(format!("{t:?} isn't in the Rust version yet"), ToastKind::Info);
-        return;
-    }
     if t == Tool::Offset {
         let has = app.sketch.as_ref().map(|s| s.sel.iter().any(|x| matches!(x, Sel::Curve(_)))).unwrap_or(false);
         if !has {
@@ -411,6 +427,10 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Arc => "Click the centre, the start, then the end (counter-clockwise)",
         Tool::Arc3 => "Click the start, the end, then a point on the arc",
         Tool::Slot => "Click the two end centres, then the width",
+        Tool::TangentArc => "Click the end of a line or arc, then where the tangent arc ends",
+        Tool::Ellipse => "Click the centre, the end of the major axis, then the minor size",
+        Tool::Spline => "Click points along the curve; Enter, right-click or clicking the first point finishes",
+        Tool::Text => "Click where the text starts, type, then press Enter",
         Tool::Polygon => "Click the centre, then a corner",
         Tool::Trim => "Click the piece of a curve to remove",
         Tool::Extend => "Click near the end of a line to extend it to the next curve",
@@ -418,7 +438,6 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Offset => "Click on the side to offset the selected curves to",
         Tool::Project => "Click model edges to bring them into the sketch",
         Tool::Dimension => "Click a line, circle or arc (then where to put it), or two items to dimension between",
-        _ => "",
     };
     let dof = if let Some(e) = &s.status.error {
         format!(" · {e}")
@@ -456,7 +475,12 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         return;
     }
     if pressed(Key::Enter) {
-        finish(app);
+        let spline_open = app.sketch.as_ref().map(|s| s.tool == Tool::Spline && s.clicks.len() >= 2).unwrap_or(false);
+        if spline_open {
+            finish_spline(app, false);
+        } else {
+            finish(app);
+        }
         return;
     }
     if pressed(Key::Delete) || pressed(Key::Backspace) {
@@ -629,6 +653,11 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
 
     // right click ends a chain / cancels the tool step
     if resp.secondary_clicked() {
+        if tool == Tool::Spline && app.sketch.as_ref().unwrap().clicks.len() >= 2 {
+            finish_spline(app, false);
+            app.context_menu = None;
+            return;
+        }
         let sess = app.sketch.as_mut().unwrap();
         if !sess.clicks.is_empty() || sess.chain.is_some() {
             sess.clicks.clear();
@@ -953,6 +982,61 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
             }
             app.after_sketch_edit();
         }
+        Tool::Ellipse => {
+            let sess = app.sketch.as_mut().unwrap();
+            sess.clicks.push(p);
+            if sess.clicks.len() < 3 {
+                app.scene_dirty = true;
+                return;
+            }
+            let pts = std::mem::take(&mut sess.clicks);
+            let u = pts[1] - pts[0];
+            if u.length() < 1e-9 {
+                return;
+            }
+            let rmin = ((pts[2] - pts[0]).perp_dot(u.normalize())).abs().max(1e-3);
+            app.sk_checkpoint();
+            let sk = app.sk_mut();
+            let c = sk.add_point(pts[0]);
+            let a = sk.add_point(pts[1]);
+            sk.add_curve(Geom::Ellipse { c, a, rmin }, construction);
+            app.after_sketch_edit();
+        }
+        Tool::Spline => {
+            let wpp = app.camera.wpp() as f64;
+            let sess = app.sketch.as_mut().unwrap();
+            if sess.clicks.len() >= 3 && (p - sess.clicks[0]).length() < 8.0 * wpp {
+                finish_spline(app, true);
+                return;
+            }
+            sess.clicks.push(p);
+            app.scene_dirty = true;
+        }
+        Tool::Text => {
+            app.sketch.as_mut().unwrap().text_edit = Some((p, String::new()));
+        }
+        Tool::TangentArc => {
+            let sess = app.sketch.as_mut().unwrap();
+            match (sess.chain, snp) {
+                (None, Some(Snap::Point(pid))) => {
+                    if tangent_at(app.sk().0, pid).is_some() {
+                        app.sketch.as_mut().unwrap().chain = Some(pid);
+                    } else {
+                        app.flash("Start a tangent arc at the end of a line or arc", ToastKind::Info);
+                    }
+                }
+                (None, _) => app.flash("Start a tangent arc at the end of a line or arc", ToastKind::Info),
+                (Some(start), _) => {
+                    app.sk_checkpoint();
+                    if let Err(e) = make_tangent_arc(app, start, p, snp, construction) {
+                        app.sketch.as_mut().unwrap().undo.pop();
+                        app.flash(e, ToastKind::Error);
+                    }
+                    app.sketch.as_mut().unwrap().chain = None;
+                    app.after_sketch_edit();
+                }
+            }
+        }
         Tool::Trim => {
             if let Some(Sel::Curve(c)) = h {
                 app.sk_checkpoint();
@@ -1118,6 +1202,115 @@ fn make_slot(app: &mut App, c1: DVec2, c2: DVec2, w: DVec2, construction: bool) 
     sk.constraints.push(Constraint::Parallel { a: axis, b: l1 });
 }
 
+fn finish_spline(app: &mut App, closed: bool) {
+    let pts = std::mem::take(&mut app.sketch.as_mut().unwrap().clicks);
+    if pts.len() < 2 {
+        return;
+    }
+    let construction = app.sketch.as_ref().unwrap().construction;
+    app.sk_checkpoint();
+    let sk = app.sk_mut();
+    let ids: Vec<Id> = pts.iter().map(|p| sk.add_point(*p)).collect();
+    sk.add_curve(Geom::Spline { pts: ids, closed }, construction);
+    app.after_sketch_edit();
+}
+
+/// Unit tangent leaving point `pid` along the line or arc that ends there.
+fn tangent_at(sk: &Sketch, pid: Id) -> Option<(DVec2, Id)> {
+    for c in &sk.curves {
+        match c.geom {
+            Geom::Line { a, b } if a == pid || b == pid => {
+                let (from, to) = if b == pid { (a, b) } else { (b, a) };
+                return Some(((sk.pv(to) - sk.pv(from)).normalize(), c.id));
+            }
+            Geom::Arc { c: cc, a, b } if a == pid || b == pid => {
+                let r = sk.pv(pid) - sk.pv(cc);
+                // counter-clockwise arcs travel a -> b
+                let t = if b == pid { r.perp() } else { -r.perp() };
+                return Some((t.normalize(), c.id));
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+fn make_tangent_arc(app: &mut App, start: Id, end: DVec2, snp: Option<Snap>, construction: bool) -> Result<(), String> {
+    let (t, prev) = tangent_at(app.sk().0, start).ok_or("no curve ends there")?;
+    let s = app.sk().0.pv(start);
+    let chord = end - s;
+    let n = t.perp();
+    let denom = 2.0 * chord.dot(n);
+    if denom.abs() < 1e-9 {
+        return Err("that would be a straight line".into());
+    }
+    let r = chord.length_squared() / denom;
+    let c = s + n * r;
+    let eid = point_at(app, end, snp);
+    let sk = app.sk_mut();
+    let cid = sk.add_point(c);
+    // going left of the tangent is counter-clockwise
+    let arc = if r > 0.0 { sk.add_curve(Geom::Arc { c: cid, a: start, b: eid }, construction) } else { sk.add_curve(Geom::Arc { c: cid, a: eid, b: start }, construction) };
+    sk.constraints.push(Constraint::Tangent { a: prev, b: arc, inner: false });
+    Ok(())
+}
+
+fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
+    let sel: Vec<Sel> = app.sketch.as_ref().unwrap().sel.iter().copied().collect();
+    let sk = app.sk().0.clone();
+    let units = app.doc.units.scale();
+    let center = sel.iter().find_map(|s| if let Sel::Point(p) = s { Some(sk.pv(*p)) } else { None }).filter(|_| circular).unwrap_or(DVec2::ZERO);
+    let curves: Vec<Id> = sel.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).collect();
+    if curves.is_empty() {
+        app.flash("Select the curves to pattern", ToastKind::Info);
+        return;
+    }
+    let mut out = sk.clone();
+    for k in 1..count.max(1) {
+        let xf = |p: DVec2| -> DVec2 {
+            if circular {
+                let step = if (a - 360.0).abs() < 1e-9 { a / count as f64 } else { a / (count.max(2) - 1) as f64 };
+                let ang = (step * k as f64).to_radians();
+                center + DVec2::from_angle(ang).rotate(p - center)
+            } else {
+                p + DVec2::new(a, b) * units * k as f64
+            }
+        };
+        let mut map = std::collections::HashMap::new();
+        let mut np = |out: &mut Sketch, id: Id| *map.entry(id).or_insert_with(|| out.add_point(xf(sk.pv(id))));
+        for id in &curves {
+            let Some(c) = sk.curve(*id) else { continue };
+            let g = match c.geom {
+                Geom::Line { a, b } => Geom::Line { a: np(&mut out, a), b: np(&mut out, b) },
+                Geom::Circle { c, r } => Geom::Circle { c: np(&mut out, c), r },
+                Geom::Arc { c, a, b } => Geom::Arc { c: np(&mut out, c), a: np(&mut out, a), b: np(&mut out, b) },
+                Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: np(&mut out, c), a: np(&mut out, a), rmin },
+                Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| np(&mut out, *p)).collect(), closed },
+                Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().map(|p| xf(DVec2::from(*p)).into()).collect(), closed },
+            };
+            out.add_curve(g, c.construction);
+        }
+    }
+    app.sk_checkpoint();
+    *app.sk_mut() = out;
+    app.after_sketch_edit();
+}
+
+fn create_text(app: &mut App, at: DVec2, text: &str) {
+    let h = app.sketch.as_ref().unwrap().text_height * app.doc.units.scale();
+    let contours = crate::text::outlines(text, at, h);
+    if contours.is_empty() {
+        return;
+    }
+    let construction = app.sketch.as_ref().unwrap().construction;
+    app.sk_checkpoint();
+    let sk = app.sk_mut();
+    for c in contours {
+        sk.add_curve(Geom::Poly { pts: c.iter().map(|p| (*p).into()).collect(), closed: true }, construction);
+    }
+    app.after_sketch_edit();
+}
+
 // ---------------------------------------------------------------- editing tools
 
 fn trim(app: &mut App, cid: Id, at: DVec2) {
@@ -1134,6 +1327,11 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
     let is_circle = matches!(c.geom, Geom::Circle { .. });
     let sk = app.sk_mut();
     if (at_start && at_end && !is_circle) || (is_circle && splits.len() <= 3) {
+        sk.delete(&[cid].into(), &HashSet::new());
+        return;
+    }
+    if !matches!(c.geom, Geom::Line { .. } | Geom::Circle { .. } | Geom::Arc { .. }) {
+        // free-form curves are removed whole
         sk.delete(&[cid].into(), &HashSet::new());
         return;
     }
@@ -1178,6 +1376,7 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
                 sk.add_curve(Geom::Arc { c: cc, a: m1, b }, c.construction);
             }
         }
+        _ => {}
     }
     // drop endpoints nothing uses any more
     let used: HashSet<Id> = sk.curves.iter().flat_map(|c| Sketch::curve_points(&c.geom)).chain(sk.constraints.iter().flat_map(|k| k.refs())).collect();
@@ -1313,6 +1512,7 @@ fn offset_selection(app: &mut App, side: DVec2, d: f64) {
                 let nb = out.add_point(ctr + (sk.pv(b) - ctr).normalize() * nr);
                 out.add_curve(Geom::Arc { c: cc, a: na, b: nb }, c.construction);
             }
+            _ => {}
         }
     }
     *app.sk_mut() = out;
@@ -1354,6 +1554,9 @@ fn mirror_selection(app: &mut App) {
                 Geom::Circle { c, r } => Geom::Circle { c: new_point(&mut out, c), r },
                 // mirroring reverses orientation
                 Geom::Arc { c, a, b } => Geom::Arc { c: new_point(&mut out, c), a: new_point(&mut out, b), b: new_point(&mut out, a) },
+                Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin },
+                Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| new_point(&mut out, *p)).collect(), closed },
+                Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().rev().map(|p| refl(DVec2::from(*p)).into()).collect(), closed },
             };
             out.add_curve(g, c.construction);
         }
@@ -1574,6 +1777,13 @@ pub fn constrain(app: &mut App, kind: &str) {
             if circles.len() == 2 && n == 2 {
                 let c = |id: Id| Sketch::curve_points(&sk.curve(id).unwrap().geom)[0];
                 merges.push((c(circles[1]), c(circles[0])));
+            } else {
+                return app.flash(err, ToastKind::Error);
+            }
+        }
+        "symmetric" => {
+            if pts.len() == 2 && lines.len() == 1 && n == 3 {
+                add.push(Constraint::Symmetric { a: pts[0], b: pts[1], l: lines[0] });
             } else {
                 return app.flash(err, ToastKind::Error);
             }
@@ -1895,6 +2105,47 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
                     poly((0..=48).map(|i| m + DVec2::from_angle(t0 + (t1 - t0) * i as f64 / 48.0) * r).collect());
                 }
             }
+            Tool::Ellipse if !sess.clicks.is_empty() => {
+                let m = sess.clicks[0];
+                if sess.clicks.len() == 1 {
+                    poly(vec![m, c]);
+                } else {
+                    let u = sess.clicks[1] - m;
+                    let rmin = ((c - m).perp_dot(u.normalize_or_zero())).abs();
+                    let v = u.perp().normalize_or_zero() * rmin;
+                    poly((0..=72).map(|i| {
+                        let t = i as f64 / 72.0 * std::f64::consts::TAU;
+                        m + u * t.cos() + v * t.sin()
+                    }).collect());
+                }
+            }
+            Tool::Spline if !sess.clicks.is_empty() => {
+                let mut pts = sess.clicks.clone();
+                pts.push(c);
+                poly(crate::sketch::catmull_rom(&pts, false, 12));
+            }
+            Tool::TangentArc if sess.chain.is_some() => {
+                let start = sess.chain.unwrap();
+                if let Some((t, _)) = tangent_at(sk, start) {
+                    let s0 = sk.pv(start);
+                    let chord = c - s0;
+                    let n = t.perp();
+                    let den = 2.0 * chord.dot(n);
+                    if den.abs() > 1e-9 {
+                        let r = chord.length_squared() / den;
+                        let ctr = s0 + n * r;
+                        let (a0, mut a1) = ((s0 - ctr).to_angle(), (c - ctr).to_angle());
+                        if r > 0.0 {
+                            while a1 < a0 { a1 += std::f64::consts::TAU; }
+                        } else {
+                            while a1 > a0 { a1 -= std::f64::consts::TAU; }
+                        }
+                        poly((0..=48).map(|i| ctr + DVec2::from_angle(a0 + (a1 - a0) * i as f64 / 48.0) * r.abs()).collect());
+                    } else {
+                        poly(vec![s0, c]);
+                    }
+                }
+            }
             Tool::Slot if !sess.clicks.is_empty() => {
                 if sess.clicks.len() == 1 {
                     poly(vec![sess.clicks[0], c]);
@@ -2144,6 +2395,78 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
             if let Some(t) = text {
                 crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &t, TEXT);
             }
+        }
+    }
+
+    // text tool input
+    let text_edit = app.sketch.as_ref().and_then(|s| s.text_edit.clone());
+    if let Some((at, mut text)) = text_edit {
+        let pos = to_screen(app, &fr, rect, at);
+        let mut done = None;
+        egui::Area::new(egui::Id::new("text-edit")).order(egui::Order::Foreground).fixed_pos(pos + egui::vec2(0.0, 6.0)).show(painter.ctx(), |ui| {
+            egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(4).inner_margin(4).show(ui, |ui| {
+                let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("Text").desired_width(160.0));
+                if !r.has_focus() && !r.lost_focus() {
+                    r.request_focus();
+                }
+                if ui.input(|i| i.key_pressed(Key::Enter)) {
+                    done = Some(true);
+                } else if ui.input(|i| i.key_pressed(Key::Escape)) {
+                    done = Some(false);
+                }
+            });
+        });
+        match done {
+            Some(true) => {
+                app.sketch.as_mut().unwrap().text_edit = None;
+                if !text.trim().is_empty() {
+                    create_text(app, at, &text);
+                }
+            }
+            Some(false) => app.sketch.as_mut().unwrap().text_edit = None,
+            None => app.sketch.as_mut().unwrap().text_edit = Some((at, text)),
+        }
+    }
+
+    // sketch pattern popup
+    let pat = app.sketch.as_ref().and_then(|s| s.pattern);
+    if let Some((circular, mut count, mut a, mut b)) = pat {
+        let mut apply = false;
+        let mut close = false;
+        let units = app.doc.units.label();
+        egui::Area::new(egui::Id::new("sk-pattern")).order(egui::Order::Foreground).fixed_pos(rect.min + egui::vec2(10.0, 10.0)).show(painter.ctx(), |ui| {
+            egui::Frame::new().fill(theme::PANEL).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+                ui.label(RichText::new(if circular { "Circular pattern" } else { "Linear pattern" }).strong());
+                egui::Grid::new("skpat").num_columns(2).show(ui, |ui| {
+                    ui.label(RichText::new("Instances").color(MUTED));
+                    ui.add(egui::DragValue::new(&mut count).range(2..=200));
+                    ui.end_row();
+                    if circular {
+                        ui.label(RichText::new("Total angle (°)").color(MUTED));
+                        ui.add(egui::DragValue::new(&mut a).range(1.0..=360.0));
+                        ui.end_row();
+                    } else {
+                        ui.label(RichText::new(format!("Spacing X ({units})")).color(MUTED));
+                        ui.add(egui::DragValue::new(&mut a).speed(0.5));
+                        ui.end_row();
+                        ui.label(RichText::new(format!("Spacing Y ({units})")).color(MUTED));
+                        ui.add(egui::DragValue::new(&mut b).speed(0.5));
+                        ui.end_row();
+                    }
+                });
+                ui.horizontal(|ui| {
+                    if ui.button("OK").clicked() {
+                        apply = true;
+                    }
+                    if ui.button("Cancel").clicked() {
+                        close = true;
+                    }
+                });
+            });
+        });
+        app.sketch.as_mut().unwrap().pattern = if apply || close { None } else { Some((circular, count, a, b)) };
+        if apply {
+            apply_pattern(app, circular, count, a, b);
         }
     }
 

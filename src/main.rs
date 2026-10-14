@@ -11,6 +11,7 @@ mod regions;
 mod render;
 mod sketch;
 mod sketcher;
+mod text;
 mod theme;
 mod viewport;
 mod worker;

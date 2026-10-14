@@ -149,6 +149,8 @@ enum Prim {
     Line { a: DVec2, b: DVec2 },
     /// Arc from angle t0 to t1 (t1 > t0), full circle when t1 - t0 = TAU.
     Arc { c: DVec2, r: f64, t0: f64, t1: f64 },
+    /// Polyline (spline, ellipse, text outline); closed ones end where they start.
+    Poly { pts: Vec<DVec2>, closed: bool },
 }
 
 impl Prim {
@@ -156,6 +158,21 @@ impl Prim {
         match *self {
             Prim::Line { a, b } => a.lerp(b, u),
             Prim::Arc { c, r, t0, t1 } => c + DVec2::from_angle(t0 + (t1 - t0) * u) * r,
+            Prim::Poly { ref pts, .. } => {
+                let f = u.clamp(0.0, 1.0) * (pts.len() - 1) as f64;
+                let i = (f.floor() as usize).min(pts.len() - 2);
+                pts[i].lerp(pts[i + 1], f - i as f64)
+            }
+        }
+    }
+    fn segments(&self) -> Vec<(DVec2, DVec2)> {
+        match self {
+            Prim::Poly { pts, .. } => pts.windows(2).map(|w| (w[0], w[1])).collect(),
+            Prim::Line { a, b } => vec![(*a, *b)],
+            Prim::Arc { .. } => {
+                let n = 96;
+                (0..n).map(|i| (self.at(i as f64 / n as f64), self.at((i + 1) as f64 / n as f64))).collect()
+            }
         }
     }
     /// Parameter (0..1) of a point known to lie on the curve, or None if outside.
@@ -184,20 +201,72 @@ impl Prim {
                     None
                 }
             }
+            Prim::Poly { ref pts, .. } => {
+                let n = (pts.len() - 1) as f64;
+                let mut best: Option<(f64, f64)> = None;
+                for (i, w) in pts.windows(2).enumerate() {
+                    let d = w[1] - w[0];
+                    let t = if d.length_squared() < 1e-18 { 0.0 } else { ((p - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
+                    let dist = (w[0] + d * t - p).length();
+                    if best.map(|b| dist < b.0).unwrap_or(true) {
+                        best = Some((dist, (i as f64 + t) / n));
+                    }
+                }
+                best.filter(|b| b.0 < TOL * 100.0).map(|b| b.1)
+            }
         }
     }
     fn sub(&self, u0: f64, u1: f64) -> Seg {
         match *self {
             Prim::Line { a, b } => Seg::Line { a: a.lerp(b, u0), b: a.lerp(b, u1) },
             Prim::Arc { c, r, t0, t1 } => Seg::Arc { c, r, t0: t0 + (t1 - t0) * u0, t1: t0 + (t1 - t0) * u1 },
+            Prim::Poly { ref pts, .. } => {
+                let n = (pts.len() - 1) as f64;
+                let mut v = vec![self.at(u0)];
+                for (i, p) in pts.iter().enumerate() {
+                    let u = i as f64 / n;
+                    if u > u0 + 1e-12 && u < u1 - 1e-12 {
+                        v.push(*p);
+                    }
+                }
+                v.push(self.at(u1));
+                Seg::Poly { pts: v, closed: false }
+            }
         }
     }
     fn is_full_circle(&self) -> bool {
-        matches!(*self, Prim::Arc { t0, t1, .. } if (t1 - t0 - TAU).abs() < 1e-12)
+        matches!(*self, Prim::Arc { t0, t1, .. } if (t1 - t0 - TAU).abs() < 1e-12) || matches!(*self, Prim::Poly { closed: true, .. })
     }
 }
 
+fn seg_seg(a: DVec2, b: DVec2, c: DVec2, d: DVec2) -> Option<DVec2> {
+    let r = b - a;
+    let s = d - c;
+    let den = r.perp_dot(s);
+    if den.abs() < 1e-14 {
+        return None;
+    }
+    let t = (c - a).perp_dot(s) / den;
+    let u = (c - a).perp_dot(r) / den;
+    let eps = 1e-9;
+    (t >= -eps && t <= 1.0 + eps && u >= -eps && u <= 1.0 + eps).then(|| a + r * t)
+}
+
 fn intersections(p: &Prim, q: &Prim) -> Vec<DVec2> {
+    if matches!(p, Prim::Poly { .. }) || matches!(q, Prim::Poly { .. }) {
+        let (sp, sq) = (p.segments(), q.segments());
+        let mut out: Vec<DVec2> = vec![];
+        for (a, b) in &sp {
+            for (c, d) in &sq {
+                if let Some(x) = seg_seg(*a, *b, *c, *d) {
+                    if !out.iter().any(|o| (*o - x).length() < TOL * 10.0) {
+                        out.push(x);
+                    }
+                }
+            }
+        }
+        return out.into_iter().filter(|x| p.param(*x).is_some() && q.param(*x).is_some()).collect();
+    }
     let circ = |pr: &Prim| match *pr {
         Prim::Arc { c, r, .. } => Some((c, r)),
         _ => None,
@@ -266,11 +335,16 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
                 let (t0, t1) = arc_angles(cc, pa, pb);
                 (r > TOL).then_some(Prim::Arc { c: cc, r, t0, t1 })
             }
+            _ => {
+                let closed = matches!(c.geom, Geom::Ellipse { .. } | Geom::Spline { closed: true, .. } | Geom::Poly { closed: true, .. });
+                let pts = s.tessellate(c, 0.5);
+                (pts.len() >= 2).then_some(Prim::Poly { pts, closed })
+            }
         })
         .collect();
 
     // split parameters per primitive
-    let mut splits: Vec<Vec<f64>> = prims.iter().map(|p| if p.is_full_circle() { vec![0.0, 0.5, 1.0] } else { vec![0.0, 1.0] }).collect();
+    let mut splits: Vec<Vec<f64>> = prims.iter().map(|p| if p.is_full_circle() { vec![0.0, 1.0 / 3.0, 2.0 / 3.0, 1.0] } else { vec![0.0, 1.0] }).collect();
     for i in 0..prims.len() {
         for j in i + 1..prims.len() {
             for x in intersections(&prims[i], &prims[j]) {
@@ -508,6 +582,10 @@ fn prim_of(s: &Sketch, c: &crate::sketch::Curve) -> Option<Prim> {
             let (t0, t1) = arc_angles(cc, pa, pb);
             Some(Prim::Arc { c: cc, r: (pa - cc).length(), t0, t1 })
         }
+        _ => {
+            let closed = matches!(c.geom, Geom::Ellipse { .. } | Geom::Spline { closed: true, .. } | Geom::Poly { closed: true, .. });
+            Some(Prim::Poly { pts: s.tessellate(c, 0.5), closed })
+        }
     }
 }
 
@@ -541,6 +619,21 @@ pub fn param_at(s: &Sketch, id: crate::sketch::Id, p: DVec2) -> Option<f64> {
         pr @ Prim::Arc { c, r, .. } => {
             let q = c + (p - c).normalize_or_zero() * r;
             pr.param(q).or(Some(0.0))
+        }
+        pr @ Prim::Poly { .. } => {
+            // nearest point on the polyline
+            let segs = pr.segments();
+            let n = segs.len() as f64;
+            let mut best = (f64::INFINITY, 0.0);
+            for (i, (a, b)) in segs.iter().enumerate() {
+                let d = *b - *a;
+                let t = if d.length_squared() < 1e-18 { 0.0 } else { ((p - *a).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
+                let dist = (*a + d * t - p).length();
+                if dist < best.0 {
+                    best = (dist, (i as f64 + t) / n);
+                }
+            }
+            Some(best.1)
         }
     }
 }
