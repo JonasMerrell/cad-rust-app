@@ -24,9 +24,10 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["fillet", "chamfer", "shell", "hole", "draft"],
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
     &["thicken", "helix", "transform", "deleteFace"],
+    &["sheetMetal"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
-pub const PRIMARY: &[&str] = &["sketch", "extrude", "revolve", "fillet", "hole"];
+pub const PRIMARY: &[&str] = &["sketch", "extrude", "revolve", "fillet", "hole", "sheetMetal"];
 
 pub fn shortcut(kind: &str) -> Option<&'static str> {
     Some(match kind {

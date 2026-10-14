@@ -22,6 +22,7 @@ enum Accept {
     Path,
     Features,
     Curve,
+    SheetProfile,
 }
 
 impl Accept {
@@ -36,6 +37,7 @@ impl Accept {
             Accept::Bodies => matches!(r, Ref::Body { .. } | Ref::Face { .. } | Ref::Edge { .. }),
             Accept::Path => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
             Accept::Features => matches!(r, Ref::Feature { .. }),
+            Accept::SheetProfile => matches!(r, Ref::SketchCurve { .. } | Ref::Region { .. }),
             Accept::Curve => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
         }
     }
@@ -50,6 +52,7 @@ impl Accept {
             Accept::Bodies => "bodies (or a face of each)",
             Accept::Path => "sketch curves, edges or a helix",
             Accept::Features => "features in the feature list",
+            Accept::SheetProfile => "connected sketch lines, or a region for a flat plate",
             Accept::Curve => "a curve or edge",
         }
     }
@@ -108,6 +111,7 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
             }
         }
         Op::DeleteFace { faces } => vec![("Faces", Faces, Slot::Many(faces))],
+        Op::SheetMetal { profile, .. } => vec![("Profile", SheetProfile, Slot::Many(profile))],
         Op::Boolean { target, tools, .. } => vec![("Target body", Bodies, Slot::One(target)), ("Tool bodies", Bodies, Slot::Many(tools))],
         Op::Split { target, plane } => vec![("Target body", Bodies, Slot::One(target)), ("Split plane", Planar, Slot::One(plane))],
         Op::DeleteBody { bodies } => vec![("Bodies", Bodies, Slot::Many(bodies))],
@@ -224,6 +228,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut ok = false;
     let mut cancel = false;
     let mut new_active = None;
+    let flat = app.result.flats.iter().find(|f| f.feature == fid).cloned();
+    let mut export_flat = false;
 
     let area = egui::Area::new(egui::Id::new("feature-dialog")).order(egui::Order::Middle);
     let area = if phone {
@@ -431,6 +437,20 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         val(ui, "Total angle (°)", angle, Kind::Angle, &mut changed);
                     }
                     Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
+                    Op::SheetMetal { thickness, radius, k_factor, depth, flip, op: bop, .. } => {
+                        combo(ui, "Operation", bop, &bool_ops, &mut changed);
+                        val(ui, "Thickness", thickness, Kind::Length, &mut changed);
+                        val(ui, "Bend radius", radius, Kind::Length, &mut changed);
+                        val(ui, "K-factor", k_factor, Kind::Count, &mut changed);
+                        val(ui, "Depth", depth, Kind::Length, &mut changed);
+                        check(ui, "Material on the other side", flip, &mut changed);
+                        if let Some(f) = flat.as_ref() {
+                            ui.label(RichText::new(format!("Flat pattern {} × {}", units.fmt_with(f.size[0]), units.fmt_with(f.size[1]))).color(MUTED).size(12.0));
+                            if ui.button("Export flat pattern DXF…").clicked() {
+                                export_flat = true;
+                            }
+                        }
+                    }
                     Op::Thicken { thickness, opposite, op: bop, .. } => {
                         combo(ui, "Operation", bop, &bool_ops, &mut changed);
                         val(ui, "Thickness", thickness, Kind::Length, &mut changed);
@@ -473,6 +493,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
             });
     });
+    if export_flat {
+        if let Some(f) = &flat {
+            if let Some(p) = rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name("flat-pattern.dxf").save_file() {
+                match std::fs::write(&p, crate::kernel::flat_dxf(f)) {
+                    Ok(()) => app.flash_info(format!("Exported {}", p.display()), Some(std::time::Duration::from_secs(3))),
+                    Err(e) => app.flash(format!("Could not export: {e}"), crate::app::ToastKind::Error),
+                }
+            }
+        }
+    }
     if ENTER.with(|e| e.replace(false)) {
         ok = true;
     }

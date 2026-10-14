@@ -293,6 +293,17 @@ pub enum Op {
     DeleteFace {
         faces: Vec<Ref>,
     },
+    /// Sheet metal part from a chain of sketch lines (bent) or a region (flat plate).
+    SheetMetal {
+        profile: Vec<Ref>,
+        thickness: String,
+        radius: String,
+        k_factor: String,
+        depth: String,
+        /// Put the material on the other side of the sketch lines.
+        flip: bool,
+        op: BoolOp,
+    },
     Import {
         name: String,
         /// STEP text, embedded so the document is self-contained.
@@ -325,6 +336,7 @@ impl Op {
             Op::Helix { .. } => "helix",
             Op::Transform { .. } => "transform",
             Op::DeleteFace { .. } => "deleteFace",
+            Op::SheetMetal { .. } => "sheetMetal",
         }
     }
 
@@ -337,6 +349,7 @@ impl Op {
             "helix" => Op::Helix { axis: None, radius: s("10"), pitch: s("5"), turns: s("4"), left: false },
             "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
             "deleteFace" => Op::DeleteFace { faces: vec![] },
+            "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
             "extrude" => Op::Extrude {
                 profiles: vec![],
                 end: EndType::Blind,
@@ -411,6 +424,7 @@ pub fn kind_label(kind: &str) -> &'static str {
         "helix" => "Helix",
         "transform" => "Transform",
         "deleteFace" => "Delete face",
+        "sheetMetal" => "Sheet metal",
         _ => "Feature",
     }
 }

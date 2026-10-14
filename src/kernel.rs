@@ -74,6 +74,8 @@ pub struct RebuildResult {
     pub bodies: Vec<BodyMesh>,
     #[serde(default)]
     pub curves: Vec<CurveMesh>,
+    #[serde(default)]
+    pub flats: Vec<FlatPattern>,
     /// Frames of plane and sketch features.
     pub frames: HashMap<FeatId, Frame>,
 }
@@ -94,6 +96,7 @@ pub struct Model<'a> {
     pub curves: Vec<(FeatId, Shape)>,
     /// Tool bodies and operation of each feature, for feature patterns.
     pub tools: HashMap<FeatId, (Vec<Shape>, BoolOp)>,
+    pub flats: Vec<FlatPattern>,
 }
 
 type R<T> = Result<T, String>;
@@ -105,7 +108,7 @@ fn v3(a: [f64; 3]) -> DVec3 {
 impl<'a> Model<'a> {
     pub fn new(doc: &'a Document) -> Self {
         let (vars, _) = doc.var_values();
-        Model { doc, vars, bodies: vec![], frames: HashMap::new(), curves: vec![], tools: HashMap::new() }
+        Model { doc, vars, bodies: vec![], frames: HashMap::new(), curves: vec![], tools: HashMap::new(), flats: vec![] }
     }
 
     fn units(&self) -> Units {
@@ -468,6 +471,15 @@ impl<'a> Model<'a> {
                 self.face_op(faces, |shape, fs| occ::draft(shape, fs, n, a, p, n))
             }
             Op::DeleteFace { faces } => self.face_op(faces, occ::delete_faces),
+            Op::SheetMetal { profile, thickness, radius, k_factor, depth, flip, op } => {
+                let t = self.len(thickness)?;
+                let r = self.len(radius)?;
+                let k = crate::doc::eval(k_factor, Kind::Count, &self.vars, self.units())?;
+                let d = self.len(depth)?;
+                let (tools, flat) = self.sheet_metal(fid, profile, t, r, k, d, *flip)?;
+                self.flats.push(flat);
+                self.apply(fid, tools, *op)
+            }
             Op::Thicken { faces, thickness, opposite, op } => {
                 let t = self.len(thickness)?;
                 let profiles = self.profile_faces(faces)?;
@@ -919,6 +931,7 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
             out.bodies.push(mesh);
         }
     }
+    out.flats = std::mem::take(&mut m.flats);
     for (fid, s) in &m.curves {
         let pts: Vec<[f32; 3]> = unique_edges(s).iter().flat_map(|e| e.approximation_segments().map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect::<Vec<_>>()).collect();
         out.curves.push(CurveMesh { feature: *fid, pts });
@@ -1018,6 +1031,8 @@ pub fn seg_edges(segs: &[Seg], fr: &Frame) -> R<Vec<Edge>> {
                 let n = if t1 > t0 { fr.normal() } else { -fr.normal() };
                 edges.push(Edge::circle(fr.to_world(*c), n, *r));
             }
+            // a zero-radius arc is a sharp corner
+            Seg::Arc { r, .. } if *r < 1e-7 => {}
             Seg::Arc { .. } => edges.push(Edge::arc(fr.to_world(s.start()), fr.to_world(s.mid()), fr.to_world(s.end()))),
             Seg::Poly { pts, closed } => {
                 let w: Vec<DVec3> = pts.iter().map(|p| fr.to_world(*p)).collect();
@@ -1802,5 +1817,261 @@ mod projection_tests {
         assert!((b[1][0] - b[0][0] - 40.0).abs() < 1e-6, "{b:?}");
         assert!((b[1][1] - b[0][1] - 10.0).abs() < 1e-6, "{b:?}");
         assert!(v[0].visible.len() >= 4);
+    }
+}
+
+// ------------------------------------------------------------------ sheet metal
+
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+pub struct FlatPattern {
+    pub feature: FeatId,
+    /// Outline polylines of the flat blank (mm).
+    pub outline: Vec<Vec<[f64; 2]>>,
+    /// Bend lines across the blank.
+    pub bends: Vec<[[f64; 2]; 2]>,
+    pub size: [f64; 2],
+}
+
+/// Fillet the corners of an open polyline: each corner gets an arc of the given radius.
+/// Returns segments and, per corner, (turn angle, radius on the path side).
+fn filleted_path(pts: &[DVec2], radii: &[f64]) -> R<(Vec<Seg>, Vec<f64>)> {
+    let n = pts.len();
+    let mut segs = vec![];
+    let mut cur = pts[0];
+    let mut angles = vec![];
+    for i in 1..n - 1 {
+        let (p, a, b) = (pts[i], pts[i - 1], pts[i + 1]);
+        let u = (p - a).normalize();
+        let v = (b - p).normalize();
+        let turn = u.angle_to(v);
+        let r = radii[i - 1];
+        let d = r * (turn.abs() / 2.0).tan();
+        if d > (p - a).length() * 0.999 || d > (b - p).length() * 0.999 {
+            return Err("a segment is too short for its bend".into());
+        }
+        let t1 = p - u * d;
+        let t2 = p + v * d;
+        segs.push(Seg::Line { a: cur, b: t1 });
+        if turn.abs() > 1e-9 {
+            // centre is to the left for left turns
+            let side = if turn > 0.0 { u.perp() } else { -u.perp() };
+            let c = t1 + side * r;
+            let (a0, a1) = ((t1 - c).to_angle(), (t2 - c).to_angle());
+            let mut a1 = a1;
+            if turn > 0.0 {
+                while a1 < a0 {
+                    a1 += std::f64::consts::TAU;
+                }
+            } else {
+                while a1 > a0 {
+                    a1 -= std::f64::consts::TAU;
+                }
+            }
+            segs.push(Seg::Arc { c, r, t0: a0, t1: a1 });
+        }
+        angles.push(turn);
+        cur = t2;
+    }
+    segs.push(Seg::Line { a: cur, b: pts[n - 1] });
+    Ok((segs, angles))
+}
+
+/// Order selected sketch lines into a connected chain of points.
+fn chain_points(sk: &crate::sketch::Sketch, ids: &[crate::sketch::Id]) -> R<Vec<DVec2>> {
+    let mut lines: Vec<(crate::sketch::Id, crate::sketch::Id)> = vec![];
+    for id in ids {
+        match sk.curve(*id).map(|c| &c.geom) {
+            Some(crate::sketch::Geom::Line { a, b }) => lines.push((*a, *b)),
+            _ => return Err("sheet metal profiles are made of sketch lines".into()),
+        }
+    }
+    if lines.is_empty() {
+        return Err("select the profile lines".into());
+    }
+    // start at a point used once
+    let count = |p: crate::sketch::Id| lines.iter().filter(|l| l.0 == p || l.1 == p).count();
+    let start = lines.iter().flat_map(|l| [l.0, l.1]).find(|p| count(*p) == 1).ok_or("the profile must be an open chain")?;
+    let mut order = vec![start];
+    let mut used = vec![false; lines.len()];
+    let mut cur = start;
+    loop {
+        let Some(i) = (0..lines.len()).find(|&i| !used[i] && (lines[i].0 == cur || lines[i].1 == cur)) else { break };
+        used[i] = true;
+        cur = if lines[i].0 == cur { lines[i].1 } else { lines[i].0 };
+        order.push(cur);
+    }
+    if used.iter().any(|u| !u) {
+        return Err("the profile lines must connect end to end".into());
+    }
+    Ok(order.iter().map(|p| sk.pv(*p)).collect())
+}
+
+impl Model<'_> {
+    /// Build the folded sheet metal solid and its flat pattern.
+    pub fn sheet_metal(&self, fid: FeatId, profile: &[Ref], t: f64, r: f64, k: f64, depth: f64, flip: bool) -> R<(Vec<Shape>, FlatPattern)> {
+        if t <= 0.0 || r < 0.0 || depth <= 0.0 {
+            return Err("thickness and depth must be positive".into());
+        }
+        // a region: flat plate
+        if let Some(Ref::Region { .. }) = profile.first() {
+            let faces = self.profile_faces(profile)?;
+            let mut tools = vec![];
+            let mut flat = FlatPattern { feature: fid, ..Default::default() };
+            for (f, fr) in &faces {
+                tools.push(occ::prism(&Shape::from(f), fr.normal() * if flip { -t } else { t })?);
+                if let Ref::Region { sketch, point } = &profile[0] {
+                    let (sk, _) = self.sketch(*sketch)?;
+                    if let Some(reg) = find_regions(sk).into_iter().find(|g| g.contains(DVec2::from(*point))) {
+                        flat.outline.push(reg.outer.poly.iter().map(|p| [p.x, p.y]).collect());
+                        for h in &reg.holes {
+                            flat.outline.push(h.poly.iter().map(|p| [p.x, p.y]).collect());
+                        }
+                    }
+                }
+            }
+            let mut lo = [f64::INFINITY; 2];
+            let mut hi = [f64::NEG_INFINITY; 2];
+            for p in flat.outline.iter().flatten() {
+                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+            }
+            flat.size = [hi[0] - lo[0], hi[1] - lo[1]];
+            return Ok((tools, flat));
+        }
+        let mut ids = vec![];
+        let mut sketch_id = None;
+        for p in profile {
+            match p {
+                Ref::SketchCurve { sketch, curve } => {
+                    sketch_id = Some(*sketch);
+                    ids.push(*curve);
+                }
+                _ => return Err("select sketch lines (or a region for a flat plate)".into()),
+            }
+        }
+        let sid = sketch_id.ok_or("select the profile lines")?;
+        let (sk, fr) = self.sketch(sid)?;
+        let pts = chain_points(sk, &ids)?;
+        // material on the left of the path (right when flipped)
+        let side = if flip { -1.0 } else { 1.0 };
+        // turning towards the material puts the path on the outside of the bend
+        let turns: Vec<f64> = (1..pts.len() - 1).map(|i| (pts[i] - pts[i - 1]).angle_to(pts[i + 1] - pts[i])).collect();
+        let path_r: Vec<f64> = turns.iter().map(|tn| if tn * side > 0.0 { r + t } else { r }).collect();
+        let (path, angles) = filleted_path(&pts, &path_r)?;
+        // offset path by t to the material side
+        let off: Vec<Seg> = path
+            .iter()
+            .map(|s| match *s {
+                Seg::Line { a, b } => {
+                    let nrm = (b - a).normalize().perp() * side * t;
+                    Seg::Line { a: a + nrm, b: b + nrm }
+                }
+                Seg::Arc { c, r: rr, t0, t1 } => {
+                    // the material side is inside the arc for turns towards it
+                    let towards = (t1 > t0) == (side > 0.0);
+                    Seg::Arc { c, r: if towards { rr - t } else { rr + t }, t0, t1 }
+                }
+                ref other => other.clone(),
+            })
+            .collect();
+        let mut outline = path.clone();
+        outline.push(Seg::Line { a: path.last().unwrap().end(), b: off.last().unwrap().end() });
+        outline.extend(off.iter().rev().map(|s| s.reversed()));
+        outline.push(Seg::Line { a: off[0].start(), b: path[0].start() });
+        let edges = seg_edges(&outline, &fr)?;
+        let wire = occ::wire(&edges)?;
+        let face = occ::face(&wire, &[])?;
+        let solid = occ::prism(&Shape::from(&face), fr.normal() * depth)?;
+        // flat pattern: straight lengths along the path side + bend allowances on the neutral layer
+        let mut flat = FlatPattern { feature: fid, ..Default::default() };
+        let mut x = 0.0;
+        let mut bends = vec![];
+        for s in &path {
+            match *s {
+                Seg::Line { a, b } => x += (b - a).length(),
+                Seg::Arc { .. } => {}
+                _ => {}
+            }
+        }
+        let _ = x;
+        // walk again to place bend lines
+        let mut pos = 0.0;
+        let mut ai = 0;
+        for s in &path {
+            match *s {
+                Seg::Line { a, b } => pos += (b - a).length(),
+                Seg::Arc { .. } => {
+                    let theta = angles[ai].abs();
+                    let inner = if angles[ai] * side > 0.0 { path_r[ai] - t } else { path_r[ai] };
+                    let ba = theta * (inner + k * t);
+                    bends.push(pos + ba / 2.0);
+                    pos += ba;
+                    ai += 1;
+                }
+                _ => {}
+            }
+        }
+        flat.size = [pos, depth];
+        flat.outline.push(vec![[0.0, 0.0], [pos, 0.0], [pos, depth], [0.0, depth], [0.0, 0.0]]);
+        flat.bends = bends.iter().map(|b| [[*b, 0.0], [*b, depth]]).collect();
+        Ok((vec![solid], flat))
+    }
+}
+
+/// DXF of a flat pattern (outline on layer CUT, bend lines on layer BEND).
+pub fn flat_dxf(f: &FlatPattern) -> String {
+    let mut s = String::from("0\nSECTION\n2\nENTITIES\n");
+    let line = |s: &mut String, layer: &str, a: [f64; 2], b: [f64; 2]| {
+        s.push_str(&format!("0\nLINE\n8\n{layer}\n10\n{:.4}\n20\n{:.4}\n30\n0\n11\n{:.4}\n21\n{:.4}\n31\n0\n", a[0], a[1], b[0], b[1]));
+    };
+    for pl in &f.outline {
+        for w in pl.windows(2) {
+            line(&mut s, "CUT", w[0], w[1]);
+        }
+        if pl.len() > 2 && pl[0] != pl[pl.len() - 1] {
+            line(&mut s, "CUT", pl[pl.len() - 1], pl[0]);
+        }
+    }
+    for b in &f.bends {
+        line(&mut s, "BEND", b[0], b[1]);
+    }
+    s.push_str("0\nENDSEC\n0\nEOF\n");
+    s
+}
+
+#[cfg(test)]
+mod sheet_metal_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    #[test]
+    fn u_channel_volume_and_flat_length() {
+        // U profile: up 20, across 30, down 20
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 20.0), (0.0, 0.0), (30.0, 0.0), (30.0, 20.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        let l: Vec<_> = (0..3).map(|i| s.add_curve(Geom::Line { a: p[i], b: p[i + 1] }, false)).collect();
+        let mut doc = Document::default();
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Front }, sketch: s, frame: Frame::FRONT });
+        let mut sm = Op::new_default("sheetMetal").unwrap();
+        if let Op::SheetMetal { profile, thickness, radius, k_factor, depth, .. } = &mut sm {
+            for id in &l {
+                profile.push(Ref::SketchCurve { sketch: sk, curve: *id });
+            }
+            *thickness = "2".into();
+            *radius = "2".into();
+            *k_factor = "0.5".into();
+            *depth = "50".into();
+        }
+        let fid = doc.insert("SM".into(), sm);
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        assert_eq!(r.bodies.len(), 1);
+        let flat = r.flats.iter().find(|f| f.feature == fid).unwrap();
+        // neutral length * thickness * depth = volume
+        let want = flat.size[0] * 2.0 * 50.0;
+        assert!((r.bodies[0].volume - want).abs() / want < 0.01, "{} vs {want}", r.bodies[0].volume);
+        assert_eq!(flat.bends.len(), 2);
     }
 }
