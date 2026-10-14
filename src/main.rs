@@ -1,3 +1,4 @@
+mod agent;
 mod app;
 mod asm_ui;
 mod assembly;
@@ -23,6 +24,25 @@ mod worker;
 mod workspace;
 
 fn main() -> eframe::Result {
+    let args: Vec<String> = std::env::args().collect();
+    match args.get(1).map(|s| s.as_str()) {
+        Some("mcp") => {
+            agent::mcp_main();
+            return Ok(());
+        }
+        Some("run") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: cad-app run script.json");
+                std::process::exit(2);
+            };
+            std::process::exit(agent::run_script(path));
+        }
+        Some("--help") | Some("-h") => {
+            println!("cad-app [part.json]        open the editor\ncad-app mcp                Model Context Protocol server on stdio (for AI agents)\ncad-app run script.json    run a JSON list of tool calls (see AGENTS.md)");
+            return Ok(());
+        }
+        _ => {}
+    }
     if std::env::args().any(|a| a == "--kernel-worker") {
         worker::worker_main();
         return Ok(());

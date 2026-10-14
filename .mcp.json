@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "cad": {
+      "command": "cad-app",
+      "args": ["mcp"]
+    }
+  }
+}

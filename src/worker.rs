@@ -103,7 +103,16 @@ pub struct KernelClient {
 
 impl KernelClient {
     pub fn new(ctx: egui::Context) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx: Some(ctx) };
+        Self::with_ctx(Some(ctx))
+    }
+
+    /// A kernel without a window to wake (for the agent interface).
+    pub fn new_headless() -> Self {
+        Self::with_ctx(None)
+    }
+
+    fn with_ctx(ctx: Option<egui::Context>) -> Self {
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx };
         k.spawn();
         k
     }
@@ -273,6 +282,52 @@ impl KernelClient {
             }
         }
         out
+    }
+}
+
+impl KernelClient {
+    fn wait_for<T>(&mut self, mut pick: impl FnMut(Outcome) -> Option<T>) -> Result<T, String> {
+        let start = std::time::Instant::now();
+        loop {
+            for o in self.poll() {
+                if let Some(t) = pick(o) {
+                    return Ok(t);
+                }
+            }
+            if self.state == KernelState::Error {
+                return Err("the modelling kernel keeps crashing".into());
+            }
+            if start.elapsed() > std::time::Duration::from_secs(600) {
+                return Err("the kernel timed out".into());
+            }
+            std::thread::sleep(std::time::Duration::from_millis(3));
+        }
+    }
+
+    /// Rebuild and wait for the result.
+    pub fn rebuild_blocking(&mut self, tag: usize, doc: &Document) -> Result<RebuildResult, String> {
+        self.rebuild(tag, doc);
+        self.wait_for(|o| match o {
+            Outcome::Rebuilt(t, r) if t == tag => Some(r),
+            _ => None,
+        })
+    }
+
+    pub fn export_blocking(&mut self, doc: &Document, format: &str, path: String) -> Result<(), String> {
+        self.export(doc, format, path);
+        self.wait_for(|o| match o {
+            Outcome::Exported(err, _) => Some(err),
+            _ => None,
+        })?
+        .map_or(Ok(()), Err)
+    }
+
+    pub fn project_blocking(&mut self, tag: usize, key: &str, doc: &Document, views: Vec<([f64; 3], [f64; 3], bool)>) -> Result<Vec<kernel::ProjView>, String> {
+        self.project(tag, key.to_string(), doc, views);
+        self.wait_for(|o| match o {
+            Outcome::Projected(t, k, v) if t == tag && k == key => Some(v),
+            _ => None,
+        })
     }
 }
 

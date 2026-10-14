@@ -1,0 +1,20 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "set_variable", "args": {"name": "w", "expr": "60"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [
+    {"type": "rect", "corner1": [0, 0], "corner2": [60, 40]},
+    {"type": "circle", "center": [30, 20], "radius": 6}
+  ]}},
+  {"tool": "sketch_constrain", "args": {"sketch_id": 1, "constraints": [
+    {"type": "length", "l": 5, "value": "w"},
+    {"type": "diameter", "c": 12, "value": 12}
+  ]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 8}}},
+  {"tool": "list_geometry", "args": {}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [60, 20, 8]}], "radius": 3}}},
+  {"tool": "render", "args": {"view": "iso", "path": "shots/agent-render.png"}},
+  {"tool": "export", "args": {"format": "step", "path": "/tmp/claude-1000/bracket.step"}},
+  {"tool": "export_drawing", "args": {"path": "/tmp/claude-1000/bracket.pdf", "title": "Bracket"}},
+  {"tool": "save_document", "args": {"path": "/tmp/claude-1000/bracket.json"}}
+]
