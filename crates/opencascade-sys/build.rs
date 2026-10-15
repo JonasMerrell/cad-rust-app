@@ -107,6 +107,20 @@ fn main() {
         build.include(current.parent().unwrap());
     }
 
+    // With MSVC, OCCT declares `Handle_X` as a class derived from `opencascade::handle<X>`
+    // instead of a typedef, which breaks the bindings that treat the two as one type.
+    // OCCT's own API only uses `opencascade::handle<X>`, so the bindings can see the
+    // typedef form: put a patched Standard_Handle.hxx ahead of OCCT's headers.
+    if target.contains("msvc") {
+        let src = std::fs::read_to_string(occt_config.include_dir.join("Standard_Handle.hxx")).expect("Standard_Handle.hxx");
+        let patched = src.replace("#if (defined(_MSC_VER) && _MSC_VER >= 1800)", "#if 0");
+        assert!(patched != src, "Standard_Handle.hxx changed: update the MSVC handle patch");
+        let dir = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap()).join("occt-override");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("Standard_Handle.hxx"), patched).unwrap();
+        build.include(dir);
+    }
+
     build
         .cpp(true)
         .flag_if_supported("-std=c++11")
