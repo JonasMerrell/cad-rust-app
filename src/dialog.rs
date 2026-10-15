@@ -121,6 +121,9 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         Op::Fill { edges } => vec![("Boundary", Curve, Slot::Many(edges))],
         Op::OffsetSurface { faces, .. } => vec![("Faces", Bodies, Slot::Many(faces))],
         Op::Knit { bodies, .. } => vec![("Surfaces", Bodies, Slot::Many(bodies))],
+        Op::Flange { edges, .. } => vec![("Edges", Edges, Slot::Many(edges))],
+        Op::Tab { profiles } => vec![("Profiles", Profiles, Slot::Many(profiles))],
+        Op::ConvertSheet { faces, .. } => vec![("Open faces", Faces, Slot::Many(faces))],
         Op::Sketch { .. } | Op::Import { .. } | Op::Derived { .. } => vec![],
     }
 }
@@ -490,6 +493,13 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                     Op::SurfaceRevolve { angle, .. } => val(ui, "Angle (°)", angle, Kind::Angle, &mut changed),
                     Op::SurfaceLoft { ruled, .. } => check(ui, "Straight (ruled) sides", ruled, &mut changed),
+                    Op::Flange { length, angle, flip, inset, .. } => {
+                        val(ui, "Length", length, Kind::Length, &mut changed);
+                        val(ui, "Angle (°)", angle, Kind::Angle, &mut changed);
+                        val(ui, "Inset (relief)", inset, Kind::Length, &mut changed);
+                        check(ui, "Bend the other way", flip, &mut changed);
+                    }
+                    Op::ConvertSheet { thickness, .. } => val(ui, "Thickness", thickness, Kind::Length, &mut changed),
                     Op::OffsetSurface { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
                     Op::Knit { solid, .. } => check(ui, "Make a solid if closed", solid, &mut changed),
                     Op::Derived { studio, bodies } => {

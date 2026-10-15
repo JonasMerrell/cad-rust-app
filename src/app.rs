@@ -25,7 +25,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
     &["thicken", "rib", "helix", "transform", "moveFace", "deleteFace"],
     &["surfaceExtrude", "surfaceRevolve", "surfaceLoft", "fill", "offsetSurface", "knit"],
-    &["sheetMetal", "derived"],
+    &["sheetMetal", "flange", "tab", "convertSheet", "derived"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
 pub const PRIMARY: &[&str] = &["sketch"];

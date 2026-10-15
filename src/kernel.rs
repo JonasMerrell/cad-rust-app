@@ -100,6 +100,18 @@ pub struct Model<'a> {
     /// Tool bodies and operation of each feature, for feature patterns.
     pub tools: HashMap<FeatId, (Vec<Shape>, BoolOp)>,
     pub flats: Vec<FlatPattern>,
+    /// Sheet metal bodies: thickness, bend radius, K-factor, the feature with its flat pattern.
+    pub sheet: HashMap<BodyId, SheetInfo>,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct SheetInfo {
+    pub t: f64,
+    pub r: f64,
+    pub k: f64,
+    pub feature: FeatId,
+    /// Sketch frame of flat-plate parts (their flat pattern is in this frame).
+    pub frame: Option<Frame>,
 }
 
 type R<T> = Result<T, String>;
@@ -118,7 +130,7 @@ fn v3(a: [f64; 3]) -> DVec3 {
 impl<'a> Model<'a> {
     pub fn new(doc: &'a Document) -> Self {
         let (vars, _) = doc.var_values();
-        Model { doc, vars, bodies: vec![], frames: HashMap::new(), curves: vec![], tools: HashMap::new(), flats: vec![] }
+        Model { doc, vars, bodies: vec![], frames: HashMap::new(), curves: vec![], tools: HashMap::new(), flats: vec![], sheet: HashMap::new() }
     }
 
     fn units(&self) -> Units {
@@ -669,7 +681,66 @@ impl<'a> Model<'a> {
                 let d = self.len(depth)?;
                 let (tools, flat) = self.sheet_metal(fid, profile, t, r, k, d, *flip)?;
                 self.flats.push(flat);
-                self.apply(fid, tools, *op)
+                self.apply(fid, tools, *op)?;
+                let frame = match profile.first() {
+                    Some(Ref::Region { sketch, .. }) => self.frames.get(sketch).copied(),
+                    _ => None,
+                };
+                for b in self.bodies.iter().filter(|b| b.id.0 == fid) {
+                    self.sheet.insert(b.id, SheetInfo { t, r, k, feature: fid, frame });
+                }
+                Ok(())
+            }
+            Op::Flange { edges, length, angle, flip, inset } => {
+                let l = self.len(length)?;
+                let ang = self.ang(angle)?.to_radians();
+                let inset = self.len(inset)?;
+                if edges.is_empty() {
+                    return Err("select straight edges of a sheet metal part".into());
+                }
+                for r in edges {
+                    let Ref::Edge { point } = r else { return Err("select edges".into()) };
+                    let (e, bi) = self.find_edge(v3(*point))?;
+                    let id = self.bodies[bi].id;
+                    let info = *self.sheet.get(&id).ok_or("pick an edge of a sheet metal part")?;
+                    let (flange, relief, flat_add) = self.flange_shape(&e, bi, &info, l, ang, *flip, inset)?;
+                    let mut shape = occ::fuse(&self.bodies[bi].shape, &flange)?;
+                    if let Some(rel) = relief {
+                        shape = occ::cut(&shape, &rel)?;
+                    }
+                    self.bodies[bi].shape = shape;
+                    if let (Some(add), Some(f)) = (flat_add, self.flats.iter_mut().find(|f| f.feature == info.feature)) {
+                        f.outline.push(add.0);
+                        f.bends.push(add.1);
+                    }
+                }
+                Ok(())
+            }
+            Op::Tab { profiles } => {
+                let faces = self.profile_faces(profiles)?;
+                let mut tools = vec![];
+                for (face, fr) in &faces {
+                    // thickness from the sheet metal part the tab touches
+                    let info = self.sheet.values().next().copied().ok_or("there is no sheet metal part")?;
+                    let s = occ::prism(&Shape::from(face), -fr.normal() * info.t)?;
+                    let s2 = occ::prism(&Shape::from(face), fr.normal() * info.t)?;
+                    // go into the material: whichever side overlaps the part more
+                    let pick = if self.bodies.iter().any(|b| overlaps_volume(&b.shape, &s)) { s } else { s2 };
+                    tools.push(pick);
+                }
+                self.apply(fid, tools, BoolOp::Add)
+            }
+            Op::ConvertSheet { faces, thickness } => {
+                let t = self.len(thickness)?;
+                if faces.is_empty() {
+                    return Err("select the faces to leave open".into());
+                }
+                self.face_op(faces, |shape, fs| occ::shell(shape, fs, -t))?;
+                let ids: Vec<BodyId> = faces.iter().filter_map(|r| self.find_face_ref(r).ok().map(|(_, bi)| self.bodies[bi].id)).collect();
+                for id in ids {
+                    self.sheet.insert(id, SheetInfo { t, r: 0.0, k: 0.45, feature: fid, frame: None });
+                }
+                Ok(())
             }
             Op::Thicken { faces, thickness, opposite, op } => {
                 let t = self.len(thickness)?;
@@ -1026,6 +1097,96 @@ impl<'a> Model<'a> {
             }
         }
         Ok(v)
+    }
+
+    /// A flange solid along edge `e` of body `bi`, an optional relief cut, and the
+    /// flat-pattern addition (outline polygon, bend line) for flat-plate parts.
+    #[allow(clippy::too_many_arguments, clippy::type_complexity)]
+    fn flange_shape(&self, e: &Edge, bi: usize, info: &SheetInfo, l: f64, ang: f64, flip: bool, inset: f64) -> R<(Shape, Option<Shape>, Option<(Vec<[f64; 2]>, [[f64; 2]; 2])>)> {
+        if !e_is_line(e) {
+            return Err("flanges need straight edges".into());
+        }
+        let (mut p0, mut p1) = (e.start_point(), e.end_point());
+        let u = (p1 - p0).normalize();
+        if inset * 2.0 >= (p1 - p0).length() {
+            return Err("the inset is longer than the edge".into());
+        }
+        p0 += u * inset;
+        p1 -= u * inset;
+        // the large planar face along the edge is the sheet surface
+        let mid = (p0 + p1) / 2.0;
+        let mut best: Option<(f64, FaceGeom)> = None;
+        for f in unique_faces(&self.bodies[bi].shape) {
+            let g = face_geom(&f);
+            if !g.planar || g.normal.dot(u).abs() > 1e-6 || face_distance(&f, mid) > 1e-4 {
+                continue;
+            }
+            if best.as_ref().map(|b| g.area > b.0).unwrap_or(true) {
+                best = Some((g.area, g));
+            }
+        }
+        let (_, g) = best.ok_or("that edge is not on a flat sheet face")?;
+        let t = info.t;
+        let mut n = g.normal;
+        let mut w = n.cross(u).normalize();
+        if (mid - g.center).dot(w) < 0.0 {
+            w = -w;
+        }
+        let mut origin = p0;
+        if flip {
+            // bend away from this face: start from the opposite surface
+            origin -= n * t;
+            n = -n;
+        }
+        // profile in (w, n) coordinates, swept along u
+        let r = info.r;
+        let c = DVec2::new(0.0, r);
+        let inner_end = c + DVec2::from_angle(-std::f64::consts::FRAC_PI_2 + ang) * r;
+        let outer_end = c + DVec2::from_angle(-std::f64::consts::FRAC_PI_2 + ang) * (r + t);
+        let dir = DVec2::from_angle(ang);
+        let a0 = -std::f64::consts::FRAC_PI_2;
+        let mut segs = vec![];
+        if r > 1e-9 {
+            segs.push(Seg::Arc { c, r, t0: a0, t1: a0 + ang });
+        }
+        segs.push(Seg::Line { a: inner_end, b: inner_end + dir * l });
+        segs.push(Seg::Line { a: inner_end + dir * l, b: outer_end + dir * l });
+        segs.push(Seg::Line { a: outer_end + dir * l, b: outer_end });
+        segs.push(Seg::Arc { c, r: r + t, t0: a0 + ang, t1: a0 });
+        segs.push(Seg::Line { a: DVec2::new(0.0, -t), b: DVec2::new(0.0, 0.0) });
+        let fr = Frame { origin: origin.into(), x: w.into(), y: n.into(), normal: u.into() };
+        let wire = occ::wire(&seg_edges(&segs, &fr)?)?;
+        let face = occ::face(&wire, &[])?;
+        let solid = occ::prism(&Shape::from(&face), u * (p1 - p0).length())?;
+        // reliefs: slots the width of the sheet at each end of an inset flange
+        let relief = if inset > 1e-9 {
+            let depth = r + t;
+            let mut cut: Option<Shape> = None;
+            for (end, s) in [(p0, -1.0), (p1, 1.0)] {
+                let a = end - n * (t * 2.0) - w * depth;
+                let b = end + u * (s * t) + n * (t * 2.0 + r + l) + w * 0.01;
+                let bx = Shape::box_from_corners(a.min(b), a.max(b));
+                cut = Some(match cut {
+                    None => bx,
+                    Some(c) => occ::fuse(&c, &bx)?,
+                });
+            }
+            cut
+        } else {
+            None
+        };
+        // flat pattern: only for flat plates, whose flat is in their sketch frame
+        let flat_add = info.frame.map(|sf| {
+            let q0 = sf.to_local(p0);
+            let q1 = sf.to_local(p1);
+            let ww = sf.to_local(sf.to_world(DVec2::ZERO) + w) - sf.to_local(sf.to_world(DVec2::ZERO));
+            let ww = ww.normalize_or_zero();
+            let ba = ang * (r + info.k * t);
+            let ext = ba + l;
+            let poly = vec![q0.into(), q1.into(), (q1 + ww * ext).into(), (q0 + ww * ext).into(), q0.into()];
+            (poly, [(q0 + ww * ba / 2.0).into(), (q1 + ww * ba / 2.0).into()])
+        });
+        Ok((solid, relief, flat_add))
     }
 
     /// Add an open surface (shell or face) as a body of its own.
@@ -2629,5 +2790,36 @@ mod surface_tests {
         let tube_out = std::f64::consts::PI * (11.0f64.powi(2) - 100.0) * 20.0;
         let tube_in = std::f64::consts::PI * (100.0 - 81.0) * 20.0;
         assert!((v - tube_out).abs() < 1.0 || (v - tube_in).abs() < 1.0, "{v}");
+    }
+}
+
+#[cfg(test)]
+mod flange_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    #[test]
+    fn plate_with_flange() {
+        let mut doc = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (40.0, 0.0), (40.0, 30.0), (0.0, 30.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let sm = doc.insert(
+            "SM".into(),
+            Op::SheetMetal { profile: vec![Ref::Region { sketch: sk, point: [5.0, 5.0] }], thickness: "2".into(), radius: "2".into(), k_factor: "0.5".into(), depth: "10".into(), flip: false, op: BoolOp::New },
+        );
+        doc.insert("F".into(), Op::Flange { edges: vec![Ref::Edge { point: [40.0, 15.0, 2.0] }], length: "10".into(), angle: "90".into(), flip: false, inset: "0".into() });
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        let want = 40.0 * 30.0 * 2.0 + std::f64::consts::FRAC_PI_2 * 3.0 * 2.0 * 30.0 + 10.0 * 2.0 * 30.0;
+        assert!((r.bodies[0].volume - want).abs() < 0.5, "{} vs {want}", r.bodies[0].volume);
+        let flat = r.flats.iter().find(|f| f.feature == sm).unwrap();
+        assert_eq!(flat.bends.len(), 1);
+        assert!(r.bodies[0].bbox[1][2] > 13.9, "flange goes up: {:?}", r.bodies[0].bbox);
     }
 }

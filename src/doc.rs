@@ -355,6 +355,27 @@ pub enum Op {
         #[serde(default)]
         solid: bool,
     },
+    /// Bent wall along a sheet metal edge.
+    Flange {
+        edges: Vec<Ref>,
+        length: String,
+        angle: String,
+        /// Bend downwards instead of up.
+        #[serde(default)]
+        flip: bool,
+        /// Keep the flange this far from each end of the edge, with bend reliefs.
+        #[serde(default = "zero")]
+        inset: String,
+    },
+    /// Flat tab added to a sheet metal part from a sketch region on its face.
+    Tab {
+        profiles: Vec<Ref>,
+    },
+    /// Make a sheet metal part from a solid: hollow it, removing the chosen faces.
+    ConvertSheet {
+        faces: Vec<Ref>,
+        thickness: String,
+    },
     /// Parts brought in from another Part Studio.
     Derived {
         studio: usize,
@@ -419,6 +440,9 @@ impl Op {
             Op::SheetMetal { .. } => "sheetMetal",
             Op::MoveFace { .. } => "moveFace",
             Op::Derived { .. } => "derived",
+            Op::Flange { .. } => "flange",
+            Op::Tab { .. } => "tab",
+            Op::ConvertSheet { .. } => "convertSheet",
             Op::SurfaceExtrude { .. } => "surfaceExtrude",
             Op::SurfaceRevolve { .. } => "surfaceRevolve",
             Op::SurfaceLoft { .. } => "surfaceLoft",
@@ -439,6 +463,9 @@ impl Op {
             "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
             "deleteFace" => Op::DeleteFace { faces: vec![] },
             "derived" => Op::Derived { studio: 0, bodies: vec![] },
+            "flange" => Op::Flange { edges: vec![], length: s("20"), angle: s("90"), flip: false, inset: s("0") },
+            "tab" => Op::Tab { profiles: vec![] },
+            "convertSheet" => Op::ConvertSheet { faces: vec![], thickness: s("1") },
             "surfaceExtrude" => Op::SurfaceExtrude { curves: vec![], depth: s("10"), symmetric: false, opposite: false },
             "surfaceRevolve" => Op::SurfaceRevolve { curves: vec![], axis: None, angle: s("360") },
             "surfaceLoft" => Op::SurfaceLoft { curves: vec![], ruled: false },
@@ -510,6 +537,9 @@ pub fn kind_label(kind: &str) -> &'static str {
         "sheetMetal" => "Sheet metal",
         "moveFace" => "Move face",
         "derived" => "Derived",
+        "flange" => "Flange",
+        "tab" => "Tab",
+        "convertSheet" => "Convert to sheet metal",
         "surfaceExtrude" => "Extrude surface",
         "surfaceRevolve" => "Revolve surface",
         "surfaceLoft" => "Loft surface",
