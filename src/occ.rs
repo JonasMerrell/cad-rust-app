@@ -155,6 +155,10 @@ pub fn compound(shapes: &[&Shape]) -> R<Shape> {
     take(ex::ex_compound(&l), "compound")
 }
 
+pub fn unify(s: &Shape) -> R<Shape> {
+    take(ex::ex_unify(&s.inner), "unify")
+}
+
 pub fn is_valid(s: &Shape) -> bool {
     ex::ex_is_valid(&s.inner)
 }

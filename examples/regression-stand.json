@@ -1,0 +1,14 @@
+[
+  {"tool": "new_document", "args": {}},
+  {"tool": "create_sketch", "args": {"plane": "front"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [
+    {"type": "polyline", "closed": true, "points": [[0,0],[100,0],[100,10],[20,10],[20,8],[10,8],[10,20],[0,20],[0,10]]}
+  ]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 80, "end": "symmetric"}}},
+  {"tool": "list_geometry", "args": {"type": "faces", "normal": [-1, 0, 0]}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [0, 40, 10]}], "radius": 4}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [55, -40, 0]}], "radius": 50}}},
+  {"tool": "describe", "args": {}},
+  {"tool": "render", "args": {"view": "iso_front_left", "path": "shots/regression.png"}},
+  {"tool": "export", "args": {"format": "stl", "path": "/tmp/claude-1000/stand.stl"}}
+]

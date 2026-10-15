@@ -38,6 +38,7 @@
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <TopExp_Explorer.hxx>
@@ -79,6 +80,20 @@ inline std::unique_ptr<TopoDS_Shape> ex_fixed(const TopoDS_Shape &s) {
   return ex_wrap(fix->Shape());
 }
 
+/// Merge coplanar faces and collinear edges left over by modelling operations.
+inline TopoDS_Shape ex_unify_raw(const TopoDS_Shape &s) {
+  try {
+    ShapeUpgrade_UnifySameDomain u(s, Standard_True, Standard_True, Standard_False);
+    u.Build();
+    TopoDS_Shape r = u.Shape();
+    return r.IsNull() ? s : r;
+  } catch (...) {
+    return s;
+  }
+}
+
+inline std::unique_ptr<TopoDS_Shape> ex_unify(const TopoDS_Shape &s) { return ex_wrap(ex_unify_raw(s)); }
+
 inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, int op) {
   EX_TRY
   TopTools_ListOfShape args, tools;
@@ -98,9 +113,7 @@ inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const Top
   bop->Build();
   if (!bop->IsDone() || bop->HasErrors())
     return ex_null("boolean operation failed");
-  if (op == 0)
-    bop->SimplifyResult();
-  return ex_wrap(bop->Shape());
+  return ex_wrap(ex_unify_raw(bop->Shape()));
   EX_CATCH("boolean")
 }
 
@@ -110,7 +123,7 @@ inline std::unique_ptr<TopoDS_Shape> ex_prism(const TopoDS_Shape &profile, doubl
   mk.Build();
   if (!mk.IsDone())
     return ex_null("extrude failed");
-  return ex_wrap(mk.Shape());
+  return ex_wrap(ex_unify_raw(mk.Shape()));
   EX_CATCH("extrude")
 }
 

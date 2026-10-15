@@ -144,6 +144,7 @@ impl Session {
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| self.doc.next_name("sketch"));
                 let id = self.doc.insert(name, Op::Sketch { plane, sketch: Sketch::default(), frame });
                 self.rebuild()?;
+                let frame = self.result.frames.get(&id).copied().unwrap_or(frame);
                 json!({"sketch_id": id, "frame": frame})
             }
             "sketch_add" => {
@@ -153,12 +154,15 @@ impl Session {
                 for it in &items {
                     created.push(self.sketch_item(sid, it)?);
                 }
+                // points at the same place (e.g. a polyline end and a spline start) become one point
+                let merged = merge_coincident(self.sketch_mut(sid)?);
                 self.rebuild()?;
-                json!({"created": created, "sketch": self.sketch_summary(sid)?})
+                json!({"created": created, "merged_points": merged.iter().map(|(a, b)| json!({"removed": a, "kept": b})).collect::<Vec<_>>(), "sketch": self.sketch_summary(sid)?})
             }
             "sketch_constrain" => {
                 let sid = id_arg(a, "sketch_id")?;
                 let list = a.get("constraints").and_then(|i| i.as_array()).ok_or("give constraints")?.clone();
+                let mut applied = vec![];
                 for c in &list {
                     let k = parse_constraint(c)?;
                     if let Constraint::PointOnLine { .. } = k {}
@@ -168,13 +172,15 @@ impl Session {
                         let (p, q) = (c["a"].as_u64().ok_or("a")? as Id, c["b"].as_u64().ok_or("b")? as Id);
                         if sk.point(p).is_some() && sk.point(q).is_some() {
                             sk.merge_point(q, p);
+                            applied.push(format!("merged point {q} into {p}"));
                             continue;
                         }
                     }
+                    applied.push(format!("added {}", c.get("type").and_then(|t| t.as_str()).unwrap_or("constraint")));
                     sk.constraints.push(k);
                 }
                 self.rebuild()?;
-                json!({"sketch": self.sketch_summary(sid)?})
+                json!({"applied": applied, "sketch": self.sketch_summary(sid)?})
             }
             "sketch_info" => {
                 let sid = id_arg(a, "sketch_id")?;
@@ -216,7 +222,9 @@ impl Session {
             "export" => {
                 let format = str_arg(a, "format")?;
                 let path = str_arg(a, "path")?;
+                let ascii = a.get("ascii").and_then(|v| v.as_bool()).unwrap_or(false);
                 match format.as_str() {
+                    "stl" if !ascii => std::fs::write(&path, stl_binary(&self.result)).map_err(|e| e.to_string())?,
                     "step" | "stl" | "iges" => self.kernel.export_blocking(&self.doc, &format, path.clone())?,
                     "obj" => std::fs::write(&path, obj(&self.result)).map_err(|e| e.to_string())?,
                     _ => return Err("format must be step, stl, iges or obj".into()),
@@ -227,7 +235,9 @@ impl Session {
                 let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
                 let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(800).clamp(64, 4096) as u32;
                 let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(600).clamp(64, 4096) as u32;
-                let png = render_png(&self.doc, &self.result, view, w, h)?;
+                let dir = a.get("direction").and_then(|d| d.as_array()).map(|d| [d[0].as_f64().unwrap_or(1.0), d.get(1).and_then(|x| x.as_f64()).unwrap_or(-1.0), d.get(2).and_then(|x| x.as_f64()).unwrap_or(1.0)]);
+                let sketches = a.get("sketches").and_then(|s| s.as_str()).unwrap_or("unused");
+                let png = render_png(&self.doc, &self.result, view, dir, sketches, w, h)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
                     std::fs::write(p, &png).map_err(|e| e.to_string())?;
                 }
@@ -340,6 +350,11 @@ impl Session {
 
     fn geometry(&self, a: &Value) -> Value {
         let only = a.get("body").and_then(|b| b.as_array()).map(|b| (b[0].as_u64().unwrap_or(0), b.get(1).and_then(|x| x.as_u64()).unwrap_or(0) as u32));
+        let want = a.get("type").and_then(|t| t.as_str()).unwrap_or("all");
+        let fnormal = a.get("normal").and_then(|n| n.as_array()).map(|n| DVec3::new(n[0].as_f64().unwrap_or(0.0), n.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0), n.get(2).and_then(|x| x.as_f64()).unwrap_or(0.0)).normalize_or_zero());
+        let bx = a.get("box").and_then(|b| b.as_array()).and_then(|b| Some((pt3(b.first()?)?, pt3(b.get(1)?)?)));
+        let in_box = |p: DVec3| bx.map(|(lo, hi)| p.cmpge(lo - DVec3::splat(1e-6)).all() && p.cmple(hi + DVec3::splat(1e-6)).all()).unwrap_or(true);
+        let planar_only = a.get("planar").and_then(|p| p.as_bool());
         let mut out = vec![];
         for b in &self.result.bodies {
             if only.map(|o| o != b.id).unwrap_or(false) {
@@ -349,6 +364,8 @@ impl Session {
                 .faces
                 .iter()
                 .enumerate()
+                .filter(|(_, f)| want != "edges" && in_box(f.center.into()) && planar_only.map(|p| p == f.planar).unwrap_or(true))
+                .filter(|(_, f)| fnormal.map(|n| DVec3::from(f.normal).dot(n) > 0.9998).unwrap_or(true))
                 .map(|(i, f)| {
                     json!({"index": i, "ref": {"kind": "face", "point": f.center.map(round), "normal": f.normal.map(round)}, "planar": f.planar, "area_mm2": round(f.area)})
                 })
@@ -357,6 +374,7 @@ impl Session {
                 .edges
                 .iter()
                 .enumerate()
+                .filter(|(_, e)| want != "faces" && fnormal.is_none() && in_box(e.mid.into()))
                 .map(|(i, e)| {
                     let kind = if e.linear { "line" } else if e.circular { "circle" } else { "curve" };
                     let mut v = json!({"index": i, "ref": {"kind": "edge", "point": e.mid.map(round)}, "type": kind, "length_mm": round(e.length),
@@ -451,6 +469,11 @@ fn val_str(v: &Value) -> String {
         Value::String(s) => s.clone(),
         other => other.to_string(),
     }
+}
+
+fn pt3(v: &Value) -> Option<DVec3> {
+    let a = v.as_array()?;
+    Some(DVec3::new(a.first()?.as_f64()?, a.get(1)?.as_f64()?, a.get(2)?.as_f64()?))
 }
 
 fn pt2(v: &Value) -> R<DVec2> {
@@ -559,18 +582,54 @@ fn obj(r: &RebuildResult) -> String {
 // ---------------------------------------------------------------- software renderer
 
 /// Shaded image of the parts (and sketches) from a standard view.
-pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, w: u32, h: u32) -> R<Vec<u8>> {
+/// `view`: front, back, top, bottom, left, right, or iso / iso_front_right, iso_front_left,
+/// iso_back_right, iso_back_left (and *_below variants); `direction` (from the part towards the
+/// camera) overrides it. `sketches`: all, unused (not consumed by a feature) or none.
+pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, direction: Option<[f64; 3]>, sketches: &str, w: u32, h: u32) -> R<Vec<u8>> {
     use crate::camera::{Camera, StdView};
     let mut cam = Camera { size: glam::Vec2::new(w as f32, h as f32), ..Default::default() };
-    cam.set_view(match view {
-        "front" => StdView::Front,
-        "top" => StdView::Top,
-        "right" => StdView::Right,
-        "back" => StdView::Back,
-        "bottom" => StdView::Bottom,
-        "left" => StdView::Left,
-        _ => StdView::Iso,
-    });
+    let iso = |x: f32, y: f32, z: f32| glam::Vec3::new(x, y, z).normalize();
+    let back = match direction {
+        Some(d) => Some(glam::Vec3::new(d[0] as f32, d[1] as f32, d[2] as f32).normalize_or(glam::Vec3::ONE)),
+        None => match view {
+            "iso" | "iso_front_right" => Some(iso(1.0, -1.0, 1.0)),
+            "iso_front_left" => Some(iso(-1.0, -1.0, 1.0)),
+            "iso_back_right" => Some(iso(1.0, 1.0, 1.0)),
+            "iso_back_left" => Some(iso(-1.0, 1.0, 1.0)),
+            "iso_front_right_below" => Some(iso(1.0, -1.0, -1.0)),
+            "iso_front_left_below" => Some(iso(-1.0, -1.0, -1.0)),
+            "iso_back_right_below" => Some(iso(1.0, 1.0, -1.0)),
+            "iso_back_left_below" => Some(iso(-1.0, 1.0, -1.0)),
+            _ => None,
+        },
+    };
+    match back {
+        Some(b) => cam.set_orientation(b, if b.z.abs() > 0.99 { glam::Vec3::Y } else { glam::Vec3::Z }),
+        None => cam.set_view(match view {
+            "front" => StdView::Front,
+            "top" => StdView::Top,
+            "right" => StdView::Right,
+            "back" => StdView::Back,
+            "bottom" => StdView::Bottom,
+            "left" => StdView::Left,
+            _ => StdView::Iso,
+        }),
+    }
+    // sketches that some feature uses are hidden by default, as in Onshape
+    let used: std::collections::HashSet<FeatId> = if sketches == "unused" {
+        doc.features
+            .iter()
+            .filter(|f| !matches!(f.op, Op::Sketch { .. }))
+            .flat_map(|f| {
+                let v = serde_json::to_value(&f.op).unwrap_or_default();
+                let mut ids = vec![];
+                collect_sketch_ids(&v, &mut ids);
+                ids
+            })
+            .collect()
+    } else {
+        Default::default()
+    };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
     for b in &r.bodies {
@@ -580,6 +639,7 @@ pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, w: u32, h: u32)
     let sketch_lines: Vec<Vec<DVec3>> = doc
         .features
         .iter()
+        .filter(|f| sketches != "none" && !used.contains(&f.id) && !f.hidden)
         .filter_map(|f| if let Op::Sketch { sketch, frame, .. } = &f.op { Some((sketch, frame)) } else { None })
         .flat_map(|(sk, fr)| sk.curves.iter().map(move |c| sk.tessellate(c, 1.0).into_iter().map(|p| fr.to_world(p)).collect::<Vec<_>>()))
         .collect();
@@ -641,6 +701,58 @@ pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, w: u32, h: u32)
     Ok(out)
 }
 
+fn collect_sketch_ids(v: &Value, out: &mut Vec<FeatId>) {
+    match v {
+        Value::Object(m) => {
+            if let (Some(k), Some(id)) = (m.get("kind").and_then(|k| k.as_str()), m.get("sketch").and_then(|s| s.as_u64())) {
+                if matches!(k, "region" | "sketch_curve" | "sketch_point") {
+                    out.push(id);
+                }
+            }
+            m.values().for_each(|x| collect_sketch_ids(x, out));
+        }
+        Value::Array(a) => a.iter().for_each(|x| collect_sketch_ids(x, out)),
+        _ => {}
+    }
+}
+
+/// Merge points closer than 1 µm; returns (removed, kept) pairs.
+fn merge_coincident(sk: &mut Sketch) -> Vec<(Id, Id)> {
+    let mut pairs = vec![];
+    let pts: Vec<(Id, DVec2)> = sk.points.iter().map(|p| (p.id, p.v())).collect();
+    for i in 0..pts.len() {
+        for j in 0..i {
+            if (pts[i].1 - pts[j].1).length() < 1e-3 && sk.point(pts[i].0).is_some() && sk.point(pts[j].0).is_some() {
+                sk.merge_point(pts[i].0, pts[j].0);
+                pairs.push((pts[i].0, pts[j].0));
+            }
+        }
+    }
+    pairs
+}
+
+/// Binary STL of the parts' meshes.
+fn stl_binary(r: &RebuildResult) -> Vec<u8> {
+    let n: usize = r.bodies.iter().map(|b| b.indices.len() / 3).sum();
+    let mut out = vec![0u8; 80];
+    out[..24].copy_from_slice(b"cad-app binary STL     \0");
+    out.extend((n as u32).to_le_bytes());
+    for b in &r.bodies {
+        for t in b.indices.chunks(3) {
+            let v = |i: u32| glam::Vec3::new(b.positions[3 * i as usize], b.positions[3 * i as usize + 1], b.positions[3 * i as usize + 2]);
+            let (p0, p1, p2) = (v(t[0]), v(t[1]), v(t[2]));
+            let nrm = (p1 - p0).cross(p2 - p0).normalize_or_zero();
+            for q in [nrm, p0, p1, p2] {
+                for c in [q.x, q.y, q.z] {
+                    out.extend(c.to_le_bytes());
+                }
+            }
+            out.extend([0u8, 0]);
+        }
+    }
+    out
+}
+
 fn raster_tri(px: &mut [u8], depth: &mut [f32], w: usize, h: usize, p: [glam::Vec3; 3], col: [u8; 3]) {
     let minx = p.iter().map(|q| q.x).fold(f32::INFINITY, f32::min).floor().max(0.0) as usize;
     let maxx = p.iter().map(|q| q.x).fold(f32::NEG_INFINITY, f32::max).ceil().min(w as f32 - 1.0);
@@ -699,15 +811,15 @@ fn tools() -> Value {
         {"name": "describe", "description": "Features (with their full params), variables, parts (volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},
         {"name": "create_sketch", "description": "New sketch on 'top' (XY), 'front' (XZ, normal -Y), 'right' (YZ), or a ref such as a planar face ref from list_geometry or {\"kind\":\"feature_plane\",\"feature\":id}. Returns sketch_id and the plane frame (sketch x/y axes in 3D).", "inputSchema": obj(json!({"plane": {}, "name": {"type": "string"}}), &[])},
-        {"name": "sketch_add", "description": "Add geometry to a sketch; coordinates are [x, y] in mm in the sketch plane. Item types: point{at}, line{from,to}, polyline{points,closed}, rect{corner1,corner2}, center_rect{center,corner}, circle{center,radius}, arc{center,start,end} (counter-clockwise), ellipse{center,major_end,minor_radius}, spline{points,closed}, polygon{center,radius,sides}, text{at,text,height}. Any item may set construction:true. Polylines/rects share corner points. Returns created ids and the sketch summary with regions.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "items": {"type": "array"}}), &["sketch_id", "items"])},
+        {"name": "sketch_add", "description": "Add geometry to a sketch; coordinates are [x, y] in mm in the sketch plane. Item types: point{at}, line{from,to}, polyline{points,closed}, rect{corner1,corner2}, center_rect{center,corner}, circle{center,radius}, arc{center,start,end} (counter-clockwise), ellipse{center,major_end,minor_radius}, spline{points,closed}, polygon{center,radius,sides}, text{at,text,height}. Any item may set construction:true. Points at the same position (within 1 µm), also across items and with existing points, are merged into one. Returns created ids and the sketch summary with regions.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "items": {"type": "array"}}), &["sketch_id", "items"])},
         {"name": "sketch_constrain", "description": "Add constraints by point/curve ids. Types: coincident{a,b} (points, or point a on curve b), horizontal{l}, vertical{l}, horizontal_pts{a,b}, vertical_pts{a,b}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, midpoint{p,l}, symmetric{a,b,l}, fix{p,x,y}; dimensions take value (number or expression): distance{a,b}, axis_distance{a,b,axis:0|1}, point_line_distance{p,l}, length{l}, radius{c}, diameter{c}, angle{a,b} (degrees).", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "constraints": {"type": "array"}}), &["sketch_id", "constraints"])},
         {"name": "sketch_info", "description": "Points, curves, degrees of freedom and closed regions (with ready-made region refs) of a sketch.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}}), &["sketch_id"])},
         {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, mirror, boolean, split, transform, deleteBody, sheetMetal. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'}; fillet {edges:[edge refs], radius:2}; hole {points:[sketch_point refs], diameter:5, through:true}.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
-        {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres.", "inputSchema": obj(json!({"body": {"type": "array"}}), &[])},
-        {"name": "render", "description": "Render a shaded PNG of the model. view: iso (default), front, top, right, back, bottom, left. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
-        {"name": "export", "description": "Export the parts: format step, iges, stl or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}}), &["format", "path"])},
+        {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
+        {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
+        {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
         {"name": "export_drawing", "description": "Write a drawing with front, top, right and iso views (hidden lines removed) as pdf, svg or dxf. Optional sheet (A4, A3, A2, A1, Letter, Tabloid), scale, title.", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "sheet": {"type": "string"}, "scale": {"type": "number"}, "title": {"type": "string"}}), &["path"])}
     ])
 }

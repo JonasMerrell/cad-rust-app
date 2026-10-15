@@ -937,7 +937,22 @@ impl<'a> Model<'a> {
             by_body.entry(bi).or_default().push(e);
         }
         for (bi, es) in by_body {
-            self.bodies[bi].shape = f(&self.bodies[bi].shape, &es)?;
+            match f(&self.bodies[bi].shape, &es) {
+                Ok(s) => self.bodies[bi].shape = s,
+                Err(e) => {
+                    // find the edges that fail on their own, to say which ones
+                    let bad: Vec<String> = es
+                        .iter()
+                        .filter(|edge| f(&self.bodies[bi].shape, std::slice::from_ref(*edge)).is_err())
+                        .map(|edge| {
+                            let pts: Vec<DVec3> = edge.approximation_segments().collect();
+                            let m = if pts.len() % 2 == 0 { (pts[pts.len() / 2 - 1] + pts[pts.len() / 2]) / 2.0 } else { pts[pts.len() / 2] };
+                            format!("[{:.3}, {:.3}, {:.3}]", m.x, m.y, m.z)
+                        })
+                        .collect();
+                    return Err(if bad.is_empty() { format!("{e} (each edge works alone; try fewer edges at once)") } else { format!("{e}; failing edge(s) near {}", bad.join(", ")) });
+                }
+            }
         }
         Ok(())
     }
@@ -1081,8 +1096,36 @@ fn merge_arcs(segs: &[Seg]) -> Vec<Seg> {
     out
 }
 
+/// Join consecutive collinear line segments (they would become separate faces).
+fn merge_lines(segs: &[Seg]) -> Vec<Seg> {
+    let join = |a: &Seg, b: &Seg| -> Option<Seg> {
+        if let (Seg::Line { a: p, b: q }, Seg::Line { a: q2, b: r }) = (a, b) {
+            let (u, v) = (*q - *p, *r - *q2);
+            if (*q - *q2).length() < 1e-9 && u.perp_dot(v).abs() < 1e-9 * u.length() * v.length() && u.dot(v) > 0.0 {
+                return Some(Seg::Line { a: *p, b: *r });
+            }
+        }
+        None
+    };
+    let mut out: Vec<Seg> = vec![];
+    for s in segs {
+        if let Some(m) = out.last().and_then(|l| join(l, s)) {
+            *out.last_mut().unwrap() = m;
+        } else {
+            out.push(s.clone());
+        }
+    }
+    if out.len() > 2 {
+        if let Some(m) = join(&out[out.len() - 1], &out[0]) {
+            out.pop();
+            out[0] = m;
+        }
+    }
+    out
+}
+
 pub fn seg_edges(segs: &[Seg], fr: &Frame) -> R<Vec<Edge>> {
-    let segs = merge_arcs(segs);
+    let segs = merge_lines(&merge_arcs(segs));
     let mut edges = vec![];
     for s in &segs {
         match s {
@@ -1408,6 +1451,18 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
         }
         let g = face_geom(&face);
         out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area });
+    }
+    // tight bounds from the triangulation (OCCT's box includes control points and tolerances)
+    if !out.positions.is_empty() {
+        let mut lo = [f64::INFINITY; 3];
+        let mut hi = [f64::NEG_INFINITY; 3];
+        for v in out.positions.chunks(3) {
+            for k in 0..3 {
+                lo[k] = lo[k].min(v[k] as f64);
+                hi[k] = hi[k].max(v[k] as f64);
+            }
+        }
+        out.bbox = [lo, hi];
     }
     for e in visible_edges(shape) {
         let pts: Vec<DVec3> = e.approximation_segments().collect();

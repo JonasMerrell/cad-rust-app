@@ -31,6 +31,10 @@ runs in this folder. Other MCP clients start the same command
   `{"kind": "edge", "point": [x, y, z]}`. `list_geometry` returns ready-made
   refs for every face and edge; `sketch_info` returns refs for every region.
 - `render` returns a PNG, so agents can check their work visually.
+- Sketch points at the same position are merged automatically, so chains of
+  items connect without extra constraints.
+- Coplanar faces and collinear edges are merged after each operation, and
+  fillet/chamfer errors name the edges that failed.
 
 ## Tools
 
@@ -44,9 +48,9 @@ runs in this folder. Other MCP clients start the same command
 | `sketch_constrain` | geometric constraints and dimensions (values can be expressions) |
 | `sketch_info` | points, curves, degrees of freedom, regions |
 | `add_feature` / `edit_feature` / `delete_feature` | extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, patterns, mirror, boolean, split, transform, deleteBody, sheetMetal |
-| `list_geometry` | faces and edges with refs, normals, lengths, circle centres |
-| `render` | shaded PNG from iso/front/top/right/back/bottom/left |
-| `export` | STEP, IGES, STL, OBJ |
+| `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |
+| `render` | shaded PNG from any standard or iso view (`iso_front_left`, `iso_back_right`, …) or a `direction`; sketches used by features are hidden unless `sketches: "all"` |
+| `export` | STEP, IGES, STL (binary unless `ascii: true`), OBJ |
 | `export_drawing` | PDF/SVG/DXF drawing with front, top, right and iso views |
 
 The tool descriptions returned by `tools/list` give the full argument formats.
