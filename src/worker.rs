@@ -20,6 +20,7 @@ pub enum Request {
     Ping,
     /// All Part Studios of the workspace, for Derived features.
     SetStudios { studios: Vec<Document> },
+    Interference { id: u64, items: Vec<(usize, crate::doc::BodyId, [f64; 12])> },
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
     Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3], bool)> },
@@ -32,6 +33,7 @@ pub enum Reply {
     Rebuilt { id: u64, tag: usize, result: RebuildResult },
     Exported { id: u64, error: Option<String> },
     Projected { id: u64, tag: usize, key: String, views: Vec<kernel::ProjView> },
+    Interference { id: u64, pairs: Vec<(usize, usize, f64)> },
 }
 
 /// Entry point of the worker process.
@@ -47,6 +49,10 @@ pub fn worker_main() {
         let Ok(req) = serde_json::from_str::<Request>(&line) else { continue };
         match req {
             Request::Ping => send(&Reply::Ready),
+            Request::Interference { id, items } => {
+                let pairs = kernel::interference(&items);
+                send(&Reply::Interference { id, pairs });
+            }
             Request::SetStudios { studios } => {
                 if let Ok(mut s) = kernel::STUDIOS.lock() {
                     *s = studios;
@@ -82,6 +88,8 @@ pub enum Outcome {
     Exported(Option<String>, String),
     /// (part studio, request key, projections)
     Projected(usize, String, Vec<kernel::ProjView>),
+    /// Overlapping instance pairs (indices into the request) and volumes.
+    Interference(Vec<(usize, usize, f64)>),
 }
 
 enum Ev {
@@ -225,6 +233,12 @@ impl KernelClient {
         self.send(&Request::Project { id, tag, key, doc: doc.clone(), views });
     }
 
+    pub fn interference(&mut self, items: Vec<(usize, crate::doc::BodyId, [f64; 12])>) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&Request::Interference { id, items });
+    }
+
     pub fn export(&mut self, doc: &Document, format: &str, path: String) {
         let id = self.next_id;
         self.next_id += 1;
@@ -267,6 +281,7 @@ impl KernelClient {
                     }
                 }
                 Ev::Reply(Reply::Projected { tag, key, views, .. }) => out.push(Outcome::Projected(tag, key, views)),
+                Ev::Reply(Reply::Interference { pairs, .. }) => out.push(Outcome::Interference(pairs)),
                 Ev::Reply(Reply::Exported { id, error }) => {
                     if let Some((eid, path)) = self.export.take() {
                         if eid == id {

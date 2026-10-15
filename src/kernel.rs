@@ -1867,6 +1867,43 @@ mod freeform_tests {
     }
 }
 
+// ------------------------------------------------------------------ interference
+
+/// Overlap volumes between assembly instances: (instance index a, b, volume mm³).
+/// `items` are (studio, body, row-major 3x4 pose) per instance.
+pub fn interference(items: &[(usize, BodyId, [f64; 12])]) -> Vec<(usize, usize, f64)> {
+    let studios = STUDIOS.lock().map(|s| s.clone()).unwrap_or_default();
+    let mut built: HashMap<usize, Vec<Body>> = HashMap::new();
+    let mut shapes: Vec<Option<Shape>> = vec![];
+    for (studio, body, m) in items {
+        if !built.contains_key(studio) {
+            let b = studios.get(*studio).map(build_bodies).unwrap_or_default();
+            built.insert(*studio, b);
+        }
+        let s = built[studio].iter().find(|b| b.id == *body).and_then(|b| {
+            let rot = DMat3::from_cols(DVec3::new(m[0], m[4], m[8]), DVec3::new(m[1], m[5], m[9]), DVec3::new(m[2], m[6], m[10]));
+            occ::transform(&b.shape, rot, DVec3::new(m[3], m[7], m[11])).ok()
+        });
+        shapes.push(s);
+    }
+    let mut out = vec![];
+    for i in 0..shapes.len() {
+        for j in i + 1..shapes.len() {
+            let (Some(a), Some(b)) = (&shapes[i], &shapes[j]) else { continue };
+            if bbox_apart(a, b) {
+                continue;
+            }
+            if let Ok(c) = occ::common(a, b) {
+                let v = volume(&c);
+                if v > 1e-6 {
+                    out.push((i, j, v));
+                }
+            }
+        }
+    }
+    out
+}
+
 // ------------------------------------------------------------------ drawings
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -2351,5 +2388,27 @@ mod derived_tests {
         *STUDIOS.lock().unwrap() = vec![c.clone()];
         let r = rebuild(&c, &[], |_| {});
         assert!(r.features[0].error.is_some());
+    }
+
+    #[test]
+    fn interference_between_instances() {
+        let mut a = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = a.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+        }
+        let eid = a.insert("E".into(), e);
+        *STUDIOS.lock().unwrap() = vec![a];
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let r = interference(&[(0, (eid, 0), at(0.0)), (0, (eid, 0), at(5.0)), (0, (eid, 0), at(30.0))]);
+        assert_eq!(r.len(), 1);
+        assert_eq!((r[0].0, r[0].1), (0, 1));
+        assert!((r[0].2 - 500.0).abs() < 1e-6, "{}", r[0].2);
     }
 }

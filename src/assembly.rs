@@ -128,8 +128,54 @@ pub struct Mate {
     /// Distance along the first connector's Z axis.
     #[serde(default)]
     pub offset: f64,
+    /// Offset along the first connector's X and Y axes.
+    #[serde(default)]
+    pub offset_xy: [f64; 2],
+    /// Rotation of the second part about the mate axis, degrees.
+    #[serde(default)]
+    pub rotation: f64,
+    /// Travel limits: degrees for revolute, mm along the axis for slider/cylindrical.
+    #[serde(default)]
+    pub limits: Option<[f64; 2]>,
     #[serde(default)]
     pub suppressed: bool,
+}
+
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
+pub enum RelationKind {
+    /// Two revolute mates turn together: θb = −ratio·θa
+    Gear,
+    /// Revolute a drives slider b: travel = ratio (pitch radius) · θa
+    Rack,
+    /// One cylindrical mate a: travel = ratio (pitch) · turns
+    Screw,
+}
+
+impl RelationKind {
+    pub const ALL: [RelationKind; 3] = [RelationKind::Gear, RelationKind::Rack, RelationKind::Screw];
+    pub fn label(self) -> &'static str {
+        match self {
+            RelationKind::Gear => "Gear",
+            RelationKind::Rack => "Rack and pinion",
+            RelationKind::Screw => "Screw",
+        }
+    }
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct Relation {
+    pub id: u64,
+    pub name: String,
+    pub kind: RelationKind,
+    pub a: u64,
+    #[serde(default)]
+    pub b: Option<u64>,
+    pub ratio: f64,
+    #[serde(default)]
+    pub reverse: bool,
+    /// Value of the relation when it was made, so parts don't jump.
+    #[serde(default)]
+    pub phase: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -138,6 +184,8 @@ pub struct Assembly {
     pub instances: Vec<Instance>,
     pub mates: Vec<Mate>,
     pub next_id: u64,
+    #[serde(default)]
+    pub relations: Vec<Relation>,
 }
 
 impl Assembly {
@@ -156,12 +204,73 @@ impl Assembly {
     }
 }
 
+type Frame3 = (DVec3, DVec3, DVec3);
+
+/// The first connector's frame after the mate's offsets and rotation.
+fn target_frame(m: &Mate, a: Frame3) -> Frame3 {
+    let (oa, za, xa) = a;
+    let rot = DMat3::from_axis_angle(za, m.rotation.to_radians());
+    let x = rot * xa;
+    let y = za.cross(x);
+    (oa + za * m.offset + x * m.offset_xy[0] + y * m.offset_xy[1], za, x)
+}
+
+/// Rotation of the second part about the mate axis (radians, −π..π).
+pub fn mate_angle(m: &Mate, a: Frame3, b: Frame3) -> f64 {
+    let (_, za, xa) = target_frame(m, a);
+    let (_, _, xb) = b;
+    // the second frame is turned over about x when faces are opposed, so x stays comparable
+    xa.cross(xb).dot(za).atan2(xa.dot(xb))
+}
+
+/// Travel of the second part along the mate axis (mm).
+pub fn mate_slide(m: &Mate, a: Frame3, b: Frame3) -> f64 {
+    let (o, za, _) = target_frame(m, a);
+    (b.0 - o).dot(za)
+}
+
+fn wrap(a: f64) -> f64 {
+    a.sin().atan2(a.cos())
+}
+
+/// Residual of a relation for the mates' current frames.
+fn relation_value(r: &Relation, mates: &[Mate], frames: &dyn Fn(&Mate) -> Option<(Frame3, Frame3)>) -> Option<f64> {
+    let ma = mates.iter().find(|m| m.id == r.a)?;
+    let (a1, b1) = frames(ma)?;
+    let sign = if r.reverse { -1.0 } else { 1.0 };
+    Some(match r.kind {
+        RelationKind::Gear => {
+            let mb = mates.iter().find(|m| Some(m.id) == r.b)?;
+            let (a2, b2) = frames(mb)?;
+            wrap(mate_angle(mb, a2, b2) + sign * r.ratio * mate_angle(ma, a1, b1) - r.phase) * 10.0
+        }
+        RelationKind::Rack => {
+            let mb = mates.iter().find(|m| Some(m.id) == r.b)?;
+            let (a2, b2) = frames(mb)?;
+            mate_slide(mb, a2, b2) - sign * r.ratio * mate_angle(ma, a1, b1) - r.phase
+        }
+        RelationKind::Screw => mate_slide(ma, a1, b1) - sign * r.ratio * mate_angle(ma, a1, b1) / std::f64::consts::TAU - r.phase,
+    })
+}
+
+/// The relation's current value with zero phase (to store as its phase when created).
+pub fn relation_phase(asm: &Assembly, r: &Relation) -> f64 {
+    let mut r0 = r.clone();
+    r0.phase = 0.0;
+    let frames = |m: &Mate| -> Option<(Frame3, Frame3)> { Some((asm.world(m.a.as_ref()?)?, asm.world(m.b.as_ref()?)?)) };
+    let v = relation_value(&r0, &asm.mates, &frames).unwrap_or(0.0);
+    match r.kind {
+        RelationKind::Gear => v / 10.0,
+        _ => v,
+    }
+}
+
 /// Residuals of one mate for the given instance poses.
 fn mate_residuals(m: &Mate, a: (DVec3, DVec3, DVec3), b: (DVec3, DVec3, DVec3), out: &mut Vec<f64>) {
-    let (oa, za, xa) = a;
+    let (oa, za, xa) = target_frame(m, a);
     let (ob, zb, xb) = b;
     let s = if m.flip { 1.0 } else { -1.0 };
-    let target_o = oa + za * m.offset;
+    let target_o = oa;
     let d = ob - target_o;
     let axis = zb - za * s;
     let push3 = |out: &mut Vec<f64>, v: DVec3| out.extend([v.x, v.y, v.z]);
@@ -222,12 +331,27 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
         let p = &poses[i];
         Some((p.apply(c.origin.into()), p.dir(c.z.into()).normalize(), p.dir(c.x.into()).normalize()))
     };
+    let relations: Vec<Relation> = asm.relations.clone();
+    let active: std::cell::RefCell<Vec<(u64, f64)>> = std::cell::RefCell::new(vec![]);
     let residuals = |x: &[f64]| -> Vec<f64> {
         let poses = poses_for(x);
         let mut out = vec![];
         for m in &mates {
             if let (Some(a), Some(b)) = (world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) {
                 mate_residuals(m, a, b, &mut out);
+                // a limit that was hit holds the part at it
+                if let Some((_, bound)) = active.borrow().iter().find(|x| x.0 == m.id) {
+                    match m.kind {
+                        MateKind::Revolute => out.push(wrap(mate_angle(m, a, b) - bound.to_radians()) * 10.0),
+                        _ => out.push(mate_slide(m, a, b) - bound),
+                    }
+                }
+            }
+        }
+        let frames = |m: &Mate| -> Option<(Frame3, Frame3)> { Some((world(&poses, m.a.as_ref()?)?, world(&poses, m.b.as_ref()?)?)) };
+        for r in &relations {
+            if let Some(v) = relation_value(r, &mates, &frames) {
+                out.push(v);
             }
         }
         out
@@ -246,6 +370,7 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
     }
     let mut x = vec![0.0; n];
     let norm = |r: &[f64]| r.iter().map(|v| v * v).sum::<f64>();
+    for _pass in 0..4 {
     if n > 0 {
         for _ in 0..80 {
             let r = residuals(&x);
@@ -283,6 +408,29 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
                 break;
             }
         }
+    }
+    // enforce travel limits: pin any mate that went past one and solve again
+    let poses = poses_for(&x);
+    let mut newly = false;
+    for m in &mates {
+        let (Some(lim), Some(a), Some(b)) = (m.limits, world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) else { continue };
+        if active.borrow().iter().any(|x| x.0 == m.id) {
+            continue;
+        }
+        let v = match m.kind {
+            MateKind::Revolute => mate_angle(m, a, b).to_degrees(),
+            MateKind::Slider | MateKind::Cylindrical => mate_slide(m, a, b),
+            _ => continue,
+        };
+        let (lo, hi) = (lim[0].min(lim[1]), lim[0].max(lim[1]));
+        if v < lo - 1e-6 || v > hi + 1e-6 {
+            active.borrow_mut().push((m.id, if v < lo { lo } else { hi }));
+            newly = true;
+        }
+    }
+    if !newly {
+        break;
+    }
     }
     let poses = poses_for(&x);
     for (i, p) in poses.into_iter().enumerate() {
@@ -356,7 +504,7 @@ mod tests {
         // top face centre of a 10 mm cube on the first, bottom face of the second
         let ca = Connector { inst: 1, origin: [5.0, 5.0, 10.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
         let cb = Connector { inst: 2, origin: [5.0, 5.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
-        a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Fastened, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, suppressed: false });
+        a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Fastened, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
         let r = solve(&mut a, &[], &|_| DVec3::splat(5.0));
         assert!(r.ok, "{:?}", r.failed);
         let p = a.instances[1].pose;
@@ -370,11 +518,55 @@ mod tests {
         a.instances.push(inst(2, false, [3.0, 1.0, 7.0]));
         let ca = Connector { inst: 1, origin: [0.0, 0.0, 5.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
         let cb = Connector { inst: 2, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
-        a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Revolute, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, suppressed: false });
+        a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Revolute, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
         let r = solve(&mut a, &[], &|_| DVec3::ZERO);
         assert!(r.ok);
         let (ob, zb, _) = a.world(&cb).unwrap();
         assert!((ob - DVec3::new(0.0, 0.0, 5.0)).length() < 1e-5);
         assert!((zb + DVec3::Z).length() < 1e-5);
+    }
+
+    fn revolute(id: u64, inst: u64, at: [f64; 3]) -> Mate {
+        let ca = Connector { inst: 1, origin: at, z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
+        let cb = Connector { inst, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
+        Mate { id, name: format!("r{id}"), kind: MateKind::Revolute, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false }
+    }
+
+    fn turn(a: &mut Assembly, inst: u64, deg: f64) {
+        let x = a.instances.iter_mut().find(|x| x.id == inst).unwrap();
+        let c = DVec3::from(x.pose.t);
+        x.pose = x.pose.perturbed(DVec3::Z * deg.to_radians(), DVec3::ZERO, c);
+    }
+
+    #[test]
+    fn gear_relation_and_limits() {
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 5.0]));
+        a.instances.push(inst(3, false, [30.0, 0.0, 5.0]));
+        a.mates.push(revolute(10, 2, [0.0, 0.0, 5.0]));
+        a.mates.push(revolute(11, 3, [30.0, 0.0, 5.0]));
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        let mut rel = Relation { id: 20, name: "g".into(), kind: RelationKind::Gear, a: 10, b: Some(11), ratio: 2.0, reverse: false, phase: 0.0 };
+        rel.phase = relation_phase(&a, &rel);
+        a.relations.push(rel);
+        turn(&mut a, 2, 20.0);
+        let r = solve(&mut a, &[2], &|_| DVec3::ZERO);
+        assert!(r.ok, "{:?}", r.failed);
+        let ang = |a: &Assembly, mid: u64| {
+            let m = a.mates.iter().find(|m| m.id == mid).unwrap();
+            mate_angle(m, a.world(m.a.as_ref().unwrap()).unwrap(), a.world(m.b.as_ref().unwrap()).unwrap()).to_degrees()
+        };
+        let (t1, t2) = (ang(&a, 10), ang(&a, 11));
+        assert!((t2 + 2.0 * t1).abs() < 1e-3, "{t1} {t2}");
+        assert!(t1.abs() > 5.0, "the driven part should keep most of its turn: {t1}");
+
+        // limit the first joint to ±10°
+        a.relations.clear();
+        a.mates[0].limits = Some([-10.0, 10.0]);
+        turn(&mut a, 2, 30.0);
+        solve(&mut a, &[2], &|_| DVec3::ZERO);
+        let t = ang(&a, 10);
+        assert!((t.abs() - 10.0).abs() < 1e-3, "clamped to the limit: {t}");
     }
 }

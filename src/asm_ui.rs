@@ -6,7 +6,7 @@ use egui::{Color32, Margin, Pos2, RichText, Sense, Stroke, Ui};
 use glam::{DMat3, DVec3, Vec2, Vec3};
 
 use crate::app::{App, ToastKind};
-use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose};
+use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose, Relation, RelationKind};
 use crate::drawing::Drawing;
 use crate::icons;
 use crate::render::{MeshVertex, SceneData, ViewportCallback};
@@ -49,6 +49,12 @@ pub struct AsmUi {
     pub undo: Vec<Snap>,
     pub redo: Vec<Snap>,
     pub failed: Vec<u64>,
+    /// Relation being made: (kind, first mate, second mate, ratio, reverse).
+    pub relation: Option<(RelationKind, Option<u64>, Option<u64>, f64, bool)>,
+    /// Last interference check: instance id pairs and overlap volume; None while running.
+    pub clashes: Option<Vec<(u64, u64, f64)>>,
+    pub clash_ids: Vec<u64>,
+    pub checking: bool,
     /// Exploded view distance factor (0 = assembled).
     pub explode: f32,
 }
@@ -149,6 +155,28 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        for k in RelationKind::ALL {
+            let tip = match k {
+                RelationKind::Gear => "Gear relation between two revolute mates",
+                RelationKind::Rack => "Rack and pinion: a revolute mate drives a slider",
+                RelationKind::Screw => "Screw: a cylindrical mate's turning drives its travel",
+            };
+            let icon = match k {
+                RelationKind::Gear => "relGear",
+                RelationKind::Rack => "relRack",
+                RelationKind::Screw => "relScrew",
+            };
+            if app.tool_button(ui, icon, k.label(), tip, false, app.asm.relation.map(|r| r.0 == k).unwrap_or(false), true).clicked() {
+                app.asm.relation = Some((k, None, None, if k == RelationKind::Screw { 2.0 } else { 1.0 }, false));
+            }
+        }
+    });
+    App::group(ui, |ui| {
+        if app.tool_button(ui, "clash", "Interference", "Check whether any parts overlap", false, app.asm.checking, !app.asm.checking).clicked() {
+            check_interference(app);
+        }
+    });
+    App::group(ui, |ui| {
         let has = !app.asm.sel.is_empty();
         if app.tool_button(ui, "fix", "Fix", "Fix or free the selected instances", false, false, has).clicked() {
             checkpoint(app);
@@ -195,7 +223,7 @@ fn start_mate(app: &mut App, kind: MateKind) {
     let a = &mut app.ws.assemblies[i];
     let id = a.new_id();
     let n = a.mates.iter().filter(|m| m.kind == kind).count() + 1;
-    a.mates.push(Mate { id, name: format!("{} {n}", kind.label()), kind, a: None, b: None, flip: false, offset: 0.0, suppressed: false });
+    a.mates.push(Mate { id, name: format!("{} {n}", kind.label()), kind, a: None, b: None, flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
     app.asm.dialog = Some(MateDialog { mate: id, before, active: 0 });
     app.asm.sel.clear();
 }
@@ -298,6 +326,12 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         section(ui, "Instances", |ui| instances(app, ui));
         section(ui, "Mates", |ui| mates(app, ui));
+        if app.asm.checking || app.asm.clashes.is_some() {
+            section(ui, "Interference", |ui| clashes_ui(app, ui));
+        }
+        if app.asm.relation.is_some() || asm(app).map(|a| !a.relations.is_empty()).unwrap_or(false) {
+            section(ui, "Relations", |ui| relations(app, ui));
+        }
         section(ui, "Bill of materials", |ui| bom_ui(app, ui));
     });
 }
@@ -827,6 +861,135 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     mate_dialog(app, ui, rect);
 }
 
+fn check_interference(app: &mut App) {
+    let Some(a) = asm(app) else { return };
+    let items: Vec<(usize, crate::doc::BodyId, [f64; 12])> = a
+        .instances
+        .iter()
+        .filter(|x| !x.hidden)
+        .map(|x| {
+            let m = x.pose.m();
+            let t = x.pose.t;
+            (x.studio, x.body, [m.x_axis.x, m.y_axis.x, m.z_axis.x, t[0], m.x_axis.y, m.y_axis.y, m.z_axis.y, t[1], m.x_axis.z, m.y_axis.z, m.z_axis.z, t[2]])
+        })
+        .collect();
+    app.asm.clash_ids = a.instances.iter().filter(|x| !x.hidden).map(|x| x.id).collect();
+    let docs = app.studio_docs();
+    app.kernel.set_studios(docs);
+    app.kernel.interference(items);
+    app.asm.checking = true;
+    app.asm.clashes = None;
+}
+
+pub fn interference_result(app: &mut App, pairs: Vec<(usize, usize, f64)>) {
+    let ids = app.asm.clash_ids.clone();
+    app.asm.clashes = Some(pairs.into_iter().filter_map(|(i, j, v)| Some((*ids.get(i)?, *ids.get(j)?, v))).collect());
+    app.asm.checking = false;
+    app.asm.scene_dirty = true;
+}
+
+fn clashes_ui(app: &mut App, ui: &mut Ui) {
+    if app.asm.checking {
+        ui.label(RichText::new("Checking…").color(theme::muted()).size(12.0));
+        return;
+    }
+    let Some(list) = app.asm.clashes.clone() else { return };
+    let Some(a) = asm(app) else { return };
+    if list.is_empty() {
+        ui.label(RichText::new("No parts overlap").color(theme::ok_green()).size(12.5));
+    }
+    let name = |id: u64| a.instance(id).map(|x| x.name.clone()).unwrap_or_default();
+    let rows: Vec<(u64, u64, String)> = list.iter().map(|(p, q, v)| (*p, *q, format!("{} ∩ {} · {} mm³", name(*p), name(*q), crate::expr::trim(*v, 2)))).collect();
+    for (p, q, text) in rows {
+        if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(theme::error_soft())).min_size(egui::vec2(ui.available_width(), 20.0))).clicked() {
+            app.asm.sel = vec![p, q];
+            app.asm.scene_dirty = true;
+        }
+    }
+}
+
+fn relations(app: &mut App, ui: &mut Ui) {
+    // the one being made
+    if let Some((kind, mut ma, mut mb, mut ratio, mut reverse)) = app.asm.relation {
+        let Some(a) = asm(app) else { return };
+        let mates: Vec<(u64, String, MateKind)> = a.mates.iter().map(|m| (m.id, m.name.clone(), m.kind)).collect();
+        let want_a: &[MateKind] = match kind {
+            RelationKind::Gear | RelationKind::Rack => &[MateKind::Revolute, MateKind::Cylindrical],
+            RelationKind::Screw => &[MateKind::Cylindrical],
+        };
+        let want_b: &[MateKind] = match kind {
+            RelationKind::Gear => &[MateKind::Revolute, MateKind::Cylindrical],
+            _ => &[MateKind::Slider, MateKind::Cylindrical],
+        };
+        ui.label(RichText::new(kind.label()).strong());
+        let pick = |ui: &mut Ui, id: &str, label: &str, cur: &mut Option<u64>, want: &[MateKind]| {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(label).color(theme::muted()).size(12.0));
+                let name = cur.and_then(|c| mates.iter().find(|m| m.0 == c)).map(|m| m.1.clone()).unwrap_or_else(|| "Choose…".into());
+                egui::ComboBox::from_id_salt(id).selected_text(name).show_ui(ui, |ui| {
+                    for (mid, n, k) in &mates {
+                        if want.contains(k) && ui.selectable_label(*cur == Some(*mid), n).clicked() {
+                            *cur = Some(*mid);
+                        }
+                    }
+                });
+            });
+        };
+        pick(ui, "rel-a", "Driving mate", &mut ma, want_a);
+        if kind != RelationKind::Screw {
+            pick(ui, "rel-b", "Driven mate", &mut mb, want_b);
+        }
+        ui.horizontal(|ui| {
+            let label = match kind {
+                RelationKind::Gear => "Ratio",
+                RelationKind::Rack => "Pitch radius (mm)",
+                RelationKind::Screw => "Pitch (mm/turn)",
+            };
+            ui.label(RichText::new(label).color(theme::muted()).size(12.0));
+            ui.add(egui::DragValue::new(&mut ratio).speed(0.05));
+        });
+        ui.checkbox(&mut reverse, "Reverse direction");
+        let ready = ma.is_some() && (kind == RelationKind::Screw || mb.is_some());
+        let mut done = false;
+        ui.horizontal(|ui| {
+            if ui.add_enabled(ready, egui::Button::new("OK")).clicked() {
+                checkpoint(app);
+                if let Some(asm) = asm_mut(app) {
+                    let id = asm.new_id();
+                    let n = asm.relations.iter().filter(|r| r.kind == kind).count() + 1;
+                    let mut r = Relation { id, name: format!("{} {n}", kind.label()), kind, a: ma.unwrap(), b: mb, ratio, reverse, phase: 0.0 };
+                    r.phase = assembly::relation_phase(asm, &r);
+                    asm.relations.push(r);
+                }
+                done = true;
+            }
+            if ui.button("Cancel").clicked() {
+                done = true;
+            }
+        });
+        app.asm.relation = if done { None } else { Some((kind, ma, mb, ratio, reverse)) };
+        ui.separator();
+    }
+    let Some(a) = asm(app) else { return };
+    let rows: Vec<(u64, String)> = a.relations.iter().map(|r| (r.id, r.name.clone())).collect();
+    let mut delete = None;
+    for (id, name) in rows {
+        let r = ui.add(egui::Button::image_and_text(icons::image("relGear", 14.0).tint(theme::text()), RichText::new(&name).size(12.5)).min_size(egui::vec2(ui.available_width(), 20.0)));
+        r.context_menu(|ui| {
+            if ui.button("Delete").clicked() {
+                delete = Some(id);
+                ui.close();
+            }
+        });
+    }
+    if let Some(id) = delete {
+        checkpoint(app);
+        if let Some(a) = asm_mut(app) {
+            a.relations.retain(|r| r.id != id);
+        }
+    }
+}
+
 fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
     let Some(d) = &app.asm.dialog else { return };
     let (mid, active) = (d.mate, d.active);
@@ -894,6 +1057,39 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                         edited.offset = off * units.scale();
                     }
                     ui.end_row();
+                    ui.label(RichText::new("Offset X / Y").color(theme::muted()));
+                    ui.horizontal(|ui| {
+                        for k in 0..2 {
+                            let mut v = edited.offset_xy[k] / units.scale();
+                            if ui.add(egui::DragValue::new(&mut v).speed(0.5)).changed() {
+                                edited.offset_xy[k] = v * units.scale();
+                            }
+                        }
+                    });
+                    ui.end_row();
+                    ui.label(RichText::new("Rotation (°)").color(theme::muted()));
+                    ui.add(egui::DragValue::new(&mut edited.rotation).speed(1.0));
+                    ui.end_row();
+                    if matches!(edited.kind, MateKind::Revolute | MateKind::Slider | MateKind::Cylindrical) {
+                        let unit = if edited.kind == MateKind::Revolute { "°" } else { units.label() };
+                        let mut on = edited.limits.is_some();
+                        ui.label(RichText::new("Limits").color(theme::muted()));
+                        ui.horizontal(|ui| {
+                            if ui.checkbox(&mut on, "").changed() {
+                                edited.limits = if on { Some(if edited.kind == MateKind::Revolute { [-90.0, 90.0] } else { [0.0, 50.0] }) } else { None };
+                            }
+                            if let Some(l) = &mut edited.limits {
+                                let sc = if edited.kind == MateKind::Revolute { 1.0 } else { units.scale() };
+                                for k in 0..2 {
+                                    let mut v = l[k] / sc;
+                                    if ui.add(egui::DragValue::new(&mut v).speed(1.0).suffix(format!(" {unit}"))).changed() {
+                                        l[k] = v * sc;
+                                    }
+                                }
+                            }
+                        });
+                        ui.end_row();
+                    }
                 });
                 ui.checkbox(&mut edited.flip, "Flip primary axis");
                 ui.add_space(4.0);
@@ -906,7 +1102,12 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
             d.active = i;
         }
     }
-    let changed = edited.kind != m.kind || edited.flip != m.flip || edited.offset != m.offset;
+    let changed = edited.kind != m.kind
+        || edited.flip != m.flip
+        || edited.offset != m.offset
+        || edited.offset_xy != m.offset_xy
+        || edited.rotation != m.rotation
+        || edited.limits != m.limits;
     if changed {
         if let Some(a) = asm_mut(app) {
             if let Some(mm) = a.mates.iter_mut().find(|x| x.id == mid) {
