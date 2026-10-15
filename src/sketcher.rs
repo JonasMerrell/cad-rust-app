@@ -7,7 +7,7 @@ use egui::{Color32, Key, Pos2, RichText, Stroke, Ui};
 use glam::{DVec2, Vec3};
 
 use crate::app::{App, ToastKind};
-use crate::doc::{Document, FeatId, Op, OriginPlane, Ref};
+use crate::doc::{Document, FeatId, Op, Ref};
 use crate::expr::{self, Env, Kind};
 use crate::icons;
 use crate::regions::{self, Region, find_regions};
@@ -195,8 +195,12 @@ impl App {
             },
             Some(p) => p,
             None => {
-                self.flash("Sketching on the Top plane (select a plane or planar face first to choose another)", ToastKind::Info);
-                Ref::OriginPlane { plane: OriginPlane::Top }
+                // ask for the plane; the next planar pick starts the sketch
+                self.picks.retain(|r| r.is_planar());
+                self.awaiting_sketch_plane = true;
+                self.flash_info("Select a plane or flat face to sketch on (Esc cancels)", None);
+                self.scene_dirty = true;
+                return;
             }
         };
         let frame = match &plane {

@@ -203,7 +203,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     }
     // model edges
     let mut best: Option<(f32, Ref)> = None;
-    for b in &app.result.bodies {
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
         for e in &b.edges {
             let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(Vec3::from(*p))).collect();
             for w in pts.windows(2) {
@@ -262,7 +262,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
     }
     if !app.xray {
-        for b in &app.result.bodies {
+        for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
             for (ti, tri) in b.indices.chunks(3).enumerate() {
                 let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
                 if let Some(t) = ray_tri(o, d, v(tri[0]), v(tri[1]), v(tri[2])) {
@@ -494,7 +494,7 @@ fn build_scene(app: &App) -> SceneData {
         .filter_map(|r| if let Ref::Face { point, .. } = r { Some(DVec3::from(*point)) } else { None })
         .collect();
     let body_alpha = if app.xray || in_sketch.is_some() { 0.35 } else { 1.0 };
-    for b in &app.result.bodies {
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
         let body_picked = is_picked(app, &Ref::Body { body: b.id });
         // which faces are highlighted
         let face_of = |p: DVec3| -> Option<usize> {
@@ -942,12 +942,47 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     if btn(ui, "measure", "Measure (M)", app.measure.is_some()).clicked() {
                         app.toggle_measure();
                     }
+                    if btn(ui, "normal", "Normal to: look straight at the selected plane or face (N)", false).clicked() {
+                        app.view_normal_to_selection();
+                    }
                     if btn(ui, "fit", "Zoom to fit (F)", false).clicked() {
                         app.fit_view();
                     }
                 });
             });
     });
+}
+
+/// The part a face, edge or body selection belongs to.
+pub fn body_of(app: &App, r: &Ref) -> Option<crate::doc::BodyId> {
+    match r {
+        Ref::Body { body } => Some(*body),
+        Ref::Edge { point } => app.result.bodies.iter().find(|b| b.edges.iter().any(|e| e.mid == *point)).map(|b| b.id),
+        Ref::Face { point, .. } => {
+            let p = DVec3::from(*point);
+            let mut best: Option<(f64, crate::doc::BodyId)> = None;
+            for b in &app.result.bodies {
+                let (lo, hi) = (DVec3::from(b.bbox[0]) - 1e-3, DVec3::from(b.bbox[1]) + 1e-3);
+                if p.cmplt(lo).any() || p.cmpgt(hi).any() {
+                    continue;
+                }
+                for t in b.indices.chunks(3) {
+                    let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+                    let (a, bb, c) = (v(t[0]), v(t[1]), v(t[2]));
+                    let n = (bb - a).cross(c - a).normalize_or_zero();
+                    let d = (p - a).dot(n).abs() + ((a + bb + c) / 3.0 - p).length() * 1e-6;
+                    // inside the triangle (projected)
+                    let q = p - n * (p - a).dot(n);
+                    let inside = [(a, bb), (bb, c), (c, a)].iter().all(|(u, w)| (*w - *u).cross(q - *u).dot(n) >= -1e-6);
+                    if inside && best.map(|x| d < x.0).unwrap_or(true) {
+                        best = Some((d, b.id));
+                    }
+                }
+            }
+            best.filter(|x| x.0 < 0.05).map(|x| x.1)
+        }
+        _ => None,
+    }
 }
 
 fn context_menu(app: &mut App, ui: &mut Ui) {
@@ -967,6 +1002,31 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         app.picks.push(t.clone());
                     }
                     close = true;
+                }
+                if let Some(b) = body_of(app, t) {
+                    if ui.button("Hide part").clicked() {
+                        let keep: Vec<Ref> = app.picks.iter().filter(|r| body_of(app, r) != Some(b)).cloned().collect();
+                        app.picks = keep;
+                        app.set_part_hidden(b, true);
+                        close = true;
+                    }
+                }
+                let sketch_feat = match t {
+                    Ref::Region { sketch, .. } | Ref::SketchCurve { sketch, .. } | Ref::SketchPoint { sketch, .. } => Some(*sketch),
+                    Ref::FeaturePlane { feature } => Some(*feature),
+                    _ => None,
+                };
+                if let Some(f) = sketch_feat.filter(|f| app.doc.feature(*f).map(|x| matches!(x.op, Op::Sketch { .. } | Op::Plane { .. })).unwrap_or(false)) {
+                    let label = if matches!(app.doc.feature(f).map(|x| &x.op), Some(Op::Plane { .. })) { "Hide plane" } else { "Hide sketch" };
+                    if ui.button(label).clicked() {
+                        app.checkpoint();
+                        if let Some(x) = app.doc.feature_mut(f) {
+                            x.hidden = true;
+                        }
+                        app.picks.clear();
+                        app.changed();
+                        close = true;
+                    }
                 }
                 if t.is_planar() && ui.button("New sketch here").clicked() {
                     app.picks = vec![t.clone()];
@@ -997,6 +1057,10 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
             }
             if ui.button("Zoom to fit").clicked() {
                 app.fit_view();
+                close = true;
+            }
+            if app.doc.parts.values().any(|p| p.hidden) && ui.button("Show all parts").clicked() {
+                app.show_all_parts();
                 close = true;
             }
             if !app.picks.is_empty() && ui.button("Clear selection").clicked() {

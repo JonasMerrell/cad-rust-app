@@ -130,6 +130,8 @@ pub struct App {
     pub tool_search: String,
     pub dark: bool,
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
+    /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
+    pub awaiting_sketch_plane: bool,
     pub was_narrow: Option<bool>,
 }
 
@@ -200,6 +202,7 @@ impl App {
             tool_search: String::new(),
             dark,
             script_editor: None,
+            awaiting_sketch_plane: false,
             was_narrow: None,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
@@ -645,7 +648,7 @@ impl App {
     pub fn model_bounds(&self) -> (glam::DVec3, glam::DVec3) {
         let mut lo = glam::DVec3::splat(f64::INFINITY);
         let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
-        for b in &self.result.bodies {
+        for b in self.result.bodies.iter().filter(|b| !self.part_hidden(b.id)) {
             lo = lo.min(b.bbox[0].into());
             hi = hi.max(b.bbox[1].into());
         }
@@ -707,7 +710,10 @@ impl App {
             return;
         }
         if pressed(Key::Escape) {
-            if self.dialog.is_some() {
+            if self.awaiting_sketch_plane {
+                self.awaiting_sketch_plane = false;
+                self.toast = None;
+            } else if self.dialog.is_some() {
                 self.dialog_cancel();
             } else if self.measure.is_some() {
                 self.measure = None;
@@ -738,6 +744,9 @@ impl App {
         }
         if pressed(Key::M) {
             self.toggle_measure();
+        }
+        if pressed(Key::N) {
+            self.view_normal_to_selection();
         }
         if pressed(Key::Delete) || pressed(Key::Backspace) {
             // delete picked features from the tree? only bodies via feature
@@ -1108,7 +1117,7 @@ impl App {
                 let total = ui.available_height();
                 let parts_h = if self.parts_open { (24.0 + 23.0 * self.result.bodies.len().max(1) as f32 + 12.0).min(total * 0.4) } else { 30.0 };
                 let props = self.picks.iter().any(|r| matches!(r, Ref::Body { .. }));
-                let props_h = if props { 130.0 } else { 0.0 };
+                let props_h = if props { 190.0f32.min(total * 0.35) } else { 0.0 };
                 let top_h = (total - parts_h - props_h).max(80.0);
                 ui.allocate_ui(egui::vec2(ui.available_width(), top_h), |ui| {
                     egui::ScrollArea::vertical().id_salt("feature-scroll").auto_shrink([false, false]).show(ui, |ui| {
@@ -1121,7 +1130,10 @@ impl App {
                     egui::ScrollArea::vertical().id_salt("parts-scroll").max_height(parts_h - 6.0).auto_shrink([false, true]).show(ui, |ui| self.parts_list(ui));
                 });
                 if props {
-                    section(ui, "Mass properties", |ui| self.properties(ui));
+                    // fits in what is left above the tab bar, scrolling if the panel is short
+                    egui::ScrollArea::vertical().id_salt("props-scroll").max_height(ui.available_height()).auto_shrink([false, true]).show(ui, |ui| {
+                        section(ui, "Mass properties", |ui| self.properties(ui));
+                    });
                 }
             }
             LeftPane::Variables => {
@@ -1236,6 +1248,9 @@ impl App {
             let picked = self.picks.iter().any(|r| matches!(r, Ref::FeaturePlane { feature } if *feature == id));
             let err = self.errors.get(&id).cloned();
             let resp = tree_row(ui, 0, f.op.kind(), &f.name, picked || editing, i >= rb, f.suppressed, f.hidden, err.as_deref());
+            if matches!(f.op, Op::Sketch { .. } | Op::Plane { .. } | Op::Helix { .. }) && eye_toggle(ui, &resp, resp.rect.right() - 12.0, f.hidden, ("feat-eye", id)) {
+                action = Some(("hide", id));
+            }
             let resp = resp.on_hover_text(match &err {
                 Some(e) => format!("{}: {e}", f.name),
                 None => "Double-click to edit · right-click for options".into(),
@@ -1322,6 +1337,57 @@ impl App {
         }
     }
 
+    pub fn set_part_hidden(&mut self, id: doc::BodyId, hidden: bool) {
+        self.set_part(id, |p| p.hidden = hidden);
+    }
+
+    pub fn show_all_parts(&mut self) {
+        if self.doc.parts.values().any(|p| p.hidden) {
+            self.checkpoint();
+            for p in self.doc.parts.values_mut() {
+                p.hidden = false;
+            }
+            self.doc.parts.retain(|_, p| *p != doc::PartProps::default());
+            self.changed();
+        }
+    }
+
+    /// The sketch frame of a planar selection (plane, flat face, or a sketch's plane).
+    pub fn frame_of(&self, r: &Ref) -> Option<crate::sketch::Frame> {
+        match r {
+            Ref::OriginPlane { plane } => Some(plane.frame()),
+            Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied(),
+            Ref::Face { point, normal } if r.is_planar() => Some(crate::kernel::plane_frame((*point).into(), (*normal).into())),
+            _ => None,
+        }
+    }
+
+    /// Look straight at the sketch being edited, or at the selected plane or flat face.
+    pub fn view_normal_to_selection(&mut self) {
+        let target = if let Some(s) = &self.sketch {
+            self.doc.feature(s.feature).and_then(|f| if let Op::Sketch { frame, .. } = &f.op { Some((*frame, None)) } else { None })
+        } else {
+            self.picks.iter().find_map(|r| {
+                let at = if let Ref::Face { point, .. } = r { Some(glam::DVec3::from(*point)) } else { None };
+                self.frame_of(r).map(|f| (f, at))
+            })
+        };
+        match target {
+            Some((fr, at)) => {
+                self.camera.set_orientation(fr.normal().as_vec3(), fr.y.map(|v| v as f32).into());
+                if let Some(p) = at {
+                    self.camera.target = p.as_vec3();
+                }
+                self.scene_dirty = true;
+            }
+            None => self.flash("Select a plane or flat face to look at", ToastKind::Info),
+        }
+    }
+
+    pub fn part_hidden(&self, id: doc::BodyId) -> bool {
+        self.doc.parts.get(&doc::body_key(id)).map(|p| p.hidden).unwrap_or(false)
+    }
+
     pub fn part_props(&self, id: doc::BodyId) -> doc::PartProps {
         self.doc.parts.get(&doc::body_key(id)).cloned().unwrap_or_default()
     }
@@ -1377,10 +1443,14 @@ impl App {
                     continue;
                 }
             }
+            let hidden = self.part_hidden(id);
             let resp = tree_row(ui, 1, "part", &name, picked, false, false, false, None);
             // colour swatch
             let sw = egui::Rect::from_center_size(egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y), egui::vec2(10.0, 10.0));
-            ui.painter().rect_filled(sw, 2.0, self.part_color(id));
+            ui.painter().rect_filled(sw, 2.0, if hidden { self.part_color(id).gamma_multiply(0.3) } else { self.part_color(id) });
+            if eye_toggle(ui, &resp, resp.rect.right() - 32.0, hidden, ("part-eye", id)) {
+                self.set_part(id, |p| p.hidden = !p.hidden);
+            }
             if resp.clicked() {
                 self.pick_from_tree(r, ui.input(|i| i.modifiers.shift || i.modifiers.command));
             }
@@ -1391,6 +1461,14 @@ impl App {
                 ui.set_min_width(200.0);
                 if ui.button("Rename").clicked() {
                     self.renaming_part = Some((doc::body_key(id), name.clone()));
+                    ui.close();
+                }
+                if ui.button(if hidden { "Show" } else { "Hide" }).clicked() {
+                    self.set_part(id, |p| p.hidden = !p.hidden);
+                    ui.close();
+                }
+                if ui.button("Show all parts").clicked() {
+                    self.show_all_parts();
                     ui.close();
                 }
                 ui.menu_button("Appearance", |ui| {
@@ -1444,18 +1522,19 @@ impl App {
             hi = hi.max(b.bbox[1].into());
         }
         let size = hi - lo;
+        // label and value on one line, the value wrapping under it when the panel is narrow
         let row = |ui: &mut Ui, k: &str, v: String| {
-            ui.label(RichText::new(k).color(theme::muted()).size(12.0));
-            ui.label(RichText::new(v).size(12.0));
-            ui.end_row();
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new(k).color(theme::muted()).size(12.0)));
+                ui.add(egui::Label::new(RichText::new(v).size(12.0)).wrap());
+            });
         };
-        egui::Grid::new("props").num_columns(2).spacing([10.0, 3.0]).show(ui, |ui| {
-            row(ui, "Volume", fmt_volume(vol, units));
-            row(ui, "Surface area", fmt_area(area, units));
-            row(ui, "Mass", if all_mass { format!("{} g", crate::expr::trim(mass, 2)) } else { "set a material".into() });
-            row(ui, "Centre of mass", format!("{}, {}, {}", units.fmt(c.x), units.fmt(c.y), units.fmt(c.z)));
-            row(ui, "Size", format!("{} × {} × {} {}", units.fmt(size.x), units.fmt(size.y), units.fmt(size.z), units.label()));
-        });
+        ui.spacing_mut().item_spacing.y = 3.0;
+        row(ui, "Volume", fmt_volume(vol, units));
+        row(ui, "Surface area", fmt_area(area, units));
+        row(ui, "Mass", if all_mass { format!("{} g", crate::expr::trim(mass, 2)) } else { "set a material".into() });
+        row(ui, "Centre of mass", format!("{}, {}, {}", units.fmt(c.x), units.fmt(c.y), units.fmt(c.z)));
+        row(ui, "Size", format!("{} × {} × {} {}", units.fmt(size.x), units.fmt(size.y), units.fmt(size.z), units.label()));
     }
 
     pub fn pick_from_tree(&mut self, r: Ref, add: bool) {
@@ -1597,6 +1676,8 @@ impl App {
             "Insert views, add dimensions and notes, then export".to_string()
         } else if let Some(s) = &self.sketch {
             crate::sketcher::status_text(self, s)
+        } else if self.awaiting_sketch_plane {
+            "Select a plane or flat face to sketch on · Esc cancels".to_string()
         } else if let Some(m) = &self.measure {
             crate::viewport::measure_text(self, m)
         } else if self.dialog.is_some() {
@@ -1990,6 +2071,11 @@ impl eframe::App for App {
             self.was_narrow = Some(narrow);
         }
         self.handle_screenshot(&ctx);
+        if self.awaiting_sketch_plane && self.sketch.is_none() && self.picks.iter().any(|r| r.is_planar() || matches!(r, Ref::FeaturePlane { .. })) {
+            self.awaiting_sketch_plane = false;
+            self.toast = None;
+            self.start_sketch();
+        }
         self.pump_kernel();
         self.shortcuts(&ctx);
 
@@ -2068,6 +2154,19 @@ fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// Eye button on a tree row: shown while the row is hovered, or always when hidden.
+/// Returns true when clicked.
+fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
+    let rect = egui::Rect::from_center_size(egui::pos2(x, row.rect.center().y), egui::vec2(18.0, 18.0));
+    let r = ui.interact(rect, ui.id().with(id), Sense::click());
+    if !(hidden || row.hovered() || r.hovered()) {
+        return false;
+    }
+    let col = if r.hovered() { theme::accent() } else { theme::muted() };
+    icons::image(if hidden { "eyeOff" } else { "eye" }, 14.0).tint(col).paint_at(ui, rect.shrink(2.0));
+    r.on_hover_text(if hidden { "Show" } else { "Hide" }).clicked()
+}
+
 fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
     let h = 24.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
@@ -2101,9 +2200,6 @@ fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolle
         ui.painter().hline(egui::Rangef::new(tp.x, tp.x + galley.size().x), y, Stroke::new(1.0, col(color)));
     }
     ui.painter().galley(tp, galley, col(color));
-    if hidden {
-        icons::image("eyeOff", 14.0).tint(theme::muted()).paint_at(ui, egui::Rect::from_center_size(egui::pos2(rect.right() - 12.0, rect.center().y), egui::vec2(14.0, 14.0)));
-    }
     if error.is_some() {
         ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, "!", egui::FontId::proportional(13.0), theme::error_soft());
     }

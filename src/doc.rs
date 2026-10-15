@@ -503,7 +503,7 @@ impl Op {
             "custom" => Op::Custom { name: String::new(), values: Default::default(), refs: vec![], select: String::new(), op: BoolOp::New },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
             "extrude" => {
-                Op::Extrude { profiles: vec![], end: EndType::Blind, depth: s("10"), opposite: false, second: false, depth2: s("10"), up_to: None, op: BoolOp::New, draft: s("0") }
+                Op::Extrude { profiles: vec![], end: EndType::Blind, depth: s("10"), opposite: false, second: false, depth2: s("10"), up_to: None, op: BoolOp::Add, draft: s("0") }
             }
             "revolve" => Op::Revolve { profiles: vec![], axis: None, mode: s("full"), angle: s("360"), op: BoolOp::New },
             "sweep" => Op::Sweep { profiles: vec![], path: vec![], op: BoolOp::New },
@@ -600,6 +600,9 @@ pub struct PartProps {
     /// Material name from `MATERIALS`.
     #[serde(default)]
     pub material: Option<String>,
+    /// Hidden in the viewport.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub hidden: bool,
 }
 
 /// (name, density g/cm³)
