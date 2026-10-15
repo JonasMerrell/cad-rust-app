@@ -54,7 +54,7 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
-        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 1000.0]).with_min_inner_size([640.0, 400.0]).with_title("cad-app"),
+        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 1000.0]).with_min_inner_size([320.0, 400.0]).with_title("cad-app"),
         ..Default::default()
     };
     eframe::run_native("cad-app", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))

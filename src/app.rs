@@ -130,6 +130,7 @@ pub struct App {
     pub tool_search: String,
     pub dark: bool,
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
+    pub was_narrow: Option<bool>,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -199,6 +200,7 @@ impl App {
             tool_search: String::new(),
             dark,
             script_editor: None,
+            was_narrow: None,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -792,11 +794,16 @@ impl App {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 6.0;
             ui.add(icons::image("logo", 20.0).tint(theme::accent()));
-            ui.label(RichText::new("cad-app").size(16.0).color(theme::muted()));
+            if !self.phone {
+                ui.label(RichText::new("cad-app").size(16.0).color(theme::muted()));
+            }
             ui.menu_image_button(icons::image("menu", 18.0).tint(theme::text()), |ui| self.document_menu(ui)).response.on_hover_text("Document menu");
             let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
+            let name = if self.phone && name.chars().count() > 18 { format!("{}…", name.chars().take(17).collect::<String>()) } else { name };
             ui.label(RichText::new(name).size(15.0).strong().color(theme::text()));
-            ui.label(RichText::new("Main").size(12.0).color(theme::muted()));
+            if !self.phone {
+                ui.label(RichText::new("Main").size(12.0).color(theme::muted()));
+            }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (icon, tip) = if self.dark { ("sun", "Switch to light mode") } else { ("moon", "Switch to dark mode") };
                 if ui.add(egui::Button::image(icons::image(icon, 17.0).tint(theme::text()))).on_hover_text(tip).clicked() {
@@ -813,7 +820,9 @@ impl App {
                     KernelState::Busy => ("Rebuilding", theme::accent()),
                     KernelState::Error => ("Kernel error", theme::error()),
                 };
-                ui.label(RichText::new(txt).size(12.0).color(theme::muted()));
+                if !self.phone {
+                    ui.label(RichText::new(txt).size(12.0).color(theme::muted()));
+                }
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
                 ui.painter().circle_filled(r.center(), 4.0, col);
             });
@@ -1691,45 +1700,53 @@ impl App {
             .response
             .on_hover_text("Add a Part Studio, Assembly or Drawing");
             ui.add_space(6.0);
-            for (t, name, icon) in tabs {
-                if let Some((rt, text)) = &mut self.renaming_tab {
-                    if *rt == t {
-                        let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
-                        r.request_focus();
-                        if r.lost_focus() {
-                            action = Some(("rename-done", t));
+            // tabs scroll sideways when they don't fit (phones)
+            let reserve = if self.phone { 115.0 } else { 220.0 };
+            egui::ScrollArea::horizontal().max_width((ui.available_width() - reserve).max(80.0)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 0.0;
+                    for (t, name, icon) in tabs {
+                        if let Some((rt, text)) = &mut self.renaming_tab {
+                            if *rt == t {
+                                let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
+                                r.request_focus();
+                                if r.lost_focus() {
+                                    action = Some(("rename-done", t));
+                                }
+                                continue;
+                            }
                         }
-                        continue;
-                    }
-                }
-                let active = self.tab == t;
-                let r = tab_button(ui, icon, &name, active);
-                if r.clicked() {
-                    switch = Some(t);
-                }
-                if r.double_clicked() {
-                    action = Some(("rename", t));
-                }
-                r.context_menu(|ui| {
-                    if ui.button("Rename").clicked() {
-                        action = Some(("rename", t));
-                        ui.close();
-                    }
-                    if ui.button("Duplicate").clicked() {
-                        action = Some(("duplicate", t));
-                        ui.close();
-                    }
-                    if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
-                        action = Some(("delete", t));
-                        ui.close();
+                        let active = self.tab == t;
+                        let r = tab_button(ui, icon, &name, active);
+                        if r.clicked() {
+                            switch = Some(t);
+                        }
+                        if r.double_clicked() {
+                            action = Some(("rename", t));
+                        }
+                        r.context_menu(|ui| {
+                            if ui.button("Rename").clicked() {
+                                action = Some(("rename", t));
+                                ui.close();
+                            }
+                            if ui.button("Duplicate").clicked() {
+                                action = Some(("duplicate", t));
+                                ui.close();
+                            }
+                            if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
+                                action = Some(("delete", t));
+                                ui.close();
+                            }
+                        });
                     }
                 });
-            }
+            });
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 8.0;
                 ui.add_space(4.0);
                 self.units_combo(ui);
-                ui.menu_button(RichText::new(format!("Versions ({})", self.ws.versions.len())).size(12.0), |ui| {
+                let versions = if self.phone { format!("V{}", self.ws.versions.len()) } else { format!("Versions ({})", self.ws.versions.len()) };
+                ui.menu_button(RichText::new(versions).size(12.0), |ui| {
                     ui.set_min_width(260.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.version_name).hint_text("Version name").desired_width(150.0));
@@ -1896,6 +1913,49 @@ impl App {
         }
     }
 
+    /// Phone layout: the sidebar slides over the viewport from the left; tapping
+    /// beside it closes it.
+    fn drawer(&mut self, ctx: &egui::Context, area: egui::Rect) {
+        let w = (area.width() * 0.86).min(340.0);
+        let shade = egui::Area::new(egui::Id::new("drawer-shade")).order(egui::Order::Middle).fixed_pos(area.min).show(ctx, |ui| {
+            let (r, resp) = ui.allocate_exact_size(area.size(), Sense::click());
+            ui.painter().rect_filled(r, 0.0, Color32::from_black_alpha(70));
+            resp
+        });
+        if shade.inner.clicked() {
+            self.sidebar_open = false;
+            return;
+        }
+        egui::Area::new(egui::Id::new("drawer")).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+            Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::border())).show(ui, |ui| {
+                ui.set_width(w);
+                ui.set_height(area.height());
+                if matches!(self.tab, crate::workspace::Tab::Studio(_)) {
+                    // the rail's panes, as tabs
+                    ui.horizontal(|ui| {
+                        for (pane, icon, label) in [(LeftPane::Features, "features", "Features"), (LeftPane::Variables, "variable", "Variables"), (LeftPane::Configurations, "configurations", "Configs")] {
+                            let on = self.left_pane == pane;
+                            let fg = if on { theme::active_text() } else { theme::text() };
+                            let mut b = egui::Button::image_and_text(icons::image(icon, 16.0).tint(fg), RichText::new(label).size(12.5).color(fg)).min_size(egui::vec2(0.0, 32.0));
+                            if on {
+                                b = b.fill(theme::active_fill());
+                            }
+                            if ui.add(b).clicked() {
+                                self.left_pane = pane;
+                            }
+                        }
+                    });
+                    ui.separator();
+                }
+                match self.tab {
+                    crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
+                    _ => self.sidebar(ui),
+                }
+            });
+        });
+    }
+
     fn dock(&mut self, ui: &mut Ui) {
         egui::ScrollArea::horizontal().show(ui, |ui| {
             ui.horizontal(|ui| {
@@ -1920,6 +1980,15 @@ impl App {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
+        // narrow windows (phones) get the phone layout; crossing back restores the desktop one
+        let narrow = ctx.content_rect().width() < 700.0;
+        if self.was_narrow != Some(narrow) {
+            if self.was_narrow.is_some() || narrow {
+                self.phone = narrow;
+                self.sidebar_open = !narrow;
+            }
+            self.was_narrow = Some(narrow);
+        }
         self.handle_screenshot(&ctx);
         self.pump_kernel();
         self.shortcuts(&ctx);
@@ -1939,7 +2008,7 @@ impl eframe::App for App {
             let rail = Frame::new().fill(theme::header()).stroke(Stroke::new(1.0, theme::border()));
             egui::Panel::left("rail").frame(rail).resizable(false).exact_size(40.0).show(ui, |ui| self.rail(ui));
         }
-        if self.sidebar_open {
+        if self.sidebar_open && !self.phone {
             let side = Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::border()));
             egui::Panel::left("sidebar").frame(side).resizable(true).default_size(250.0).min_size(190.0).show(ui, |ui| match self.tab {
                 crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
@@ -1960,6 +2029,9 @@ impl eframe::App for App {
         });
         if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {
             self.hint_ui(&ctx, central.response.rect);
+        }
+        if self.phone && self.sidebar_open {
+            self.drawer(&ctx, central.response.rect);
         }
         self.toast_ui(&ctx);
         let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sketcher".into()));

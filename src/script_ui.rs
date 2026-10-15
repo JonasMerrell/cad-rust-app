@@ -74,7 +74,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let mut switch: Option<Option<usize>> = None;
     let defs: Vec<String> = app.doc.custom_features.iter().map(|d| d.name.clone()).collect();
     let cur = ed.index;
-    egui::Window::new("Custom features").open(&mut shown).default_size([760.0, 560.0]).resizable(true).show(ctx, |ui| {
+    let screen = ctx.content_rect();
+    let size = [760f32.min(screen.width() - 16.0), 560f32.min(screen.height() - 120.0)];
+    egui::Window::new("Custom features").open(&mut shown).default_size(size).constrain(true).resizable(true).show(ctx, |ui| {
         ui.horizontal_top(|ui| {
             // list of definitions
             ui.vertical(|ui| {

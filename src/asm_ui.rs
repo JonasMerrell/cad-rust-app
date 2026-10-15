@@ -895,7 +895,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
     crate::viewport::paint_background(ui.painter(), rect);
     let before = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height);
-    crate::viewport::navigate(app, ui, &resp);
+    let free = app.asm.hover.is_none() && app.asm.dialog.is_none() && app.asm.measure.is_none();
+    crate::viewport::navigate(app, ui, &resp, free);
     if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
         app.asm.scene_dirty = true;
     }

@@ -1119,7 +1119,18 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             app.dwg.center = [before[0] - ((p.x - rect.center().x) / z) as f64, before[1] + ((p.y - rect.center().y) / z) as f64];
         }
     }
-    if resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
+    // touch: pinch zooms, one finger on empty sheet pans
+    let pinch = ui.input(|i| i.zoom_delta());
+    if (pinch - 1.0).abs() > 1e-4 {
+        if let Some(p) = resp.hover_pos() {
+            let before = to_sheet_pt(p);
+            app.dwg.zoom = (zoom * pinch).clamp(0.2, 200.0);
+            let z = app.dwg.zoom;
+            app.dwg.center = [before[0] - ((p.x - rect.center().x) / z) as f64, before[1] + ((p.y - rect.center().y) / z) as f64];
+        }
+    }
+    let touch_pan = (app.phone || ui.input(|i| i.any_touches())) && app.dwg.tool == DTool::Select && app.dwg.sel.is_none() && app.dwg.drag.is_none() && resp.dragged_by(egui::PointerButton::Primary);
+    if touch_pan || resp.dragged_by(egui::PointerButton::Middle) || resp.dragged_by(egui::PointerButton::Secondary) {
         let dlt = resp.drag_delta();
         app.dwg.center[0] -= (dlt.x / zoom) as f64;
         app.dwg.center[1] += (dlt.y / zoom) as f64;

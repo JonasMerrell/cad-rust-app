@@ -33,7 +33,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
     paint_background(ui.painter(), rect);
 
-    navigate(app, ui, &resp);
+    let free = app.sketch.is_none() && app.hover.is_none();
+    navigate(app, ui, &resp, free);
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
 
     // hover + clicks
@@ -108,8 +109,21 @@ pub fn paint_background(painter: &egui::Painter, rect: egui::Rect) {
     painter.add(egui::Shape::mesh(m));
 }
 
-pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
+/// Mouse and touch navigation. `free_drag`: a primary drag here would do nothing
+/// else, so on a phone one finger orbits (two fingers pan and pinch-zoom).
+pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response, free_drag: bool) {
     let rect = resp.rect;
+    if let Some(mt) = ui.input(|i| i.multi_touch()) {
+        if resp.contains_pointer() || rect.contains(mt.center_pos) {
+            app.nav = None;
+            if mt.translation_delta != egui::Vec2::ZERO {
+                app.camera.pan(mt.translation_delta.x, mt.translation_delta.y);
+                app.scene_dirty = true;
+                app.asm.scene_dirty = true;
+            }
+            // zoom_delta below handles the pinch
+        }
+    }
     let (pos, scroll, pinch) = ui.input(|i| (i.pointer.hover_pos(), i.smooth_scroll_delta.y, i.zoom_delta()));
     if let Some(p) = pos {
         if rect.contains(p) {
@@ -127,6 +141,10 @@ pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
     let (down_sec, down_mid, shift, delta, latest) = ui.input(|i| {
         (i.pointer.button_down(egui::PointerButton::Secondary), i.pointer.button_down(egui::PointerButton::Middle), i.modifiers.shift, i.pointer.delta(), i.pointer.latest_pos())
     });
+    let touches = ui.input(|i| i.any_touches());
+    if app.nav.is_none() && (app.phone || touches) && free_drag && resp.drag_started_by(egui::PointerButton::Primary) && ui.input(|i| i.multi_touch().is_none()) {
+        app.nav = Some(Nav { orbit: true, moved: 0.0, last: latest.unwrap_or_default(), button: egui::PointerButton::Primary });
+    }
     if app.nav.is_none() && (resp.drag_started_by(egui::PointerButton::Secondary) || resp.drag_started_by(egui::PointerButton::Middle)) {
         let button = if down_mid { egui::PointerButton::Middle } else { egui::PointerButton::Secondary };
         app.nav = Some(Nav { orbit: button == egui::PointerButton::Secondary && !shift, moved: 0.0, last: latest.unwrap_or_default(), button });
@@ -134,6 +152,7 @@ pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
     if let Some(n) = &mut app.nav {
         let still = match n.button {
             egui::PointerButton::Middle => down_mid,
+            egui::PointerButton::Primary => ui.input(|i| i.pointer.primary_down() && i.multi_touch().is_none()),
             _ => down_sec,
         };
         if !still {
