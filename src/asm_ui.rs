@@ -594,9 +594,9 @@ fn mates(app: &mut App, ui: &mut Ui) {
 }
 
 /// (item, part name, quantity, material, mass each in g)
-pub fn bom(app: &App, a: &Assembly) -> Vec<(usize, String, usize, String, Option<f64>)> {
+pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<(usize, String, usize, String, Option<f64>)> {
     let mut rows: Vec<((usize, crate::doc::BodyId), String, usize, String, Option<f64>)> = vec![];
-    for leaf in a.instances.iter().flat_map(|x| assembly::leaves(&app.ws.assemblies, x).into_iter().map(move |l| (x, l))) {
+    for leaf in a.instances.iter().flat_map(|x| assembly::leaves(&app.ws().assemblies, x).into_iter().map(move |l| (x, l))) {
         let (x, l) = leaf;
         let key = (l.studio, l.body);
         if let Some(r) = rows.iter_mut().find(|r| r.0 == key) {
@@ -604,8 +604,13 @@ pub fn bom(app: &App, a: &Assembly) -> Vec<(usize, String, usize, String, Option
             continue;
         }
         let props = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).cloned().unwrap_or_default();
-        let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body);
-        let name = props.name.clone().or_else(|| mesh.map(|m| m.name.clone())).unwrap_or_else(|| x.name.clone());
+        let mesh = app.bodies(l.studio).iter().find(|b| b.id == l.body);
+        // parts from different Part Studios all start out as "Part 1": say which studio
+        let studio_name = app.ws().studios.get(l.studio).map(|s| s.name.clone()).filter(|_| app.ws().studios.len() > 1);
+        let name = props.name.clone().or_else(|| mesh.map(|m| match &studio_name {
+            Some(s) => format!("{s} / {}", m.name),
+            None => m.name.clone(),
+        })).unwrap_or_else(|| x.name.clone());
         let density = props.material.as_ref().and_then(|m| crate::doc::MATERIALS.iter().find(|q| q.0 == m)).map(|q| q.1);
         let mass = match (density, mesh) {
             (Some(d), Some(m)) => Some(m.volume / 1000.0 * d),
@@ -640,7 +645,7 @@ fn explode_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
             ui.add(egui::DragValue::new(&mut st.distance).speed(1.0).suffix(" mm"));
-            if ui.small_button("✕").on_hover_text("Delete step").clicked() {
+            if ui.add(egui::Button::image(icons::image("close", 12.0).tint(theme::muted())).frame(false)).on_hover_text("Delete step").clicked() {
                 delete = Some(i);
             }
         });

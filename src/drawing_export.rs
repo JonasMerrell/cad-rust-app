@@ -184,3 +184,83 @@ mod tests {
         assert!(svg(&prims, [297.0, 210.0]).contains("<line"));
     }
 }
+
+/// Rasterise sheet primitives to a PNG `width` pixels wide (for previews and agents).
+pub fn png(prims: &[Prim], size: [f64; 2], width: u32) -> Result<Vec<u8>, String> {
+    use tiny_skia::{Color, FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, StrokeDash, Transform};
+    let k = width as f64 / size[0];
+    let height = (size[1] * k).round().max(1.0) as u32;
+    let mut pm = Pixmap::new(width, height).ok_or("bad image size")?;
+    pm.fill(Color::WHITE);
+    // sheet mm (origin bottom-left) to pixels
+    let at = |p: [f64; 2]| ((p[0] * k) as f32, ((size[1] - p[1]) * k) as f32);
+    let face = ttf_parser::Face::parse(epaint_default_fonts::UBUNTU_LIGHT, 0).map_err(|e| e.to_string())?;
+    struct Out<'a> {
+        pb: &'a mut PathBuilder,
+        x: f32,
+        y: f32,
+        s: f32,
+    }
+    impl ttf_parser::OutlineBuilder for Out<'_> {
+        fn move_to(&mut self, x: f32, y: f32) {
+            self.pb.move_to(self.x + x * self.s, self.y - y * self.s);
+        }
+        fn line_to(&mut self, x: f32, y: f32) {
+            self.pb.line_to(self.x + x * self.s, self.y - y * self.s);
+        }
+        fn quad_to(&mut self, x1: f32, y1: f32, x: f32, y: f32) {
+            self.pb.quad_to(self.x + x1 * self.s, self.y - y1 * self.s, self.x + x * self.s, self.y - y * self.s);
+        }
+        fn curve_to(&mut self, x1: f32, y1: f32, x2: f32, y2: f32, x: f32, y: f32) {
+            self.pb.cubic_to(self.x + x1 * self.s, self.y - y1 * self.s, self.x + x2 * self.s, self.y - y2 * self.s, self.x + x * self.s, self.y - y * self.s);
+        }
+        fn close(&mut self) {
+            self.pb.close();
+        }
+    }
+    for p in prims {
+        match p {
+            Prim::Line { a, b, w, dashed, color } => {
+                let mut pb = PathBuilder::new();
+                let (a, b) = (at(*a), at(*b));
+                pb.move_to(a.0, a.1);
+                pb.line_to(b.0, b.1);
+                let Some(path) = pb.finish() else { continue };
+                let mut paint = Paint::default();
+                paint.set_color_rgba8(color[0], color[1], color[2], 255);
+                paint.anti_alias = true;
+                let mut st = Stroke { width: ((*w * k) as f32).max(0.8), line_cap: LineCap::Round, ..Default::default() };
+                if *dashed {
+                    st.dash = StrokeDash::new(vec![(1.5 * k) as f32, (1.0 * k) as f32], 0.0);
+                }
+                pm.stroke_path(&path, &paint, &st, Transform::identity(), None);
+            }
+            Prim::Text { at: pos, size: sz, text, anchor, color } => {
+                let s = (*sz * k) as f32 / face.units_per_em() as f32 * 1.35;
+                let adv: f32 = text.chars().map(|c| face.glyph_index(c).and_then(|g| face.glyph_hor_advance(g)).unwrap_or(500) as f32 * s).sum();
+                let (mut x, y) = at(*pos);
+                x -= match anchor {
+                    1 => adv / 2.0,
+                    2 => adv,
+                    _ => 0.0,
+                };
+                let mut pb = PathBuilder::new();
+                for c in text.chars() {
+                    let Some(g) = face.glyph_index(c) else {
+                        x += 500.0 * s;
+                        continue;
+                    };
+                    face.outline_glyph(g, &mut Out { pb: &mut pb, x, y, s });
+                    x += face.glyph_hor_advance(g).unwrap_or(500) as f32 * s;
+                }
+                if let Some(path) = pb.finish() {
+                    let mut paint = Paint::default();
+                    paint.set_color_rgba8(color[0], color[1], color[2], 255);
+                    paint.anti_alias = true;
+                    pm.fill_path(&path, &paint, FillRule::Winding, Transform::identity(), None);
+                }
+            }
+        }
+    }
+    pm.encode_png().map_err(|e| e.to_string())
+}

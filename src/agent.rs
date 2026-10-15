@@ -18,18 +18,37 @@ use crate::regions::find_regions;
 use crate::sketch::{Constraint, Dim, Frame, Geom, Id, Sketch};
 use crate::worker::KernelClient;
 
+#[path = "agent_ws.rs"]
+mod ws;
+
 pub struct Session {
+    /// The active Part Studio (its copy in `ws` is stale until `sync`).
     pub doc: Document,
     pub path: Option<String>,
     pub result: RebuildResult,
     kernel: KernelClient,
+    /// The whole document: Part Studios, Assemblies and Drawings.
+    ws: crate::workspace::Workspace,
+    cur: usize,
+    /// Built results of the other Part Studios, and drawing projections.
+    others: HashMap<usize, RebuildResult>,
+    proj: HashMap<(usize, String), crate::kernel::ProjView>,
 }
 
 type R<T> = Result<T, String>;
 
 impl Session {
     pub fn new() -> Session {
-        Session { doc: Document::default(), path: None, result: RebuildResult::default(), kernel: KernelClient::new_headless() }
+        Session {
+            doc: Document::default(),
+            path: None,
+            result: RebuildResult::default(),
+            kernel: KernelClient::new_headless(),
+            ws: Default::default(),
+            cur: 0,
+            others: HashMap::new(),
+            proj: HashMap::new(),
+        }
     }
 
     fn rebuild(&mut self) -> R<()> {
@@ -41,7 +60,11 @@ impl Session {
                 sketch.solve(&crate::expr::Env { vars: &vars, units }, &[]);
             }
         }
-        self.result = self.kernel.rebuild_blocking(0, &self.doc)?;
+        self.sync();
+        self.kernel.set_studios(self.ws.studios.iter().map(|s| s.doc.clone()).collect());
+        self.others.clear();
+        self.proj.clear();
+        self.result = self.kernel.rebuild_blocking(self.cur, &self.doc)?;
         for f in &mut self.doc.features {
             if let (Op::Sketch { frame, .. }, Some(fr)) = (&mut f.op, self.result.frames.get(&f.id)) {
                 *frame = *fr;
@@ -90,6 +113,8 @@ impl Session {
             "new_document" => {
                 let units = a.get("units").and_then(|u| u.as_str()).unwrap_or("mm");
                 self.doc = Document::default();
+                self.ws = Default::default();
+                self.cur = 0;
                 self.doc.units = serde_json::from_value(json!(units)).map_err(|_| "units must be mm, cm, m, in or ft")?;
                 self.path = None;
                 self.rebuild()?;
@@ -99,21 +124,24 @@ impl Session {
                 let path = str_arg(a, "path")?;
                 let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
                 let ws = crate::workspace::Workspace::from_json(&text)?;
-                self.doc = ws.studios.into_iter().next().map(|s| s.doc).unwrap_or_default();
+                self.doc = ws.studios.first().map(|s| s.doc.clone()).unwrap_or_default();
+                self.ws = ws;
+                self.cur = 0;
                 self.path = Some(path);
                 self.rebuild()?;
                 self.status()
             }
             "save_document" => {
                 let path = a.get("path").and_then(|p| p.as_str()).map(String::from).or(self.path.clone()).ok_or("give a path")?;
-                let ws = crate::workspace::Workspace { studios: vec![crate::workspace::Studio { name: "Part Studio 1".into(), doc: self.doc.clone() }], ..Default::default() };
-                std::fs::write(&path, ws.to_json()).map_err(|e| e.to_string())?;
+                self.sync();
+                std::fs::write(&path, self.ws.to_json()).map_err(|e| e.to_string())?;
                 self.path = Some(path.clone());
                 json!({"saved": path})
             }
             "describe" => {
                 let mut v = self.status();
                 v["units"] = json!(self.doc.units.label());
+                v["document"] = self.tabs_summary();
                 v["variables"] = json!(self.doc.variables.iter().map(|x| json!({"name": x.name, "expr": x.expr})).collect::<Vec<_>>());
                 v["features"] = json!(self
                     .doc
@@ -246,11 +274,14 @@ impl Session {
             "export_drawing" => {
                 let path = str_arg(a, "path")?;
                 let format = a.get("format").and_then(|f| f.as_str()).unwrap_or_else(|| path.rsplit('.').next().unwrap_or("pdf")).to_lowercase();
-                let data = self.drawing(&format, a)?;
+                let data = match a.get("drawing").and_then(|d| d.as_u64()) {
+                    Some(i) => self.export_drawing_tab(i as usize, &format, a)?,
+                    None => self.drawing(&format, a)?,
+                };
                 std::fs::write(&path, data).map_err(|e| e.to_string())?;
                 json!({"exported": path})
             }
-            _ => return Err(format!("unknown tool {name}")),
+            _ => return self.ws_call(name, a),
         };
         Ok((v, None))
     }
@@ -593,6 +624,36 @@ fn obj(r: &RebuildResult) -> String {
 /// iso_back_right, iso_back_left (and *_below variants); `direction` (from the part towards the
 /// camera) overrides it. `sketches`: all, unused (not consumed by a feature) or none.
 pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, direction: Option<[f64; 3]>, sketches: &str, w: u32, h: u32) -> R<Vec<u8>> {
+    // sketches that some feature uses are hidden by default, as in Onshape
+    let used: std::collections::HashSet<FeatId> = if sketches == "unused" {
+        doc.features
+            .iter()
+            .filter(|f| !matches!(f.op, Op::Sketch { .. }))
+            .flat_map(|f| {
+                let v = serde_json::to_value(&f.op).unwrap_or_default();
+                let mut ids = vec![];
+                collect_sketch_ids(&v, &mut ids);
+                ids
+            })
+            .collect()
+    } else {
+        Default::default()
+    };
+    let sketch_lines: Vec<Vec<DVec3>> = doc
+        .features
+        .iter()
+        .filter(|f| sketches != "none" && !used.contains(&f.id) && !f.hidden)
+        .filter_map(|f| if let Op::Sketch { sketch, frame, .. } = &f.op { Some((sketch, frame)) } else { None })
+        .flat_map(|(sk, fr)| sk.curves.iter().map(move |c| sk.tessellate(c, 1.0).into_iter().map(|p| fr.to_world(p)).collect::<Vec<_>>()))
+        .collect();
+    let parts: HashMap<String, [u8; 3]> = doc.parts.iter().filter_map(|(k, p)| p.color.map(|c| (k.clone(), c))).collect();
+    let items: Vec<(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])> =
+        r.bodies.iter().map(|b| (b, crate::assembly::Pose::default(), parts.get(&crate::doc::body_key(b.id)).copied().unwrap_or([0x9a, 0xa9, 0xba]))).collect();
+    raster_scene(&items, &sketch_lines, view, direction, w, h)
+}
+
+/// Shade posed meshes (and draw 3D polylines on top) into a PNG.
+pub fn raster_scene(items: &[(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])], sketch_lines: &[Vec<DVec3>], view: &str, direction: Option<[f64; 3]>, w: u32, h: u32) -> R<Vec<u8>> {
     use crate::camera::{Camera, StdView};
     let mut cam = Camera { size: glam::Vec2::new(w as f32, h as f32), ..Default::default() };
     let iso = |x: f32, y: f32, z: f32| glam::Vec3::new(x, y, z).normalize();
@@ -622,35 +683,16 @@ pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, direction: Opti
             _ => StdView::Iso,
         }),
     }
-    // sketches that some feature uses are hidden by default, as in Onshape
-    let used: std::collections::HashSet<FeatId> = if sketches == "unused" {
-        doc.features
-            .iter()
-            .filter(|f| !matches!(f.op, Op::Sketch { .. }))
-            .flat_map(|f| {
-                let v = serde_json::to_value(&f.op).unwrap_or_default();
-                let mut ids = vec![];
-                collect_sketch_ids(&v, &mut ids);
-                ids
-            })
-            .collect()
-    } else {
-        Default::default()
-    };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
-    for b in &r.bodies {
-        lo = lo.min(b.bbox[0].into());
-        hi = hi.max(b.bbox[1].into());
+    for (b, pose, _) in items {
+        for c in 0..8 {
+            let p = pose.apply(DVec3::new(b.bbox[c & 1][0], b.bbox[(c >> 1) & 1][1], b.bbox[(c >> 2) & 1][2]));
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
     }
-    let sketch_lines: Vec<Vec<DVec3>> = doc
-        .features
-        .iter()
-        .filter(|f| sketches != "none" && !used.contains(&f.id) && !f.hidden)
-        .filter_map(|f| if let Op::Sketch { sketch, frame, .. } = &f.op { Some((sketch, frame)) } else { None })
-        .flat_map(|(sk, fr)| sk.curves.iter().map(move |c| sk.tessellate(c, 1.0).into_iter().map(|p| fr.to_world(p)).collect::<Vec<_>>()))
-        .collect();
-    for l in &sketch_lines {
+    for l in sketch_lines {
         for p in l {
             lo = lo.min(*p);
             hi = hi.max(*p);
@@ -674,31 +716,29 @@ pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, direction: Opti
         glam::Vec3::new((n.x + 1.0) * 0.5 * w as f32, (1.0 - n.y) * 0.5 * h as f32, n.z)
     };
     let light = (cam.back + glam::Vec3::new(0.25, 0.15, 0.45)).normalize();
-    let parts: HashMap<String, [u8; 3]> = doc.parts.iter().filter_map(|(k, p)| p.color.map(|c| (k.clone(), c))).collect();
-    for b in &r.bodies {
-        let base = parts.get(&crate::doc::body_key(b.id)).copied().unwrap_or([0x9a, 0xa9, 0xba]);
+    for (b, pose, base) in items {
+        let at = |i: u32| pose.apply(DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64)).as_vec3();
         for t in b.indices.chunks(3) {
-            let v = |i: u32| glam::Vec3::new(b.positions[3 * i as usize], b.positions[3 * i as usize + 1], b.positions[3 * i as usize + 2]);
-            let (a, bb, c) = (v(t[0]), v(t[1]), v(t[2]));
+            let (a, bb, c) = (at(t[0]), at(t[1]), at(t[2]));
             let mut n = (bb - a).cross(c - a).normalize_or_zero();
             if n.dot(cam.back) < 0.0 {
                 n = -n;
             }
             let l = 0.42 + 0.38 * n.dot(light).max(0.0) + 0.25 * n.dot(cam.back).max(0.0).powi(6);
             let col = [(base[0] as f32 * l).min(255.0) as u8, (base[1] as f32 * l).min(255.0) as u8, (base[2] as f32 * l).min(255.0) as u8];
-            let (p0, p1, p2) = (proj(a), proj(bb), proj(c));
-            raster_tri(&mut px, &mut depth, wu, hu, [p0, p1, p2], col);
+            raster_tri(&mut px, &mut depth, wu, hu, [proj(a), proj(bb), proj(c)], col);
         }
     }
     // edges, then sketches on top
-    for b in &r.bodies {
+    for (b, pose, _) in items {
         for e in &b.edges {
             for s in e.pts.windows(2) {
-                raster_line(&mut px, &depth, wu, hu, proj(glam::Vec3::from(s[0])), proj(glam::Vec3::from(s[1])), [0x1c, 0x20, 0x26], true);
+                let (p, q) = (pose.apply(DVec3::from(s[0].map(|v| v as f64))), pose.apply(DVec3::from(s[1].map(|v| v as f64))));
+                raster_line(&mut px, &depth, wu, hu, proj(p.as_vec3()), proj(q.as_vec3()), [0x1c, 0x20, 0x26], true);
             }
         }
     }
-    for l in &sketch_lines {
+    for l in sketch_lines {
         for s in l.windows(2) {
             raster_line(&mut px, &depth, wu, hu, proj(s[0].as_vec3()), proj(s[1].as_vec3()), [0x56, 0xb6, 0xff], true);
         }
@@ -813,8 +853,8 @@ fn tools() -> Value {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     json!([
         {"name": "new_document", "description": "Start a new empty Part Studio. Units: mm (default), cm, m, in, ft.", "inputSchema": obj(json!({"units": {"type": "string"}}), &[])},
-        {"name": "open_document", "description": "Open a .json part/workspace file (its first Part Studio).", "inputSchema": obj(json!({"path": {"type": "string"}}), &["path"])},
-        {"name": "save_document", "description": "Save the document as a .json file the cad-app GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
+        {"name": "open_document", "description": "Open a .json document; its first Part Studio becomes active (see describe for the other tabs).", "inputSchema": obj(json!({"path": {"type": "string"}}), &["path"])},
+        {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the cad-app GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
         {"name": "describe", "description": "Features (with their full params), variables, parts (volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},
         {"name": "create_sketch", "description": "New sketch on 'top' (XY), 'front' (XZ, normal -Y), 'right' (YZ), or a ref such as a planar face ref from list_geometry or {\"kind\":\"feature_plane\",\"feature\":id}. Returns sketch_id and the plane frame (sketch x/y axes in 3D).", "inputSchema": obj(json!({"plane": {}, "name": {"type": "string"}}), &[])},
@@ -827,7 +867,21 @@ fn tools() -> Value {
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
-        {"name": "export_drawing", "description": "Write a drawing with front, top, right and iso views (hidden lines removed) as pdf, svg or dxf. Optional sheet (A4, A3, A2, A1, Letter, Tabloid), scale, title.", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "sheet": {"type": "string"}, "scale": {"type": "number"}, "title": {"type": "string"}}), &["path"])}
+        {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}}), &["path"])},
+        {"name": "new_part_studio", "description": "Add another Part Studio to the document and make it active (sketches/features go there). Parts from different studios can be combined in assemblies; describe lists all studios, assemblies and drawings.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
+        {"name": "switch_part_studio", "description": "Make another Part Studio (by index) the active one.", "inputSchema": obj(json!({"index": {"type": "integer"}}), &["index"])},
+        {"name": "create_assembly", "description": "Add an Assembly tab. Returns its index.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
+        {"name": "assembly_insert", "description": "Insert an instance into an assembly: a part (studio index, body [f,i] from describe; default the active studio's first part) or a whole other assembly as a rigid sub-assembly (sub_assembly: index). Optional position [x,y,z], rotate {axis:[x,y,z], angle: degrees}, fixed (the first instance is fixed by default), name. Returns the instance id.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "studio": {"type": "integer"}, "body": {"type": "array"}, "sub_assembly": {"type": "integer"}, "position": {"type": "array"}, "rotate": {"type": "object"}, "fixed": {"type": "boolean"}, "name": {"type": "string"}}), &["assembly"])},
+        {"name": "assembly_mate", "description": "Mate two instances and solve. kind: fastened, revolute, slider, cylindrical, planar, ball. a and b each: {instance, face:[x,y,z]} or {instance, edge:[x,y,z]} with a point on that face/edge in the part's own coordinates (as list_geometry gives them; a circular edge or cylindrical face gives its axis), or {instance, origin:[..], z:[..], x:[..]} explicitly. Mate connectors' Z axes end up opposed (faces touch); flip:true aligns them. Optional offset (mm along Z), offset_x, offset_y, rotation (degrees), limits [min,max] for the free motion. Reports instance poses and failed mates.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "kind": {"type": "string"}, "a": {"type": "object"}, "b": {"type": "object"}, "flip": {"type": "boolean"}, "offset": {"type": "number"}, "offset_x": {"type": "number"}, "offset_y": {"type": "number"}, "rotation": {"type": "number"}, "limits": {"type": "array"}, "name": {"type": "string"}}), &["assembly", "kind", "a", "b"])},
+        {"name": "assembly_move", "description": "Move/rotate an instance (position, rotate {axis, angle}), set fixed or hidden, or delete:true; mates are re-solved.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "instance": {"type": "integer"}, "position": {"type": "array"}, "rotate": {"type": "object"}, "fixed": {"type": "boolean"}, "hidden": {"type": "boolean"}, "delete": {"type": "boolean"}}), &["assembly", "instance"])},
+        {"name": "assembly_relation", "description": "Couple two mates: gear (two revolute mates, ratio), rack (revolute mate_a drives slider mate_b, ratio = pitch radius mm) or screw (cylindrical mate_a, ratio = pitch mm/turn).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "kind": {"type": "string"}, "mate_a": {"type": "integer"}, "mate_b": {"type": "integer"}, "ratio": {"type": "number"}, "reverse": {"type": "boolean"}}), &["assembly", "kind", "mate_a"])},
+        {"name": "assembly_explode", "description": "Set the exploded view steps: [{instances:[ids], direction:[x,y,z], distance: mm}], applied in order.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "steps": {"type": "array"}}), &["assembly", "steps"])},
+        {"name": "assembly_info", "description": "Instances (poses, world bounding boxes), mates, bill of materials and explode steps. interference:true also lists overlapping instances with their overlap volume.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "interference": {"type": "boolean"}}), &["assembly"])},
+        {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["assembly"])},
+        {"name": "create_drawing", "description": "Add a Drawing tab (sheet A4/A3/A2/A1/Letter/Tabloid, default A3) with front, top, right and iso views of a Part Studio (standard_views:false for an empty sheet). Returns its index and drawing_info.", "inputSchema": obj(json!({"name": {"type": "string"}, "sheet": {"type": "string"}, "studio": {"type": "integer"}, "standard_views": {"type": "boolean"}}), &[])},
+        {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, position:[x,y] sheet mm, scale, hidden_lines, sheet}; detail{view, center:[x,y] view coords, radius, position, scale}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× '}; auto_dimensions{view} (overall size + hole diameters); note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
+        {"name": "drawing_info", "description": "A drawing's views (with dimensionable points, straight lines and circles in view coordinates), dimensions, notes and GD&T.", "inputSchema": obj(json!({"drawing": {"type": "integer"}}), &["drawing"])},
+        {"name": "render_drawing", "description": "PNG of one drawing sheet (sheet: 1-based, width px) to check the layout.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "sheet": {"type": "integer"}, "width": {"type": "integer"}, "path": {"type": "string"}}), &["drawing"])}
     ])
 }
 

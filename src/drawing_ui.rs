@@ -116,7 +116,7 @@ fn dwg_mut(app: &mut App) -> Option<&mut Drawing> {
     app.ws.drawings.get_mut(i)
 }
 
-fn units_of(app: &App, studio: usize) -> crate::expr::Units {
+fn units_of(app: &dyn DocCtx, studio: usize) -> crate::expr::Units {
     app.studio_doc(studio).map(|d| d.units).unwrap_or_default()
 }
 
@@ -204,6 +204,29 @@ fn from_sheet(v: &DrawView, proj: Option<&ProjView>, s: [f64; 2]) -> [f64; 2] {
 
 // ---------------------------------------------------------------- geometry for display and export
 
+/// What the sheet renderer needs to know about the document (the GUI app or a headless session).
+pub trait DocCtx {
+    fn ws(&self) -> &crate::workspace::Workspace;
+    fn bodies(&self, studio: usize) -> &[crate::kernel::BodyMesh];
+    fn studio_doc(&self, studio: usize) -> Option<&crate::doc::Document>;
+    fn proj(&self, studio: usize, dir: &str) -> Option<&ProjView>;
+}
+
+impl DocCtx for App {
+    fn ws(&self) -> &crate::workspace::Workspace {
+        &self.ws
+    }
+    fn bodies(&self, studio: usize) -> &[crate::kernel::BodyMesh] {
+        self.studio_bodies(studio)
+    }
+    fn studio_doc(&self, studio: usize) -> Option<&crate::doc::Document> {
+        App::studio_doc(self, studio)
+    }
+    fn proj(&self, studio: usize, dir: &str) -> Option<&ProjView> {
+        self.dwg.proj.get(&(studio, dir.to_string()))
+    }
+}
+
 /// A drawing primitive in sheet millimetres.
 pub enum Prim {
     Line { a: [f64; 2], b: [f64; 2], w: f64, dashed: bool, color: [u8; 3] },
@@ -214,7 +237,7 @@ const INK: [u8; 3] = [20, 20, 20];
 const DIM_INK: [u8; 3] = [20, 60, 140];
 
 /// Everything on the sheet, for both the screen and the exporters.
-pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
+pub fn sheet_prims(app: &dyn DocCtx, d: &Drawing, sheet: usize) -> Vec<Prim> {
     let mut out = vec![];
     let [w, h] = sheet_size(&d.sheet);
     let line = |out: &mut Vec<Prim>, a: [f64; 2], b: [f64; 2], wid: f64| out.push(Prim::Line { a, b, w: wid, dashed: false, color: INK });
@@ -232,7 +255,7 @@ pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
     let on_sheet: Vec<&DrawView> = d.views.iter().filter(|v| v.sheet == sheet).collect();
     let units = on_sheet.first().map(|v| units_of(app, v.studio)).unwrap_or_default();
     let scale = on_sheet.first().map(|v| fmt_scale(v.scale)).unwrap_or_default();
-    let studio = on_sheet.first().and_then(|v| app.ws.studios.get(v.studio)).map(|s| s.name.clone()).unwrap_or_default();
+    let studio = on_sheet.first().and_then(|v| app.ws().studios.get(v.studio)).map(|s| s.name.clone()).unwrap_or_default();
     out.push(Prim::Text { at: [tx + 4.0, ty + 24.0], size: 6.0, text: d.name.clone(), anchor: 0, color: INK });
     out.push(Prim::Text { at: [tx + 4.0, ty + 6.0], size: 3.2, text: format!("Part: {studio}"), anchor: 0, color: INK });
     out.push(Prim::Text { at: [tx + 114.0, ty + 11.0], size: 3.2, text: format!("Scale {scale}"), anchor: 0, color: INK });
@@ -245,7 +268,7 @@ pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
             detail_prims(app, d, v, src, c, r, &mut out);
             continue;
         }
-        let proj = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+        let proj = app.proj(v.studio, &v.dir);
         let Some(p) = proj else {
             out.push(Prim::Text { at: v.pos, size: 4.0, text: "projecting…".into(), anchor: 1, color: [130, 130, 130] });
             continue;
@@ -271,7 +294,7 @@ pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
     }
     for dm in &d.dims {
         let Some(v) = on_sheet.iter().find(|v| v.id == dm.view) else { continue };
-        let p = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+        let p = app.proj(v.studio, &v.dir);
         let (a, b) = (to_sheet(v, p, dm.a), to_sheet(v, p, dm.b));
         let units = units_of(app, v.studio);
         match dm.kind {
@@ -287,7 +310,7 @@ pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
         gdt_prims(&mut out, g);
     }
     if let Some((ai, pos)) = d.bom {
-        if let Some(a) = app.ws.assemblies.get(ai).filter(|_| d.bom_sheet == sheet) {
+        if let Some(a) = app.ws().assemblies.get(ai).filter(|_| d.bom_sheet == sheet) {
             bom_prims(app, a, pos, &mut out);
         }
     }
@@ -550,7 +573,8 @@ pub fn auto_dims(p: &ProjView, view: u64, next_id: &mut u64) -> Vec<DrawDim> {
         out.push(DrawDim { id: *next_id, view, a, b, kind, offset, extra: vec![], prefix });
     };
     if hi[0] - lo[0] > 1e-6 {
-        push(1, [lo[0], lo[1]], [hi[0], lo[1]], -10.0, String::new(), &mut out);
+        // above the view, clear of the view label underneath
+        push(1, [lo[0], hi[1]], [hi[0], hi[1]], 10.0, String::new(), &mut out);
     }
     if hi[1] - lo[1] > 1e-6 {
         push(2, [hi[0], lo[1]], [hi[0], hi[1]], -10.0, String::new(), &mut out);
@@ -577,7 +601,7 @@ pub fn auto_dims(p: &ProjView, view: u64, next_id: &mut u64) -> Vec<DrawDim> {
     out
 }
 
-fn bom_prims(app: &App, a: &crate::assembly::Assembly, pos: [f64; 2], out: &mut Vec<Prim>) {
+fn bom_prims(app: &dyn DocCtx, a: &crate::assembly::Assembly, pos: [f64; 2], out: &mut Vec<Prim>) {
     let rows = crate::asm_ui::bom(app, a);
     let cols = [12.0, 60.0, 14.0, 34.0];
     let rh = 6.0;
@@ -607,9 +631,9 @@ fn bom_prims(app: &App, a: &crate::assembly::Assembly, pos: [f64; 2], out: &mut 
 }
 
 /// A detail view: part of another view, clipped to a circle and enlarged.
-fn detail_prims(app: &App, d: &Drawing, v: &DrawView, src: u64, c: [f64; 2], r: f64, out: &mut Vec<Prim>) {
+fn detail_prims(app: &dyn DocCtx, d: &Drawing, v: &DrawView, src: u64, c: [f64; 2], r: f64, out: &mut Vec<Prim>) {
     let Some(sv) = d.views.iter().find(|x| x.id == src) else { return };
-    let Some(p) = app.dwg.proj.get(&(sv.studio, sv.dir.clone())) else { return };
+    let Some(p) = app.proj(sv.studio, &sv.dir) else { return };
     let cc = glam::DVec2::from(c);
     let map = |q: glam::DVec2| -> [f64; 2] { [v.pos[0] + (q.x - cc.x) * v.scale, v.pos[1] + (q.y - cc.y) * v.scale] };
     for pl in &p.visible {
@@ -1183,7 +1207,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         // arcs: only near the arc itself
                         let near_arc = full || pl.iter().any(|q| glam::DVec2::from(*q).distance(sp.into()) * v.scale * (zoom as f64) < 14.0);
                         if dd < 8.0 && near_arc && best_c.map(|b| (dd as f32) < b.0).unwrap_or(true) {
-                            best_c = Some((dd as f32, v.id, c, sp, full));
+                            // the leader point snapped onto the circle
+                            let on = glam::DVec2::from(c) + (glam::DVec2::from(sp) - glam::DVec2::from(c)).normalize_or(glam::DVec2::X) * r;
+                            best_c = Some((dd as f32, v.id, c, on.into(), full));
                         }
                     }
                 } else if let Some((a, b)) = straight(pl) {

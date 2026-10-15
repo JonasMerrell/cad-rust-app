@@ -361,6 +361,14 @@ impl KernelClient {
         .map_or(Ok(()), Err)
     }
 
+    pub fn interference_blocking(&mut self, items: Vec<(usize, crate::doc::BodyId, [f64; 12])>) -> Result<Vec<(usize, usize, f64)>, String> {
+        self.interference(items);
+        self.wait_for(|o| match o {
+            Outcome::Interference(p) => Some(p),
+            _ => None,
+        })
+    }
+
     pub fn project_blocking(&mut self, tag: usize, key: &str, doc: &Document, views: Vec<([f64; 3], [f64; 3], bool)>) -> Result<Vec<kernel::ProjView>, String> {
         self.project(tag, key.to_string(), doc, views);
         self.wait_for(|o| match o {
