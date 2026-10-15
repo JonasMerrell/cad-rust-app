@@ -1866,8 +1866,8 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
     let bb = opencascade::bounding_box::aabb(shape);
     let diag = (bb.max() - bb.min()).length().max(1.0);
     let tol = (diag * 0.0008).clamp(0.005, 0.5);
-    let mesher = ffi::b_rep_mesh::IncrementalMesh_new(&shape.inner, tol);
-    if !mesher.IsDone() {
+    // the angular limit keeps small and large curved faces smooth alike (~8.6°)
+    if !ffi::extra::ex_mesh(&shape.inner, tol, 0.15) {
         return Err("meshing failed".into());
     }
     let mut out = BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), ..Default::default() };
@@ -1885,6 +1885,7 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             verts.push(DVec3::new(p.X(), p.Y(), p.Z()));
         }
         let reversed = face.orientation() != opencascade::primitives::FaceOrientation::Forward;
+        let g = face_geom(&face);
         let mut normals = vec![DVec3::ZERO; verts.len()];
         let mut idx = vec![];
         for i in 1..=tri.NbTriangles() {
@@ -1899,6 +1900,20 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             normals[c] += n;
             idx.push([a, b, c]);
         }
+        if g.planar {
+            // flat faces: one normal, so thin slivers and fans shade like the rest of the face
+            normals.iter_mut().for_each(|n| *n = g.normal);
+        } else {
+            // nodes repeated along a seam get the same normal, so the seam doesn't show as a band
+            let key = |p: DVec3| ((p.x * 1e4).round() as i64, (p.y * 1e4).round() as i64, (p.z * 1e4).round() as i64);
+            let mut sum: HashMap<(i64, i64, i64), DVec3> = HashMap::new();
+            for (v, n) in verts.iter().zip(&normals) {
+                *sum.entry(key(*v)).or_default() += *n;
+            }
+            for (v, n) in verts.iter().zip(normals.iter_mut()) {
+                *n = sum[&key(*v)];
+            }
+        }
         for (v, n) in verts.iter().zip(&normals) {
             let n = n.normalize_or_zero();
             out.positions.extend([v.x as f32, v.y as f32, v.z as f32]);
@@ -1908,7 +1923,6 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             out.indices.extend(t.map(|i| base + i as u32));
             out.tri_face.push(fi as u32);
         }
-        let g = face_geom(&face);
         out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area });
     }
     // tight bounds from the triangulation (OCCT's box includes control points and tolerances)
@@ -3141,5 +3155,30 @@ mod custom_tests {
         doc.custom_features[0].source = "cube(1, 2)".into();
         let r = rebuild(&doc, &[], |_| {});
         assert!(r.features.iter().any(|f| f.error.as_deref().map(|e| e.contains("script")).unwrap_or(false)));
+    }
+}
+
+#[cfg(test)]
+mod validity_probe {
+    use super::*;
+    #[test]
+    #[ignore]
+    fn probe_file() {
+        let path = std::env::var("PROBE").unwrap();
+        let ws = crate::workspace::Workspace::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let bodies = build_bodies(&ws.studios[0].doc);
+        for b in &bodies {
+            eprintln!("body {:?} valid={} faces={}", b.id, occ::is_valid(&b.shape), unique_faces(&b.shape).len());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn probe_step() {
+        // read a STEP back like a slicer would, mesh it and write an STL to check
+        let path = std::env::var("PROBE").unwrap();
+        let s = Shape::read_step(&path).unwrap();
+        eprintln!("valid={} faces={} vol={}", occ::is_valid(&s), unique_faces(&s).len(), volume(&s));
+        s.write_stl_with_tolerance(format!("{path}.stl"), 0.05).unwrap();
     }
 }

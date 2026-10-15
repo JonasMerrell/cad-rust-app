@@ -8,6 +8,8 @@
 #include <string>
 
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepMesh_IncrementalMesh.hxx>
+#include <BRepTools.hxx>
 #include <BRepOffset_MakeOffset.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
 #include <TopExp.hxx>
@@ -101,6 +103,18 @@ inline TopoDS_Shape ex_unify_raw(const TopoDS_Shape &s) {
 }
 
 inline std::unique_ptr<TopoDS_Shape> ex_unify(const TopoDS_Shape &s) { return ex_wrap(ex_unify_raw(s)); }
+
+// Triangulate with a linear and an angular limit (radians); replaces coarser meshes.
+inline bool ex_mesh(const TopoDS_Shape &s, double linear, double angular) {
+  try {
+    // drop triangulations made earlier with other limits, or they would be kept
+    BRepTools::Clean(s);
+    BRepMesh_IncrementalMesh m(s, linear, Standard_False, angular, Standard_True);
+    return m.IsDone();
+  } catch (...) {
+    return false;
+  }
+}
 
 inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, int op) {
   EX_TRY
