@@ -8,6 +8,11 @@
 #include <string>
 
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepBuilderAPI_Sewing.hxx>
+#include <BRepBuilderAPI_MakeSolid.hxx>
+#include <BRepOffsetAPI_MakeFilling.hxx>
+#include <BRepOffsetAPI_MakeOffsetShape.hxx>
+#include <GeomAbs_Shape.hxx>
 #include <BRepAlgoAPI_Cut.hxx>
 #include <BRepAlgoAPI_Defeaturing.hxx>
 #include <BRepAlgoAPI_Fuse.hxx>
@@ -376,4 +381,58 @@ inline std::unique_ptr<TopoDS_Shape> ex_compound(const TopTools_ListOfShape &sha
     b.Add(c, *it);
   return ex_wrap(c);
   EX_CATCH("compound")
+}
+
+/// Sew faces/shells into one shell, optionally closing it into a solid.
+inline std::unique_ptr<TopoDS_Shape> ex_sew(const TopTools_ListOfShape &shapes, double tol, bool solid) {
+  EX_TRY
+  BRepBuilderAPI_Sewing sew(tol);
+  for (auto it = shapes.begin(); it != shapes.end(); ++it)
+    sew.Add(*it);
+  sew.Perform();
+  TopoDS_Shape r = sew.SewedShape();
+  if (r.IsNull())
+    return ex_null("the surfaces could not be knitted");
+  if (solid) {
+    BRepBuilderAPI_MakeSolid ms;
+    bool any = false;
+    for (TopExp_Explorer ex(r, TopAbs_SHELL); ex.More(); ex.Next()) {
+      ms.Add(TopoDS::Shell(ex.Current()));
+      any = true;
+    }
+    if (!any || !ms.IsDone())
+      return ex_null("the knitted surfaces do not close a volume");
+    TopoDS_Shape so = ms.Shape();
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(so, props);
+    if (props.Mass() < 0)
+      so.Reverse();
+    return ex_wrap(so);
+  }
+  return ex_wrap(r);
+  EX_CATCH("knit")
+}
+
+/// A surface patch filling a closed boundary of edges.
+inline std::unique_ptr<TopoDS_Shape> ex_fill(const TopTools_ListOfShape &edges) {
+  EX_TRY
+  BRepOffsetAPI_MakeFilling mk;
+  for (auto it = edges.begin(); it != edges.end(); ++it)
+    mk.Add(TopoDS::Edge(*it), GeomAbs_C0);
+  mk.Build();
+  if (!mk.IsDone())
+    return ex_null("the boundary could not be filled (is it closed?)");
+  return ex_wrap(mk.Shape());
+  EX_CATCH("fill")
+}
+
+/// Offset a surface (or every face of a shape) by a distance.
+inline std::unique_ptr<TopoDS_Shape> ex_offset_shape(const TopoDS_Shape &s, double d) {
+  EX_TRY
+  BRepOffsetAPI_MakeOffsetShape mk;
+  mk.PerformBySimple(s, d);
+  if (!mk.IsDone())
+    return ex_null("offset failed");
+  return ex_wrap(mk.Shape());
+  EX_CATCH("offset")
 }

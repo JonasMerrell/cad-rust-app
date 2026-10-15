@@ -118,4 +118,10 @@ pub const ICONS: &[(&str, &str)] = &[
     ("relRack", "M3 18h18M5 18v-3M9 18v-3M13 18v-3M17 18v-3M12 8m-4 0a4 4 0 1 0 8 0a4 4 0 1 0 -8 0"),
     ("relScrew", "M8 3h8M12 3v18M8 7l8 2M8 11l8 2M8 15l8 2"),
     ("clash", "M9 9m-6 0a6 6 0 1 0 12 0a6 6 0 1 0 -12 0M15 15m-6 0a6 6 0 1 0 12 0a6 6 0 1 0 -12 0"),
+    ("surfaceExtrude", "M4 18c3-2 5-2 8 0s5 2 8 0M4 10c3-2 5-2 8 0s5 2 8 0M4 10v8M20 10v8"),
+    ("surfaceRevolve", "M12 3v18M6 8c4-2 8-2 12 0M6 16c4 2 8 2 12 0M6 8v8M18 8v8"),
+    ("surfaceLoft", "M4 6c4-2 12-2 16 0M6 18c3 1 9 1 12 0M4 6l2 12M20 6l-2 12"),
+    ("fill", "M4 8c4-4 12-4 16 0l-2 10c-4 3-8 3-12 0zM8 12h8M9 15h6"),
+    ("offsetSurface", "M4 14c4-4 12-4 16 0M4 9c4-4 12-4 16 0M12 9v5"),
+    ("knit", "M4 12h7M13 12h7M11 9l2 3-2 3M7 6l3 3M17 18l-3-3"),
 ];

@@ -155,6 +155,20 @@ pub fn compound(shapes: &[&Shape]) -> R<Shape> {
     take(ex::ex_compound(&l), "compound")
 }
 
+pub fn sew(shapes: &[&Shape], solid: bool) -> R<Shape> {
+    let l = list(shapes.iter().map(|s| &*s.inner));
+    take(ex::ex_sew(&l, 1e-4, solid), "knit")
+}
+
+pub fn fill(edges: &[Edge]) -> R<Shape> {
+    let l = list(edges.iter().map(edge_shape));
+    take(ex::ex_fill(&l), "fill")
+}
+
+pub fn offset_shape(s: &Shape, d: f64) -> R<Shape> {
+    take(ex::ex_offset_shape(&s.inner, d), "offset")
+}
+
 pub fn unify(s: &Shape) -> R<Shape> {
     take(ex::ex_unify(&s.inner), "unify")
 }

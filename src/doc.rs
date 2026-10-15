@@ -321,6 +321,40 @@ pub enum Op {
     DeleteFace {
         faces: Vec<Ref>,
     },
+    /// Surface swept straight from curves.
+    SurfaceExtrude {
+        curves: Vec<Ref>,
+        depth: String,
+        #[serde(default)]
+        symmetric: bool,
+        #[serde(default)]
+        opposite: bool,
+    },
+    SurfaceRevolve {
+        curves: Vec<Ref>,
+        axis: Option<Ref>,
+        angle: String,
+    },
+    /// Surface through profile curves (one profile per sketch or edge).
+    SurfaceLoft {
+        curves: Vec<Ref>,
+        #[serde(default)]
+        ruled: bool,
+    },
+    /// Surface patch filling a closed boundary.
+    Fill {
+        edges: Vec<Ref>,
+    },
+    OffsetSurface {
+        faces: Vec<Ref>,
+        distance: String,
+    },
+    /// Join surfaces along shared edges, optionally into a solid.
+    Knit {
+        bodies: Vec<Ref>,
+        #[serde(default)]
+        solid: bool,
+    },
     /// Parts brought in from another Part Studio.
     Derived {
         studio: usize,
@@ -385,6 +419,12 @@ impl Op {
             Op::SheetMetal { .. } => "sheetMetal",
             Op::MoveFace { .. } => "moveFace",
             Op::Derived { .. } => "derived",
+            Op::SurfaceExtrude { .. } => "surfaceExtrude",
+            Op::SurfaceRevolve { .. } => "surfaceRevolve",
+            Op::SurfaceLoft { .. } => "surfaceLoft",
+            Op::Fill { .. } => "fill",
+            Op::OffsetSurface { .. } => "offsetSurface",
+            Op::Knit { .. } => "knit",
             Op::Rib { .. } => "rib",
         }
     }
@@ -399,6 +439,12 @@ impl Op {
             "transform" => Op::Transform { bodies: vec![], mode: s("translate"), direction: None, distance: s("10"), axis: None, angle: s("90"), copy: false },
             "deleteFace" => Op::DeleteFace { faces: vec![] },
             "derived" => Op::Derived { studio: 0, bodies: vec![] },
+            "surfaceExtrude" => Op::SurfaceExtrude { curves: vec![], depth: s("10"), symmetric: false, opposite: false },
+            "surfaceRevolve" => Op::SurfaceRevolve { curves: vec![], axis: None, angle: s("360") },
+            "surfaceLoft" => Op::SurfaceLoft { curves: vec![], ruled: false },
+            "fill" => Op::Fill { edges: vec![] },
+            "offsetSurface" => Op::OffsetSurface { faces: vec![], distance: s("2") },
+            "knit" => Op::Knit { bodies: vec![], solid: true },
             "moveFace" => Op::MoveFace { faces: vec![], distance: s("2") },
             "rib" => Op::Rib { profile: vec![], thickness: s("2"), flip: false },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
@@ -464,6 +510,12 @@ pub fn kind_label(kind: &str) -> &'static str {
         "sheetMetal" => "Sheet metal",
         "moveFace" => "Move face",
         "derived" => "Derived",
+        "surfaceExtrude" => "Extrude surface",
+        "surfaceRevolve" => "Revolve surface",
+        "surfaceLoft" => "Loft surface",
+        "fill" => "Fill",
+        "offsetSurface" => "Offset surface",
+        "knit" => "Knit",
         "rib" => "Rib",
         _ => "Feature",
     }

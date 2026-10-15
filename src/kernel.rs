@@ -54,6 +54,9 @@ pub struct BodyMesh {
     pub bbox: [[f64; 3]; 2],
     #[serde(default)]
     pub centroid: [f64; 3],
+    /// An open surface rather than a solid.
+    #[serde(default)]
+    pub surface: bool,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -476,6 +479,108 @@ impl<'a> Model<'a> {
                 self.face_op(faces, |shape, fs| occ::draft(shape, fs, n, a, p, n))
             }
             Op::DeleteFace { faces } => self.face_op(faces, occ::delete_faces),
+            Op::SurfaceExtrude { curves, depth, symmetric, opposite } => {
+                let d = self.len(depth)?;
+                let n = self.curves_normal(curves)? * if *opposite { -1.0 } else { 1.0 };
+                let wire = self.path_wire(curves)?;
+                let ws = Shape::from(&wire);
+                let s = if *symmetric { occ::prism(&occ::translate(&ws, -n * (d / 2.0))?, n * d)? } else { occ::prism(&ws, n * d)? };
+                self.add_surface(fid, s);
+                Ok(())
+            }
+            Op::SurfaceRevolve { curves, axis, angle } => {
+                let (o, dir) = self.axis_of(axis.as_ref().ok_or("select an axis")?)?;
+                let wire = self.path_wire(curves)?;
+                let s = occ::revolve(&Shape::from(&wire), o, dir, self.ang(angle)?.to_radians())?;
+                self.add_surface(fid, s);
+                Ok(())
+            }
+            Op::SurfaceLoft { curves, ruled } => {
+                // one profile per sketch (or per edge)
+                let mut groups: Vec<(Option<FeatId>, Vec<Ref>)> = vec![];
+                for r in curves {
+                    let key = match r {
+                        Ref::SketchCurve { sketch, .. } | Ref::Region { sketch, .. } => Some(*sketch),
+                        _ => None,
+                    };
+                    match groups.iter_mut().find(|g| g.0.is_some() && g.0 == key) {
+                        Some(g) => g.1.push(r.clone()),
+                        None => groups.push((key, vec![r.clone()])),
+                    }
+                }
+                if groups.len() < 2 {
+                    return Err("select curves in two or more sketches".into());
+                }
+                let wires: Vec<Wire> = groups.iter().map(|g| self.path_wire(&g.1)).collect::<R<_>>()?;
+                let l = ffi_loft_surface(&wires, *ruled)?;
+                self.add_surface(fid, l);
+                Ok(())
+            }
+            Op::Fill { edges } => {
+                let mut es = vec![];
+                for r in edges {
+                    match r {
+                        Ref::Edge { point } => es.push(self.find_edge(v3(*point))?.0),
+                        Ref::SketchCurve { sketch, curve } => {
+                            let (sk, fr) = self.sketch(*sketch)?;
+                            es.extend(curve_edges(sk, &fr, *curve)?);
+                        }
+                        Ref::Curve { feature } => {
+                            let (_, s) = self.curves.iter().find(|c| c.0 == *feature).ok_or("the curve no longer exists")?;
+                            es.extend(unique_edges(s));
+                        }
+                        _ => return Err("select the boundary edges or curves".into()),
+                    }
+                }
+                let s = occ::fill(&es)?;
+                self.add_surface(fid, s);
+                Ok(())
+            }
+            Op::OffsetSurface { faces, distance } => {
+                let d = self.len(distance)?;
+                let mut made = vec![];
+                for r in faces {
+                    match r {
+                        Ref::Body { body } => {
+                            let i = self.bodies.iter().position(|b| b.id == *body).ok_or("a body no longer exists")?;
+                            made.push(occ::offset_shape(&self.bodies[i].shape, d)?);
+                        }
+                        _ => {
+                            let (f, _) = self.find_face_ref(r)?;
+                            made.push(occ::offset_shape(&Shape::from(&f), d)?);
+                        }
+                    }
+                }
+                if made.is_empty() {
+                    return Err("select faces or surfaces".into());
+                }
+                for m in made {
+                    self.add_surface(fid, m);
+                }
+                Ok(())
+            }
+            Op::Knit { bodies, solid } => {
+                let mut idx = vec![];
+                for r in bodies {
+                    let i = self.body_index(r)?;
+                    if !idx.contains(&i) {
+                        idx.push(i);
+                    }
+                }
+                if idx.is_empty() {
+                    return Err("select the surfaces to knit".into());
+                }
+                let shapes: Vec<&Shape> = idx.iter().map(|&i| &self.bodies[i].shape).collect();
+                let s = occ::sew(&shapes, *solid)?;
+                let ids: Vec<BodyId> = idx.iter().map(|&i| self.bodies[i].id).collect();
+                self.bodies.retain(|b| !ids.contains(&b.id));
+                if *solid {
+                    self.bodies.push(Body { id: (fid, 0), shape: s });
+                } else {
+                    self.add_surface(fid, s);
+                }
+                Ok(())
+            }
             Op::Derived { studio, bodies } => {
                 let other = STUDIOS.lock().map_err(|_| "studio list unavailable")?.get(*studio).cloned().ok_or("that Part Studio does not exist")?;
                 if DERIVE_DEPTH.with(|d| d.get()) > 4 {
@@ -568,10 +673,20 @@ impl<'a> Model<'a> {
             }
             Op::Thicken { faces, thickness, opposite, op } => {
                 let t = self.len(thickness)?;
-                let profiles = self.profile_faces(faces)?;
+                let t = if *opposite { -t } else { t };
                 let mut tools = vec![];
-                for (f, _) in &profiles {
-                    tools.push(occ::thicken(&Shape::from(f), if *opposite { -t } else { t })?);
+                // whole surface bodies are thickened and replaced
+                let surf: Vec<BodyId> = faces.iter().filter_map(|r| if let Ref::Body { body } = r { Some(*body) } else { None }).collect();
+                for b in &surf {
+                    let i = self.bodies.iter().position(|x| x.id == *b).ok_or("a surface no longer exists")?;
+                    tools.push(occ::thicken(&self.bodies[i].shape, t)?);
+                }
+                self.bodies.retain(|x| !surf.contains(&x.id));
+                let rest: Vec<Ref> = faces.iter().filter(|r| !matches!(r, Ref::Body { .. })).cloned().collect();
+                if !rest.is_empty() {
+                    for (f, _) in &self.profile_faces(&rest)? {
+                        tools.push(occ::thicken(&Shape::from(f), t)?);
+                    }
                 }
                 self.apply(fid, tools, *op)
             }
@@ -913,6 +1028,22 @@ impl<'a> Model<'a> {
         Ok(v)
     }
 
+    /// Add an open surface (shell or face) as a body of its own.
+    fn add_surface(&mut self, fid: FeatId, s: Shape) {
+        let n = self.bodies.iter().filter(|b| b.id.0 == fid).count() as u32;
+        self.bodies.push(Body { id: (fid, n), shape: s });
+    }
+
+    /// Normal of the sketch the curves are in (Z when they are model edges).
+    fn curves_normal(&self, refs: &[Ref]) -> R<DVec3> {
+        for r in refs {
+            if let Ref::SketchCurve { sketch, .. } | Ref::Region { sketch, .. } = r {
+                return Ok(self.sketch(*sketch)?.1.normal());
+            }
+        }
+        Ok(DVec3::Z)
+    }
+
     fn path_wire(&self, refs: &[Ref]) -> R<Wire> {
         let mut edges = vec![];
         for r in refs {
@@ -923,22 +1054,12 @@ impl<'a> Model<'a> {
                 }
                 Ref::SketchCurve { sketch, curve } => {
                     let (sk, fr) = self.sketch(*sketch)?;
-                    let c = sk.curve(*curve).ok_or("a path curve no longer exists")?;
-                    let pts = sk.tessellate(c, 1.0);
-                    match c.geom {
-                        crate::sketch::Geom::Line { .. } => edges.push(Edge::segment(fr.to_world(pts[0]), fr.to_world(pts[1]))),
-                        _ => {
-                            let (a, m, b) = (pts[0], pts[pts.len() / 2], pts[pts.len() - 1]);
-                            if (a - b).length() < 1e-9 {
-                                let q = pts[pts.len() / 4];
-                                let q3 = pts[3 * pts.len() / 4];
-                                edges.push(Edge::arc(fr.to_world(a), fr.to_world(q), fr.to_world(m)));
-                                edges.push(Edge::arc(fr.to_world(m), fr.to_world(q3), fr.to_world(b)));
-                            } else {
-                                edges.push(Edge::arc(fr.to_world(a), fr.to_world(m), fr.to_world(b)));
-                            }
-                        }
-                    }
+                    edges.extend(curve_edges(sk, &fr, *curve)?);
+                }
+                Ref::Region { sketch, point } => {
+                    let (sk, fr) = self.sketch(*sketch)?;
+                    let reg = find_regions(sk).into_iter().filter(|g| g.contains(DVec2::from(*point))).min_by(|a, b| a.area.total_cmp(&b.area)).ok_or("a region no longer exists")?;
+                    edges.extend(seg_edges(&reg.outer.segs, &fr)?);
                 }
                 Ref::Edge { point } => edges.push(self.find_edge(v3(*point))?.0),
                 _ => return Err("select sketch curves, edges or a helix for the path".into()),
@@ -1028,8 +1149,9 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
     out.frames.extend(m.frames.iter().map(|(k, v)| (*k, *v)));
     for (i, b) in m.bodies.iter().enumerate() {
         if let Ok(mut mesh) = mesh_body(&b.shape) {
+            mesh.surface = solids_of(&b.shape).is_empty();
             mesh.id = b.id;
-            mesh.name = format!("Part {}", i + 1);
+            mesh.name = if mesh.surface { format!("Surface {}", i + 1) } else { format!("Part {}", i + 1) };
             out.bodies.push(mesh);
         }
     }
@@ -1172,6 +1294,48 @@ pub fn seg_edges(segs: &[Seg], fr: &Frame) -> R<Vec<Edge>> {
         }
     }
     Ok(edges)
+}
+
+fn ffi_loft_surface(wires: &[Wire], ruled: bool) -> R<Shape> {
+    let l = {
+        let mut l = ffi::top_tools::new_list_of_shape();
+        for w in wires {
+            l.pin_mut().Append(occ::wire_shape(w));
+        }
+        l
+    };
+    let r = ffi::extra::ex_loft(&l, false, ruled);
+    if r.is_null() || r.IsNull() {
+        return Err(ffi::extra::ex_last_error());
+    }
+    Ok(Shape::from_shape(&r))
+}
+
+/// OCCT edges for one sketch curve.
+fn curve_edges(sk: &crate::sketch::Sketch, fr: &Frame, id: crate::sketch::Id) -> R<Vec<Edge>> {
+    use crate::sketch::Geom;
+    let c = sk.curve(id).ok_or("a curve no longer exists")?;
+    Ok(match &c.geom {
+        Geom::Line { a, b } => vec![Edge::segment(fr.to_world(sk.pv(*a)), fr.to_world(sk.pv(*b)))],
+        Geom::Circle { c, r } => vec![Edge::circle(fr.to_world(sk.pv(*c)), fr.normal(), *r)],
+        Geom::Arc { c: cc, a, b } => {
+            let pts = sk.tessellate(c, 1.0);
+            let _ = cc;
+            vec![Edge::arc(fr.to_world(sk.pv(*a)), fr.to_world(pts[pts.len() / 2]), fr.to_world(sk.pv(*b)))]
+        }
+        Geom::Spline { closed, .. } | Geom::Poly { closed, .. } => {
+            let mut pts: Vec<DVec3> = sk.tessellate(c, 0.5).into_iter().map(|p| fr.to_world(p)).collect();
+            if *closed {
+                pts.pop();
+            }
+            vec![occ::spline_edge(&pts, *closed)?]
+        }
+        Geom::Ellipse { .. } => {
+            let mut pts: Vec<DVec3> = sk.tessellate(c, 0.5).into_iter().map(|p| fr.to_world(p)).collect();
+            pts.pop();
+            vec![occ::spline_edge(&pts, true)?]
+        }
+    })
 }
 
 fn region_face(r: &Region, fr: &Frame) -> R<Face> {
@@ -2410,5 +2574,60 @@ mod derived_tests {
         assert_eq!(r.len(), 1);
         assert_eq!((r[0].0, r[0].1), (0, 1));
         assert!((r[0].2 - 500.0).abs() < 1e-6, "{}", r[0].2);
+    }
+}
+
+#[cfg(test)]
+mod surface_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    #[test]
+    fn surfaces_fill_knit_into_a_solid() {
+        let mut doc = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        let lines: Vec<_> = (0..4).map(|i| s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false)).collect();
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let walls = doc.insert(
+            "W".into(),
+            Op::SurfaceExtrude { curves: lines.iter().map(|l| Ref::SketchCurve { sketch: sk, curve: *l }).collect(), depth: "10".into(), symmetric: false, opposite: false },
+        );
+        let edges = |z: f64| vec![[5.0, 0.0, z], [10.0, 5.0, z], [5.0, 10.0, z], [0.0, 5.0, z]].into_iter().map(|p| Ref::Edge { point: p }).collect::<Vec<_>>();
+        let bottom = doc.insert("B".into(), Op::Fill { edges: edges(0.0) });
+        let top = doc.insert("T".into(), Op::Fill { edges: edges(10.0) });
+        doc.insert(
+            "K".into(),
+            Op::Knit { bodies: [walls, bottom, top].iter().map(|f| Ref::Body { body: (*f, 0) }).collect(), solid: true },
+        );
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        assert_eq!(r.bodies.len(), 1);
+        assert!(!r.bodies[0].surface);
+        assert!((r.bodies[0].volume - 1000.0).abs() < 1e-3, "{}", r.bodies[0].volume);
+    }
+
+    #[test]
+    fn revolved_surface_thickened() {
+        let mut doc = Document::default();
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(10.0, 0.0));
+        let b = s.add_point(DVec2::new(10.0, 20.0));
+        let l = s.add_curve(Geom::Line { a, b }, false);
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Front }, sketch: s, frame: Frame::FRONT });
+        let rv = doc.insert("R".into(), Op::SurfaceRevolve { curves: vec![Ref::SketchCurve { sketch: sk, curve: l }], axis: Some(Ref::Axis { axis: 2 }), angle: "360".into() });
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(r.bodies[0].surface, "a revolved line is a surface");
+        doc.insert("T".into(), Op::Thicken { faces: vec![Ref::Body { body: (rv, 0) }], thickness: "1".into(), opposite: false, op: BoolOp::New });
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        let v = r.bodies[0].volume;
+        let tube_out = std::f64::consts::PI * (11.0f64.powi(2) - 100.0) * 20.0;
+        let tube_in = std::f64::consts::PI * (100.0 - 81.0) * 20.0;
+        assert!((v - tube_out).abs() < 1.0 || (v - tube_in).abs() < 1.0, "{v}");
     }
 }

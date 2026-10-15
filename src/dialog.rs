@@ -38,7 +38,7 @@ impl Accept {
             Accept::Path => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
             Accept::Features => matches!(r, Ref::Feature { .. }),
             Accept::SheetProfile => matches!(r, Ref::SketchCurve { .. } | Ref::Region { .. }),
-            Accept::Curve => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. }),
+            Accept::Curve => matches!(r, Ref::SketchCurve { .. } | Ref::Edge { .. } | Ref::Curve { .. } | Ref::Region { .. }),
         }
     }
     fn hint(self) -> &'static str {
@@ -115,6 +115,12 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         Op::Boolean { target, tools, .. } => vec![("Target body", Bodies, Slot::One(target)), ("Tool bodies", Bodies, Slot::Many(tools))],
         Op::Split { target, plane } => vec![("Target body", Bodies, Slot::One(target)), ("Split plane", Planar, Slot::One(plane))],
         Op::DeleteBody { bodies } => vec![("Bodies", Bodies, Slot::Many(bodies))],
+        Op::SurfaceExtrude { curves, .. } => vec![("Curves", Curve, Slot::Many(curves))],
+        Op::SurfaceRevolve { curves, axis, .. } => vec![("Curves", Curve, Slot::Many(curves)), ("Axis", Axis, Slot::One(axis))],
+        Op::SurfaceLoft { curves, .. } => vec![("Profiles", Curve, Slot::Many(curves))],
+        Op::Fill { edges } => vec![("Boundary", Curve, Slot::Many(edges))],
+        Op::OffsetSurface { faces, .. } => vec![("Faces", Bodies, Slot::Many(faces))],
+        Op::Knit { bodies, .. } => vec![("Surfaces", Bodies, Slot::Many(bodies))],
         Op::Sketch { .. } | Op::Import { .. } | Op::Derived { .. } => vec![],
     }
 }
@@ -477,6 +483,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                     Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
                     Op::MoveFace { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
+                    Op::SurfaceExtrude { depth, symmetric, opposite, .. } => {
+                        val(ui, "Depth", depth, Kind::Length, &mut changed);
+                        check(ui, "Symmetric", symmetric, &mut changed);
+                        check(ui, "Opposite direction", opposite, &mut changed);
+                    }
+                    Op::SurfaceRevolve { angle, .. } => val(ui, "Angle (°)", angle, Kind::Angle, &mut changed),
+                    Op::SurfaceLoft { ruled, .. } => check(ui, "Straight (ruled) sides", ruled, &mut changed),
+                    Op::OffsetSurface { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
+                    Op::Knit { solid, .. } => check(ui, "Make a solid if closed", solid, &mut changed),
                     Op::Derived { studio, bodies } => {
                         if studios.is_empty() {
                             ui.label(RichText::new("Add another Part Studio (the + tab) to derive parts from.").color(theme::muted()).size(12.0));

@@ -24,6 +24,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["fillet", "chamfer", "shell", "hole", "draft"],
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
     &["thicken", "rib", "helix", "transform", "moveFace", "deleteFace"],
+    &["surfaceExtrude", "surfaceRevolve", "surfaceLoft", "fill", "offsetSurface", "knit"],
     &["sheetMetal", "derived"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
