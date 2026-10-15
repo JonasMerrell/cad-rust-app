@@ -101,6 +101,13 @@ pub struct Model<'a> {
 
 type R<T> = Result<T, String>;
 
+/// Every Part Studio of the workspace, for Derived features (set by the editor).
+pub static STUDIOS: std::sync::Mutex<Vec<Document>> = std::sync::Mutex::new(Vec::new());
+
+thread_local! {
+    static DERIVE_DEPTH: std::cell::Cell<u32> = const { std::cell::Cell::new(0) };
+}
+
 fn v3(a: [f64; 3]) -> DVec3 {
     DVec3::from(a)
 }
@@ -469,6 +476,26 @@ impl<'a> Model<'a> {
                 self.face_op(faces, |shape, fs| occ::draft(shape, fs, n, a, p, n))
             }
             Op::DeleteFace { faces } => self.face_op(faces, occ::delete_faces),
+            Op::Derived { studio, bodies } => {
+                let other = STUDIOS.lock().map_err(|_| "studio list unavailable")?.get(*studio).cloned().ok_or("that Part Studio does not exist")?;
+                if DERIVE_DEPTH.with(|d| d.get()) > 4 {
+                    return Err("Part Studios derive from each other in a loop".into());
+                }
+                DERIVE_DEPTH.with(|d| d.set(d.get() + 1));
+                let parts = build_bodies(&other);
+                DERIVE_DEPTH.with(|d| d.set(d.get() - 1));
+                let mut n = 0;
+                for b in parts {
+                    if bodies.is_empty() || bodies.contains(&b.id) {
+                        self.bodies.push(Body { id: (fid, n), shape: b.shape });
+                        n += 1;
+                    }
+                }
+                if n == 0 {
+                    return Err("no parts to derive (the other Part Studio has none, or the chosen ones are gone)".into());
+                }
+                Ok(())
+            }
             Op::MoveFace { faces, distance } => {
                 let d = self.len(distance)?;
                 let mut by_body: HashMap<usize, Vec<Face>> = HashMap::new();
@@ -2277,5 +2304,52 @@ mod face_tests {
         let moved = base + 5.0 * 5.0 * 20.0;
         let rib_vol = 0.5 * 20.0 * 20.0 * 1.0;
         assert!((r.bodies[0].volume - (moved + rib_vol)).abs() < 1.0, "{} vs {}", r.bodies[0].volume, moved + rib_vol);
+    }
+}
+
+#[cfg(test)]
+mod derived_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    #[test]
+    fn derive_parts_from_another_studio() {
+        // studio 0: a 10 mm cube
+        let mut a = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = a.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+        }
+        a.insert("E".into(), e);
+        // studio 1 derives it and moves a copy
+        let mut b = Document::default();
+        let d = b.insert("D".into(), Op::Derived { studio: 0, bodies: vec![] });
+        let mut t = Op::new_default("transform").unwrap();
+        if let Op::Transform { bodies, direction, distance, copy, .. } = &mut t {
+            bodies.push(Ref::Body { body: (d, 0) });
+            *direction = Some(Ref::Axis { axis: 0 });
+            *distance = "20".into();
+            *copy = true;
+        }
+        b.insert("T".into(), t);
+        *STUDIOS.lock().unwrap() = vec![a, b.clone()];
+        let r = rebuild(&b, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        assert_eq!(r.bodies.len(), 2);
+        assert!((r.bodies[0].volume - 1000.0).abs() < 1e-6);
+        // a studio deriving from itself is reported, not looped forever
+        let mut c = Document::default();
+        c.insert("D".into(), Op::Derived { studio: 0, bodies: vec![] });
+        *STUDIOS.lock().unwrap() = vec![c.clone()];
+        let r = rebuild(&c, &[], |_| {});
+        assert!(r.features[0].error.is_some());
     }
 }

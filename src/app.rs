@@ -24,7 +24,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["fillet", "chamfer", "shell", "hole", "draft"],
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
     &["thicken", "rib", "helix", "transform", "moveFace", "deleteFace"],
-    &["sheetMetal"],
+    &["sheetMetal", "derived"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
 pub const PRIMARY: &[&str] = &["sketch"];
@@ -431,6 +431,8 @@ impl App {
             for i in 0..self.ws.studios.len() {
                 if i != self.cur_studio && !self.studio_results.contains_key(&i) {
                     let d = self.ws.studios[i].doc.clone();
+                    let docs = self.studio_docs();
+                    self.kernel.set_studios(docs);
                     self.kernel.rebuild(i, &d);
                 }
             }
@@ -441,6 +443,11 @@ impl App {
         self.hover = None;
         self.tab = t;
         self.scene_dirty = true;
+    }
+
+    /// Every Part Studio's document, with the live one in place.
+    pub fn studio_docs(&self) -> Vec<Document> {
+        self.ws.studios.iter().enumerate().map(|(i, s)| if i == self.cur_studio { self.doc.clone() } else { s.doc.clone() }).collect()
     }
 
     /// Meshes of a Part Studio's parts.
@@ -574,6 +581,18 @@ impl App {
                     self.dwg.dirty = true;
                 }
                 Outcome::Rebuilt(_, r) => {
+                    // Part Studios deriving from this one need rebuilding too
+                    let cur = self.cur_studio;
+                    for i in 0..self.ws.studios.len() {
+                        let derives = i != cur && self.ws.studios[i].doc.features.iter().any(|f| matches!(f.op, Op::Derived { studio, .. } if studio == cur));
+                        if derives {
+                            self.studio_results.remove(&i);
+                            let d = self.ws.studios[i].doc.clone();
+                            let docs = self.studio_docs();
+                            self.kernel.set_studios(docs);
+                            self.kernel.rebuild(i, &d);
+                        }
+                    }
                     self.asm.scene_dirty = true;
                     self.dwg.dirty = true;
                     self.errors = r.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
@@ -605,6 +624,8 @@ impl App {
         if self.dirty_model && self.kernel.state != KernelState::Error {
             self.dirty_model = false;
             let cur = self.cur_studio;
+            let docs = self.studio_docs();
+            self.kernel.set_studios(docs);
             self.kernel.rebuild(cur, &self.doc);
         }
     }

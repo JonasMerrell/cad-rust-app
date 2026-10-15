@@ -18,6 +18,8 @@ const TAG: &str = "\u{1e}CAD ";
 #[derive(Serialize, Deserialize)]
 pub enum Request {
     Ping,
+    /// All Part Studios of the workspace, for Derived features.
+    SetStudios { studios: Vec<Document> },
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
     Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3], bool)> },
@@ -45,6 +47,11 @@ pub fn worker_main() {
         let Ok(req) = serde_json::from_str::<Request>(&line) else { continue };
         match req {
             Request::Ping => send(&Reply::Ready),
+            Request::SetStudios { studios } => {
+                if let Ok(mut s) = kernel::STUDIOS.lock() {
+                    *s = studios;
+                }
+            }
             Request::Rebuild { id, tag, doc, skip } => {
                 let result = kernel::rebuild(&doc, &skip, |f| send(&Reply::Progress { id, feature: f }));
                 send(&Reply::Rebuilt { id, tag, result });
@@ -98,6 +105,9 @@ pub struct KernelClient {
     queued: Vec<(usize, Document)>,
     export: Option<(u64, String)>,
     pub crashes: u32,
+    /// Last Part Studio list sent, re-sent when the worker restarts.
+    studios: Vec<Document>,
+    studios_json: String,
     ctx: Option<egui::Context>,
 }
 
@@ -112,7 +122,7 @@ impl KernelClient {
     }
 
     fn with_ctx(ctx: Option<egui::Context>) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx };
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx, studios: vec![], studios_json: String::new() };
         k.spawn();
         k
     }
@@ -155,6 +165,10 @@ impl KernelClient {
         });
         self.proc = Some(Proc { child, stdin, rx });
         self.send(&Request::Ping);
+        if !self.studios.is_empty() {
+            let studios = self.studios.clone();
+            self.send(&Request::SetStudios { studios });
+        }
     }
 
     fn send(&mut self, r: &Request) {
@@ -163,6 +177,16 @@ impl KernelClient {
             if writeln!(p.stdin, "{line}").and_then(|_| p.stdin.flush()).is_err() {
                 // the reader thread will notice the exit
             }
+        }
+    }
+
+    /// Tell the worker about every Part Studio (only sends when something changed).
+    pub fn set_studios(&mut self, studios: Vec<Document>) {
+        let json = serde_json::to_string(&studios).unwrap_or_default();
+        if json != self.studios_json {
+            self.studios_json = json;
+            self.studios = studios.clone();
+            self.send(&Request::SetStudios { studios });
         }
     }
 

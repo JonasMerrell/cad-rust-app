@@ -115,7 +115,7 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         Op::Boolean { target, tools, .. } => vec![("Target body", Bodies, Slot::One(target)), ("Tool bodies", Bodies, Slot::Many(tools))],
         Op::Split { target, plane } => vec![("Target body", Bodies, Slot::One(target)), ("Split plane", Planar, Slot::One(plane))],
         Op::DeleteBody { bodies } => vec![("Bodies", Bodies, Slot::Many(bodies))],
-        Op::Sketch { .. } | Op::Import { .. } => vec![],
+        Op::Sketch { .. } | Op::Import { .. } | Op::Derived { .. } => vec![],
     }
 }
 
@@ -229,6 +229,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut cancel = false;
     let mut new_active = None;
     let flat = app.result.flats.iter().find(|f| f.feature == fid).cloned();
+    // Part Studios and their parts, for Derived
+    let studios: Vec<(usize, String, Vec<([u64; 2], String)>)> = (0..app.ws.studios.len())
+        .filter(|i| *i != app.cur_studio)
+        .map(|i| {
+            let parts = app.studio_bodies(i).iter().map(|b| ([b.id.0, b.id.1 as u64], b.name.clone())).collect();
+            (i, app.ws.studios[i].name.clone(), parts)
+        })
+        .collect();
     let mut export_flat = false;
 
     let area = egui::Area::new(egui::Id::new("feature-dialog")).order(egui::Order::Middle);
@@ -469,6 +477,48 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                     Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
                     Op::MoveFace { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
+                    Op::Derived { studio, bodies } => {
+                        if studios.is_empty() {
+                            ui.label(RichText::new("Add another Part Studio (the + tab) to derive parts from.").color(theme::muted()).size(12.0));
+                        }
+                        let cur = studios.iter().find(|s| s.0 == *studio).map(|s| s.1.clone()).unwrap_or_else(|| "Choose…".into());
+                        ui.horizontal(|ui| {
+                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new("Part Studio").color(theme::muted())));
+                            egui::ComboBox::from_id_salt("derive-studio").selected_text(cur).show_ui(ui, |ui| {
+                                for (i, n, _) in &studios {
+                                    if ui.selectable_label(*studio == *i, n).clicked() {
+                                        *studio = *i;
+                                        bodies.clear();
+                                        changed = true;
+                                    }
+                                }
+                            });
+                        });
+                        if let Some((_, _, parts)) = studios.iter().find(|s| s.0 == *studio) {
+                            let mut all = bodies.is_empty();
+                            if ui.checkbox(&mut all, "All parts").changed() {
+                                bodies.clear();
+                                if !all {
+                                    bodies.extend(parts.iter().take(1).map(|p| (p.0[0], p.0[1] as u32)));
+                                }
+                                changed = true;
+                            }
+                            if !all {
+                                for (id, n) in parts {
+                                    let bid = (id[0], id[1] as u32);
+                                    let mut on = bodies.contains(&bid);
+                                    if ui.checkbox(&mut on, n).changed() {
+                                        if on {
+                                            bodies.push(bid);
+                                        } else {
+                                            bodies.retain(|b| *b != bid);
+                                        }
+                                        changed = true;
+                                    }
+                                }
+                            }
+                        }
+                    }
                     Op::Rib { thickness, flip, .. } => {
                         val(ui, "Thickness", thickness, Kind::Length, &mut changed);
                         check(ui, "Other side of the line", flip, &mut changed);

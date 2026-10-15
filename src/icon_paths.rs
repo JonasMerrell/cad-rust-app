@@ -113,4 +113,5 @@ pub const ICONS: &[(&str, &str)] = &[
     ("logo", "M12 2l8.5 5v10L12 22l-8.5-5V7zM12 7.5a4.5 4.5 0 1 0 0 9a4.5 4.5 0 1 0 0-9"),
     ("display", "M3 5h18v12H3zM8 21h8M12 17v4M7 13l3-3 2 2 4-4"),
     ("isoView", "M12 3l8 4.5v9L12 21l-8-4.5v-9zM12 12l8-4.5M12 12v9M12 12L4 7.5"),
+    ("derived", "M4 4h7v7H4zM13 13h7v7h-7zM8 11v4h5M11 13l2 2-2 2"),
 ];
