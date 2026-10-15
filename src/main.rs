@@ -1,3 +1,6 @@
+// No console window behind the editor on Windows; the CLI modes attach to the parent console.
+#![cfg_attr(windows, windows_subsystem = "windows")]
+
 mod agent;
 mod app;
 mod asm_ui;
@@ -27,6 +30,13 @@ mod workspace;
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(windows)]
+    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("--help") | Some("-h")) {
+        // print to the terminal that started us (the MCP server talks over pipes and needs no console)
+        unsafe {
+            windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
+        }
+    }
     match args.get(1).map(|s| s.as_str()) {
         Some("mcp") => {
             agent::mcp_main();
