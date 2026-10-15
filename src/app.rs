@@ -14,7 +14,7 @@ use crate::icons;
 use crate::kernel::RebuildResult;
 use crate::render::SceneData;
 use crate::sketcher::SketchSession;
-use crate::theme::{self, ACCENT, BORDER, MUTED, PANEL, PANEL_2, TEXT};
+use crate::theme;
 use crate::worker::{KernelClient, KernelState, Outcome};
 
 /// Feature buttons in toolbar groups, as in the original (`Am`).
@@ -27,7 +27,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["sheetMetal"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
-pub const PRIMARY: &[&str] = &["sketch", "extrude", "revolve", "fillet", "hole", "sheetMetal"];
+pub const PRIMARY: &[&str] = &["sketch"];
 
 pub fn shortcut(kind: &str) -> Option<&'static str> {
     Some(match kind {
@@ -122,11 +122,26 @@ pub struct App {
     pub restore_version: Option<usize>,
     pub screenshot_pending: Option<std::path::PathBuf>,
     pub context_menu: Option<(egui::Pos2, Option<Ref>)>,
+    pub left_pane: LeftPane,
+    pub tree_filter: String,
+    pub geom_open: bool,
+    pub parts_open: bool,
+    pub tool_search: String,
+    pub dark: bool,
+}
+
+/// What the left panel shows; picked with the icon rail on the far left.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub enum LeftPane {
+    Features,
+    Variables,
+    Configurations,
 }
 
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
-        theme::apply(&cc.egui_ctx);
+        let dark = load_dark_pref();
+        theme::set_dark(&cc.egui_ctx, dark);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
             crate::render::Renderer::install(rs);
@@ -175,6 +190,12 @@ impl App {
             restore_version: None,
             screenshot_pending: None,
             context_menu: None,
+            left_pane: LeftPane::Features,
+            tree_filter: String::new(),
+            geom_open: true,
+            parts_open: true,
+            tool_search: String::new(),
+            dark,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -717,35 +738,157 @@ impl App {
 
     pub fn tool_button(&self, ui: &mut Ui, icon: &str, label: &str, tip: &str, primary: bool, active: bool, enabled: bool) -> egui::Response {
         let show_label = primary || self.phone;
-        let fg = if active { theme::ACTIVE_TEXT } else { TEXT };
+        let fg = if active { theme::active_text() } else { theme::text() };
         let mut b = if show_label {
-            egui::Button::image_and_text(icons::image(icon, 18.0).tint(fg), RichText::new(label).size(12.0).color(fg))
+            egui::Button::image_and_text(icons::image(icon, 18.0).tint(fg), RichText::new(label).size(12.5).color(fg))
         } else {
             egui::Button::image(icons::image(icon, 18.0).tint(fg))
         };
+        b = b.min_size(egui::vec2(26.0, 26.0));
         if active {
-            b = b.fill(Color32::from_rgba_unmultiplied(0x4e, 0xa1, 0xff, 0x2e)).stroke(Stroke::new(1.0, Color32::from_rgba_unmultiplied(0x4e, 0xa1, 0xff, 0x80)));
+            b = b.fill(theme::active_fill()).stroke(Stroke::new(1.0, theme::active_stroke()));
         }
         let r = ui.add_enabled(enabled, b);
         r.on_hover_text(tip)
     }
 
     pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 24.0), Sense::hover());
-        ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, BORDER));
-        ui.add_space(6.0);
+        ui.add_space(3.0);
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 26.0), Sense::hover());
+        ui.painter().vline(rect.center().x, rect.y_range().shrink(2.0), Stroke::new(1.0, theme::border()));
+        ui.add_space(3.0);
         ui.spacing_mut().item_spacing.x = 1.0;
         add(ui);
-        ui.spacing_mut().item_spacing.x = 8.0;
+        ui.spacing_mut().item_spacing.x = 1.0;
     }
 
+    /// Top strip: logo, document menu and name, theme and phone toggles.
+    fn header(&mut self, ui: &mut Ui) {
+        ui.horizontal(|ui| {
+            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.add(icons::image("logo", 20.0).tint(theme::accent()));
+            ui.label(RichText::new("cad-app").size(16.0).color(theme::muted()));
+            ui.menu_image_button(icons::image("menu", 18.0).tint(theme::text()), |ui| self.document_menu(ui)).response.on_hover_text("Document menu");
+            let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
+            ui.label(RichText::new(name).size(15.0).strong().color(theme::text()));
+            ui.label(RichText::new("Main").size(12.0).color(theme::muted()));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                let (icon, tip) = if self.dark { ("sun", "Switch to light mode") } else { ("moon", "Switch to dark mode") };
+                if ui.add(egui::Button::image(icons::image(icon, 17.0).tint(theme::text()))).on_hover_text(tip).clicked() {
+                    self.set_dark(ui.ctx(), !self.dark);
+                }
+                let mode = if self.phone { ("desktop", "Switch to desktop mode") } else { ("phone", "Switch to phone mode") };
+                if ui.add(egui::Button::image(icons::image(mode.0, 17.0).tint(theme::text()))).on_hover_text(mode.1).clicked() {
+                    self.phone = !self.phone;
+                    self.sidebar_open = !self.phone;
+                }
+                let (txt, col) = match self.kernel.state {
+                    KernelState::Loading => ("Kernel loading", theme::muted()),
+                    KernelState::Ready => ("Kernel ready", theme::ok_green()),
+                    KernelState::Busy => ("Rebuilding", theme::accent()),
+                    KernelState::Error => ("Kernel error", theme::error()),
+                };
+                ui.label(RichText::new(txt).size(12.0).color(theme::muted()));
+                let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
+                ui.painter().circle_filled(r.center(), 4.0, col);
+            });
+        });
+    }
+
+    pub fn set_dark(&mut self, ctx: &egui::Context, dark: bool) {
+        self.dark = dark;
+        theme::set_dark(ctx, dark);
+        save_dark_pref(dark);
+        self.scene_dirty = true;
+        self.asm.scene_dirty = true;
+    }
+
+    fn document_menu(&mut self, ui: &mut Ui) {
+        ui.set_min_width(220.0);
+        let mut action = None;
+        for (a, icon, l) in [("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP / IGES…")]
+        {
+            if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
+                action = Some(a);
+                ui.close();
+            }
+        }
+        ui.menu_image_text_button(icons::image("download", 15.0).tint(theme::text()), "Export", |ui| {
+            for (a, l) in [("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("png", "Screenshot PNG")] {
+                if ui.button(l).clicked() {
+                    action = Some(a);
+                    ui.close();
+                }
+            }
+        });
+        ui.menu_image_text_button(icons::image("view", 15.0).tint(theme::text()), "View", |ui| self.view_items(ui));
+        ui.separator();
+        let (icon, l) = if self.dark { ("sun", "Light mode") } else { ("moon", "Dark mode") };
+        if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
+            self.set_dark(ui.ctx(), !self.dark);
+            ui.close();
+        }
+        match action {
+            Some("new") => self.new_document(),
+            Some("open") => self.open_dialog(),
+            Some("json") => self.save(false),
+            Some("import") => self.import_step(),
+            Some(f @ ("step" | "stl" | "iges")) => self.export(f),
+            Some("obj") => self.export_obj(),
+            Some("png") => self.screenshot(ui.ctx()),
+            _ => {}
+        }
+    }
+
+    fn view_items(&mut self, ui: &mut Ui) {
+        for (v, l) in [
+            (StdView::Iso, "Isometric (0)"),
+            (StdView::Front, "Front (1)"),
+            (StdView::Top, "Top (2)"),
+            (StdView::Right, "Right (3)"),
+            (StdView::Back, "Back"),
+            (StdView::Bottom, "Bottom"),
+            (StdView::Left, "Left"),
+        ] {
+            if ui.button(l).clicked() {
+                self.camera.set_view(v);
+                self.scene_dirty = true;
+                self.asm.scene_dirty = true;
+                ui.close();
+            }
+        }
+        if ui.button("Zoom to fit (F)").clicked() {
+            self.fit_view();
+            ui.close();
+        }
+    }
+
+    /// The icon toolbar under the header.
     fn toolbar(&mut self, ui: &mut Ui) {
         ui.horizontal_wrapped(|ui| {
-            ui.spacing_mut().item_spacing = egui::vec2(8.0, 6.0);
-            if ui.add(egui::Button::new(RichText::new("☰").size(14.0))).on_hover_text("Features and variables").clicked() {
+            ui.spacing_mut().item_spacing = egui::vec2(1.0, 4.0);
+            if ui
+                .add(egui::Button::image(icons::image("features", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
+                .on_hover_text("Show or hide the feature list")
+                .clicked()
+            {
                 self.sidebar_open = !self.sidebar_open;
             }
-            ui.label(RichText::new("cad-app").strong().size(13.5));
+            ui.add_space(4.0);
+            if ui
+                .add_enabled(self.can_undo(), egui::Button::image(icons::image("undo", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
+                .on_hover_text("Undo (Ctrl+Z)")
+                .clicked()
+            {
+                self.undo();
+            }
+            if ui
+                .add_enabled(self.can_redo(), egui::Button::image(icons::image("redo", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
+                .on_hover_text("Redo (Ctrl+Shift+Z)")
+                .clicked()
+            {
+                self.redo();
+            }
             if !self.phone {
                 match self.tab {
                     crate::workspace::Tab::Assembly(_) => crate::asm_ui::toolbar(self, ui),
@@ -754,45 +897,72 @@ impl App {
                     _ => self.model_tools(ui),
                 }
             }
-            Self::group(ui, |ui| {
-                if ui.add_enabled(self.can_undo(), egui::Button::image(icons::image("undo", 18.0).tint(TEXT))).on_hover_text("Undo (Ctrl+Z)").clicked() {
-                    self.undo();
-                }
-                if ui.add_enabled(self.can_redo(), egui::Button::image(icons::image("redo", 18.0).tint(TEXT))).on_hover_text("Redo (Ctrl+Shift+Z)").clicked() {
-                    self.redo();
-                }
-            });
-            // right-aligned part
-            let mode = if self.phone { ("desktop", "Desktop", "Switch to desktop mode") } else { ("phone", "Phone", "Switch to phone mode") };
-            if ui.available_width() < 100.0 {
-                ui.end_row();
-            }
-            if self.tool_button(ui, mode.0, mode.1, mode.2, true, false, true).clicked() {
-                self.phone = !self.phone;
-                self.sidebar_open = !self.phone;
-            }
             if self.sketch.is_some() {
                 Self::group(ui, |ui| {
+                    ui.spacing_mut().item_spacing.x = 4.0;
                     let label = if self.phone { "Finish" } else { "Finish sketch" };
-                    let b =
-                        egui::Button::image_and_text(icons::image("check", 18.0).tint(Color32::WHITE), RichText::new(label).color(Color32::WHITE).size(12.0)).fill(theme::FINISH);
+                    let b = egui::Button::image_and_text(icons::image("check", 18.0).tint(Color32::WHITE), RichText::new(label).color(Color32::WHITE).size(12.5))
+                        .fill(theme::finish())
+                        .min_size(egui::vec2(26.0, 26.0));
                     if ui.add(b).on_hover_text("Finish sketch (Enter)").clicked() {
                         crate::sketcher::finish(self);
                     }
-                    if ui.add(egui::Button::image(icons::image("close", 18.0).tint(TEXT))).on_hover_text("Discard this sketch session's changes").clicked() {
+                    if ui
+                        .add(egui::Button::image(icons::image("close", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
+                        .on_hover_text("Discard this sketch session's changes")
+                        .clicked()
+                    {
                         crate::sketcher::cancel(self);
                     }
                 });
-            } else {
-                if ui.available_width() < 270.0 {
+            } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) && !self.phone {
+                if ui.available_width() < 200.0 {
                     ui.end_row();
                 }
-                Self::group(ui, |ui| {
-                    self.view_menu(ui);
-                    self.file_menu(ui);
-                });
+                ui.add_space(8.0);
+                self.tool_search(ui);
             }
         });
+    }
+
+    /// "Search tools…" box: type part of a feature name and press Enter (or pick
+    /// from the list) to start it.
+    fn tool_search(&mut self, ui: &mut Ui) {
+        let q = self.tool_search.trim().to_lowercase();
+        let matches: Vec<&str> =
+            if q.is_empty() { vec![] } else { FEATURE_GROUPS.iter().flat_map(|g| g.iter().copied()).filter(|k| doc::kind_label(k).to_lowercase().contains(&q)).collect() };
+        let resp = ui.add(
+            egui::TextEdit::singleline(&mut self.tool_search).hint_text(RichText::new("Search tools…").color(theme::muted())).desired_width(170.0).margin(egui::vec2(6.0, 4.0)),
+        );
+        let mut start = None;
+        if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
+            start = matches.first().copied();
+        }
+        let mut list_hovered = false;
+        if !matches.is_empty() {
+            let area =
+                egui::Area::new(egui::Id::new("tool-search-list")).order(egui::Order::Foreground).fixed_pos(resp.rect.left_bottom() + egui::vec2(0.0, 2.0)).show(ui.ctx(), |ui| {
+                    Frame::popup(ui.style()).show(ui, |ui| {
+                        ui.set_min_width(resp.rect.width());
+                        for k in &matches {
+                            if ui.add(egui::Button::image_and_text(icons::image(k, 16.0).tint(theme::text()), doc::kind_label(k)).frame(false)).clicked() {
+                                start = Some(*k);
+                            }
+                        }
+                    });
+                });
+            list_hovered = area.response.contains_pointer();
+        }
+        // clicking anywhere else closes the list
+        if start.is_none() && !resp.has_focus() && !list_hovered && ui.input(|i| i.pointer.any_click()) {
+            self.tool_search.clear();
+        }
+        if let Some(k) = start {
+            self.tool_search.clear();
+            if self.kernel_ready() {
+                self.start_feature(k);
+            }
+        }
     }
 
     pub fn model_tools(&mut self, ui: &mut Ui) {
@@ -811,12 +981,16 @@ impl App {
                 }
             });
         }
+    }
+
+    /// View toggles for the phone dock (the desktop has them beside the viewport).
+    fn view_toggles(&mut self, ui: &mut Ui) {
         Self::group(ui, |ui| {
-            if self.tool_button(ui, "dimension", "Dims", "Show dimensions on the model (sketch dimensions and kept measurements)", false, self.show_dims, true).clicked() {
+            if self.tool_button(ui, "dimension", "Dims", "Show dimensions on the model", false, self.show_dims, true).clicked() {
                 self.show_dims = !self.show_dims;
                 self.scene_dirty = true;
             }
-            if self.tool_button(ui, "eye", "X-ray", "See-through bodies (X-ray)", false, self.xray, true).clicked() {
+            if self.tool_button(ui, "xray", "X-ray", "See-through bodies (X-ray)", false, self.xray, true).clicked() {
                 self.xray = !self.xray;
                 self.scene_dirty = true;
             }
@@ -864,99 +1038,127 @@ impl App {
         }
     }
 
-    fn view_menu(&mut self, ui: &mut Ui) {
-        egui::ComboBox::from_id_salt("view")
-            .selected_text("View…")
-            .width(110.0)
-            .show_ui(ui, |ui| {
-                for (v, l) in [
-                    (StdView::Iso, "Isometric (0)"),
-                    (StdView::Front, "Front (1)"),
-                    (StdView::Top, "Top (2)"),
-                    (StdView::Right, "Right (3)"),
-                    (StdView::Back, "Back"),
-                    (StdView::Bottom, "Bottom"),
-                    (StdView::Left, "Left"),
-                ] {
-                    if ui.selectable_label(false, l).clicked() {
-                        self.camera.set_view(v);
-                        self.scene_dirty = true;
-                    }
-                }
-                if ui.selectable_label(false, "Zoom to fit (F)").clicked() {
-                    self.fit_view();
-                }
-            })
-            .response
-            .on_hover_text("Standard views (1 front, 2 top, 3 right, 0 iso, F fit)");
-    }
-
-    fn file_menu(&mut self, ui: &mut Ui) {
-        let mut action = None;
-        egui::ComboBox::from_id_salt("file")
-            .selected_text("File…")
-            .width(120.0)
-            .show_ui(ui, |ui| {
-                for (a, l) in [
-                    ("new", "New part"),
-                    ("open", "Open .json…"),
-                    ("json", "Save .json (Ctrl+S)"),
-                    ("import", "Import STEP / IGES…"),
-                    ("step", "Export STEP"),
-                    ("iges", "Export IGES"),
-                    ("stl", "Export STL"),
-                    ("obj", "Export OBJ"),
-                    ("png", "Screenshot PNG"),
-                ] {
-                    if ui.selectable_label(false, l).clicked() {
-                        action = Some(a);
-                    }
-                }
-            })
-            .response
-            .on_hover_text("File");
-        match action {
-            Some("new") => self.new_document(),
-            Some("open") => self.open_dialog(),
-            Some("json") => self.save(false),
-            Some("import") => self.import_step(),
-            Some(f @ ("step" | "stl" | "iges")) => self.export(f),
-            Some("obj") => self.export_obj(),
-            Some("png") => self.screenshot(ui.ctx()),
-            _ => {}
-        }
-    }
-
     // ------------------------------------------------------------ sidebar
 
-    fn sidebar(&mut self, ui: &mut Ui) {
-        egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-            section(ui, "Features", |ui| self.feature_tree(ui));
-            section(ui, "Parts", |ui| self.parts_list(ui));
-            if self.picks.iter().any(|r| matches!(r, Ref::Body { .. })) {
-                section(ui, "Mass properties", |ui| self.properties(ui));
+    /// Far-left icon rail choosing what the left panel shows.
+    fn rail(&mut self, ui: &mut Ui) {
+        ui.add_space(6.0);
+        ui.vertical_centered(|ui| {
+            ui.spacing_mut().item_spacing.y = 4.0;
+            for (pane, icon, tip) in
+                [(LeftPane::Features, "features", "Feature list"), (LeftPane::Variables, "variable", "Variables"), (LeftPane::Configurations, "configurations", "Configurations")]
+            {
+                let on = self.sidebar_open && self.left_pane == pane;
+                let fg = if on { theme::active_text() } else { theme::text() };
+                let mut b = egui::Button::image(icons::image(icon, 19.0).tint(fg)).min_size(egui::vec2(30.0, 30.0));
+                if on {
+                    b = b.fill(theme::active_fill());
+                }
+                if ui.add(b).on_hover_text(tip).clicked() {
+                    if on {
+                        self.sidebar_open = false;
+                    } else {
+                        self.left_pane = pane;
+                        self.sidebar_open = true;
+                    }
+                }
             }
-            section(ui, "Variables", |ui| self.variables(ui));
-            section(ui, "Configurations", |ui| self.configurations(ui));
         });
+    }
+
+    fn sidebar(&mut self, ui: &mut Ui) {
+        match self.left_pane {
+            LeftPane::Features => {
+                // features on top, parts pinned below, like Onshape
+                let total = ui.available_height();
+                let parts_h = if self.parts_open { (24.0 + 23.0 * self.result.bodies.len().max(1) as f32 + 12.0).min(total * 0.4) } else { 30.0 };
+                let props = self.picks.iter().any(|r| matches!(r, Ref::Body { .. }));
+                let props_h = if props { 130.0 } else { 0.0 };
+                let top_h = (total - parts_h - props_h).max(80.0);
+                ui.allocate_ui(egui::vec2(ui.available_width(), top_h), |ui| {
+                    egui::ScrollArea::vertical().id_salt("feature-scroll").auto_shrink([false, false]).show(ui, |ui| {
+                        Frame::new().inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 }).show(ui, |ui| self.feature_tree(ui));
+                    });
+                });
+                let y = ui.cursor().top();
+                ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::border()));
+                Frame::new().inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 }).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt("parts-scroll").max_height(parts_h - 6.0).auto_shrink([false, true]).show(ui, |ui| self.parts_list(ui));
+                });
+                if props {
+                    section(ui, "Mass properties", |ui| self.properties(ui));
+                }
+            }
+            LeftPane::Variables => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| section(ui, "Variables", |ui| self.variables(ui)));
+            }
+            LeftPane::Configurations => {
+                egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| section(ui, "Configurations", |ui| self.configurations(ui)));
+            }
+        }
     }
 
     fn feature_tree(&mut self, ui: &mut Ui) {
         ui.spacing_mut().item_spacing.y = 1.0;
-        for p in OriginPlane::ALL {
-            let r = Ref::OriginPlane { plane: p };
-            let picked = self.picks.contains(&r);
-            let resp = tree_row(ui, "plane", p.name(), picked, false, false, false, None);
-            if resp.clicked() {
-                self.pick_from_tree(r.clone(), ui.input(|i| i.modifiers.shift || i.modifiers.command));
+        // filter box
+        ui.horizontal(|ui| {
+            ui.add(icons::image("filter", 16.0).tint(theme::muted()));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.tree_filter)
+                    .hint_text(RichText::new("Filter by name or type").italics().color(theme::muted()))
+                    .desired_width(ui.available_width()),
+            );
+        });
+        ui.add_space(6.0);
+        // header
+        ui.horizontal(|ui| {
+            ui.label(RichText::new(format!("Features ({})", self.doc.features.len())).strong().size(13.0));
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 2.0;
+                let rolled = self.doc.rollback.is_some();
+                if ui
+                    .add(egui::Button::image(icons::image("rollback", 15.0).tint(if rolled { theme::accent() } else { theme::text() })))
+                    .on_hover_text(if rolled { "Roll to end" } else { "Roll back one feature" })
+                    .clicked()
+                {
+                    self.checkpoint();
+                    let n = self.doc.features.len();
+                    self.doc.rollback = if rolled {
+                        None
+                    } else if n > 0 {
+                        Some(n - 1)
+                    } else {
+                        None
+                    };
+                    self.changed();
+                }
+            });
+        });
+        ui.add_space(2.0);
+        let filter = self.tree_filter.trim().to_lowercase();
+        let shown = |name: &str, kind: &str| filter.is_empty() || name.to_lowercase().contains(&filter) || kind.to_lowercase().contains(&filter);
+
+        // default geometry
+        if filter.is_empty() || "default geometry origin top front right plane".contains(&filter) {
+            if disclosure_row(ui, "Default geometry", self.geom_open).clicked() {
+                self.geom_open = !self.geom_open;
             }
-            if resp.hovered() && self.hover.as_ref() != Some(&r) {
-                self.hover = Some(r);
-                self.scene_dirty = true;
+            if self.geom_open {
+                tree_row(ui, 1, "origin", "Origin", false, false, false, false, None).on_hover_text("Origin (0, 0, 0)");
+                for p in OriginPlane::ALL {
+                    let r = Ref::OriginPlane { plane: p };
+                    let picked = self.picks.contains(&r);
+                    let resp = tree_row(ui, 1, "planeSheet", p.name().trim_end_matches(" plane"), picked, false, false, false, None);
+                    if resp.clicked() {
+                        self.pick_from_tree(r.clone(), ui.input(|i| i.modifiers.shift || i.modifiers.command));
+                    }
+                    if resp.hovered() && self.hover.as_ref() != Some(&r) {
+                        self.hover = Some(r);
+                        self.scene_dirty = true;
+                    }
+                }
             }
         }
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 7.0), Sense::hover());
-        dashed_hline(ui, rect.center().y, rect.x_range());
 
         let rb = self.doc.rollback_index();
         let mut action: Option<(&'static str, FeatId)> = None;
@@ -993,9 +1195,12 @@ impl App {
                     continue;
                 }
             }
+            if !shown(&f.name, doc::kind_label(f.op.kind())) {
+                continue;
+            }
             let picked = self.picks.iter().any(|r| matches!(r, Ref::FeaturePlane { feature } if *feature == id));
             let err = self.errors.get(&id).cloned();
-            let resp = tree_row(ui, f.op.kind(), &f.name, picked || editing, i >= rb, f.suppressed, f.hidden, err.as_deref());
+            let resp = tree_row(ui, 0, f.op.kind(), &f.name, picked || editing, i >= rb, f.suppressed, f.hidden, err.as_deref());
             let resp = resp.on_hover_text(match &err {
                 Some(e) => format!("{}: {e}", f.name),
                 None => "Double-click to edit · right-click for options".into(),
@@ -1042,7 +1247,7 @@ impl App {
                     ui.close();
                 }
                 ui.separator();
-                if ui.button(RichText::new("Delete").color(theme::ERROR_SOFT)).clicked() {
+                if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
                     action = Some(("delete", id));
                     ui.close();
                 }
@@ -1092,7 +1297,7 @@ impl App {
     }
 
     pub fn part_color(&self, id: doc::BodyId) -> Color32 {
-        self.part_props(id).color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(theme::vp::BODY)
+        self.part_props(id).color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(theme::vp::body())
     }
 
     fn set_part(&mut self, id: doc::BodyId, f: impl FnOnce(&mut doc::PartProps)) {
@@ -1109,8 +1314,14 @@ impl App {
     }
 
     fn parts_list(&mut self, ui: &mut Ui) {
+        if disclosure_row(ui, &format!("Parts ({})", self.result.bodies.len()), self.parts_open).clicked() {
+            self.parts_open = !self.parts_open;
+        }
+        if !self.parts_open {
+            return;
+        }
         if self.result.bodies.is_empty() {
-            ui.label(RichText::new("No parts yet").color(MUTED).size(12.0));
+            ui.label(RichText::new("    No parts yet").color(theme::muted()).size(12.0));
             return;
         }
         ui.spacing_mut().item_spacing.y = 1.0;
@@ -1131,7 +1342,7 @@ impl App {
                     continue;
                 }
             }
-            let resp = tree_row(ui, "extrude", &name, picked, false, false, false, None);
+            let resp = tree_row(ui, 1, "part", &name, picked, false, false, false, None);
             // colour swatch
             let sw = egui::Rect::from_center_size(egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y), egui::vec2(10.0, 10.0));
             ui.painter().rect_filled(sw, 2.0, self.part_color(id));
@@ -1199,7 +1410,7 @@ impl App {
         }
         let size = hi - lo;
         let row = |ui: &mut Ui, k: &str, v: String| {
-            ui.label(RichText::new(k).color(MUTED).size(12.0));
+            ui.label(RichText::new(k).color(theme::muted()).size(12.0));
             ui.label(RichText::new(v).size(12.0));
             ui.end_row();
         };
@@ -1256,13 +1467,13 @@ impl App {
         if let Some(i) = active {
             if let Some(c) = self.doc.configs.get_mut(i) {
                 ui.horizontal(|ui| {
-                    ui.label(RichText::new("Name").color(MUTED).size(12.0));
+                    ui.label(RichText::new("Name").color(theme::muted()).size(12.0));
                     ui.text_edit_singleline(&mut c.name);
                 });
             }
-            ui.label(RichText::new("Variable edits now apply to this configuration only.").color(MUTED).size(12.0));
+            ui.label(RichText::new("Variable edits now apply to this configuration only.").color(theme::muted()).size(12.0));
         } else {
-            ui.label(RichText::new("Configurations are named sets of variable values.").color(MUTED).size(12.0));
+            ui.label(RichText::new("Configurations are named sets of variable values.").color(theme::muted()).size(12.0));
         }
         if active != self.doc.active_config {
             self.doc.active_config = active;
@@ -1300,7 +1511,7 @@ impl App {
                 } else {
                     let mut txt = RichText::new(&v.expr).monospace();
                     if errs.get(i).map(|e| e.is_some()).unwrap_or(false) {
-                        txt = txt.color(theme::ERROR_SOFT);
+                        txt = txt.color(theme::error_soft());
                     }
                     let r = ui.add(egui::Label::new(txt).sense(Sense::click())).on_hover_text(format!("{}: double-click to change", v.name));
                     if r.double_clicked() {
@@ -1332,63 +1543,64 @@ impl App {
         ui.add_space(4.0);
         ui.horizontal_wrapped(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
-            ui.label(RichText::new("Use variables in any dimension or feature value, e.g. ").color(MUTED).size(12.0));
+            ui.label(RichText::new("Use variables in any dimension or feature value, e.g. ").color(theme::muted()).size(12.0));
             ui.label(RichText::new("width / 2").monospace().size(11.5));
-            ui.label(RichText::new(".").color(MUTED).size(12.0));
+            ui.label(RichText::new(".").color(theme::muted()).size(12.0));
         });
     }
 
     // ------------------------------------------------------------ status bar
 
-    fn statusbar(&mut self, ui: &mut Ui) {
-        ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 16.0;
-            let msg = if let crate::workspace::Tab::Assembly(_) = self.tab {
-                if self.asm.dialog.is_some() {
-                    "Click a face, edge or circular edge on each of the two parts · Enter to accept".to_string()
-                } else {
-                    "Insert parts, then pick a mate type · drag parts to move them, Shift+drag rotates".to_string()
-                }
-            } else if let crate::workspace::Tab::Drawing(_) = self.tab {
-                "Insert views, add dimensions and notes, then export".to_string()
-            } else if let Some(s) = &self.sketch {
-                crate::sketcher::status_text(self, s)
-            } else if let Some(m) = &self.measure {
-                crate::viewport::measure_text(self, m)
-            } else if self.dialog.is_some() {
-                "Pick geometry in the viewport for the highlighted field · Enter to accept, Esc to cancel".to_string()
-            } else if !self.picks.is_empty() {
-                format!("{} selected · start a feature, or Esc to clear", self.picks.len())
+    fn hint_text(&self) -> String {
+        if let crate::workspace::Tab::Assembly(_) = self.tab {
+            if self.asm.dialog.is_some() {
+                "Click a face, edge or circular edge on each of the two parts · Enter to accept".to_string()
             } else {
-                "Click faces, edges, planes or sketch regions to select them before starting a feature".to_string()
-            };
-            ui.label(RichText::new(msg).color(MUTED).size(12.0));
-            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-                let (txt, col) = match self.kernel.state {
-                    KernelState::Loading => ("kernel: loading", MUTED),
-                    KernelState::Ready => ("kernel: ready", theme::OK_GREEN),
-                    KernelState::Busy => ("kernel: rebuilding", MUTED),
-                    KernelState::Error => ("kernel: error", theme::ERROR),
-                };
-                ui.label(RichText::new(txt).color(col).size(12.0));
-                let mut u = self.doc.units;
-                egui::ComboBox::from_id_salt("units")
-                    .selected_text(u.label())
-                    .width(52.0)
-                    .show_ui(ui, |ui| {
-                        for x in Units::ALL {
-                            ui.selectable_value(&mut u, x, x.label());
-                        }
-                    })
-                    .response
-                    .on_hover_text("Document units: plain numbers you type and all lengths shown use this unit");
-                if u != self.doc.units {
-                    self.checkpoint();
-                    self.doc.units = u;
-                    self.changed();
+                "Insert parts, then pick a mate type · drag parts to move them, Shift+drag rotates".to_string()
+            }
+        } else if let crate::workspace::Tab::Drawing(_) = self.tab {
+            "Insert views, add dimensions and notes, then export".to_string()
+        } else if let Some(s) = &self.sketch {
+            crate::sketcher::status_text(self, s)
+        } else if let Some(m) = &self.measure {
+            crate::viewport::measure_text(self, m)
+        } else if self.dialog.is_some() {
+            "Pick geometry in the viewport for the highlighted field · Enter to accept, Esc to cancel".to_string()
+        } else if !self.picks.is_empty() {
+            format!("{} selected · start a feature, or Esc to clear", self.picks.len())
+        } else {
+            "Click faces, edges, planes or sketch regions to select them before starting a feature".to_string()
+        }
+    }
+
+    /// The hint line, drawn over the bottom-left of the work area.
+    fn hint_ui(&self, ctx: &egui::Context, area: egui::Rect) {
+        let msg = self.hint_text();
+        let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hint")));
+        let font = egui::FontId::proportional(12.0);
+        let g = painter.layout(msg, font, theme::muted(), area.width() - 260.0);
+        let at = egui::pos2(area.left() + 12.0, area.bottom() - 10.0 - g.size().y);
+        painter.rect_filled(egui::Rect::from_min_size(at, g.size()).expand2(egui::vec2(6.0, 3.0)), 3.0, theme::label_bg());
+        painter.galley(at, g, theme::muted());
+    }
+
+    fn units_combo(&mut self, ui: &mut Ui) {
+        let mut u = self.doc.units;
+        egui::ComboBox::from_id_salt("units")
+            .selected_text(u.label())
+            .width(52.0)
+            .show_ui(ui, |ui| {
+                for x in Units::ALL {
+                    ui.selectable_value(&mut u, x, x.label());
                 }
-            });
-        });
+            })
+            .response
+            .on_hover_text("Document units: plain numbers you type and all lengths shown use this unit");
+        if u != self.doc.units {
+            self.checkpoint();
+            self.doc.units = u;
+            self.changed();
+        }
     }
 
     fn toast_ui(&mut self, ctx: &egui::Context) {
@@ -1402,8 +1614,8 @@ impl App {
         }
         let r = self.viewport_rect;
         let (fill, stroke) = match t.kind {
-            ToastKind::Info => (theme::TOAST, BORDER),
-            ToastKind::Error => (theme::TOAST_ERR, theme::hex(0x7a3a3a)),
+            ToastKind::Info => (theme::toast(), theme::border()),
+            ToastKind::Error => (theme::toast_err(), theme::toast_err_border()),
         };
         let text = t.text.clone();
         let bottom = if self.phone { 70.0 } else { 14.0 };
@@ -1415,7 +1627,7 @@ impl App {
             .show(ctx, |ui| {
                 Frame::new().fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(6).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
                     ui.set_max_width(r.width() * 0.8);
-                    ui.label(RichText::new(text).color(TEXT));
+                    ui.label(RichText::new(text).color(theme::text()));
                 });
             });
     }
@@ -1424,7 +1636,7 @@ impl App {
         use crate::workspace::Tab;
         let mut tabs: Vec<(Tab, String, &str)> = vec![];
         for (i, s) in self.ws.studios.iter().enumerate() {
-            tabs.push((Tab::Studio(i), s.name.clone(), "sketch"));
+            tabs.push((Tab::Studio(i), s.name.clone(), "partStudio"));
         }
         for (i, a) in self.ws.assemblies.iter().enumerate() {
             tabs.push((Tab::Assembly(i), a.name.clone(), "assembly"));
@@ -1435,7 +1647,24 @@ impl App {
         let mut switch = None;
         let mut action: Option<(&str, Tab)> = None;
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 2.0;
+            ui.spacing_mut().item_spacing.x = 0.0;
+            ui.menu_image_button(icons::image("plus", 16.0).tint(theme::text()), |ui| {
+                if ui.add(egui::Button::image_and_text(icons::image("partStudio", 15.0).tint(theme::text()), "Part Studio")).clicked() {
+                    action = Some(("new-studio", Tab::Studio(0)));
+                    ui.close();
+                }
+                if ui.add(egui::Button::image_and_text(icons::image("assembly", 15.0).tint(theme::text()), "Assembly")).clicked() {
+                    action = Some(("new-assembly", Tab::Studio(0)));
+                    ui.close();
+                }
+                if ui.add(egui::Button::image_and_text(icons::image("drawing", 15.0).tint(theme::text()), "Drawing")).clicked() {
+                    action = Some(("new-drawing", Tab::Studio(0)));
+                    ui.close();
+                }
+            })
+            .response
+            .on_hover_text("Add a Part Studio, Assembly or Drawing");
+            ui.add_space(6.0);
             for (t, name, icon) in tabs {
                 if let Some((rt, text)) = &mut self.renaming_tab {
                     if *rt == t {
@@ -1448,13 +1677,7 @@ impl App {
                     }
                 }
                 let active = self.tab == t;
-                let b = egui::Button::image_and_text(
-                    icons::image(icon, 14.0).tint(if active { theme::ACTIVE_TEXT } else { MUTED }),
-                    RichText::new(&name).size(12.0).color(if active { TEXT } else { MUTED }),
-                )
-                .fill(if active { PANEL_2 } else { Color32::TRANSPARENT })
-                .corner_radius(CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 });
-                let r = ui.add(b);
+                let r = tab_button(ui, icon, &name, active);
                 if r.clicked() {
                     switch = Some(t);
                 }
@@ -1470,30 +1693,16 @@ impl App {
                         action = Some(("duplicate", t));
                         ui.close();
                     }
-                    if ui.button(RichText::new("Delete").color(theme::ERROR_SOFT)).clicked() {
+                    if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
                         action = Some(("delete", t));
                         ui.close();
                     }
                 });
             }
-            ui.add_space(6.0);
-            ui.menu_button(RichText::new("+").size(14.0), |ui| {
-                if ui.button("Part Studio").clicked() {
-                    action = Some(("new-studio", Tab::Studio(0)));
-                    ui.close();
-                }
-                if ui.button("Assembly").clicked() {
-                    action = Some(("new-assembly", Tab::Studio(0)));
-                    ui.close();
-                }
-                if ui.button("Drawing").clicked() {
-                    action = Some(("new-drawing", Tab::Studio(0)));
-                    ui.close();
-                }
-            })
-            .response
-            .on_hover_text("Add a Part Studio, Assembly or Drawing");
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                ui.spacing_mut().item_spacing.x = 8.0;
+                ui.add_space(4.0);
+                self.units_combo(ui);
                 ui.menu_button(RichText::new(format!("Versions ({})", self.ws.versions.len())).size(12.0), |ui| {
                     ui.set_min_width(260.0);
                     ui.horizontal(|ui| {
@@ -1505,12 +1714,12 @@ impl App {
                     });
                     ui.separator();
                     if self.ws.versions.is_empty() {
-                        ui.label(RichText::new("No versions yet").color(MUTED));
+                        ui.label(RichText::new("No versions yet").color(theme::muted()));
                     }
                     for (i, v) in self.ws.versions.iter().enumerate().rev() {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&v.name).strong());
-                            ui.label(RichText::new(&v.created).color(MUTED).size(11.0));
+                            ui.label(RichText::new(&v.created).color(theme::muted()).size(11.0));
                             if ui.small_button("Restore").on_hover_text("Go back to this version (the current state stays in undo)").clicked() {
                                 self.restore_version = Some(i);
                                 ui.close();
@@ -1665,9 +1874,9 @@ impl App {
                     crate::sketcher::toolbar(self, ui);
                 } else {
                     self.model_tools(ui);
+                    self.view_toggles(ui);
                     Self::group(ui, |ui| {
-                        self.view_menu(ui);
-                        self.file_menu(ui);
+                        ui.menu_image_button(icons::image("menu", 18.0).tint(theme::text()), |ui| self.document_menu(ui));
                     });
                 }
             });
@@ -1682,21 +1891,30 @@ impl eframe::App for App {
         self.pump_kernel();
         self.shortcuts(&ctx);
 
-        let bar = Frame::new().fill(PANEL).inner_margin(Margin::symmetric(8, 5)).stroke(Stroke::NONE);
+        let header = Frame::new().fill(theme::header()).inner_margin(Margin::symmetric(8, 3));
+        egui::Panel::top("header").frame(header).resizable(false).show(ui, |ui| self.header(ui));
+        let bar = Frame::new().fill(theme::panel()).inner_margin(Margin::symmetric(6, 3)).stroke(Stroke::new(1.0, theme::border()));
         egui::Panel::top("toolbar").frame(bar).resizable(false).show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("status").frame(Frame::new().fill(PANEL).inner_margin(Margin::symmetric(10, 4))).resizable(false).show(ui, |ui| self.statusbar(ui));
-        egui::Panel::bottom("tabs").frame(Frame::new().fill(theme::BG).inner_margin(Margin::symmetric(6, 3))).resizable(false).show(ui, |ui| self.tabs_ui(ui));
+        egui::Panel::bottom("tabs")
+            .frame(Frame::new().fill(theme::tabbar()).inner_margin(Margin { left: 0, right: 6, top: 0, bottom: 0 }))
+            .resizable(false)
+            .show(ui, |ui| self.tabs_ui(ui));
         if self.phone {
-            egui::Panel::bottom("dock").frame(Frame::new().fill(PANEL).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
+            egui::Panel::bottom("dock").frame(Frame::new().fill(theme::panel()).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
+        }
+        if !self.phone && matches!(self.tab, crate::workspace::Tab::Studio(_)) {
+            let rail = Frame::new().fill(theme::header()).stroke(Stroke::new(1.0, theme::border()));
+            egui::Panel::left("rail").frame(rail).resizable(false).exact_size(40.0).show(ui, |ui| self.rail(ui));
         }
         if self.sidebar_open {
-            egui::Panel::left("sidebar").frame(Frame::new().fill(PANEL)).resizable(true).default_size(270.0).min_size(200.0).show(ui, |ui| match self.tab {
+            let side = Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::border()));
+            egui::Panel::left("sidebar").frame(side).resizable(true).default_size(250.0).min_size(190.0).show(ui, |ui| match self.tab {
                 crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
                 crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
                 _ => self.sidebar(ui),
             });
         }
-        egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
+        let central = egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
             _ => {
@@ -1706,6 +1924,9 @@ impl eframe::App for App {
                 }
             }
         });
+        if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {
+            self.hint_ui(&ctx, central.response.rect);
+        }
         self.toast_ui(&ctx);
         let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sketcher".into()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
@@ -1731,63 +1952,104 @@ pub fn key_mods(ctx: &egui::Context) -> (bool, bool) {
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title.to_uppercase()).color(MUTED).size(11.0).strong());
+        ui.label(RichText::new(title.to_uppercase()).color(theme::muted()).size(11.0).strong());
         ui.add_space(4.0);
         add(ui);
     });
     let r = ui.max_rect();
     let y = ui.cursor().top();
-    ui.painter().hline(r.x_range(), y, Stroke::new(1.0, BORDER));
-}
-
-fn dashed_hline(ui: &Ui, y: f32, x: egui::Rangef) {
-    let mut a = x.min;
-    while a < x.max {
-        ui.painter().hline(egui::Rangef::new(a, (a + 3.0).min(x.max)), y, Stroke::new(1.0, BORDER));
-        a += 6.0;
-    }
+    ui.painter().hline(r.x_range(), y, Stroke::new(1.0, theme::border()));
 }
 
 #[allow(clippy::too_many_arguments)]
-fn tree_row(ui: &mut Ui, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
-    let h = 22.0;
+fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
+    let h = 24.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
     let p = ui.painter();
     if picked {
-        p.rect_filled(rect, CornerRadius::same(5), Color32::from_rgba_unmultiplied(0x4e, 0xa1, 0xff, 0x33));
+        p.rect_filled(rect, CornerRadius::same(3), theme::sel_fill());
     } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(5), PANEL_2);
+        p.rect_filled(rect, CornerRadius::same(3), theme::panel_2());
     }
     let alpha = if rolled { 0.4 } else { 1.0 };
     let col = |c: Color32| c.gamma_multiply(alpha);
-    let icon_rect = egui::Rect::from_min_size(rect.min + egui::vec2(6.0, 3.0), egui::vec2(16.0, 16.0));
-    icons::image(icon, 16.0).tint(col(if hidden { MUTED } else { TEXT })).paint_at(ui, icon_rect);
-    let mut color = if error.is_some() { theme::ERROR_SOFT } else { TEXT };
+    let x0 = rect.min.x + 6.0 + indent as f32 * 18.0;
+    let icon_rect = egui::Rect::from_min_size(egui::pos2(x0, rect.center().y - 8.0), egui::vec2(16.0, 16.0));
+    let icol = if error.is_some() {
+        theme::error_soft()
+    } else if hidden {
+        theme::muted()
+    } else {
+        theme::text().gamma_multiply(0.85)
+    };
+    icons::image(icon, 16.0).tint(col(icol)).paint_at(ui, icon_rect);
+    let mut color = if error.is_some() { theme::error_soft() } else { theme::text() };
     if suppressed || hidden {
         color = color.gamma_multiply(0.6);
     }
     let font = egui::FontId::proportional(13.0);
     let galley = ui.painter().layout_no_wrap(name.to_string(), font, col(color));
-    let tp = egui::pos2(rect.min.x + 28.0, rect.center().y - galley.size().y / 2.0);
+    let tp = egui::pos2(x0 + 22.0, rect.center().y - galley.size().y / 2.0);
     if suppressed {
         let y = rect.center().y;
         ui.painter().hline(egui::Rangef::new(tp.x, tp.x + galley.size().x), y, Stroke::new(1.0, col(color)));
     }
     ui.painter().galley(tp, galley, col(color));
+    if hidden {
+        icons::image("eyeOff", 14.0).tint(theme::muted()).paint_at(ui, egui::Rect::from_center_size(egui::pos2(rect.right() - 12.0, rect.center().y), egui::vec2(14.0, 14.0)));
+    }
     if error.is_some() {
-        ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, "!", egui::FontId::proportional(13.0), theme::ERROR_SOFT);
+        ui.painter().text(egui::pos2(rect.right() - 8.0, rect.center().y), egui::Align2::RIGHT_CENTER, "!", egui::FontId::proportional(13.0), theme::error_soft());
     }
     resp
 }
 
-fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 20.0), Sense::click());
-    ui.painter().hline(rect.x_range(), rect.top() + 4.0, Stroke::new(2.0, ACCENT));
-    ui.painter().text(egui::pos2(rect.left() + 6.0, rect.top() + 13.0), egui::Align2::LEFT_CENTER, "End of part", egui::FontId::proportional(11.0), MUTED);
-    if rolled {
-        ui.painter().text(egui::pos2(rect.right() - 6.0, rect.top() + 13.0), egui::Align2::RIGHT_CENTER, "roll to end", egui::FontId::proportional(11.0), ACCENT);
+/// A document tab in the bottom bar: icon and name, the active one raised.
+fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Response {
+    let font = egui::FontId::proportional(12.5);
+    let col = if active { theme::text() } else { theme::text().gamma_multiply(0.8) };
+    let g = ui.painter().layout_no_wrap(name.to_string(), font, col);
+    let w = (g.size().x + 44.0).max(120.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), Sense::click());
+    let p = ui.painter();
+    if active {
+        p.rect_filled(rect, 0.0, theme::panel());
+        p.hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
+    } else if resp.hovered() {
+        p.rect_filled(rect, 0.0, theme::panel_2());
     }
-    resp.on_hover_text("Rollback bar: new features are inserted here")
+    p.vline(rect.right(), rect.y_range().shrink(6.0), Stroke::new(1.0, theme::border()));
+    let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(15.0, 15.0));
+    icons::image(icon, 15.0).tint(if active { theme::accent() } else { col }).paint_at(ui, ir);
+    ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, col);
+    resp
+}
+
+/// A collapsible group header row with a chevron ("Default geometry", "Parts (n)").
+fn disclosure_row(ui: &mut Ui, label: &str, open: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::click());
+    if resp.hovered() {
+        ui.painter().rect_filled(rect, CornerRadius::same(3), theme::panel_2());
+    }
+    let ir = egui::Rect::from_center_size(egui::pos2(rect.min.x + 12.0, rect.center().y), egui::vec2(14.0, 14.0));
+    icons::image(if open { "chevronDown" } else { "chevronRight" }, 14.0).tint(theme::text()).paint_at(ui, ir);
+    ui.painter().text(egui::pos2(rect.min.x + 24.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), theme::text());
+    resp
+}
+
+/// Onshape-style rollback bar: a thick grey bar under the last active feature.
+fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), Sense::click());
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 2.0, rect.center().y - 3.0), egui::pos2(rect.right() - 4.0, rect.center().y + 3.0));
+    let c = if rolled {
+        theme::accent()
+    } else if resp.hovered() {
+        theme::muted()
+    } else {
+        theme::rollbar()
+    };
+    ui.painter().rect_filled(bar, CornerRadius::same(1), c);
+    resp.on_hover_text(if rolled { "Rollback bar: click to roll to the end" } else { "Rollback bar: new features are inserted here" })
 }
 
 fn is_ident(s: &str) -> bool {
@@ -1804,6 +2066,26 @@ pub fn fmt_volume(mm3: f64, u: Units) -> String {
 
 pub fn fmt_area(mm2: f64, u: Units) -> String {
     format!("{} {}²", crate::expr::trim(mm2 / u.scale().powi(2), 3), u.label())
+}
+
+/// Light or dark: `CAD_THEME=dark|light` wins, then the saved choice; light by default.
+fn load_dark_pref() -> bool {
+    if let Ok(t) = std::env::var("CAD_THEME") {
+        return t.eq_ignore_ascii_case("dark");
+    }
+    pref_path().and_then(|p| std::fs::read_to_string(p).ok()).map(|t| t.trim() == "dark").unwrap_or(false)
+}
+
+fn save_dark_pref(dark: bool) {
+    if let Some(p) = pref_path() {
+        let _ = std::fs::create_dir_all(p.parent().unwrap());
+        let _ = std::fs::write(p, if dark { "dark" } else { "light" });
+    }
+}
+
+fn pref_path() -> Option<std::path::PathBuf> {
+    let base = std::env::var_os("XDG_CONFIG_HOME").map(std::path::PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| std::path::PathBuf::from(h).join(".config")))?;
+    Some(base.join("cad-rust-app").join("theme"))
 }
 
 #[allow(dead_code)]

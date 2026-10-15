@@ -1,3 +1,3 @@
 #!/bin/bash
 # x.sh <xdotool args...>
-podman exec -e DISPLAY=:1 cadgui xdotool "$@"
+podman exec -e DISPLAY=:1 ${CADGUI:-cadgui} xdotool "$@"

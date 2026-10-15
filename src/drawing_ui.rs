@@ -9,7 +9,7 @@ use crate::app::{App, ToastKind};
 use crate::asm_ui::checkpoint;
 use crate::drawing::{DrawDim, DrawView, Drawing, Note};
 use crate::kernel::ProjView;
-use crate::theme::{self, BORDER, MUTED, TEXT};
+use crate::theme;
 use crate::workspace::Tab;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Default)]
@@ -384,7 +384,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         ui.menu_button(RichText::new("Insert view").size(12.5), |ui| {
             for si in 0..app.ws.studios.len() {
                 let name = app.ws.studios[si].name.clone();
-                ui.label(RichText::new(name).color(MUTED).size(11.0));
+                ui.label(RichText::new(name).color(theme::muted()).size(11.0));
                 for (dir, label) in DIRS {
                     if ui.button(*label).clicked() {
                         insert_view(app, si, dir);
@@ -525,7 +525,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
             ui.set_width(ui.available_width());
-            ui.label(RichText::new("SHEET").color(MUTED).size(11.0).strong());
+            ui.label(RichText::new("SHEET").color(theme::muted()).size(11.0).strong());
             let mut sheet = app.ws.drawings[di].sheet.clone();
             egui::ComboBox::from_id_salt("sheet").selected_text(&sheet).show_ui(ui, |ui| {
                 for s in ["A4", "A3", "A2", "A1", "Letter", "Tabloid"] {
@@ -538,7 +538,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 app.dwg.fitted = false;
             }
             ui.add_space(8.0);
-            ui.label(RichText::new("VIEWS").color(MUTED).size(11.0).strong());
+            ui.label(RichText::new("VIEWS").color(theme::muted()).size(11.0).strong());
             let views: Vec<(u64, String, f64, bool, bool)> = app.ws.drawings[di].views.iter().map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines, v.detail.is_some())).collect();
             for (id, dir, scale, hidden, detail) in views {
                 let label = if detail { "Detail" } else { DIRS.iter().find(|x| x.0 == dir).map(|x| x.1).unwrap_or("View") };
@@ -560,7 +560,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 });
             }
             ui.add_space(8.0);
-            ui.label(RichText::new(format!("{} dimensions · {} notes", app.ws.drawings[di].dims.len(), app.ws.drawings[di].notes.len())).color(MUTED).size(12.0));
+            ui.label(RichText::new(format!("{} dimensions · {} notes", app.ws.drawings[di].dims.len(), app.ws.drawings[di].notes.len())).color(theme::muted()).size(12.0));
         });
     });
 }
@@ -600,9 +600,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 
     let painter = ui.painter_at(rect);
-    painter.rect_filled(rect, 0.0, theme::vp::BACKGROUND);
+    painter.rect_filled(rect, 0.0, if theme::is_dark() { theme::vp::background() } else { theme::hex(0xdfe3e8) });
     let sheet_rect = egui::Rect::from_two_pos(to_screen([0.0, 0.0]), to_screen([sw, sh]));
-    painter.rect_filled(sheet_rect.translate(egui::vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(90));
+    painter.rect_filled(sheet_rect.translate(egui::vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(if theme::is_dark() { 90 } else { 40 }));
     painter.rect_filled(sheet_rect, 0.0, Color32::from_rgb(250, 250, 248));
 
     let prims = sheet_prims(app, &d);
@@ -638,7 +638,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     };
     if let Some(DSel::View(id)) = app.dwg.sel {
         if let Some(r) = d.views.iter().find(|v| v.id == id).and_then(|v| view_rect(v)) {
-            painter.rect_stroke(r, 2.0, Stroke::new(1.5, theme::ACCENT), egui::StrokeKind::Outside);
+            painter.rect_stroke(r, 2.0, Stroke::new(1.5, theme::accent()), egui::StrokeKind::Outside);
         }
     }
 
@@ -664,7 +664,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 app.dwg.hover_pt = Some((vid, q));
                 let v = d.views.iter().find(|v| v.id == vid).unwrap();
                 let s = to_screen(to_sheet(v, app.dwg.proj.get(&(v.studio, v.dir.clone())), q));
-                painter.circle_filled(s, 4.0, theme::vp::HOVER);
+                painter.circle_filled(s, 4.0, theme::vp::hover());
             }
         }
     }
@@ -776,7 +776,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if let Some((id, pos, mut text)) = app.dwg.note_edit.clone() {
         let mut done = None;
         egui::Area::new(egui::Id::new("note-edit")).order(egui::Order::Foreground).fixed_pos(to_screen(pos)).show(ui.ctx(), |ui| {
-            egui::Frame::new().fill(theme::PANEL).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(4).inner_margin(4).show(ui, |ui| {
+            egui::Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(4).show(ui, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("Note").desired_width(200.0));
                 if !r.has_focus() && !r.lost_focus() {
                     r.request_focus();
@@ -821,8 +821,8 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         DTool::Dimension => "Click a corner or line end on a view",
         DTool::Note => "Click where the note goes",
     };
-    painter.text(rect.left_bottom() + egui::vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, hint, egui::FontId::proportional(12.0), MUTED);
-    let _ = (BORDER, TEXT, from_sheet);
+    painter.text(rect.left_bottom() + egui::vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, hint, egui::FontId::proportional(12.0), theme::muted());
+    let _ = (theme::border(), theme::text(), from_sheet);
 }
 
 // ---------------------------------------------------------------- export
