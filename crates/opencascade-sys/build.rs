@@ -153,7 +153,14 @@ impl OcctConfig {
         // Add path to builtin OCCT
         #[cfg(feature = "builtin")]
         {
-            occt_sys::build_occt();
+            // Building OCCT takes most of a clean build. Reuse an installed copy in
+            // target/OCCT when there is one (CI restores it from its cache).
+            let occt = occt_sys::occt_path();
+            let installed = occt.join("include").join("Standard_Handle.hxx").exists()
+                && std::fs::read_dir(occt.join("lib")).map(|mut d| d.next().is_some()).unwrap_or(false);
+            if !installed {
+                occt_sys::build_occt();
+            }
             std::env::set_var("DEP_OCCT_ROOT", occt_sys::occt_path().as_os_str());
         }
 
