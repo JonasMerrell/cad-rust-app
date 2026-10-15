@@ -7,7 +7,7 @@ use egui::{Color32, Margin, Pos2, RichText, Sense, Stroke, Ui};
 
 use crate::app::{App, ToastKind};
 use crate::asm_ui::checkpoint;
-use crate::drawing::{DrawDim, DrawView, Drawing, Note};
+use crate::drawing::{DrawDim, DrawView, Drawing, Gdt, Note, GDT_KINDS};
 use crate::kernel::ProjView;
 use crate::theme;
 use crate::workspace::Tab;
@@ -17,7 +17,11 @@ pub enum DTool {
     #[default]
     Select,
     Dimension,
+    Radial,
+    Angle,
     Note,
+    Gdt,
+    Datum,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -25,6 +29,7 @@ pub enum DSel {
     View(u64),
     Dim(u64),
     Note(u64),
+    Gdt(u64),
 }
 
 #[derive(Default)]
@@ -43,6 +48,15 @@ pub struct DrawUi {
     pub dim_first: Option<(u64, [f64; 2])>,
     pub note_edit: Option<(Option<u64>, [f64; 2], String)>,
     pub hover_pt: Option<(u64, [f64; 2])>,
+    /// Sheet shown (0-based).
+    pub cur_sheet: usize,
+    /// Circle or arc under the pointer for radial dimensions: (view, centre, point on it, full circle).
+    pub hover_circle: Option<(u64, [f64; 2], [f64; 2], bool)>,
+    /// Straight line under the pointer for angle dimensions, and the first one picked.
+    pub hover_line: Option<(u64, [f64; 2], [f64; 2])>,
+    pub angle_first: Option<(u64, [f64; 2], [f64; 2])>,
+    /// Alignment guides while dragging a view (sheet x, sheet y).
+    pub guides: (Option<f64>, Option<f64>),
 }
 
 pub const DIRS: &[(&str, &str)] = &[
@@ -153,6 +167,7 @@ pub fn add_standard_views(app: &mut App) {
     let (fw, fh) = (size.x * scale, size.z * scale);
     let gap = 25.0;
     let front = [40.0 + fw / 2.0, 60.0 + fh / 2.0];
+    let sheet_no = app.dwg.cur_sheet;
     let Some(d) = dwg_mut(app) else { return };
     for (dir, pos) in [
         ("front", front),
@@ -162,7 +177,7 @@ pub fn add_standard_views(app: &mut App) {
     ] {
         d.next_id += 1;
         let id = d.next_id;
-        d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, hidden_lines: false, detail: None });
+        d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, hidden_lines: false, detail: None, sheet: sheet_no });
     }
     app.dwg.fitted = false;
 }
@@ -199,7 +214,7 @@ const INK: [u8; 3] = [20, 20, 20];
 const DIM_INK: [u8; 3] = [20, 60, 140];
 
 /// Everything on the sheet, for both the screen and the exporters.
-pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
+pub fn sheet_prims(app: &App, d: &Drawing, sheet: usize) -> Vec<Prim> {
     let mut out = vec![];
     let [w, h] = sheet_size(&d.sheet);
     let line = |out: &mut Vec<Prim>, a: [f64; 2], b: [f64; 2], wid: f64| out.push(Prim::Line { a, b, w: wid, dashed: false, color: INK });
@@ -214,16 +229,18 @@ pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
     for (a, b) in [([tx, ty], [tx, ty + th]), ([tx, ty + th], [w - m, ty + th]), ([tx, ty + 18.0], [w - m, ty + 18.0]), ([tx + 110.0, ty], [tx + 110.0, ty + 18.0])] {
         line(&mut out, a, b, 0.35);
     }
-    let units = d.views.first().map(|v| units_of(app, v.studio)).unwrap_or_default();
-    let scale = d.views.first().map(|v| fmt_scale(v.scale)).unwrap_or_default();
-    let studio = d.views.first().and_then(|v| app.ws.studios.get(v.studio)).map(|s| s.name.clone()).unwrap_or_default();
+    let on_sheet: Vec<&DrawView> = d.views.iter().filter(|v| v.sheet == sheet).collect();
+    let units = on_sheet.first().map(|v| units_of(app, v.studio)).unwrap_or_default();
+    let scale = on_sheet.first().map(|v| fmt_scale(v.scale)).unwrap_or_default();
+    let studio = on_sheet.first().and_then(|v| app.ws.studios.get(v.studio)).map(|s| s.name.clone()).unwrap_or_default();
     out.push(Prim::Text { at: [tx + 4.0, ty + 24.0], size: 6.0, text: d.name.clone(), anchor: 0, color: INK });
     out.push(Prim::Text { at: [tx + 4.0, ty + 6.0], size: 3.2, text: format!("Part: {studio}"), anchor: 0, color: INK });
     out.push(Prim::Text { at: [tx + 114.0, ty + 11.0], size: 3.2, text: format!("Scale {scale}"), anchor: 0, color: INK });
     out.push(Prim::Text { at: [tx + 114.0, ty + 4.0], size: 3.2, text: format!("Units {}", units.label()), anchor: 0, color: INK });
     out.push(Prim::Text { at: [w - m - 4.0, ty + 24.0], size: 3.0, text: "cad-app".into(), anchor: 2, color: [110, 110, 110] });
+    out.push(Prim::Text { at: [w - m - 4.0, ty + 4.0], size: 3.2, text: format!("Sheet {} of {}", sheet + 1, d.sheet_count()), anchor: 2, color: INK });
 
-    for v in &d.views {
+    for v in on_sheet.iter().copied() {
         if let Some((src, c, r)) = v.detail {
             detail_prims(app, d, v, src, c, r, &mut out);
             continue;
@@ -253,19 +270,309 @@ pub fn sheet_prims(app: &App, d: &Drawing) -> Vec<Prim> {
         out.push(Prim::Text { at: [v.pos[0], bottom - 7.0], size: 3.2, text: format!("{} ({})", label.to_uppercase(), fmt_scale(v.scale)), anchor: 1, color: [80, 80, 80] });
     }
     for dm in &d.dims {
-        let Some(v) = d.views.iter().find(|v| v.id == dm.view) else { continue };
+        let Some(v) = on_sheet.iter().find(|v| v.id == dm.view) else { continue };
         let p = app.dwg.proj.get(&(v.studio, v.dir.clone()));
         let (a, b) = (to_sheet(v, p, dm.a), to_sheet(v, p, dm.b));
         let units = units_of(app, v.studio);
-        dim_prims(&mut out, a, b, dm.kind, dm.offset, |len| units.fmt(len / v.scale));
+        match dm.kind {
+            3 | 4 => radial_prims(&mut out, a, b, dm.kind == 4, dm.offset, &format!("{}{}{}", dm.prefix, if dm.kind == 4 { "Ø" } else { "R" }, units.fmt(glam::DVec2::from(dm.a).distance(dm.b.into()) * if dm.kind == 4 { 2.0 } else { 1.0 }))),
+            5 if dm.extra.len() == 2 => angle_prims(&mut out, [a, b], [to_sheet(v, p, dm.extra[0]), to_sheet(v, p, dm.extra[1])], dm.offset),
+            _ => dim_prims(&mut out, a, b, dm.kind, dm.offset, |len| format!("{}{}", dm.prefix, units.fmt(len / v.scale))),
+        }
     }
-    for n in &d.notes {
+    for n in d.notes.iter().filter(|n| n.sheet == sheet) {
         out.push(Prim::Text { at: n.pos, size: 3.5, text: n.text.clone(), anchor: 0, color: INK });
     }
+    for g in d.gdts.iter().filter(|g| g.sheet == sheet) {
+        gdt_prims(&mut out, g);
+    }
     if let Some((ai, pos)) = d.bom {
-        if let Some(a) = app.ws.assemblies.get(ai) {
+        if let Some(a) = app.ws.assemblies.get(ai).filter(|_| d.bom_sheet == sheet) {
             bom_prims(app, a, pos, &mut out);
         }
+    }
+    out
+}
+
+fn arrow(out: &mut Vec<Prim>, tip: glam::DVec2, dir: glam::DVec2, color: [u8; 3]) {
+    // `dir` points from the tip back along the shaft
+    let d = dir.normalize_or_zero();
+    let back = tip + d * 3.0;
+    out.push(Prim::Line { a: tip.into(), b: (back + d.perp() * 0.9).into(), w: 0.25, dashed: false, color });
+    out.push(Prim::Line { a: tip.into(), b: (back - d.perp() * 0.9).into(), w: 0.25, dashed: false, color });
+}
+
+/// Radius or diameter: leader from the circle outwards with a shoulder and the text.
+fn radial_prims(out: &mut Vec<Prim>, c: [f64; 2], on: [f64; 2], diameter: bool, offset: f64, text: &str) {
+    let (c, on) = (glam::DVec2::from(c), glam::DVec2::from(on));
+    let dir = (on - c).normalize_or(glam::DVec2::X);
+    let r = (on - c).length();
+    let p = c + dir * r;
+    let end = p + dir * offset.max(2.0);
+    let start = if diameter { c - dir * r } else { c };
+    out.push(Prim::Line { a: start.into(), b: end.into(), w: 0.25, dashed: false, color: DIM_INK });
+    arrow(out, p, -dir, DIM_INK);
+    if diameter {
+        arrow(out, c - dir * r, dir, DIM_INK);
+    }
+    let sh = if dir.x >= 0.0 { 4.0 } else { -4.0 };
+    let tip = end + glam::DVec2::new(sh, 0.0);
+    out.push(Prim::Line { a: end.into(), b: tip.into(), w: 0.25, dashed: false, color: DIM_INK });
+    out.push(Prim::Text { at: (tip + glam::DVec2::new(if sh > 0.0 { 0.8 } else { -0.8 }, -1.2)).into(), size: 3.5, text: text.into(), anchor: if sh > 0.0 { 0 } else { 2 }, color: DIM_INK });
+}
+
+/// Angle between two lines, drawn as an arc of radius `r` about their intersection.
+fn angle_prims(out: &mut Vec<Prim>, l1: [[f64; 2]; 2], l2: [[f64; 2]; 2], r: f64) {
+    use glam::DVec2;
+    let (a0, a1, b0, b1) = (DVec2::from(l1[0]), DVec2::from(l1[1]), DVec2::from(l2[0]), DVec2::from(l2[1]));
+    let (da, db) = (a1 - a0, b1 - b0);
+    let den = da.perp_dot(db);
+    if den.abs() < 1e-9 {
+        return;
+    }
+    let t = (b0 - a0).perp_dot(db) / den;
+    let x = a0 + da * t;
+    // each ray points from the intersection towards its line's far end
+    let ray = |p: DVec2, q: DVec2| if (p - x).length() > (q - x).length() { (p - x).normalize() } else { (q - x).normalize() };
+    let (u, v) = (ray(a0, a1), ray(b0, b1));
+    let ang = u.angle_to(v);
+    let n = 32;
+    let r = r.max(3.0);
+    let pts: Vec<DVec2> = (0..=n).map(|i| x + DVec2::from_angle(ang * i as f64 / n as f64).rotate(u) * r).collect();
+    for w in pts.windows(2) {
+        out.push(Prim::Line { a: w[0].into(), b: w[1].into(), w: 0.25, dashed: false, color: DIM_INK });
+    }
+    let s = ang.signum();
+    arrow(out, pts[0], u.perp() * s, DIM_INK);
+    arrow(out, pts[n], -v.perp() * s, DIM_INK);
+    // extension lines where the arc lies beyond a line's extent
+    for (p, q, e) in [(a0, a1, pts[0]), (b0, b1, pts[n])] {
+        let near = if (p - e).length() < (q - e).length() { p } else { q };
+        let along = (e - x).dot((near - x).normalize_or_zero());
+        if along > (near - x).length() + 0.5 {
+            out.push(Prim::Line { a: (near + (e - near).normalize() * 1.0).into(), b: (e + (e - near).normalize() * 2.0).into(), w: 0.25, dashed: false, color: DIM_INK });
+        }
+    }
+    let mid = x + DVec2::from_angle(ang / 2.0).rotate(u) * (r + 2.5);
+    out.push(Prim::Text { at: (mid + DVec2::new(0.0, -1.2)).into(), size: 3.5, text: format!("{}°", crate::expr::trim(ang.abs().to_degrees(), 1)), anchor: 1, color: DIM_INK });
+}
+
+const GDT_H: f64 = 7.0;
+
+/// Sizes of a feature control frame's cells.
+fn gdt_cells(g: &Gdt) -> Vec<f64> {
+    let tol_w = (g.tol.chars().count() as f64 * 2.2 + 3.0).max(GDT_H);
+    let mut cells = vec![GDT_H, tol_w];
+    for d in g.datums.split_whitespace() {
+        cells.push((d.chars().count() as f64 * 2.2 + 3.0).max(GDT_H));
+    }
+    cells
+}
+
+/// Sheet rectangle of a GD&T annotation (for picking).
+pub fn gdt_rect(g: &Gdt) -> ([f64; 2], [f64; 2]) {
+    if g.kind == "datum" {
+        return (g.pos, [g.pos[0] + GDT_H, g.pos[1] + GDT_H]);
+    }
+    let w: f64 = gdt_cells(g).iter().sum();
+    (g.pos, [g.pos[0] + w, g.pos[1] + GDT_H])
+}
+
+fn gdt_prims(out: &mut Vec<Prim>, g: &Gdt) {
+    use glam::DVec2;
+    let ink = INK;
+    let line = |out: &mut Vec<Prim>, a: DVec2, b: DVec2| out.push(Prim::Line { a: a.into(), b: b.into(), w: 0.3, dashed: false, color: ink });
+    let rect = |out: &mut Vec<Prim>, lo: DVec2, hi: DVec2| {
+        line(out, lo, DVec2::new(hi.x, lo.y));
+        line(out, DVec2::new(hi.x, lo.y), hi);
+        line(out, hi, DVec2::new(lo.x, hi.y));
+        line(out, DVec2::new(lo.x, hi.y), lo);
+    };
+    let p = DVec2::from(g.pos);
+    if g.kind == "datum" {
+        rect(out, p, p + DVec2::splat(GDT_H));
+        out.push(Prim::Text { at: [p.x + GDT_H / 2.0, p.y + 1.6], size: 4.0, text: g.tol.clone(), anchor: 1, color: ink });
+        if let Some(l) = g.leader {
+            let l = DVec2::from(l);
+            let top = p + DVec2::new(GDT_H / 2.0, 0.0);
+            let top = if l.y > p.y + GDT_H { p + DVec2::new(GDT_H / 2.0, GDT_H) } else { top };
+            let d = (l - top).normalize_or(DVec2::NEG_Y);
+            let base = l - d * 2.6;
+            line(out, top, base);
+            // filled datum triangle on the feature
+            let s = d.perp() * 1.5;
+            for k in 0..=6 {
+                let f = k as f64 / 6.0;
+                line(out, base + s * (1.0 - 2.0 * f), l);
+            }
+            line(out, base + s, base - s);
+        }
+        return;
+    }
+    let cells = gdt_cells(g);
+    let w: f64 = cells.iter().sum();
+    rect(out, p, p + DVec2::new(w, GDT_H));
+    let mut x = p.x;
+    for c in &cells[..cells.len() - 1] {
+        x += c;
+        line(out, DVec2::new(x, p.y), DVec2::new(x, p.y + GDT_H));
+    }
+    gdt_symbol(out, &g.kind, p + DVec2::splat(GDT_H / 2.0));
+    out.push(Prim::Text { at: [p.x + GDT_H + 1.5, p.y + 1.8], size: 3.5, text: g.tol.clone(), anchor: 0, color: ink });
+    let mut x = p.x + cells[0] + cells[1];
+    for (i, d) in g.datums.split_whitespace().enumerate() {
+        out.push(Prim::Text { at: [x + cells[2 + i] / 2.0, p.y + 1.8], size: 3.5, text: d.into(), anchor: 1, color: ink });
+        x += cells[2 + i];
+    }
+    if let Some(l) = g.leader {
+        let l = DVec2::from(l);
+        let start = if l.x < p.x { p + DVec2::new(0.0, GDT_H / 2.0) } else { p + DVec2::new(w, GDT_H / 2.0) };
+        let knee = DVec2::new(start.x + if l.x < p.x { -4.0 } else { 4.0 }, start.y);
+        line(out, start, knee);
+        line(out, knee, l);
+        arrow(out, l, knee - l, ink);
+    }
+}
+
+/// The characteristic symbol of a GD&T frame, drawn in lines about `c` (cell 7 mm).
+fn gdt_symbol(out: &mut Vec<Prim>, kind: &str, c: glam::DVec2) {
+    use glam::DVec2;
+    let mut segs: Vec<(DVec2, DVec2)> = vec![];
+    let circle = |segs: &mut Vec<(DVec2, DVec2)>, o: DVec2, r: f64, a0: f64, a1: f64| {
+        let n = 24;
+        for i in 0..n {
+            let (t0, t1) = (a0 + (a1 - a0) * i as f64 / n as f64, a0 + (a1 - a0) * (i + 1) as f64 / n as f64);
+            segs.push((o + DVec2::from_angle(t0) * r, o + DVec2::from_angle(t1) * r));
+        }
+    };
+    let v = |x: f64, y: f64| c + DVec2::new(x, y);
+    let tau = std::f64::consts::TAU;
+    let pi = std::f64::consts::PI;
+    match kind {
+        "straightness" => segs.push((v(-2.5, 0.0), v(2.5, 0.0))),
+        "flatness" => {
+            let q = [v(-2.5, -1.2), v(1.5, -1.2), v(2.5, 1.2), v(-1.5, 1.2)];
+            for i in 0..4 {
+                segs.push((q[i], q[(i + 1) % 4]));
+            }
+        }
+        "circularity" => circle(&mut segs, c, 2.0, 0.0, tau),
+        "cylindricity" => {
+            circle(&mut segs, c, 1.6, 0.0, tau);
+            segs.push((v(-2.6, -2.2), v(-0.6, 2.2)));
+            segs.push((v(0.6, -2.2), v(2.6, 2.2)));
+        }
+        "perpendicularity" => {
+            segs.push((v(-2.5, -2.0), v(2.5, -2.0)));
+            segs.push((v(0.0, -2.0), v(0.0, 2.5)));
+        }
+        "parallelism" => {
+            segs.push((v(-2.0, -2.2), v(0.0, 2.2)));
+            segs.push((v(0.0, -2.2), v(2.0, 2.2)));
+        }
+        "angularity" => {
+            segs.push((v(-2.5, -2.0), v(2.5, -2.0)));
+            segs.push((v(-2.5, -2.0), v(2.0, 2.2)));
+        }
+        "position" => {
+            circle(&mut segs, c, 1.7, 0.0, tau);
+            segs.push((v(-2.7, 0.0), v(2.7, 0.0)));
+            segs.push((v(0.0, -2.7), v(0.0, 2.7)));
+        }
+        "concentricity" => {
+            circle(&mut segs, c, 1.0, 0.0, tau);
+            circle(&mut segs, c, 2.2, 0.0, tau);
+        }
+        "symmetry" => {
+            segs.push((v(-2.6, 0.0), v(2.6, 0.0)));
+            segs.push((v(-1.6, 1.5), v(1.6, 1.5)));
+            segs.push((v(-1.6, -1.5), v(1.6, -1.5)));
+        }
+        "profileLine" => circle(&mut segs, v(0.0, -1.2), 2.5, 0.0, pi),
+        "profileSurface" => {
+            circle(&mut segs, v(0.0, -1.2), 2.5, 0.0, pi);
+            segs.push((v(-2.5, -1.2), v(2.5, -1.2)));
+        }
+        "runout" | "totalRunout" => {
+            segs.push((v(-1.5, -2.2), v(1.5, 2.2)));
+            segs.push((v(1.5, 2.2), v(1.6, 0.6)));
+            segs.push((v(1.5, 2.2), v(0.2, 1.4)));
+            if kind == "totalRunout" {
+                segs.push((v(-0.2, -2.2), v(2.8, 2.2)));
+                segs.push((v(-2.5, -2.2), v(2.5, -2.2)));
+            }
+        }
+        _ => {}
+    }
+    for (a, b) in segs {
+        out.push(Prim::Line { a: a.into(), b: b.into(), w: 0.3, dashed: false, color: INK });
+    }
+}
+
+/// A circle or circular arc through a projected polyline: (centre, radius, full circle).
+pub fn fit_circle(pl: &[[f64; 2]]) -> Option<([f64; 2], f64, bool)> {
+    use glam::DVec2;
+    if pl.len() < 5 {
+        return None;
+    }
+    let (a, b, c) = (DVec2::from(pl[0]), DVec2::from(pl[pl.len() / 3]), DVec2::from(pl[2 * pl.len() / 3]));
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let (a2, b2, c2) = (a.length_squared(), b.length_squared(), c.length_squared());
+    let o = DVec2::new((a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d, (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d);
+    let r = (a - o).length();
+    if !r.is_finite() || r < 1e-6 || pl.iter().any(|p| ((DVec2::from(*p) - o).length() - r).abs() > 1e-3 * r + 1e-4) {
+        return None;
+    }
+    let full = DVec2::from(pl[0]).distance(DVec2::from(pl[pl.len() - 1])) < 1e-6 * (1.0 + r);
+    Some((o.into(), r, full))
+}
+
+/// Straight polylines of a projection (lines in the view) as segments.
+fn straight(pl: &[[f64; 2]]) -> Option<([f64; 2], [f64; 2])> {
+    let (a, b) = (glam::DVec2::from(pl[0]), glam::DVec2::from(pl[pl.len() - 1]));
+    let d = b - a;
+    if d.length() < 1e-9 {
+        return None;
+    }
+    let n = d.perp().normalize();
+    pl.iter().all(|p| (glam::DVec2::from(*p) - a).dot(n).abs() < 1e-6 * (1.0 + d.length())).then_some((pl[0], pl[pl.len() - 1]))
+}
+
+/// Overall size and one diameter per distinct hole size for a view.
+pub fn auto_dims(p: &ProjView, view: u64, next_id: &mut u64) -> Vec<DrawDim> {
+    let mut out = vec![];
+    let [lo, hi] = p.bbox;
+    let mut push = |kind: u8, a: [f64; 2], b: [f64; 2], offset: f64, prefix: String, out: &mut Vec<DrawDim>| {
+        *next_id += 1;
+        out.push(DrawDim { id: *next_id, view, a, b, kind, offset, extra: vec![], prefix });
+    };
+    if hi[0] - lo[0] > 1e-6 {
+        push(1, [lo[0], lo[1]], [hi[0], lo[1]], -10.0, String::new(), &mut out);
+    }
+    if hi[1] - lo[1] > 1e-6 {
+        push(2, [hi[0], lo[1]], [hi[0], hi[1]], -10.0, String::new(), &mut out);
+    }
+    // full circles, grouped by radius
+    let mut groups: Vec<(f64, Vec<[f64; 2]>)> = vec![];
+    for pl in &p.visible {
+        if let Some((c, r, true)) = fit_circle(pl) {
+            match groups.iter_mut().find(|g| (g.0 - r).abs() < 1e-4 * (1.0 + r)) {
+                Some(g) => {
+                    if !g.1.iter().any(|q| (q[0] - c[0]).abs() + (q[1] - c[1]).abs() < 1e-6 * (1.0 + r)) {
+                        g.1.push(c);
+                    }
+                }
+                None => groups.push((r, vec![c])),
+            }
+        }
+    }
+    for (r, cs) in groups {
+        let c = cs[0];
+        let on = [c[0] + r * 0.7071, c[1] + r * 0.7071];
+        push(4, c, on, 6.0, if cs.len() > 1 { format!("{}× ", cs.len()) } else { String::new() }, &mut out);
     }
     out
 }
@@ -408,8 +715,10 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
                     if ui.button(format!("BOM table: {}", a.name)).clicked() {
                         let sheet = dwg(app).map(|d| sheet_size(&d.sheet)).unwrap_or([420.0, 297.0]);
                         checkpoint(app);
+                        let cur = app.dwg.cur_sheet;
                         if let Some(d) = dwg_mut(app) {
                             d.bom = Some((i, [sheet[0] - 10.0 - 120.0, sheet[1] - 10.0]));
+                            d.bom_sheet = cur;
                         }
                         ui.close();
                         break;
@@ -427,8 +736,25 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             app.dwg.tool = DTool::Dimension;
             app.dwg.dim_first = None;
         }
+        if app.tool_button(ui, "dimRadial", "Radius / diameter", "Radius or diameter: click a circle or arc on a view (R)", false, t == DTool::Radial, true).clicked() {
+            app.dwg.tool = DTool::Radial;
+        }
+        if app.tool_button(ui, "dimAngle", "Angle", "Angle: click two straight edges on a view (A)", false, t == DTool::Angle, true).clicked() {
+            app.dwg.tool = DTool::Angle;
+            app.dwg.angle_first = None;
+        }
+        let has_view = matches!(app.dwg.sel, Some(DSel::View(_)));
+        if app.tool_button(ui, "autoDim", "Auto-dimension", "Add overall size and hole diameters to the selected view", false, false, has_view).clicked() {
+            auto_dimension(app);
+        }
         if app.tool_button(ui, "text", "Note", "Note: click to place text (N)", false, t == DTool::Note, true).clicked() {
             app.dwg.tool = DTool::Note;
+        }
+        if app.tool_button(ui, "gdt", "Tolerance", "Geometric tolerance (GD&T) frame: click the feature it applies to", false, t == DTool::Gdt, true).clicked() {
+            app.dwg.tool = DTool::Gdt;
+        }
+        if app.tool_button(ui, "datum", "Datum", "Datum feature symbol: click the feature", false, t == DTool::Datum, true).clicked() {
+            app.dwg.tool = DTool::Datum;
         }
         if app.tool_button(ui, "delete", "Delete", "Delete the selection (Del)", false, false, app.dwg.sel.is_some()).clicked() {
             delete_sel(app);
@@ -446,6 +772,23 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     });
 }
 
+fn auto_dimension(app: &mut App) {
+    let Some(DSel::View(vid)) = app.dwg.sel else { return };
+    let Some(v) = dwg(app).and_then(|d| d.views.iter().find(|v| v.id == vid)).cloned() else { return };
+    if v.detail.is_some() || v.dir == "iso" {
+        app.flash("Auto-dimension works on orthographic views", ToastKind::Info);
+        return;
+    }
+    let Some(p) = app.dwg.proj.get(&(v.studio, v.dir.clone())).cloned() else { return };
+    checkpoint(app);
+    if let Some(d) = dwg_mut(app) {
+        let dims = auto_dims(&p, vid, &mut d.next_id);
+        let n = dims.len();
+        d.dims.extend(dims);
+        app.flash_info(format!("Added {n} dimensions"), Some(std::time::Duration::from_secs(2)));
+    }
+}
+
 fn add_detail(app: &mut App) {
     let Some(DSel::View(src)) = app.dwg.sel else {
         app.flash("Select a view to take the detail from", ToastKind::Info);
@@ -456,24 +799,67 @@ fn add_detail(app: &mut App) {
     let Some(p) = app.dwg.proj.get(&(sv.studio, sv.dir.clone())).cloned() else { return };
     let c = [(p.bbox[0][0] + p.bbox[1][0]) / 2.0, (p.bbox[0][1] + p.bbox[1][1]) / 2.0];
     let r = ((p.bbox[1][0] - p.bbox[0][0]).max(p.bbox[1][1] - p.bbox[0][1]) * 0.2).max(1.0);
+    let size = r * sv.scale * 2.0 * 2.0;
+    let pos = free_spot(app, d, sv.sheet, [size + 10.0, size + 16.0]).unwrap_or([sv.pos[0] + (p.bbox[1][0] - p.bbox[0][0]) * sv.scale * 0.5 + r * sv.scale * 2.0 + 20.0, sv.pos[1]]);
     checkpoint(app);
     if let Some(d) = dwg_mut(app) {
         d.next_id += 1;
         let id = d.next_id;
-        let pos = [sv.pos[0] + (p.bbox[1][0] - p.bbox[0][0]) * sv.scale * 0.5 + r * sv.scale * 2.0 + 20.0, sv.pos[1]];
-        d.views.push(DrawView { id, studio: sv.studio, dir: sv.dir.clone(), pos, scale: sv.scale * 2.0, hidden_lines: false, detail: Some((src, c, r)) });
+        d.views.push(DrawView { id, studio: sv.studio, dir: sv.dir.clone(), pos, scale: sv.scale * 2.0, hidden_lines: false, detail: Some((src, c, r)), sheet: sv.sheet });
         app.dwg.sel = Some(DSel::View(id));
     }
 }
 
+/// Sheet-space rectangle a view occupies (min, max), when known.
+fn view_extent(app: &App, v: &DrawView) -> Option<([f64; 2], [f64; 2])> {
+    if let Some((_, _, r)) = v.detail {
+        let rr = r * v.scale;
+        return Some(([v.pos[0] - rr, v.pos[1] - rr - 8.0], [v.pos[0] + rr, v.pos[1] + rr]));
+    }
+    let p = app.dwg.proj.get(&(v.studio, v.dir.clone()))?;
+    let (a, b) = (to_sheet(v, Some(p), p.bbox[0]), to_sheet(v, Some(p), p.bbox[1]));
+    Some(([a[0].min(b[0]), a[1].min(b[1]) - 8.0], [a[0].max(b[0]), a[1].max(b[1])]))
+}
+
+/// Centre of an empty area of `size` mm on a sheet, clear of views, the BOM and the title block.
+fn free_spot(app: &App, d: &Drawing, sheet: usize, size: [f64; 2]) -> Option<[f64; 2]> {
+    let [w, h] = sheet_size(&d.sheet);
+    let mut taken: Vec<([f64; 2], [f64; 2])> = d.views.iter().filter(|v| v.sheet == sheet).filter_map(|v| view_extent(app, v)).collect();
+    taken.push(([w - 10.0 - 170.0, 10.0], [w - 10.0, 46.0]));
+    let (hw, hh) = (size[0] / 2.0, size[1] / 2.0);
+    let step = 5.0;
+    let mut y = h - 15.0 - hh;
+    while y >= 15.0 + hh {
+        let mut x = 15.0 + hw;
+        while x <= w - 15.0 - hw {
+            let (lo, hi) = ([x - hw - 4.0, y - hh - 4.0], [x + hw + 4.0, y + hh + 4.0]);
+            if !taken.iter().any(|(a, b)| lo[0] < b[0] && hi[0] > a[0] && lo[1] < b[1] && hi[1] > a[1]) {
+                return Some([x, y]);
+            }
+            x += step;
+        }
+        y -= step;
+    }
+    None
+}
+
 fn insert_view(app: &mut App, studio: usize, dir: &str) {
     checkpoint(app);
-    let center = app.dwg.center;
     let scale = dwg(app).and_then(|d| d.views.first()).map(|v| v.scale).unwrap_or(1.0);
+    // size from the part's extent
+    let mut lo = glam::DVec3::splat(f64::INFINITY);
+    let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+    for b in app.studio_bodies(studio) {
+        lo = lo.min(b.bbox[0].into());
+        hi = hi.max(b.bbox[1].into());
+    }
+    let ext = if lo.x.is_finite() { (hi - lo).max_element() * scale } else { 40.0 };
+    let sheet = app.dwg.cur_sheet;
+    let pos = dwg(app).and_then(|d| free_spot(app, d, sheet, [ext, ext])).unwrap_or(app.dwg.center);
     if let Some(d) = dwg_mut(app) {
         d.next_id += 1;
         let id = d.next_id;
-        d.views.push(DrawView { id, studio, dir: dir.into(), pos: center, scale, hidden_lines: false, detail: None });
+        d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, hidden_lines: false, detail: None, sheet });
         app.dwg.sel = Some(DSel::View(id));
     }
 }
@@ -489,6 +875,7 @@ fn delete_sel(app: &mut App) {
             }
             DSel::Dim(id) => d.dims.retain(|x| x.id != id),
             DSel::Note(id) => d.notes.retain(|x| x.id != id),
+            DSel::Gdt(id) => d.gdts.retain(|x| x.id != id),
         }
     }
 }
@@ -500,6 +887,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
     if pressed(egui::Key::Escape) {
         app.dwg.dim_first = None;
+        app.dwg.angle_first = None;
         app.dwg.sel = None;
         app.dwg.tool = DTool::Select;
     }
@@ -514,6 +902,13 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
     if pressed(egui::Key::N) {
         app.dwg.tool = DTool::Note;
+    }
+    if pressed(egui::Key::R) {
+        app.dwg.tool = DTool::Radial;
+    }
+    if pressed(egui::Key::A) {
+        app.dwg.tool = DTool::Angle;
+        app.dwg.angle_first = None;
     }
     if pressed(egui::Key::F) {
         app.dwg.fitted = false;
@@ -537,9 +932,58 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 app.ws.drawings[di].sheet = sheet;
                 app.dwg.fitted = false;
             }
+            ui.add_space(4.0);
+            let count = app.ws.drawings[di].sheet_count();
+            let mut remove = None;
+            for i in 0..count {
+                let r = ui.add(egui::Button::selectable(app.dwg.cur_sheet == i, RichText::new(format!("Sheet {}", i + 1)).size(12.5)).min_size(egui::vec2(ui.available_width(), 20.0)));
+                if r.clicked() {
+                    app.dwg.cur_sheet = i;
+                    app.dwg.sel = None;
+                }
+                if count > 1 {
+                    r.context_menu(|ui| {
+                        if ui.button(RichText::new("Delete sheet").color(theme::error_soft())).clicked() {
+                            remove = Some(i);
+                            ui.close();
+                        }
+                    });
+                }
+            }
+            if ui.button("+ Add sheet").clicked() {
+                checkpoint(app);
+                app.ws.drawings[di].sheets = count + 1;
+                app.dwg.cur_sheet = count;
+                app.dwg.sel = None;
+            }
+            if let Some(i) = remove {
+                checkpoint(app);
+                let d = &mut app.ws.drawings[di];
+                let gone: Vec<u64> = d.views.iter().filter(|v| v.sheet == i).map(|v| v.id).collect();
+                d.views.retain(|v| v.sheet != i);
+                d.dims.retain(|x| !gone.contains(&x.view));
+                d.notes.retain(|n| n.sheet != i);
+                d.gdts.retain(|g| g.sheet != i);
+                if d.bom_sheet == i {
+                    d.bom = None;
+                }
+                let fix = |k: &mut usize| {
+                    if *k > i {
+                        *k -= 1
+                    }
+                };
+                d.views.iter_mut().for_each(|v| fix(&mut v.sheet));
+                d.notes.iter_mut().for_each(|v| fix(&mut v.sheet));
+                d.gdts.iter_mut().for_each(|v| fix(&mut v.sheet));
+                fix(&mut d.bom_sheet);
+                d.sheets = count - 1;
+                app.dwg.cur_sheet = app.dwg.cur_sheet.min(count - 2);
+                app.dwg.sel = None;
+            }
             ui.add_space(8.0);
             ui.label(RichText::new("VIEWS").color(theme::muted()).size(11.0).strong());
-            let views: Vec<(u64, String, f64, bool, bool)> = app.ws.drawings[di].views.iter().map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines, v.detail.is_some())).collect();
+            let cur = app.dwg.cur_sheet;
+            let views: Vec<(u64, String, f64, bool, bool)> = app.ws.drawings[di].views.iter().filter(|v| v.sheet == cur).map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines, v.detail.is_some())).collect();
             for (id, dir, scale, hidden, detail) in views {
                 let label = if detail { "Detail" } else { DIRS.iter().find(|x| x.0 == dir).map(|x| x.1).unwrap_or("View") };
                 let sel = app.dwg.sel == Some(DSel::View(id));
@@ -560,7 +1004,65 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 });
             }
             ui.add_space(8.0);
-            ui.label(RichText::new(format!("{} dimensions · {} notes", app.ws.drawings[di].dims.len(), app.ws.drawings[di].notes.len())).color(theme::muted()).size(12.0));
+            ui.label(RichText::new(format!("{} dimensions · {} notes · {} tolerances", app.ws.drawings[di].dims.len(), app.ws.drawings[di].notes.len(), app.ws.drawings[di].gdts.len())).color(theme::muted()).size(12.0));
+            // the selected tolerance frame or datum
+            if let Some(DSel::Gdt(id)) = app.dwg.sel {
+                if let Some(mut g) = app.ws.drawings[di].gdts.iter().find(|g| g.id == id).cloned() {
+                    ui.add_space(8.0);
+                    let datum = g.kind == "datum";
+                    ui.label(RichText::new(if datum { "DATUM" } else { "TOLERANCE" }).color(theme::muted()).size(11.0).strong());
+                    if datum {
+                        ui.horizontal(|ui| {
+                            ui.label("Letter");
+                            ui.add(egui::TextEdit::singleline(&mut g.tol).desired_width(40.0));
+                        });
+                    } else {
+                        let label = GDT_KINDS.iter().find(|k| k.0 == g.kind).map(|k| k.1).unwrap_or("?");
+                        egui::ComboBox::from_id_salt("gdt-kind").selected_text(label).show_ui(ui, |ui| {
+                            for (k, l) in GDT_KINDS {
+                                ui.selectable_value(&mut g.kind, k.to_string(), *l);
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Tolerance");
+                            ui.add(egui::TextEdit::singleline(&mut g.tol).desired_width(90.0));
+                            if ui.small_button("Ø").on_hover_text("Diameter zone").clicked() && !g.tol.starts_with('Ø') {
+                                g.tol.insert(0, 'Ø');
+                            }
+                        });
+                        ui.horizontal(|ui| {
+                            ui.label("Datums");
+                            ui.add(egui::TextEdit::singleline(&mut g.datums).desired_width(90.0).hint_text("A B C"));
+                        });
+                    }
+                    let mut has_leader = g.leader.is_some();
+                    if ui.checkbox(&mut has_leader, "Leader").changed() {
+                        g.leader = if has_leader { Some([g.pos[0] - 10.0, g.pos[1] - 8.0]) } else { None };
+                    }
+                    if let Some(cur) = app.ws.drawings[di].gdts.iter_mut().find(|x| x.id == id) {
+                        if *cur != g {
+                            *cur = g;
+                        }
+                    }
+                }
+            }
+            // prefix of the selected dimension (e.g. "4× ")
+            if let Some(DSel::Dim(id)) = app.dwg.sel {
+                if let Some(dm) = app.ws.drawings[di].dims.iter_mut().find(|x| x.id == id) {
+                    ui.add_space(8.0);
+                    ui.label(RichText::new("DIMENSION").color(theme::muted()).size(11.0).strong());
+                    ui.horizontal(|ui| {
+                        ui.label("Prefix");
+                        ui.add(egui::TextEdit::singleline(&mut dm.prefix).desired_width(80.0).hint_text("e.g. 4× "));
+                    });
+                    if dm.kind == 3 || dm.kind == 4 {
+                        let mut dia = dm.kind == 4;
+                        if ui.checkbox(&mut dia, "Diameter").changed() {
+                            dm.kind = if dia { 4 } else { 3 };
+                        }
+                    }
+                }
+            }
         });
     });
 }
@@ -605,7 +1107,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     painter.rect_filled(sheet_rect.translate(egui::vec2(3.0, 3.0)), 0.0, Color32::from_black_alpha(if theme::is_dark() { 90 } else { 40 }));
     painter.rect_filled(sheet_rect, 0.0, Color32::from_rgb(250, 250, 248));
 
-    let prims = sheet_prims(app, &d);
+    if app.dwg.cur_sheet >= d.sheet_count() {
+        app.dwg.cur_sheet = 0;
+    }
+    let cur = app.dwg.cur_sheet;
+    let prims = sheet_prims(app, &d, cur);
     for p in &prims {
         match p {
             Prim::Line { a, b, w, dashed, color } => {
@@ -641,14 +1147,87 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             painter.rect_stroke(r, 2.0, Stroke::new(1.5, theme::accent()), egui::StrokeKind::Outside);
         }
     }
+    if let Some(DSel::Gdt(id)) = app.dwg.sel {
+        if let Some(g) = d.gdts.iter().find(|g| g.id == id) {
+            let (lo, hi) = gdt_rect(g);
+            painter.rect_stroke(egui::Rect::from_two_pos(to_screen(lo), to_screen(hi)).expand(3.0), 2.0, Stroke::new(1.5, theme::accent()), egui::StrokeKind::Outside);
+        }
+    }
+    // alignment guides while dragging a view
+    let guide = Stroke::new(1.0, theme::accent().gamma_multiply(0.7));
+    if app.dwg.drag.is_some() {
+        if let Some(x) = app.dwg.guides.0 {
+            painter.extend(egui::Shape::dashed_line(&[to_screen([x, 0.0]), to_screen([x, sh])], guide, 5.0, 4.0));
+        }
+        if let Some(y) = app.dwg.guides.1 {
+            painter.extend(egui::Shape::dashed_line(&[to_screen([0.0, y]), to_screen([sw, y])], guide, 5.0, 4.0));
+        }
+    }
 
     // snapping to view geometry for dimensions
     let pointer = resp.hover_pos();
     app.dwg.hover_pt = None;
-    if app.dwg.tool == DTool::Dimension {
+    app.dwg.hover_circle = None;
+    app.dwg.hover_line = None;
+    let views: Vec<&DrawView> = d.views.iter().filter(|v| v.sheet == cur && v.detail.is_none()).collect();
+    if let (DTool::Radial | DTool::Angle, Some(p)) = (app.dwg.tool, pointer) {
+        let mut best_c: Option<(f32, u64, [f64; 2], [f64; 2], bool)> = None;
+        let mut best_l: Option<(f32, u64, [f64; 2], [f64; 2])> = None;
+        for v in &views {
+            let Some(pr) = app.dwg.proj.get(&(v.studio, v.dir.clone())) else { continue };
+            let sp = from_sheet(v, Some(pr), to_sheet_pt(p));
+            for pl in &pr.visible {
+                if app.dwg.tool == DTool::Radial {
+                    if let Some((c, r, full)) = fit_circle(pl) {
+                        let dd = ((glam::DVec2::from(sp) - glam::DVec2::from(c)).length() - r).abs() * v.scale * zoom as f64;
+                        // arcs: only near the arc itself
+                        let near_arc = full || pl.iter().any(|q| glam::DVec2::from(*q).distance(sp.into()) * v.scale * (zoom as f64) < 14.0);
+                        if dd < 8.0 && near_arc && best_c.map(|b| (dd as f32) < b.0).unwrap_or(true) {
+                            best_c = Some((dd as f32, v.id, c, sp, full));
+                        }
+                    }
+                } else if let Some((a, b)) = straight(pl) {
+                    let (sa, sb) = (to_screen(to_sheet(v, Some(pr), a)), to_screen(to_sheet(v, Some(pr), b)));
+                    let dv = sb - sa;
+                    let t = ((p - sa).dot(dv) / dv.length_sq().max(1e-6)).clamp(0.0, 1.0);
+                    let dd = (sa + dv * t - p).length();
+                    if dd < 8.0 && best_l.map(|x| dd < x.0).unwrap_or(true) {
+                        best_l = Some((dd, v.id, a, b));
+                    }
+                }
+            }
+        }
+        if let Some((_, vid, c, sp, full)) = best_c {
+            app.dwg.hover_circle = Some((vid, c, sp, full));
+            let v = views.iter().find(|v| v.id == vid).unwrap();
+            let pr = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+            let r = glam::DVec2::from(c).distance(sp.into());
+            let n = 48;
+            let pts: Vec<Pos2> = (0..=n)
+                .map(|i| {
+                    let q = glam::DVec2::from(c) + glam::DVec2::from_angle(i as f64 / n as f64 * std::f64::consts::TAU) * r;
+                    to_screen(to_sheet(v, pr, q.into()))
+                })
+                .collect();
+            painter.add(egui::Shape::line(pts, Stroke::new(2.0, theme::vp::hover())));
+        }
+        if let Some((_, vid, a, b)) = best_l {
+            app.dwg.hover_line = Some((vid, a, b));
+            let v = views.iter().find(|v| v.id == vid).unwrap();
+            let pr = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+            painter.line_segment([to_screen(to_sheet(v, pr, a)), to_screen(to_sheet(v, pr, b))], Stroke::new(2.5, theme::vp::hover()));
+        }
+        if let Some((vid, a, b)) = app.dwg.angle_first {
+            if let Some(v) = views.iter().find(|v| v.id == vid) {
+                let pr = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+                painter.line_segment([to_screen(to_sheet(v, pr, a)), to_screen(to_sheet(v, pr, b))], Stroke::new(2.5, theme::accent()));
+            }
+        }
+    }
+    if matches!(app.dwg.tool, DTool::Dimension | DTool::Gdt | DTool::Datum) {
         if let Some(p) = pointer {
             let mut best: Option<(f32, u64, [f64; 2])> = None;
-            for v in &d.views {
+            for v in &views {
                 let Some(pr) = app.dwg.proj.get(&(v.studio, v.dir.clone())) else { continue };
                 for pl in &pr.visible {
                     for q in [pl[0], pl[pl.len() - 1]] {
@@ -676,18 +1255,24 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             match app.dwg.tool {
                 DTool::Select => {
                     app.dwg.sel = None;
-                    for v in &d.views {
+                    for v in d.views.iter().filter(|v| v.sheet == cur) {
                         if view_rect(v).map(|r| r.contains(p)).unwrap_or(false) {
                             app.dwg.sel = Some(DSel::View(v.id));
                         }
                     }
-                    for n in &d.notes {
+                    for g in d.gdts.iter().filter(|g| g.sheet == cur) {
+                        let (lo, hi) = gdt_rect(g);
+                        if egui::Rect::from_two_pos(to_screen(lo), to_screen(hi)).expand(3.0).contains(p) {
+                            app.dwg.sel = Some(DSel::Gdt(g.id));
+                        }
+                    }
+                    for n in d.notes.iter().filter(|n| n.sheet == cur) {
                         if (to_screen(n.pos) - p).length() < 20.0 {
                             app.dwg.sel = Some(DSel::Note(n.id));
                         }
                     }
                     for dm in &d.dims {
-                        if let Some(v) = d.views.iter().find(|v| v.id == dm.view) {
+                        if let Some(v) = d.views.iter().find(|v| v.id == dm.view && v.sheet == cur) {
                             let pr = app.dwg.proj.get(&(v.studio, v.dir.clone()));
                             let (a, b) = (to_sheet(v, pr, dm.a), to_sheet(v, pr, dm.b));
                             let mid = to_screen([(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]);
@@ -715,7 +1300,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 if let Some(dd) = dwg_mut(app) {
                                     dd.next_id += 1;
                                     let id = dd.next_id;
-                                    dd.dims.push(DrawDim { id, view: vid, a, b: q, kind, offset: 8.0 });
+                                    dd.dims.push(DrawDim { id, view: vid, a, b: q, kind, offset: 8.0, extra: vec![], prefix: String::new() });
                                 }
                                 app.dwg.dim_first = None;
                             }
@@ -724,6 +1309,59 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     }
                 }
                 DTool::Note => app.dwg.note_edit = Some((None, sp, String::new())),
+                DTool::Radial => {
+                    if let Some((vid, c, on, full)) = app.dwg.hover_circle {
+                        checkpoint(app);
+                        if let Some(dd) = dwg_mut(app) {
+                            dd.next_id += 1;
+                            let id = dd.next_id;
+                            dd.dims.push(DrawDim { id, view: vid, a: c, b: on, kind: if full { 4 } else { 3 }, offset: 8.0, extra: vec![], prefix: String::new() });
+                            app.dwg.sel = Some(DSel::Dim(id));
+                        }
+                    }
+                }
+                DTool::Angle => {
+                    if let Some((vid, a, b)) = app.dwg.hover_line {
+                        match app.dwg.angle_first {
+                            Some((v0, a0, b0)) if v0 == vid && (a0, b0) != (a, b) => {
+                                let (u, w) = (glam::DVec2::from(b0) - glam::DVec2::from(a0), glam::DVec2::from(b) - glam::DVec2::from(a));
+                                if u.perp_dot(w).abs() < 1e-9 * u.length() * w.length() {
+                                    app.flash("Those lines are parallel", ToastKind::Info);
+                                } else {
+                                    checkpoint(app);
+                                    if let Some(dd) = dwg_mut(app) {
+                                        dd.next_id += 1;
+                                        let id = dd.next_id;
+                                        dd.dims.push(DrawDim { id, view: vid, a: a0, b: b0, kind: 5, offset: 12.0, extra: vec![a, b], prefix: String::new() });
+                                        app.dwg.sel = Some(DSel::Dim(id));
+                                    }
+                                }
+                                app.dwg.angle_first = None;
+                            }
+                            _ => app.dwg.angle_first = Some((vid, a, b)),
+                        }
+                    }
+                }
+                DTool::Gdt | DTool::Datum => {
+                    // the leader goes to snapped geometry, else to the click itself
+                    let leader = app.dwg.hover_pt.and_then(|(vid, q)| d.views.iter().find(|v| v.id == vid).map(|v| to_sheet(v, app.dwg.proj.get(&(v.studio, v.dir.clone())), q))).unwrap_or(sp);
+                    let datum = app.dwg.tool == DTool::Datum;
+                    let used: Vec<String> = d.gdts.iter().filter(|g| g.kind == "datum").map(|g| g.tol.clone()).collect();
+                    let letter = ('A'..='Z').map(|c| c.to_string()).find(|c| !used.contains(c)).unwrap_or_else(|| "A".into());
+                    checkpoint(app);
+                    if let Some(dd) = dwg_mut(app) {
+                        dd.next_id += 1;
+                        let id = dd.next_id;
+                        let g = if datum {
+                            Gdt { id, sheet: cur, pos: [leader[0] - GDT_H / 2.0, leader[1] + 10.0], kind: "datum".into(), tol: letter, datums: String::new(), leader: Some(leader) }
+                        } else {
+                            Gdt { id, sheet: cur, pos: [leader[0] + 10.0, leader[1] + 8.0], kind: "position".into(), tol: "Ø0.1".into(), datums: "A B".into(), leader: Some(leader) }
+                        };
+                        dd.gdts.push(g);
+                        app.dwg.sel = Some(DSel::Gdt(id));
+                    }
+                    app.dwg.tool = DTool::Select;
+                }
             }
         }
     }
@@ -735,6 +1373,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     DSel::View(id) => d.views.iter().find(|v| v.id == id).map(|v| v.pos),
                     DSel::Note(id) => d.notes.iter().find(|n| n.id == id).map(|n| n.pos),
                     DSel::Dim(id) => d.dims.iter().find(|x| x.id == id).map(|x| [x.offset, 0.0]),
+                    DSel::Gdt(id) => d.gdts.iter().find(|x| x.id == id).map(|x| x.pos),
                 };
                 if let Some(o) = orig {
                     checkpoint(app);
@@ -746,11 +1385,33 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             if let Some(p) = ui.input(|i| i.pointer.latest_pos()) {
                 let cur = to_sheet_pt(p);
                 let dlt = [cur[0] - start[0], cur[1] - start[1]];
-                if let Some(dd) = dwg_mut(app) {
+                let di = dwg_index(app);
+                if let Some(dd) = di.and_then(|i| app.ws.drawings.get_mut(i)) {
                     match sel {
                         DSel::View(id) => {
+                            // snap into line with other views on the sheet
+                            let mut pos = [orig[0] + dlt[0], orig[1] + dlt[1]];
+                            let tol = 6.0 / zoom as f64;
+                            let mut guides = (None, None);
+                            let sheet = dd.views.iter().find(|v| v.id == id).map(|v| v.sheet).unwrap_or(0);
+                            for o in dd.views.iter().filter(|v| v.id != id && v.sheet == sheet) {
+                                if (o.pos[0] - pos[0]).abs() < tol {
+                                    pos[0] = o.pos[0];
+                                    guides.0 = Some(o.pos[0]);
+                                }
+                                if (o.pos[1] - pos[1]).abs() < tol {
+                                    pos[1] = o.pos[1];
+                                    guides.1 = Some(o.pos[1]);
+                                }
+                            }
+                            app.dwg.guides = guides;
                             if let Some(v) = dd.views.iter_mut().find(|v| v.id == id) {
-                                v.pos = [orig[0] + dlt[0], orig[1] + dlt[1]];
+                                v.pos = pos;
+                            }
+                        }
+                        DSel::Gdt(id) => {
+                            if let Some(g) = dd.gdts.iter_mut().find(|g| g.id == id) {
+                                g.pos = [orig[0] + dlt[0], orig[1] + dlt[1]];
                             }
                         }
                         DSel::Note(id) => {
@@ -803,7 +1464,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                             None => {
                                 dd.next_id += 1;
                                 let nid = dd.next_id;
-                                dd.notes.push(Note { id: nid, pos, text });
+                                dd.notes.push(Note { id: nid, pos, text, sheet: cur });
                             }
                         }
                     }
@@ -820,6 +1481,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         DTool::Dimension if app.dwg.dim_first.is_some() => "Click the second point on the same view",
         DTool::Dimension => "Click a corner or line end on a view",
         DTool::Note => "Click where the note goes",
+        DTool::Radial => "Click a circle (diameter) or an arc (radius); drag the dimension to lengthen its leader",
+        DTool::Angle if app.dwg.angle_first.is_some() => "Click the second line",
+        DTool::Angle => "Click a straight edge in a view",
+        DTool::Gdt => "Click the feature the tolerance frame points at; edit it in the sidebar",
+        DTool::Datum => "Click the feature to mark as a datum",
     };
     painter.text(rect.left_bottom() + egui::vec2(10.0, -10.0), egui::Align2::LEFT_BOTTOM, hint, egui::FontId::proportional(12.0), theme::muted());
     let _ = (theme::border(), theme::text(), from_sheet);
@@ -831,15 +1497,67 @@ fn export(app: &mut App, format: &str) {
     let Some(d) = dwg(app).cloned() else { return };
     let ext = format;
     let Some(path) = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("{}.{ext}", d.name)).save_file() else { return };
-    let prims = sheet_prims(app, &d);
+    let prims = sheet_prims(app, &d, app.dwg.cur_sheet);
     let size = sheet_size(&d.sheet);
     let data = match format {
-        "pdf" => crate::drawing_export::pdf(&prims, size),
+        "pdf" => {
+            let pages: Vec<Vec<Prim>> = (0..d.sheet_count()).map(|i| sheet_prims(app, &d, i)).collect();
+            let refs: Vec<&[Prim]> = pages.iter().map(|p| p.as_slice()).collect();
+            crate::drawing_export::pdf_pages(&refs, size)
+        }
         "dxf" => crate::drawing_export::dxf(&prims).into_bytes(),
         _ => crate::drawing_export::svg(&prims, size).into_bytes(),
     };
     match std::fs::write(&path, data) {
         Ok(()) => app.flash_info(format!("Exported {}", path.display()), Some(std::time::Duration::from_secs(3))),
         Err(e) => app.flash(format!("Could not export: {e}"), ToastKind::Error),
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn circle(c: [f64; 2], r: f64, a0: f64, a1: f64) -> Vec<[f64; 2]> {
+        (0..=40).map(|i| {
+            let t = a0 + (a1 - a0) * i as f64 / 40.0;
+            [c[0] + r * t.cos(), c[1] + r * t.sin()]
+        }).collect()
+    }
+
+    #[test]
+    fn circles_auto_dims_and_annotations() {
+        let tau = std::f64::consts::TAU;
+        assert!(matches!(fit_circle(&circle([3.0, 4.0], 2.5, 0.0, tau)), Some((c, r, true)) if (c[0] - 3.0).abs() < 1e-9 && (r - 2.5).abs() < 1e-9));
+        assert!(matches!(fit_circle(&circle([0.0, 0.0], 5.0, 0.0, 1.0)), Some((_, _, false))));
+        assert!(fit_circle(&[[0.0, 0.0], [1.0, 0.0], [2.0, 0.0], [3.0, 0.0], [4.0, 0.0]]).is_none());
+        // a 40x20 plate with two 5 mm holes
+        let p = ProjView {
+            visible: vec![
+                vec![[0.0, 0.0], [40.0, 0.0]],
+                vec![[40.0, 0.0], [40.0, 20.0]],
+                circle([10.0, 10.0], 2.5, 0.0, tau),
+                circle([30.0, 10.0], 2.5, 0.0, tau),
+            ],
+            hidden: vec![],
+            hatch: vec![],
+            bbox: [[0.0, 0.0], [40.0, 20.0]],
+        };
+        let mut id = 0;
+        let dims = auto_dims(&p, 1, &mut id);
+        assert_eq!(dims.len(), 3);
+        assert_eq!(dims[2].kind, 4);
+        assert_eq!(dims[2].prefix, "2× ");
+        // annotations draw without trouble
+        let mut out = vec![];
+        angle_prims(&mut out, [[0.0, 0.0], [10.0, 0.0]], [[0.0, 0.0], [10.0, 10.0]], 8.0);
+        assert!(out.iter().any(|p| matches!(p, Prim::Text { text, .. } if text == "45°")));
+        for (k, _) in GDT_KINDS {
+            gdt_prims(&mut out, &Gdt { id: 1, sheet: 0, pos: [0.0, 0.0], kind: k.to_string(), tol: "Ø0.1".into(), datums: "A B".into(), leader: Some([-5.0, -5.0]) });
+        }
+        let pdf = crate::drawing_export::pdf_pages(&[&out, &out], [297.0, 210.0]);
+        let text = String::from_utf8_lossy(&pdf);
+        assert!(text.contains("/Count 2"));
+        assert!(text.contains("\\330")); // Ø in WinAnsi
     }
 }

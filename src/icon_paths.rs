@@ -128,4 +128,9 @@ pub const ICONS: &[(&str, &str)] = &[
     ("tab", "M3 14h12v4H3zM15 14l3-4h3v8h-6"),
     ("convertSheet", "M4 6h12v12H4zM8 3h12v12M4 6l4-3M16 6l4-3M16 18l4-3"),
     ("ellipticalArc", "M3 12a9 5 0 0 1 18 0M3 12h.01M21 12h.01"),
+    ("dimRadial", "M12 12m-8 0a8 8 0 1 0 16 0a8 8 0 1 0 -16 0M12 12l5.6-5.6M14.5 6.5h3.1v3.1"),
+    ("dimAngle", "M4 20h16M4 20L14 5M12 20a8 8 0 0 0-3.2-6.4"),
+    ("gdt", "M2 8h20v8H2zM9 8v8M15 8v8M5.5 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M3 12h5M5.5 9.5v5"),
+    ("datum", "M8 3h8v8H8zM12 11v5M8 21l4-5 4 5z"),
+    ("autoDim", "M4 18h12M4 15v6M16 15v6M4 4h8v8H4zM19 3l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"),
 ];

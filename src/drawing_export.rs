@@ -8,12 +8,49 @@ fn esc_pdf(s: &str) -> String {
         .map(|c| match c {
             '(' | ')' | '\\' => format!("\\{c}"),
             c if c.is_ascii() => c.to_string(),
+            // WinAnsiEncoding covers the Latin-1 range (Ø, °, ±, ×, …)
+            c if (c as u32) >= 0xa0 && (c as u32) <= 0xff => format!("\\{:03o}", c as u32),
             _ => "?".into(),
         })
         .collect()
 }
 
 pub fn pdf(prims: &[Prim], size: [f64; 2]) -> Vec<u8> {
+    pdf_pages(&[prims], size)
+}
+
+/// A PDF with one page per sheet.
+pub fn pdf_pages(pages: &[&[Prim]], size: [f64; 2]) -> Vec<u8> {
+    let k = 72.0 / 25.4;
+    let contents: Vec<String> = pages.iter().map(|p| page_stream(p)).collect();
+    let n = contents.len().max(1);
+    // objects: 1 catalog, 2 pages, 3 font, then (page, contents) pairs
+    let kids: Vec<String> = (0..n).map(|i| format!("{} 0 R", 4 + 2 * i)).collect();
+    let mut objs = vec![
+        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
+        format!("<< /Type /Pages /Kids [{}] /Count {n} >>", kids.join(" ")),
+        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica /Encoding /WinAnsiEncoding >>".to_string(),
+    ];
+    for (i, c) in contents.iter().enumerate() {
+        objs.push(format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Contents {} 0 R /Resources << /Font << /F1 3 0 R >> >> >>", size[0] * k, size[1] * k, 5 + 2 * i));
+        objs.push(format!("<< /Length {} >>\nstream\n{}endstream", c.len(), c));
+    }
+    let mut out = b"%PDF-1.4\n".to_vec();
+    let mut offsets = vec![];
+    for (i, o) in objs.iter().enumerate() {
+        offsets.push(out.len());
+        out.extend(format!("{} 0 obj\n{}\nendobj\n", i + 1, o).as_bytes());
+    }
+    let xref = out.len();
+    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
+    for o in offsets {
+        out.extend(format!("{o:010} 00000 n \n").as_bytes());
+    }
+    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objs.len() + 1, xref).as_bytes());
+    out
+}
+
+fn page_stream(prims: &[Prim]) -> String {
     let k = 72.0 / 25.4;
     let mut c = String::new();
     c.push_str("1 J 1 j\n");
@@ -56,26 +93,7 @@ pub fn pdf(prims: &[Prim], size: [f64; 2]) -> Vec<u8> {
             }
         }
     }
-    let objs = [
-        "<< /Type /Catalog /Pages 2 0 R >>".to_string(),
-        "<< /Type /Pages /Kids [3 0 R] /Count 1 >>".to_string(),
-        format!("<< /Type /Page /Parent 2 0 R /MediaBox [0 0 {:.2} {:.2}] /Contents 4 0 R /Resources << /Font << /F1 5 0 R >> >> >>", size[0] * k, size[1] * k),
-        format!("<< /Length {} >>\nstream\n{}endstream", c.len(), c),
-        "<< /Type /Font /Subtype /Type1 /BaseFont /Helvetica >>".to_string(),
-    ];
-    let mut out = b"%PDF-1.4\n".to_vec();
-    let mut offsets = vec![];
-    for (i, o) in objs.iter().enumerate() {
-        offsets.push(out.len());
-        out.extend(format!("{} 0 obj\n{}\nendobj\n", i + 1, o).as_bytes());
-    }
-    let xref = out.len();
-    out.extend(format!("xref\n0 {}\n0000000000 65535 f \n", objs.len() + 1).as_bytes());
-    for o in offsets {
-        out.extend(format!("{o:010} 00000 n \n").as_bytes());
-    }
-    out.extend(format!("trailer\n<< /Size {} /Root 1 0 R >>\nstartxref\n{}\n%%EOF\n", objs.len() + 1, xref).as_bytes());
-    out
+    c
 }
 
 pub fn dxf(prims: &[Prim]) -> String {
