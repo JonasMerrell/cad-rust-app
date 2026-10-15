@@ -7,7 +7,7 @@ use crate::app::App;
 use crate::doc::{BoolOp, BooleanKind, Document, EndType, HoleType, Op, Ref, kind_label};
 use crate::expr::Kind;
 use crate::icons;
-use crate::theme::{self, ACCENT, BORDER, MUTED, TEXT};
+use crate::theme;
 
 #[derive(Clone, Copy)]
 enum Accept {
@@ -235,21 +235,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let area = if phone { area.pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(egui::pos2(rect.left(), rect.bottom())) } else { area.fixed_pos(rect.min + egui::vec2(10.0, 10.0)) };
     area.show(ui.ctx(), |ui| {
         egui::Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(0x1f, 0x24, 0x2b, 0xf7))
-            .stroke(Stroke::new(1.0, BORDER))
+            .fill(theme::window())
+            .stroke(Stroke::new(1.0, theme::border()))
             .corner_radius(8)
             .inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 10 })
             .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(0x59) })
             .show(ui, |ui| {
                 ui.set_width(if phone { rect.width() - 20.0 } else { 300.0 });
                 ui.horizontal(|ui| {
-                    ui.add(icons::image(kind, 18.0).tint(TEXT));
+                    ui.add(icons::image(kind, 18.0).tint(theme::text()));
                     ui.label(RichText::new(&name).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::image(icons::image("close", 16.0).tint(TEXT))).on_hover_text("Cancel (Esc)").clicked() {
+                        if ui.add(egui::Button::image(icons::image("close", 16.0).tint(theme::text()))).on_hover_text("Cancel (Esc)").clicked() {
                             cancel = true;
                         }
-                        if ui.add(egui::Button::image(icons::image("check", 16.0).tint(theme::OK_GREEN))).on_hover_text("OK (Enter)").clicked() {
+                        if ui.add(egui::Button::image(icons::image("check", 16.0).tint(theme::ok_green()))).on_hover_text("OK (Enter)").clicked() {
                             ok = true;
                         }
                     });
@@ -266,16 +266,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     let is_active = i == active;
                     let resp = ui
                         .horizontal(|ui| {
-                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
+                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
                             let fr = egui::Frame::new()
-                                .fill(theme::BG)
-                                .stroke(Stroke::new(1.0, if is_active { ACCENT } else { BORDER }))
+                                .fill(theme::bg())
+                                .stroke(Stroke::new(1.0, if is_active { theme::accent() } else { theme::border() }))
                                 .corner_radius(5)
                                 .inner_margin(Margin::symmetric(6, 3));
                             fr.show(ui, |ui| {
                                 ui.set_width(ui.available_width());
                                 if refs.is_empty() {
-                                    ui.label(RichText::new(format!("Select {}", acc.hint())).color(MUTED).italics().size(12.0));
+                                    ui.label(RichText::new(format!("Select {}", acc.hint())).color(theme::muted()).italics().size(12.0));
                                 } else {
                                     let txt = if refs.len() == 1 { refs[0].describe() } else { format!("{} selected", refs.len()) };
                                     ui.label(RichText::new(txt).size(12.0));
@@ -293,11 +293,11 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 let mut changed = false;
                 let val = |ui: &mut Ui, label: &str, s: &mut String, kind: Kind, changed: &mut bool| {
                     ui.horizontal(|ui| {
-                        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
+                        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
                         let ok = crate::doc::eval(s, kind, &vars, units).is_ok();
                         let mut te = egui::TextEdit::singleline(s).desired_width(ui.available_width());
                         if !ok {
-                            te = te.text_color(theme::ERROR_SOFT);
+                            te = te.text_color(theme::error_soft());
                         }
                         let r = ui.add(te);
                         if r.changed() {
@@ -321,7 +321,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
                 fn combo<T: PartialEq + Clone>(ui: &mut Ui, label: &str, v: &mut T, opts: &[(T, &str)], changed: &mut bool) {
                     ui.horizontal(|ui| {
-                        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(MUTED)));
+                        ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
                         let cur = opts.iter().find(|o| o.0 == *v).map(|o| o.1).unwrap_or("");
                         egui::ComboBox::from_id_salt(label).selected_text(cur).width(ui.available_width()).show_ui(ui, |ui| {
                             for (o, l) in opts {
@@ -403,7 +403,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     Op::Shell { thickness, .. } => val(ui, "Thickness", thickness, Kind::Length, &mut changed),
                     Op::Hole { hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, tapped, .. } => {
                         ui.horizontal(|ui| {
-                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new("ISO size").color(MUTED)));
+                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new("ISO size").color(theme::muted())));
                             egui::ComboBox::from_id_salt("iso-hole").selected_text("Choose…").show_ui(ui, |ui| {
                                 // (size, clearance (normal), tap drill, counterbore Ø, counterbore depth, countersink Ø)
                                 for (m, clr, tap, cbd, cbh, csd) in ISO_HOLES {
@@ -481,7 +481,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         val(ui, "Depth", depth, Kind::Length, &mut changed);
                         check(ui, "Material on the other side", flip, &mut changed);
                         if let Some(f) = flat.as_ref() {
-                            ui.label(RichText::new(format!("Flat pattern {} × {}", units.fmt_with(f.size[0]), units.fmt_with(f.size[1]))).color(MUTED).size(12.0));
+                            ui.label(RichText::new(format!("Flat pattern {} × {}", units.fmt_with(f.size[0]), units.fmt_with(f.size[1]))).color(theme::muted()).size(12.0));
                             if ui.button("Export flat pattern DXF…").clicked() {
                                 export_flat = true;
                             }
@@ -517,10 +517,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 }
                 if let Some(e) = &error {
                     ui.add_space(4.0);
-                    ui.label(RichText::new(e).color(theme::ERROR_SOFT));
+                    ui.label(RichText::new(e).color(theme::error_soft()));
                 }
                 ui.add_space(4.0);
-                ui.label(RichText::new(format!("{} · Enter to accept, Esc to cancel", hint_for(kind))).color(MUTED).size(12.0));
+                ui.label(RichText::new(format!("{} · Enter to accept, Esc to cancel", hint_for(kind))).color(theme::muted()).size(12.0));
                 if changed {
                     if let Some(f) = app.doc.feature_mut(fid) {
                         f.op = op.clone();

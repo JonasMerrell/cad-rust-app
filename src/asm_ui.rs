@@ -10,7 +10,7 @@ use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose}
 use crate::drawing::Drawing;
 use crate::icons;
 use crate::render::{MeshVertex, SceneData, ViewportCallback};
-use crate::theme::{self, BORDER, MUTED, TEXT, vp};
+use crate::theme::{self, vp};
 use crate::workspace::Tab;
 
 #[derive(Clone, Copy, Debug, PartialEq)]
@@ -116,7 +116,7 @@ fn mesh_of<'a>(app: &'a App, inst: &Instance) -> Option<&'a crate::kernel::BodyM
 }
 
 fn part_color(app: &App, inst: &Instance) -> Color32 {
-    app.studio_doc(inst.studio).and_then(|d| d.parts.get(&crate::doc::body_key(inst.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::BODY)
+    app.studio_doc(inst.studio).and_then(|d| d.parts.get(&crate::doc::body_key(inst.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body())
 }
 
 fn centroid_local(app: &App, inst: &Instance) -> DVec3 {
@@ -305,26 +305,30 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title.to_uppercase()).color(MUTED).size(11.0).strong());
+        ui.label(RichText::new(title.to_uppercase()).color(theme::muted()).size(11.0).strong());
         ui.add_space(4.0);
         add(ui);
     });
     let r = ui.max_rect();
     let y = ui.cursor().top();
-    ui.painter().hline(r.x_range(), y, Stroke::new(1.0, BORDER));
+    ui.painter().hline(r.x_range(), y, Stroke::new(1.0, theme::border()));
 }
 
 fn insert_panel(app: &mut App, ui: &mut Ui) {
     let mut add: Option<(usize, crate::doc::BodyId, String)> = None;
     for (si, s) in app.ws.studios.iter().enumerate() {
-        ui.label(RichText::new(&s.name).color(MUTED).size(12.0));
+        ui.label(RichText::new(&s.name).color(theme::muted()).size(12.0));
         let bodies = app.studio_bodies(si);
         if bodies.is_empty() {
-            ui.label(RichText::new("  (no parts yet)").color(MUTED).italics().size(12.0));
+            ui.label(RichText::new("  (no parts yet)").color(theme::muted()).italics().size(12.0));
         }
         for b in bodies {
             let name = app.studio_doc(si).and_then(|d| d.parts.get(&crate::doc::body_key(b.id))).and_then(|p| p.name.clone()).unwrap_or_else(|| b.name.clone());
-            if ui.add(egui::Button::image_and_text(icons::image("extrude", 14.0).tint(TEXT), RichText::new(&name).size(12.5))).on_hover_text("Insert an instance").clicked() {
+            if ui
+                .add(egui::Button::image_and_text(icons::image("extrude", 14.0).tint(theme::text()), RichText::new(&name).size(12.5)))
+                .on_hover_text("Insert an instance")
+                .clicked()
+            {
                 add = Some((si, b.id, name));
             }
         }
@@ -364,7 +368,7 @@ fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, name: String) 
 fn instances(app: &mut App, ui: &mut Ui) {
     let Some(a) = asm(app) else { return };
     if a.instances.is_empty() {
-        ui.label(RichText::new("Use Insert to add parts").color(MUTED).size(12.0));
+        ui.label(RichText::new("Use Insert to add parts").color(theme::muted()).size(12.0));
         return;
     }
     let rows: Vec<(u64, String, bool, bool)> = a.instances.iter().map(|x| (x.id, x.name.clone(), x.fixed, x.hidden)).collect();
@@ -372,7 +376,10 @@ fn instances(app: &mut App, ui: &mut Ui) {
     for (id, name, fixed, hidden) in rows {
         let picked = app.asm.sel.contains(&id);
         let label = if fixed { format!("📌 {name}") } else { name };
-        let r = ui.add(egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if hidden { MUTED } else { TEXT })).min_size(egui::vec2(ui.available_width(), 20.0)));
+        let r = ui.add(
+            egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if hidden { theme::muted() } else { theme::text() }))
+                .min_size(egui::vec2(ui.available_width(), 20.0)),
+        );
         if r.clicked() {
             if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                 app.asm.sel.clear();
@@ -401,7 +408,7 @@ fn instances(app: &mut App, ui: &mut Ui) {
 fn mates(app: &mut App, ui: &mut Ui) {
     let Some(a) = asm(app) else { return };
     if a.mates.is_empty() {
-        ui.label(RichText::new("Pick a mate type in the toolbar").color(MUTED).size(12.0));
+        ui.label(RichText::new("Pick a mate type in the toolbar").color(theme::muted()).size(12.0));
         return;
     }
     let rows: Vec<(u64, String, MateKind, bool)> = a.mates.iter().map(|m| (m.id, m.name.clone(), m.kind, m.suppressed)).collect();
@@ -410,11 +417,11 @@ fn mates(app: &mut App, ui: &mut Ui) {
         let failed = app.asm.failed.contains(&id);
         let picked = app.asm.sel_mate == Some(id) || app.asm.dialog.as_ref().map(|d| d.mate == id).unwrap_or(false);
         let col = if failed {
-            theme::ERROR_SOFT
+            theme::error_soft()
         } else if suppressed {
-            MUTED
+            theme::muted()
         } else {
-            TEXT
+            theme::text()
         };
         let r = ui.add(
             egui::Button::image_and_text(icons::image(kind.icon(), 14.0).tint(col), RichText::new(&name).size(12.5).color(col))
@@ -439,7 +446,7 @@ fn mates(app: &mut App, ui: &mut Ui) {
                 action = Some(("suppress", id));
                 ui.close();
             }
-            if ui.button(RichText::new("Delete").color(theme::ERROR_SOFT)).clicked() {
+            if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
                 action = Some(("delete", id));
                 ui.close();
             }
@@ -499,12 +506,12 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
     let Some(a) = asm(app) else { return };
     let rows = bom(app, a);
     if rows.is_empty() {
-        ui.label(RichText::new("Empty").color(MUTED).size(12.0));
+        ui.label(RichText::new("Empty").color(theme::muted()).size(12.0));
         return;
     }
     egui::Grid::new("bom").num_columns(4).striped(true).spacing([8.0, 3.0]).show(ui, |ui| {
         for h in ["#", "Part", "Qty", "Material"] {
-            ui.label(RichText::new(h).color(MUTED).size(11.5));
+            ui.label(RichText::new(h).color(theme::muted()).size(11.5));
         }
         ui.end_row();
         for (i, n, q, m, _) in &rows {
@@ -517,7 +524,7 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
     });
     let total: f64 = rows.iter().filter_map(|r| r.4.map(|m| m * r.2 as f64)).sum();
     if total > 0.0 {
-        ui.label(RichText::new(format!("Total mass {} g", crate::expr::trim(total, 1))).color(MUTED).size(12.0));
+        ui.label(RichText::new(format!("Total mass {} g", crate::expr::trim(total, 1))).color(theme::muted()).size(12.0));
     }
     if ui.button("Export CSV…").clicked() {
         let mut csv = String::from("Item,Part,Quantity,Material,Mass each (g)\n");
@@ -631,9 +638,9 @@ fn build_scene(app: &App) -> SceneData {
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let fi = m.tri_face[ti] as usize;
             let col = if hov_face == Some(fi) {
-                vp::HOVER
+                vp::hover()
             } else if sel {
-                vp::PICKED
+                vp::picked()
             } else {
                 base
             };
@@ -648,7 +655,7 @@ fn build_scene(app: &App) -> SceneData {
         for (ei, e) in m.edges.iter().enumerate() {
             let pts: Vec<Vec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
             let hov = hov_edge == Some(ei);
-            s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::HOVER } else { vp::EDGE }, 1.0), hov);
+            s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::hover() } else { vp::edge() }, 1.0), hov);
         }
         let _ = world_tri;
     }
@@ -657,7 +664,7 @@ fn build_scene(app: &App) -> SceneData {
     for c in &dialog_conns {
         if let Some((o, z, xx)) = a.world(c) {
             let y = z.cross(xx);
-            for (d, col) in [(xx, vp::AXIS_X), (y, vp::AXIS_Y), (z, vp::AXIS_Z)] {
+            for (d, col) in [(xx, vp::axis_x()), (y, vp::axis_y()), (z, vp::axis_z())] {
                 s.lines_top.push(crate::render::LineInst {
                     a: o.as_vec3().into(),
                     b: (o + d * size).as_vec3().into(),
@@ -666,7 +673,7 @@ fn build_scene(app: &App) -> SceneData {
                     color: crate::viewport::rgba(col, 1.0),
                 });
             }
-            s.point(o.as_vec3(), 8.0, crate::viewport::rgba(vp::SNAP, 1.0));
+            s.point(o.as_vec3(), 8.0, crate::viewport::rgba(vp::snap(), 1.0));
         }
     }
     s
@@ -680,7 +687,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         app.asm.scene_dirty = true;
     }
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
-    ui.painter().rect_filled(rect, 0.0, vp::BACKGROUND);
+    crate::viewport::paint_background(ui.painter(), rect);
     let before = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height);
     crate::viewport::navigate(app, ui, &resp);
     if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
@@ -810,11 +817,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     };
     ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     let painter = ui.painter_at(rect);
-    crate::viewport::axis_triad(app, &painter, rect);
+    crate::viewport::view_cube(app, ui, rect);
     if let (Some(h), Some(p)) = (app.asm.hover, resp.hover_pos()) {
         if let Some(x) = asm(app).and_then(|a| a.instance(h.inst)) {
             let what = if h.edge.is_some() { "edge" } else { "face" };
-            crate::viewport::label_box(&painter, p + egui::vec2(14.0, 18.0), &format!("{} · {what}", x.name), TEXT);
+            crate::viewport::label_box(&painter, p + egui::vec2(14.0, 18.0), &format!("{} · {what}", x.name), theme::text());
         }
     }
     mate_dialog(app, ui, rect);
@@ -836,27 +843,24 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
     let mut set_active = None;
     let units = app.studio_doc(0).map(|d| d.units).unwrap_or_default();
     egui::Area::new(egui::Id::new("mate-dialog")).order(egui::Order::Middle).fixed_pos(rect.min + egui::vec2(10.0, 10.0)).show(ui.ctx(), |ui| {
-        egui::Frame::new()
-            .fill(Color32::from_rgba_unmultiplied(0x1f, 0x24, 0x2b, 0xf7))
-            .stroke(Stroke::new(1.0, BORDER))
-            .corner_radius(8)
-            .inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 10 })
-            .show(ui, |ui| {
+        egui::Frame::new().fill(theme::window()).stroke(Stroke::new(1.0, theme::border())).corner_radius(8).inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 10 }).show(
+            ui,
+            |ui| {
                 ui.set_width(300.0);
                 ui.horizontal(|ui| {
-                    ui.add(icons::image(m.kind.icon(), 18.0).tint(TEXT));
+                    ui.add(icons::image(m.kind.icon(), 18.0).tint(theme::text()));
                     ui.label(RichText::new(&m.name).strong());
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                        if ui.add(egui::Button::image(icons::image("close", 16.0).tint(TEXT))).on_hover_text("Cancel (Esc)").clicked() {
+                        if ui.add(egui::Button::image(icons::image("close", 16.0).tint(theme::text()))).on_hover_text("Cancel (Esc)").clicked() {
                             cancel = true;
                         }
-                        if ui.add(egui::Button::image(icons::image("check", 16.0).tint(theme::OK_GREEN))).on_hover_text("OK (Enter)").clicked() {
+                        if ui.add(egui::Button::image(icons::image("check", 16.0).tint(theme::ok_green()))).on_hover_text("OK (Enter)").clicked() {
                             ok = true;
                         }
                     });
                 });
                 egui::Grid::new("mate-grid").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-                    ui.label(RichText::new("Type").color(MUTED));
+                    ui.label(RichText::new("Type").color(theme::muted()));
                     egui::ComboBox::from_id_salt("mate-kind").selected_text(edited.kind.label()).show_ui(ui, |ui| {
                         for k in MateKind::ALL {
                             ui.selectable_value(&mut edited.kind, k, k.label());
@@ -864,10 +868,10 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                     });
                     ui.end_row();
                     for (i, (label, n)) in [("First", &na), ("Second", &nb)].into_iter().enumerate() {
-                        ui.label(RichText::new(label).color(MUTED));
+                        ui.label(RichText::new(label).color(theme::muted()));
                         let fr = egui::Frame::new()
-                            .fill(theme::BG)
-                            .stroke(Stroke::new(1.0, if active == i { theme::ACCENT } else { BORDER }))
+                            .fill(theme::bg())
+                            .stroke(Stroke::new(1.0, if active == i { theme::accent() } else { theme::border() }))
                             .corner_radius(5)
                             .inner_margin(Margin::symmetric(6, 3));
                         let r = fr
@@ -875,7 +879,7 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                                 ui.set_width(180.0);
                                 match n {
                                     Some(n) => ui.label(RichText::new(n).size(12.0)),
-                                    None => ui.label(RichText::new("Pick a face, edge or circle").italics().color(MUTED).size(12.0)),
+                                    None => ui.label(RichText::new("Pick a face, edge or circle").italics().color(theme::muted()).size(12.0)),
                                 };
                             })
                             .response;
@@ -884,7 +888,7 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                         }
                         ui.end_row();
                     }
-                    ui.label(RichText::new(format!("Offset ({})", units.label())).color(MUTED));
+                    ui.label(RichText::new(format!("Offset ({})", units.label())).color(theme::muted()));
                     let mut off = edited.offset / units.scale();
                     if ui.add(egui::DragValue::new(&mut off).speed(0.5)).changed() {
                         edited.offset = off * units.scale();
@@ -893,8 +897,9 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
                 });
                 ui.checkbox(&mut edited.flip, "Flip primary axis");
                 ui.add_space(4.0);
-                ui.label(RichText::new("Click a face, edge or circular edge on each part · Enter to accept").color(MUTED).size(12.0));
-            });
+                ui.label(RichText::new("Click a face, edge or circular edge on each part · Enter to accept").color(theme::muted()).size(12.0));
+            },
+        );
     });
     if let Some(i) = set_active {
         if let Some(d) = &mut app.asm.dialog {

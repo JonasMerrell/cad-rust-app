@@ -13,7 +13,7 @@ use crate::icons;
 use crate::regions::{self, Region, find_regions};
 use crate::render::SceneData;
 use crate::sketch::{Constraint, Curve, Dim, Frame, Geom, Id, Sketch, SolveStatus, arc_angles};
-use crate::theme::{self, MUTED, TEXT, to_rgba, vp};
+use crate::theme::{self, to_rgba, vp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Tool {
@@ -404,7 +404,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
 
 fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
     let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 24.0), egui::Sense::hover());
-    ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, theme::BORDER));
+    ui.painter().vline(rect.center().x, rect.y_range(), Stroke::new(1.0, theme::border()));
     ui.add_space(6.0);
     ui.spacing_mut().item_spacing.x = 1.0;
     add(ui);
@@ -2010,7 +2010,7 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         for (axis, k) in [(0, cx + i), (1, cy + i)] {
             let v = k as f64 * g;
             let major = k % 5 == 0;
-            let col = if major { vp::GRID_MAJOR } else { vp::GRID_MINOR };
+            let col = if major { vp::grid_major() } else { vp::grid_minor() };
             let (a, b) = if axis == 0 {
                 (DVec2::new(v, (cy - n) as f64 * g), DVec2::new(v, (cy + n) as f64 * g))
             } else {
@@ -2020,12 +2020,12 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         }
     }
     // sketch axes through the origin
-    s.polyline(&[w(DVec2::new(-half * 4.0, 0.0)), w(DVec2::new(half * 4.0, 0.0))], 1.0, rgba(vp::AXIS_X, 0.45), false);
-    s.polyline(&[w(DVec2::new(0.0, -half * 4.0)), w(DVec2::new(0.0, half * 4.0))], 1.0, rgba(vp::AXIS_Y, 0.45), false);
+    s.polyline(&[w(DVec2::new(-half * 4.0, 0.0)), w(DVec2::new(half * 4.0, 0.0))], 1.0, rgba(vp::axis_x(), 0.45), false);
+    s.polyline(&[w(DVec2::new(0.0, -half * 4.0)), w(DVec2::new(0.0, half * 4.0))], 1.0, rgba(vp::axis_y(), 0.45), false);
 
     for r in &sess.regions {
         for t in &r.tris {
-            s.tri(true, t.map(|p| w(p) + fr.normal().as_vec3() * 0.005), rgba(vp::SKETCH, 0.10));
+            s.tri(true, t.map(|p| w(p) + fr.normal().as_vec3() * 0.005), rgba(vp::sketch(), 0.10));
         }
     }
     let st = &sess.status;
@@ -2033,15 +2033,15 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         let sel = sess.sel.contains(&Sel::Curve(c.id));
         let hov = sess.hover == Some(Sel::Curve(c.id)) || sess.dim_pending.contains(&Sel::Curve(c.id));
         let col = if sel {
-            vp::PICKED
+            vp::picked()
         } else if hov {
-            vp::HOVER
+            vp::hover()
         } else if c.construction {
-            vp::CONSTRUCTION
+            vp::construction()
         } else if st.fixed_curves.contains(&c.id) {
-            vp::GEOMETRY
+            vp::geometry()
         } else {
-            vp::UNDER_DEFINED
+            vp::under_defined()
         };
         let pts: Vec<Vec3> = sk.tessellate(c, (app.camera.wpp() * 3.0) as f64).iter().map(|p| w(*p)).collect();
         if c.construction {
@@ -2054,22 +2054,22 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         let sel = sess.sel.contains(&Sel::Point(p.id));
         let hov = sess.hover == Some(Sel::Point(p.id)) || sess.dim_pending.contains(&Sel::Point(p.id));
         let col = if sel {
-            vp::PICKED
+            vp::picked()
         } else if hov {
-            vp::HOVER
+            vp::hover()
         } else if st.fixed_points.contains(&p.id) {
-            vp::GEOMETRY
+            vp::geometry()
         } else {
-            vp::UNDER_DEFINED
+            vp::under_defined()
         };
         s.point(w(p.v()), if sel || hov { 8.0 } else { 5.5 }, rgba(col, 1.0));
     }
     // origin
-    s.point(w(DVec2::ZERO), 6.0, rgba(vp::FIXED, 0.9));
+    s.point(w(DVec2::ZERO), 6.0, rgba(vp::fixed(), 0.9));
 
     // tool preview
     if let Some(c) = sess.cursor {
-        let prev = rgba(vp::PREVIEW, 1.0);
+        let prev = rgba(vp::preview(), 1.0);
         let mut poly = |pts: Vec<DVec2>| s.polyline(&pts.iter().map(|p| w(*p)).collect::<Vec<_>>(), 1.6, prev, true);
         match sess.tool {
             Tool::Line => {
@@ -2199,9 +2199,9 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         }
         if sess.tool != Tool::Select {
             let col = match sess.snap {
-                Some(Snap::Point(_)) | Some(Snap::Origin) => vp::SNAP,
-                Some(Snap::Curve(_)) => vp::HOVER,
-                _ => vp::PREVIEW,
+                Some(Snap::Point(_)) | Some(Snap::Origin) => vp::snap(),
+                Some(Snap::Curve(_)) => vp::hover(),
+                _ => vp::preview(),
             };
             s.point(w(c), 6.0, rgba(col, 1.0));
         }
@@ -2252,26 +2252,26 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
         let hov = sess.map(|s| s.hover == Some(Sel::Constraint(i))).unwrap_or(false);
         let bad = sess.map(|s| s.status.bad_dims.contains(&i)).unwrap_or(false);
         let col = if sel {
-            vp::PICKED
+            vp::picked()
         } else if hov {
-            vp::HOVER
+            vp::hover()
         } else if bad {
-            vp::FIXED
+            vp::fixed()
         } else {
-            vp::DIM
+            vp::dim()
         };
         let stroke = Stroke::new(1.0, col.gamma_multiply(0.9));
         let Some(d) = c.dim() else {
             if glyphs {
                 if let Some(p) = label_pos(app, sk, fr, rect, c, i) {
                     let r = egui::Rect::from_center_size(p, egui::vec2(15.0, 15.0));
-                    painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(0x15, 0x18, 0x1c, 0xc0));
+                    painter.rect_filled(r, 3.0, theme::label_bg());
                     let tint = if sel {
-                        vp::PICKED
+                        vp::picked()
                     } else if hov {
-                        vp::HOVER
+                        vp::hover()
                     } else {
-                        MUTED
+                        theme::muted()
                     };
                     if let Some(ui) = ui {
                         icons::image(c.icon(), 13.0).tint(tint).paint_at(ui, r.shrink(1.0));
@@ -2359,7 +2359,7 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
             let font = egui::FontId::proportional(12.0);
             let g = painter.layout_no_wrap(text, font, col);
             let r = egui::Rect::from_center_size(lp, g.size() + egui::vec2(8.0, 2.0));
-            painter.rect_filled(r, 3.0, Color32::from_rgba_unmultiplied(0x20, 0x25, 0x2c, 0xe0));
+            painter.rect_filled(r, 3.0, theme::label_bg());
             painter.galley(r.min + egui::vec2(4.0, 1.0), g, col);
         }
     }
@@ -2404,9 +2404,9 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
     if let (Some(Drag::Box { start }), Some(end)) = (&sess.drag, sess.box_end) {
         let r = egui::Rect::from_two_pos(*start, end);
         let crossing = end.x < start.x;
-        painter.rect(r, 0.0, theme::ACCENT.gamma_multiply(0.08), Stroke::new(1.0, theme::ACCENT), egui::StrokeKind::Inside);
+        painter.rect(r, 0.0, theme::accent().gamma_multiply(0.08), Stroke::new(1.0, theme::accent()), egui::StrokeKind::Inside);
         if crossing {
-            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "crossing", egui::FontId::proportional(10.0), theme::ACCENT);
+            painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "crossing", egui::FontId::proportional(10.0), theme::accent());
         }
     }
 
@@ -2432,7 +2432,7 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                 _ => None,
             };
             if let Some(t) = text {
-                crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &t, TEXT);
+                crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &t, theme::text());
             }
         }
     }
@@ -2443,7 +2443,7 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         let pos = to_screen(app, &fr, rect, at);
         let mut done = None;
         egui::Area::new(egui::Id::new("text-edit")).order(egui::Order::Foreground).fixed_pos(pos + egui::vec2(0.0, 6.0)).show(painter.ctx(), |ui| {
-            egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(4).inner_margin(4).show(ui, |ui| {
+            egui::Frame::new().fill(theme::bg()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(4).show(ui, |ui| {
                 let r = ui.add(egui::TextEdit::singleline(&mut text).hint_text("Text").desired_width(160.0));
                 if !r.has_focus() && !r.lost_focus() {
                     r.request_focus();
@@ -2474,21 +2474,21 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         let mut close = false;
         let units = app.doc.units.label();
         egui::Area::new(egui::Id::new("sk-pattern")).order(egui::Order::Foreground).fixed_pos(rect.min + egui::vec2(10.0, 10.0)).show(painter.ctx(), |ui| {
-            egui::Frame::new().fill(theme::PANEL).stroke(Stroke::new(1.0, theme::BORDER)).corner_radius(8).inner_margin(10).show(ui, |ui| {
+            egui::Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::border())).corner_radius(8).inner_margin(10).show(ui, |ui| {
                 ui.label(RichText::new(if circular { "Circular pattern" } else { "Linear pattern" }).strong());
                 egui::Grid::new("skpat").num_columns(2).show(ui, |ui| {
-                    ui.label(RichText::new("Instances").color(MUTED));
+                    ui.label(RichText::new("Instances").color(theme::muted()));
                     ui.add(egui::DragValue::new(&mut count).range(2..=200));
                     ui.end_row();
                     if circular {
-                        ui.label(RichText::new("Total angle (°)").color(MUTED));
+                        ui.label(RichText::new("Total angle (°)").color(theme::muted()));
                         ui.add(egui::DragValue::new(&mut a).range(1.0..=360.0));
                         ui.end_row();
                     } else {
-                        ui.label(RichText::new(format!("Spacing X ({units})")).color(MUTED));
+                        ui.label(RichText::new(format!("Spacing X ({units})")).color(theme::muted()));
                         ui.add(egui::DragValue::new(&mut a).speed(0.5));
                         ui.end_row();
-                        ui.label(RichText::new(format!("Spacing Y ({units})")).color(MUTED));
+                        ui.label(RichText::new(format!("Spacing Y ({units})")).color(theme::muted()));
                         ui.add(egui::DragValue::new(&mut b).speed(0.5));
                         ui.end_row();
                     }
@@ -2523,9 +2523,9 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         let units = app.doc.units;
         let mut done = None;
         egui::Area::new(egui::Id::new("dim-edit")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_CENTER).fixed_pos(pos).show(painter.ctx(), |ui| {
-            egui::Frame::new().fill(theme::BG).stroke(Stroke::new(1.0, theme::ACCENT)).corner_radius(4).inner_margin(2).show(ui, |ui| {
+            egui::Frame::new().fill(theme::bg()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(2).show(ui, |ui| {
                 let ok = expr::eval(&text, if angle { Kind::Angle } else { Kind::Length }, &Env { vars: &vars, units }).is_ok();
-                let out = egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { TEXT } else { theme::ERROR_SOFT }).show(ui);
+                let out = egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { theme::text() } else { theme::error_soft() }).show(ui);
                 let r = out.response;
                 if !r.has_focus() && !r.lost_focus() {
                     // first frame: focus and select the current value so typing replaces it
@@ -2539,7 +2539,7 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                 } else if ui.input(|i| i.key_pressed(Key::Escape)) || r.lost_focus() && !ui.input(|i| i.key_pressed(Key::Enter)) {
                     done = Some(false);
                 }
-                ui.label(RichText::new(if angle { "°" } else { units.label() }).color(MUTED).size(11.0));
+                ui.label(RichText::new(if angle { "°" } else { units.label() }).color(theme::muted()).size(11.0));
             });
         });
         match done {

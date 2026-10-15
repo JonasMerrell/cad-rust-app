@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         app.scene_dirty = true;
     }
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
-    ui.painter().rect_filled(rect, 0.0, vp::BACKGROUND);
+    paint_background(ui.painter(), rect);
 
     navigate(app, ui, &resp);
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
@@ -90,8 +90,22 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     } else {
         model_overlay(app, &painter, rect);
     }
-    axis_triad(app, &painter, rect);
+    view_cube(app, ui, rect);
+    view_tools(app, ui, rect);
     context_menu(app, ui);
+}
+
+/// Viewport background: a soft vertical gradient.
+pub fn paint_background(painter: &egui::Painter, rect: egui::Rect) {
+    let mut m = egui::Mesh::default();
+    let (a, b) = (vp::background(), vp::background_2());
+    m.colored_vertex(rect.left_top(), a);
+    m.colored_vertex(rect.right_top(), a);
+    m.colored_vertex(rect.right_bottom(), b);
+    m.colored_vertex(rect.left_bottom(), b);
+    m.add_triangle(0, 1, 2);
+    m.add_triangle(0, 2, 3);
+    painter.add(egui::Shape::mesh(m));
 }
 
 pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response) {
@@ -404,11 +418,11 @@ fn build_scene(app: &App) -> SceneData {
             continue;
         }
         let col = if picked {
-            vp::PICKED
+            vp::picked()
         } else if hov {
-            vp::HOVER
+            vp::hover()
         } else {
-            vp::PLANE
+            vp::plane()
         };
         let q = |x: f32, y: f32| (fr.to_world(DVec2::new(x as f64, y as f64))).as_vec3();
         let quad = [q(0.0, 0.0), q(size, 0.0), q(size, size), q(0.0, size)];
@@ -418,9 +432,9 @@ fn build_scene(app: &App) -> SceneData {
         s.polyline(&ring, 1.2, rgba(col, if picked || hov { 0.95 } else { 0.55 }), false);
     }
     let al = size * 0.45;
-    s.line(Vec3::ZERO, Vec3::X * al, 1.6, rgba(vp::AXIS_X, 0.8));
-    s.line(Vec3::ZERO, Vec3::Y * al, 1.6, rgba(vp::AXIS_Y, 0.8));
-    s.line(Vec3::ZERO, Vec3::Z * al, 1.6, rgba(vp::AXIS_Z, 0.8));
+    s.line(Vec3::ZERO, Vec3::X * al, 1.6, rgba(vp::axis_x(), 0.8));
+    s.line(Vec3::ZERO, Vec3::Y * al, 1.6, rgba(vp::axis_y(), 0.8));
+    s.line(Vec3::ZERO, Vec3::Z * al, 1.6, rgba(vp::axis_z(), 0.8));
 
     // plane features
     for f in &app.doc.features {
@@ -432,11 +446,11 @@ fn build_scene(app: &App) -> SceneData {
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r) || app.dialog.as_ref().map(|d| d.feature == f.id).unwrap_or(false);
             let col = if picked {
-                vp::PICKED
+                vp::picked()
             } else if hov {
-                vp::HOVER
+                vp::hover()
             } else {
-                vp::PLANE
+                vp::plane()
             };
             let h = (size / 2.0) as f64;
             let q = |x: f64, y: f64| fr.to_world(DVec2::new(x, y)).as_vec3();
@@ -483,9 +497,9 @@ fn build_scene(app: &App) -> SceneData {
         for (ti, tri) in b.indices.chunks(3).enumerate() {
             let fi = b.tri_face[ti] as usize;
             let col = if body_picked || picked_f.contains(&fi) {
-                vp::PICKED
+                vp::picked()
             } else if hov_f == Some(fi) {
-                vp::HOVER
+                vp::hover()
             } else {
                 app.part_color(b.id)
             };
@@ -504,11 +518,11 @@ fn build_scene(app: &App) -> SceneData {
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r);
             let (col, w) = if picked {
-                (rgba(vp::PICKED, 1.0), 3.0)
+                (rgba(vp::picked(), 1.0), 3.0)
             } else if hov {
-                (rgba(vp::HOVER, 1.0), 3.0)
+                (rgba(vp::hover(), 1.0), 3.0)
             } else {
-                (rgba(vp::EDGE, 1.0), 1.4)
+                (rgba(vp::edge(), 1.0), 1.4)
             };
             let pts: Vec<Vec3> = e.pts.iter().map(|p| Vec3::from(*p)).collect();
             s.polyline(&pts, w, col, picked || hov || app.xray);
@@ -532,11 +546,11 @@ fn build_scene(app: &App) -> SceneData {
                         .chain(crate::dialog::field_refs(app).iter())
                         .any(|x| matches!(x, Ref::Region { sketch, point } if *sketch == f.id && r.contains(DVec2::from(*point))));
                 let (col, a) = if picked {
-                    (vp::PICKED, 0.45)
+                    (vp::picked(), 0.45)
                 } else if hov {
-                    (vp::HOVER, 0.35)
+                    (vp::hover(), 0.35)
                 } else {
-                    (vp::SKETCH, 0.10)
+                    (vp::sketch(), 0.10)
                 };
                 // lift slightly towards the viewer so regions on faces stay visible
                 let lift = frame.normal().as_vec3() * 0.01;
@@ -550,13 +564,13 @@ fn build_scene(app: &App) -> SceneData {
                 let hov = app.hover.as_ref() == Some(&r);
                 let picked = is_picked(app, &r);
                 let col = if picked || sk_picked {
-                    vp::PICKED
+                    vp::picked()
                 } else if hov {
-                    vp::HOVER
+                    vp::hover()
                 } else if c.construction {
-                    vp::CONSTRUCTION
+                    vp::construction()
                 } else {
-                    vp::SKETCH
+                    vp::sketch()
                 };
                 let pts: Vec<Vec3> = sketch.tessellate(c, 1.0).iter().map(|p| frame.to_world(*p).as_vec3()).collect();
                 if c.construction {
@@ -570,9 +584,9 @@ fn build_scene(app: &App) -> SceneData {
                 let hov = app.hover.as_ref() == Some(&r);
                 let picked = is_picked(app, &r);
                 if hov || picked {
-                    s.point(frame.to_world(p.v()).as_vec3(), 7.0, rgba(if picked { vp::PICKED } else { vp::HOVER }, 1.0));
+                    s.point(frame.to_world(p.v()).as_vec3(), 7.0, rgba(if picked { vp::picked() } else { vp::hover() }, 1.0));
                 } else if !sketch.curves.iter().any(|c| matches!(c.geom, Geom::Circle { .. } | Geom::Arc { .. }) && crate::sketch::Sketch::curve_points(&c.geom)[0] == p.id) {
-                    s.point(frame.to_world(p.v()).as_vec3(), 3.5, rgba(vp::SKETCH, 0.9));
+                    s.point(frame.to_world(p.v()).as_vec3(), 3.5, rgba(vp::sketch(), 0.9));
                 }
             }
         }
@@ -582,11 +596,11 @@ fn build_scene(app: &App) -> SceneData {
     for c in &app.result.curves {
         let r = Ref::Curve { feature: c.feature };
         let col = if is_picked(app, &r) {
-            vp::PICKED
+            vp::picked()
         } else if app.hover.as_ref() == Some(&r) {
-            vp::HOVER
+            vp::hover()
         } else {
-            vp::SKETCH
+            vp::sketch()
         };
         let pts: Vec<Vec3> = c.pts.iter().map(|p| Vec3::from(*p)).collect();
         s.polyline(&pts, 2.0, rgba(col, 1.0), false);
@@ -600,9 +614,9 @@ fn build_scene(app: &App) -> SceneData {
     // measurement lines
     if let Some(m) = &app.measure {
         if let Some((a, b, _)) = measure_pair(app, m) {
-            s.polyline(&[a.as_vec3(), b.as_vec3()], 1.5, rgba(vp::DIM, 1.0), true);
-            s.point(a.as_vec3(), 6.0, rgba(vp::DIM, 1.0));
-            s.point(b.as_vec3(), 6.0, rgba(vp::DIM, 1.0));
+            s.polyline(&[a.as_vec3(), b.as_vec3()], 1.5, rgba(vp::dim(), 1.0), true);
+            s.point(a.as_vec3(), 6.0, rgba(vp::dim(), 1.0));
+            s.point(b.as_vec3(), 6.0, rgba(vp::dim(), 1.0));
         }
     }
     s
@@ -654,19 +668,19 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
     if let Some(m) = &app.measure {
         if let Some((a, b, label)) = measure_pair(app, m) {
             let mid = to_screen((a + b) / 2.0);
-            label_box(painter, mid + egui::vec2(0.0, -14.0), &label, vp::DIM);
+            label_box(painter, mid + egui::vec2(0.0, -14.0), &label, vp::dim());
         }
         for (a, b, l) in &m.kept {
             let (sa, sb) = (to_screen((*a).into()), to_screen((*b).into()));
-            painter.line_segment([sa, sb], Stroke::new(1.2, vp::DIM));
-            label_box(painter, sa + (sb - sa) / 2.0, l, vp::DIM);
+            painter.line_segment([sa, sb], Stroke::new(1.2, vp::dim()));
+            label_box(painter, sa + (sb - sa) / 2.0, l, vp::dim());
         }
     }
     // hover label
     if let (Some(h), Some(p)) = (&app.hover, painter.ctx().pointer_hover_pos()) {
         if rect.contains(p) && app.nav.is_none() {
             let text = hover_text(app, h);
-            label_box(painter, p + egui::vec2(14.0, 18.0), &text, crate::theme::TEXT);
+            label_box(painter, p + egui::vec2(14.0, 18.0), &text, crate::theme::text());
         }
     }
 }
@@ -697,20 +711,224 @@ pub fn label_box(painter: &egui::Painter, at: Pos2, text: &str, color: Color32) 
     let font = egui::FontId::proportional(12.0);
     let g = painter.layout_no_wrap(text.to_string(), font, color);
     let r = egui::Rect::from_center_size(at, g.size() + egui::vec2(12.0, 4.0));
-    painter.rect(r, 4.0, Color32::from_rgba_unmultiplied(0x15, 0x18, 0x1c, 0xd9), Stroke::new(1.0, crate::theme::BORDER), egui::StrokeKind::Inside);
+    painter.rect(r, 4.0, crate::theme::label_bg(), Stroke::new(1.0, crate::theme::border()), egui::StrokeKind::Inside);
     painter.galley(r.min + egui::vec2(6.0, 2.0), g, color);
 }
 
-pub fn axis_triad(app: &App, painter: &egui::Painter, rect: egui::Rect) {
-    let c = Pos2::new(rect.left() + 36.0, rect.bottom() - 36.0);
-    let cam = &app.camera;
-    for (dir, col, l) in [(Vec3::X, vp::AXIS_X, "X"), (Vec3::Y, vp::AXIS_Y, "Y"), (Vec3::Z, vp::AXIS_Z, "Z")] {
-        let x = dir.dot(cam.right());
-        let y = dir.dot(cam.up);
-        let e = c + egui::vec2(x, -y) * 22.0;
-        painter.line_segment([c, e], Stroke::new(2.0, col));
-        painter.text(e + egui::vec2(x, -y) * 7.0, egui::Align2::CENTER_CENTER, l, egui::FontId::proportional(10.0), col);
+/// Onshape-style view cube in the top-right corner of the viewport: click a face
+/// for that standard view, the arrows turn the view by 90°, the small button
+/// below goes back to isometric. Also draws the X/Y/Z triad.
+pub fn view_cube(app: &mut App, ui: &Ui, rect: egui::Rect) {
+    use crate::camera::StdView;
+    let size = egui::vec2(150.0, 162.0);
+    let origin = egui::pos2(rect.right() - size.x - 8.0, rect.top() + 8.0);
+    let mut changed = false;
+    egui::Area::new(egui::Id::new("view-cube")).order(egui::Order::Middle).fixed_pos(origin).show(ui.ctx(), |ui| {
+        let (r, resp) = ui.allocate_exact_size(size, Sense::click());
+        let p = ui.painter();
+        let c = egui::pos2(r.center().x, r.top() + 70.0);
+        let s = 30.0;
+        let cam = &app.camera;
+        let (right, up, back) = (cam.right(), cam.up, cam.back);
+        let proj = |v: Vec3| c + egui::vec2(v.dot(right), -v.dot(up)) * s;
+        let hover = resp.hover_pos();
+        let pal = crate::theme::pal();
+
+        // axes from the hidden back corner
+        let o = Vec3::splat(-1.0);
+        for (dir, col, l) in [(Vec3::X, vp::axis_x(), "X"), (Vec3::Y, vp::axis_y(), "Y"), (Vec3::Z, vp::axis_z(), "Z")] {
+            let a = proj(o);
+            let b = proj(o + dir * 2.7);
+            p.line_segment([a, b], Stroke::new(1.6, col));
+            p.text(b + (b - a).normalized() * 6.0, egui::Align2::CENTER_CENTER, l, egui::FontId::proportional(10.5), col);
+        }
+
+        let faces: [(Vec3, &str, StdView); 6] = [
+            (Vec3::Z, "Top", StdView::Top),
+            (-Vec3::Z, "Bottom", StdView::Bottom),
+            (-Vec3::Y, "Front", StdView::Front),
+            (Vec3::Y, "Back", StdView::Back),
+            (Vec3::X, "Right", StdView::Right),
+            (-Vec3::X, "Left", StdView::Left),
+        ];
+        let mut clicked_view = None;
+        for (n, label, view) in faces {
+            let facing = n.dot(back);
+            if facing <= 1e-3 {
+                continue;
+            }
+            // two in-plane axes
+            let (u, v) = if n.z.abs() > 0.5 {
+                (Vec3::X, Vec3::Y)
+            } else if n.x.abs() > 0.5 {
+                (Vec3::Y, Vec3::Z)
+            } else {
+                (Vec3::X, Vec3::Z)
+            };
+            let pts: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|(a, b)| proj(n + u * *a + v * *b)).collect();
+            let hovered = hover.map(|h| point_in_quad(h, &pts)).unwrap_or(false);
+            let shade = 0.86 + 0.14 * facing;
+            let (base, edge) =
+                if crate::theme::is_dark() { (crate::theme::hex(0x46505d), crate::theme::hex(0x7a8696)) } else { (crate::theme::hex(0xeef1f5), crate::theme::hex(0x9aa5b2)) };
+            let fill = if hovered { crate::theme::lerp(base, pal.accent, 0.35) } else { base.gamma_multiply(shade).to_opaque() };
+            p.add(egui::Shape::convex_polygon(pts.clone(), fill, Stroke::new(1.0, edge)));
+            if facing > 0.3 {
+                let ctr = proj(n);
+                let fs = 9.0 + 2.5 * facing;
+                p.text(ctr, egui::Align2::CENTER_CENTER, label, egui::FontId::proportional(fs), pal.text.gamma_multiply(0.45 + 0.55 * facing));
+            }
+            if hovered && resp.clicked() {
+                clicked_view = Some(view);
+            }
+        }
+
+        // rotate arrows: left/right turn about the screen up axis, up/down about the screen right axis
+        let arrows = [
+            (egui::vec2(-66.0, 0.0), 0.0f32, "Rotate left 90°", (up, 1.0f32)),
+            (egui::vec2(66.0, 0.0), 180.0, "Rotate right 90°", (up, -1.0)),
+            (egui::vec2(0.0, -64.0), 90.0, "Rotate up 90°", (right, 1.0)),
+            (egui::vec2(0.0, 64.0), 270.0, "Rotate down 90°", (right, -1.0)),
+        ];
+        let mut turn = None;
+        for (off, ang, tip, (axis, sign)) in arrows {
+            let at = c + off;
+            let hit = egui::Rect::from_center_size(at, egui::vec2(16.0, 16.0));
+            let hov = hover.map(|h| hit.contains(h)).unwrap_or(false);
+            let a = ang.to_radians();
+            let d = egui::vec2(a.cos(), -a.sin());
+            let n = egui::vec2(-d.y, d.x);
+            let col = if hov { pal.accent } else { pal.muted.gamma_multiply(0.7) };
+            p.add(egui::Shape::convex_polygon(vec![at - d * 5.0, at + d * 4.0 + n * 5.0, at + d * 4.0 - n * 5.0], col, Stroke::NONE));
+            if hov {
+                egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new(tip), egui::PopupAnchor::Pointer).show(|ui| ui.label(tip));
+                if resp.clicked() {
+                    turn = Some((axis, sign));
+                }
+            }
+        }
+
+        // home (isometric) button
+        let home = egui::Rect::from_center_size(egui::pos2(r.right() - 16.0, r.bottom() - 10.0), egui::vec2(20.0, 18.0));
+        let hov = hover.map(|h| home.contains(h)).unwrap_or(false);
+        if hov {
+            p.rect_filled(home, 3.0, pal.panel_2);
+        }
+        crate::icons::image("isoView", 15.0).tint(if hov { pal.accent } else { pal.muted }).paint_at(ui, egui::Rect::from_center_size(home.center(), egui::vec2(15.0, 15.0)));
+        if hov && resp.clicked() {
+            clicked_view = Some(StdView::Iso);
+        }
+
+        if let Some(v) = clicked_view {
+            app.camera.set_view(v);
+            changed = true;
+        } else if let Some((axis, sign)) = turn {
+            let q = glam::Quat::from_axis_angle(axis, sign * std::f32::consts::FRAC_PI_2);
+            let (b, u) = (q * app.camera.back, q * app.camera.up);
+            app.camera.set_orientation(b, u);
+            changed = true;
+        }
+    });
+    if changed {
+        app.scene_dirty = true;
+        app.asm.scene_dirty = true;
     }
+}
+
+fn point_in_quad(p: Pos2, q: &[Pos2]) -> bool {
+    let mut sign = 0.0f32;
+    for i in 0..q.len() {
+        let a = q[i];
+        let b = q[(i + 1) % q.len()];
+        let cr = (b - a).x * (p - a).y - (b - a).y * (p - a).x;
+        if cr.abs() < 1e-6 {
+            continue;
+        }
+        if sign == 0.0 {
+            sign = cr.signum();
+        } else if cr.signum() != sign {
+            return false;
+        }
+    }
+    true
+}
+
+/// Vertical strip of view tools on the right edge of the Part Studio viewport,
+/// like Onshape's: section, X-ray, dimensions, measure, zoom to fit, views.
+pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
+    let pal = crate::theme::pal();
+    let pos = egui::pos2(rect.right() - 38.0, rect.center().y - 110.0);
+    egui::Area::new(egui::Id::new("view-tools")).order(egui::Order::Middle).fixed_pos(pos).show(ui.ctx(), |ui| {
+        egui::Frame::new()
+            .fill(pal.panel)
+            .stroke(Stroke::new(1.0, pal.border))
+            .corner_radius(egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 })
+            .inner_margin(egui::Margin::same(3))
+            .show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 2.0;
+                ui.vertical(|ui| {
+                    let btn = |ui: &mut Ui, icon: &str, tip: &str, on: bool| {
+                        let fg = if on { pal.active_text } else { pal.text };
+                        let mut b = egui::Button::image(crate::icons::image(icon, 18.0).tint(fg)).min_size(egui::vec2(28.0, 28.0));
+                        if on {
+                            b = b.fill(pal.active_fill).stroke(Stroke::new(1.0, pal.active_stroke));
+                        }
+                        ui.add(b).on_hover_text(tip)
+                    };
+                    let on = app.section.is_some();
+                    let mut sec = app.section;
+                    let r = egui::containers::menu::MenuButton::from_button({
+                        let fg = if on { pal.active_text } else { pal.text };
+                        let mut b = egui::Button::image(crate::icons::image("section", 18.0).tint(fg)).min_size(egui::vec2(28.0, 28.0));
+                        if on {
+                            b = b.fill(pal.active_fill).stroke(Stroke::new(1.0, pal.active_stroke));
+                        }
+                        b
+                    })
+                    .ui(ui, |ui| {
+                        ui.set_min_width(170.0);
+                        if ui.selectable_label(sec.is_none(), "No section").clicked() {
+                            sec = None;
+                        }
+                        let off = app.section.map(|s| s.offset).unwrap_or(0.0);
+                        for (pl, name) in [(0u8, "Top"), (1, "Front"), (2, "Right")] {
+                            for flip in [false, true] {
+                                let cur = sec.map(|s| s.plane == pl && s.flip == flip).unwrap_or(false);
+                                let l = if flip { format!("{name} (flipped)") } else { name.to_string() };
+                                if ui.selectable_label(cur, l).clicked() {
+                                    sec = Some(crate::app::Section { plane: pl, flip, offset: off });
+                                }
+                            }
+                        }
+                        if let Some(s) = &mut sec {
+                            ui.separator();
+                            ui.horizontal(|ui| {
+                                ui.label("Offset");
+                                ui.add(egui::DragValue::new(&mut s.offset).speed(0.5).suffix(" mm"));
+                            });
+                        }
+                    });
+                    r.0.on_hover_text("Section view");
+                    if sec != app.section {
+                        app.section = sec;
+                        app.scene_dirty = true;
+                    }
+                    if btn(ui, "xray", "See-through bodies (X-ray)", app.xray).clicked() {
+                        app.xray = !app.xray;
+                        app.scene_dirty = true;
+                    }
+                    if btn(ui, "dimension", "Show dimensions on the model", app.show_dims).clicked() {
+                        app.show_dims = !app.show_dims;
+                        app.scene_dirty = true;
+                    }
+                    if btn(ui, "measure", "Measure (M)", app.measure.is_some()).clicked() {
+                        app.toggle_measure();
+                    }
+                    if btn(ui, "fit", "Zoom to fit (F)", false).clicked() {
+                        app.fit_view();
+                    }
+                });
+            });
+    });
 }
 
 fn context_menu(app: &mut App, ui: &mut Ui) {
@@ -721,10 +939,10 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
     }
     let mut close = false;
     let area = egui::Area::new(egui::Id::new("ctx-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
-        egui::Frame::menu(ui.style()).fill(crate::theme::PANEL_2).show(ui, |ui| {
+        egui::Frame::menu(ui.style()).fill(crate::theme::panel_2()).show(ui, |ui| {
             ui.set_min_width(200.0);
             if let Some(t) = &target {
-                ui.label(egui::RichText::new(t.describe()).color(crate::theme::MUTED).size(11.0));
+                ui.label(egui::RichText::new(t.describe()).color(crate::theme::muted()).size(11.0));
                 if ui.button("Select").clicked() {
                     if !app.picks.contains(t) {
                         app.picks.push(t.clone());
