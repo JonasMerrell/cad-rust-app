@@ -29,6 +29,7 @@ pub enum Tool {
     TangentArc,
     Polygon,
     Ellipse,
+    EllipticalArc,
     Spline,
     Text,
     Trim,
@@ -53,6 +54,7 @@ pub const TOOLS: &[(Tool, &str, &str, Option<&str>)] = &[
     (Tool::Slot, "slot", "Slot", None),
     (Tool::Polygon, "polygon", "Polygon", None),
     (Tool::Ellipse, "ellipse", "Ellipse", None),
+    (Tool::EllipticalArc, "ellipticalArc", "Elliptical arc", None),
     (Tool::Spline, "spline", "Spline", None),
     (Tool::Text, "text", "Text", None),
     (Tool::Trim, "trim", "Trim", Some("K")),
@@ -141,6 +143,8 @@ pub struct SketchSession {
     pub text_height: f64,
     /// Text being typed for the Text tool: (baseline start, text).
     pub text_edit: Option<(DVec2, String)>,
+    /// Index of the text item being edited (None = new text).
+    pub text_editing: Option<usize>,
     /// Sketch pattern popup: (circular?, count, spacing x / angle, spacing y).
     pub pattern: Option<(bool, u32, f64, f64)>,
 }
@@ -250,6 +254,7 @@ impl App {
             box_end: None,
             text_height: 10.0,
             text_edit: None,
+            text_editing: None,
             pattern: None,
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
@@ -272,6 +277,10 @@ impl App {
         let Some(sk) = sketch_mut(&mut self.doc, fid) else { return };
         let env = Env { vars: &vars, units };
         let st = sk.solve(&env, hold);
+        // text outlines follow their (possibly moved) anchor points
+        if !sk.texts.is_empty() {
+            sk.refresh_texts();
+        }
         let regions = find_regions(sk);
         if let Some(s) = &mut self.sketch {
             s.status = st;
@@ -439,6 +448,7 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Slot => "Click the two end centres, then the width",
         Tool::TangentArc => "Click the end of a line or arc, then where the tangent arc ends",
         Tool::Ellipse => "Click the centre, the end of the major axis, then the minor size",
+        Tool::EllipticalArc => "Click the centre, the major axis end, the minor size, then the start and end (counter-clockwise)",
         Tool::Spline => "Click points along the curve; Enter, right-click or clicking the first point finishes",
         Tool::Text => "Click where the text starts, type, then press Enter",
         Tool::Polygon => "Click the centre, then a corner",
@@ -829,6 +839,20 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
         if let Some(Sel::Constraint(i)) = h {
             open_dim_edit(app, i);
         }
+        // double-clicking text outlines edits the text
+        if let Some(Sel::Curve(c)) = h {
+            let found = {
+                let (sk, _) = app.sk();
+                sk.text_of(c).map(|i| (i, sk.pv(sk.texts[i].anchor), sk.texts[i].text.clone(), sk.texts[i].height))
+            };
+            if let Some((i, at, text, height)) = found {
+                let scale = app.doc.units.scale();
+                let sess = app.sketch.as_mut().unwrap();
+                sess.text_edit = Some((at, text));
+                sess.text_editing = Some(i);
+                sess.text_height = height / scale;
+            }
+        }
         return;
     }
     if resp.clicked_by(egui::PointerButton::Primary) {
@@ -1012,6 +1036,35 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
             let c = sk.add_point(pts[0]);
             let a = sk.add_point(pts[1]);
             sk.add_curve(Geom::Ellipse { c, a, rmin }, construction);
+            app.after_sketch_edit();
+        }
+        Tool::EllipticalArc => {
+            let sess = app.sketch.as_mut().unwrap();
+            sess.clicks.push(p);
+            if sess.clicks.len() < 5 {
+                app.scene_dirty = true;
+                return;
+            }
+            let pts = std::mem::take(&mut sess.clicks);
+            let u = pts[1] - pts[0];
+            if u.length() < 1e-9 {
+                return;
+            }
+            let rmin = ((pts[2] - pts[0]).perp_dot(u.normalize())).abs().max(1e-3);
+            let param = |q: DVec2| {
+                let d = q - pts[0];
+                (d.dot(u.perp().normalize()) / rmin).atan2(d.dot(u.normalize()) / u.length())
+            };
+            let t0 = param(pts[3]);
+            let mut t1 = param(pts[4]);
+            while t1 <= t0 {
+                t1 += std::f64::consts::TAU;
+            }
+            app.sk_checkpoint();
+            let sk = app.sk_mut();
+            let c = sk.add_point(pts[0]);
+            let a = sk.add_point(pts[1]);
+            sk.add_curve(Geom::EllipticalArc { c, a, rmin, t0, t1 }, construction);
             app.after_sketch_edit();
         }
         Tool::Spline => {
@@ -1303,6 +1356,7 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
                 Geom::Circle { c, r } => Geom::Circle { c: np(&mut out, c), r },
                 Geom::Arc { c, a, b } => Geom::Arc { c: np(&mut out, c), a: np(&mut out, a), b: np(&mut out, b) },
                 Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: np(&mut out, c), a: np(&mut out, a), rmin },
+                Geom::EllipticalArc { c, a, rmin, t0, t1 } => Geom::EllipticalArc { c: np(&mut out, c), a: np(&mut out, a), rmin, t0, t1 },
                 Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| np(&mut out, *p)).collect(), closed },
                 Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().map(|p| xf(DVec2::from(*p)).into()).collect(), closed },
             };
@@ -1316,16 +1370,29 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
 
 fn create_text(app: &mut App, at: DVec2, text: &str) {
     let h = app.sketch.as_ref().unwrap().text_height * app.doc.units.scale();
-    let contours = crate::text::outlines(text, at, h);
-    if contours.is_empty() {
-        return;
-    }
-    let construction = app.sketch.as_ref().unwrap().construction;
+    let editing = app.sketch.as_mut().unwrap().text_editing.take();
     app.sk_checkpoint();
     let sk = app.sk_mut();
-    for c in contours {
-        sk.add_curve(Geom::Poly { pts: c.iter().map(|p| (*p).into()).collect(), closed: true }, construction);
+    match editing {
+        Some(i) if i < sk.texts.len() => {
+            if text.trim().is_empty() {
+                // empty text deletes it
+                let anchor = sk.texts[i].anchor;
+                sk.delete(&[anchor].into(), &HashSet::new());
+            } else {
+                sk.texts[i].text = text.to_string();
+                sk.texts[i].height = h;
+            }
+        }
+        _ => {
+            if text.trim().is_empty() {
+                return;
+            }
+            let anchor = sk.add_point(at);
+            sk.texts.push(crate::sketch::TextItem { anchor, text: text.to_string(), height: h, curves: vec![] });
+        }
     }
+    sk.refresh_texts();
     app.after_sketch_edit();
 }
 
@@ -1349,8 +1416,7 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
         return;
     }
     if !matches!(c.geom, Geom::Line { .. } | Geom::Circle { .. } | Geom::Arc { .. }) {
-        // free-form curves are removed whole
-        sk.delete(&[cid].into(), &HashSet::new());
+        trim_freeform(sk, &c, &splits, u0, u1);
         return;
     }
     let mut old_points = Sketch::curve_points(&c.geom);
@@ -1401,6 +1467,62 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
     old_points.retain(|p| !used.contains(p));
     sk.points.retain(|p| !old_points.contains(&p.id));
     merge_close_points(app);
+}
+
+/// Trim a piece out of an ellipse, elliptical arc, spline or outline. Ellipses stay
+/// elliptical arcs; splines and outlines become fixed outlines.
+fn trim_freeform(sk: &mut Sketch, c: &Curve, splits: &[f64], u0: f64, u1: f64) {
+    let closed = matches!(c.geom, Geom::Ellipse { .. } | Geom::Spline { closed: true, .. } | Geom::Poly { closed: true, .. });
+    let inner: Vec<f64> = splits.iter().copied().filter(|s| *s > 1e-9 && *s < 1.0 - 1e-9).collect();
+    // pieces to keep, as parameter ranges (may run past 1 for closed curves)
+    let keep: Vec<(f64, f64)> = if closed {
+        if inner.is_empty() {
+            vec![]
+        } else if u0 <= 1e-9 || u1 >= 1.0 - 1e-9 {
+            vec![(inner[0], *inner.last().unwrap())]
+        } else {
+            vec![(u1, u0 + 1.0)]
+        }
+    } else {
+        let mut v = vec![];
+        if u0 > 1e-9 {
+            v.push((0.0, u0));
+        }
+        if u1 < 1.0 - 1e-9 {
+            v.push((u1, 1.0));
+        }
+        v
+    };
+    let id = c.id;
+    let pts = sk.tessellate(c, 0.5);
+    sk.curves.retain(|x| x.id != id);
+    for (a, b) in keep {
+        if b - a < 1e-9 {
+            continue;
+        }
+        let g = match c.geom {
+            Geom::Ellipse { c: cc, a: aa, rmin } => Geom::EllipticalArc { c: cc, a: aa, rmin, t0: a * std::f64::consts::TAU, t1: b * std::f64::consts::TAU },
+            Geom::EllipticalArc { c: cc, a: aa, rmin, t0, t1 } => Geom::EllipticalArc { c: cc, a: aa, rmin, t0: t0 + (t1 - t0) * a, t1: t0 + (t1 - t0) * b },
+            _ => {
+                // sample the polyline between the parameters (wrapping for closed curves)
+                let n = pts.len() - 1;
+                let at = |u: f64| -> DVec2 {
+                    let u = u.rem_euclid(1.0 + 1e-12).min(1.0);
+                    let f = u * n as f64;
+                    let i = (f.floor() as usize).min(n - 1);
+                    pts[i].lerp(pts[i + 1], f - i as f64)
+                };
+                let steps = (((b - a) * n as f64).ceil() as usize).max(2);
+                let out: Vec<[f64; 2]> = (0..=steps).map(|k| at(a + (b - a) * k as f64 / steps as f64).into()).collect();
+                Geom::Poly { pts: out, closed: false }
+            }
+        };
+        sk.add_curve(g, c.construction);
+    }
+    // text pieces are no longer editable text
+    if let Some(i) = sk.text_of(id) {
+        sk.texts.remove(i);
+    }
 }
 
 /// Merge coincident points created by trimming so the result stays connected.
@@ -1530,7 +1652,26 @@ fn offset_selection(app: &mut App, side: DVec2, d: f64) {
                 let nb = out.add_point(ctr + (sk.pv(b) - ctr).normalize() * nr);
                 out.add_curve(Geom::Arc { c: cc, a: na, b: nb }, c.construction);
             }
-            _ => {}
+            _ => {
+                // free-form: offset the polyline along its normals, to the clicked side
+                let closed = matches!(c.geom, Geom::Ellipse { .. } | Geom::Spline { closed: true, .. } | Geom::Poly { closed: true, .. });
+                let mut pts = sk.tessellate(c, 0.5);
+                if closed && pts.len() > 2 {
+                    pts.pop();
+                }
+                let n = pts.len();
+                if n < 2 {
+                    continue;
+                }
+                let normal = |i: usize| {
+                    let (a, b) = if closed { (pts[(i + n - 1) % n], pts[(i + 1) % n]) } else { (pts[i.saturating_sub(1)], pts[(i + 1).min(n - 1)]) };
+                    (b - a).perp().normalize_or_zero()
+                };
+                let j = (0..n).min_by(|&x, &y| (pts[x] - side).length().total_cmp(&(pts[y] - side).length())).unwrap_or(0);
+                let sgn = if (side - pts[j]).dot(normal(j)) >= 0.0 { 1.0 } else { -1.0 };
+                let off: Vec<[f64; 2]> = (0..n).map(|i| (pts[i] + normal(i) * d * sgn).into()).collect();
+                out.add_curve(Geom::Poly { pts: off, closed }, c.construction);
+            }
         }
     }
     *app.sk_mut() = out;
@@ -1574,6 +1715,8 @@ fn mirror_selection(app: &mut App) {
                 // mirroring reverses orientation
                 Geom::Arc { c, a, b } => Geom::Arc { c: new_point(&mut out, c), a: new_point(&mut out, b), b: new_point(&mut out, a) },
                 Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin },
+                // a reflection runs the parameter backwards
+                Geom::EllipticalArc { c, a, rmin, t0, t1 } => Geom::EllipticalArc { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin, t0: -t1, t1: -t0 },
                 Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| new_point(&mut out, *p)).collect(), closed },
                 Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().rev().map(|p| refl(DVec2::from(*p)).into()).collect(), closed },
             };
@@ -2127,13 +2270,14 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
                     poly((0..=48).map(|i| m + DVec2::from_angle(t0 + (t1 - t0) * i as f64 / 48.0) * r).collect());
                 }
             }
-            Tool::Ellipse if !sess.clicks.is_empty() => {
+            Tool::Ellipse | Tool::EllipticalArc if !sess.clicks.is_empty() => {
                 let m = sess.clicks[0];
                 if sess.clicks.len() == 1 {
                     poly(vec![m, c]);
                 } else {
                     let u = sess.clicks[1] - m;
-                    let rmin = ((c - m).perp_dot(u.normalize_or_zero())).abs();
+                    let minor_at = if sess.clicks.len() >= 3 { sess.clicks[2] } else { c };
+                    let rmin = ((minor_at - m).perp_dot(u.normalize_or_zero())).abs();
                     let v = u.perp().normalize_or_zero() * rmin;
                     poly(
                         (0..=72)
@@ -2458,11 +2602,13 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         match done {
             Some(true) => {
                 app.sketch.as_mut().unwrap().text_edit = None;
-                if !text.trim().is_empty() {
-                    create_text(app, at, &text);
-                }
+                create_text(app, at, &text);
             }
-            Some(false) => app.sketch.as_mut().unwrap().text_edit = None,
+            Some(false) => {
+                let s = app.sketch.as_mut().unwrap();
+                s.text_edit = None;
+                s.text_editing = None;
+            }
             None => app.sketch.as_mut().unwrap().text_edit = Some((at, text)),
         }
     }

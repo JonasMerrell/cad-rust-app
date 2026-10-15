@@ -51,6 +51,14 @@ pub enum Geom {
         a: Id,
         rmin: f64,
     },
+    /// Part of an ellipse from parameter `t0` to `t1` (radians, counter-clockwise).
+    EllipticalArc {
+        c: Id,
+        a: Id,
+        rmin: f64,
+        t0: f64,
+        t1: f64,
+    },
     /// Smooth curve through the points.
     Spline {
         pts: Vec<Id>,
@@ -293,6 +301,19 @@ pub struct Sketch {
     pub curves: Vec<Curve>,
     pub constraints: Vec<Constraint>,
     pub next_id: Id,
+    /// Text items: their outlines are curves regenerated from the text.
+    #[serde(default)]
+    pub texts: Vec<TextItem>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct TextItem {
+    /// Baseline start point (a sketch point, so it can be dragged and constrained).
+    pub anchor: Id,
+    pub text: String,
+    pub height: f64,
+    /// Outline curves generated for it.
+    pub curves: Vec<Id>,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -310,6 +331,32 @@ pub struct SolveStatus {
 }
 
 impl Sketch {
+    /// Regenerate text outlines at their anchors (after edits or solving).
+    pub fn refresh_texts(&mut self) {
+        for i in 0..self.texts.len() {
+            let t = self.texts[i].clone();
+            let Some(at) = self.point(t.anchor).map(|p| p.v()) else { continue };
+            let construction = t.curves.first().and_then(|c| self.curve(*c)).map(|c| c.construction).unwrap_or(false);
+            let old: HashSet<Id> = t.curves.iter().copied().collect();
+            self.curves.retain(|c| !old.contains(&c.id));
+            let mut ids = vec![];
+            for contour in crate::text::outlines(&t.text, at, t.height) {
+                ids.push(self.add_curve(Geom::Poly { pts: contour.iter().map(|p| (*p).into()).collect(), closed: true }, construction));
+            }
+            self.texts[i].curves = ids;
+        }
+        // texts whose anchor was deleted go too
+        let points: HashSet<Id> = self.points.iter().map(|p| p.id).collect();
+        let gone: HashSet<Id> = self.texts.iter().filter(|t| !points.contains(&t.anchor)).flat_map(|t| t.curves.clone()).collect();
+        self.curves.retain(|c| !gone.contains(&c.id));
+        self.texts.retain(|t| points.contains(&t.anchor));
+    }
+
+    /// The text item an outline curve belongs to.
+    pub fn text_of(&self, curve: Id) -> Option<usize> {
+        self.texts.iter().position(|t| t.curves.contains(&curve))
+    }
+
     pub fn new_id(&mut self) -> Id {
         self.next_id += 1;
         self.next_id
@@ -353,7 +400,7 @@ impl Sketch {
             Geom::Line { a, b } => vec![a, b],
             Geom::Circle { c, .. } => vec![c],
             Geom::Arc { c, a, b } => vec![c, a, b],
-            Geom::Ellipse { c, a, .. } => vec![c, a],
+            Geom::Ellipse { c, a, .. } | Geom::EllipticalArc { c, a, .. } => vec![c, a],
             Geom::Spline { ref pts, .. } => pts.clone(),
             Geom::Poly { .. } => vec![],
         }
@@ -381,7 +428,7 @@ impl Sketch {
                     sub(a);
                     sub(b)
                 }
-                Geom::Ellipse { c, a, .. } => {
+                Geom::Ellipse { c, a, .. } | Geom::EllipticalArc { c, a, .. } => {
                     sub(c);
                     sub(a)
                 }
@@ -699,7 +746,7 @@ impl System {
             x0.push(p.y);
         }
         for c in &s.curves {
-            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } = c.geom {
+            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } | Geom::EllipticalArc { rmin: r, .. } = c.geom {
                 ridx.insert(c.id, x0.len());
                 x0.push(r);
             }
@@ -863,7 +910,7 @@ impl System {
             p.y = x[i + 1];
         }
         for c in &mut s.curves {
-            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } = &mut c.geom {
+            if let Geom::Circle { r, .. } | Geom::Ellipse { rmin: r, .. } | Geom::EllipticalArc { rmin: r, .. } = &mut c.geom {
                 *r = x[self.ridx[&c.id]].abs();
             }
         }
@@ -1025,6 +1072,18 @@ impl Sketch {
                     })
                     .collect()
             }
+            Geom::EllipticalArc { c: cc, a, rmin, t0, t1 } => {
+                let ctr = self.pv(cc);
+                let u = self.pv(a) - ctr;
+                let v = u.perp().normalize_or_zero() * rmin;
+                let n = (((t1 - t0).abs() * u.length().max(rmin) / seg_len).ceil() as usize).clamp(8, 360);
+                (0..=n)
+                    .map(|i| {
+                        let t = t0 + (t1 - t0) * i as f64 / n as f64;
+                        ctr + u * t.cos() + v * t.sin()
+                    })
+                    .collect()
+            }
             Geom::Spline { ref pts, closed } => {
                 let p: Vec<DVec2> = pts.iter().map(|id| self.pv(*id)).collect();
                 catmull_rom(&p, closed, 16)
@@ -1170,5 +1229,20 @@ mod tests {
         };
         let d = (s.pv(c).y - s.pv(a).y).abs();
         assert!((d - r).abs() < 1e-6, "{d} {r}");
+    }
+
+    #[test]
+    fn text_follows_anchor() {
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        s.texts.push(TextItem { anchor: a, text: "I".into(), height: 10.0, curves: vec![] });
+        s.refresh_texts();
+        let n = s.curves.len();
+        assert!(n >= 1);
+        s.point_mut(a).unwrap().x = 50.0;
+        s.refresh_texts();
+        assert_eq!(s.curves.len(), n, "outlines are replaced, not added");
+        let b = s.bounds().unwrap();
+        assert!(b.0.x > 45.0, "{b:?}");
     }
 }

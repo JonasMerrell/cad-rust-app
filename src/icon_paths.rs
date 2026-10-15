@@ -127,4 +127,5 @@ pub const ICONS: &[(&str, &str)] = &[
     ("flange", "M4 18h12a4 4 0 0 0 4-4V5M4 15h12a1 1 0 0 0 1-1V5"),
     ("tab", "M3 14h12v4H3zM15 14l3-4h3v8h-6"),
     ("convertSheet", "M4 6h12v12H4zM8 3h12v12M4 6l4-3M16 6l4-3M16 18l4-3"),
+    ("ellipticalArc", "M3 12a9 5 0 0 1 18 0M3 12h.01M21 12h.01"),
 ];

@@ -226,7 +226,7 @@ impl<'a> Model<'a> {
                         let (pa, pb) = (fr.to_world(sk.pv(a)), fr.to_world(sk.pv(b)));
                         Ok((pa, (pb - pa).normalize()))
                     }
-                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) | Some(crate::sketch::Geom::Ellipse { c, .. }) => {
+                    Some(crate::sketch::Geom::Circle { c, .. }) | Some(crate::sketch::Geom::Arc { c, .. }) | Some(crate::sketch::Geom::Ellipse { c, .. }) | Some(crate::sketch::Geom::EllipticalArc { c, .. }) => {
                         Ok((fr.to_world(sk.pv(c)), fr.normal()))
                     }
                     Some(_) => Err("use a line, circle or arc as the axis".into()),
@@ -1495,6 +1495,10 @@ fn curve_edges(sk: &crate::sketch::Sketch, fr: &Frame, id: crate::sketch::Id) ->
             let mut pts: Vec<DVec3> = sk.tessellate(c, 0.5).into_iter().map(|p| fr.to_world(p)).collect();
             pts.pop();
             vec![occ::spline_edge(&pts, true)?]
+        }
+        Geom::EllipticalArc { .. } => {
+            let pts: Vec<DVec3> = sk.tessellate(c, 0.5).into_iter().map(|p| fr.to_world(p)).collect();
+            vec![occ::spline_edge(&pts, false)?]
         }
     })
 }
