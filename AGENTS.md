@@ -51,6 +51,7 @@ runs in this folder. Other MCP clients start the same command
 | `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |
 | `render` | shaded PNG from any standard or iso view (`iso_front_left`, `iso_back_right`, …) or a `direction`; sketches used by features are hidden unless `sketches: "all"` |
 | `export` | STEP, IGES, STL (binary unless `ascii: true`), OBJ |
+| `define_custom_feature` | scripted feature types (Rhai): parameters + selection in, solids out; use with `add_feature` kind `custom` |
 | `new_part_studio` / `switch_part_studio` | more Part Studios in one document (e.g. one per part) |
 | `create_assembly` / `assembly_insert` | assemblies of parts, or of other assemblies as rigid sub-assemblies |
 | `assembly_mate` / `assembly_relation` / `assembly_move` | mates (fastened, revolute, slider, cylindrical, planar, ball) picked by a point on a face or edge; gear/rack/screw relations |

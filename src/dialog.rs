@@ -87,6 +87,11 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
         Op::Sweep { profiles, path, .. } => vec![("Profiles", Profiles, Slot::Many(profiles)), ("Path", Path, Slot::Many(path))],
         Op::Loft { profiles, .. } => vec![("Profiles", Profiles, Slot::Many(profiles))],
         Op::Fillet { edges, .. } | Op::Chamfer { edges, .. } => vec![("Edges", Edges, Slot::Many(edges))],
+        Op::Custom { refs, select, .. } => match select.as_str() {
+            "points" => vec![("Points", Points, Slot::Many(refs))],
+            "faces" => vec![("Faces", Faces, Slot::Many(refs))],
+            _ => vec![],
+        },
         Op::Shell { faces, .. } => vec![("Faces to remove", Faces, Slot::Many(faces))],
         Op::Hole { points, .. } => vec![("Hole points", Points, Slot::Many(points))],
         Op::Draft { faces, neutral, .. } => vec![("Faces", Faces, Slot::Many(faces)), ("Neutral plane", Planar, Slot::One(neutral))],
@@ -249,6 +254,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         })
         .collect();
     let mut export_flat = false;
+    let custom_defs = app.doc.custom_features.clone();
 
     let area = egui::Area::new(egui::Id::new("feature-dialog")).order(egui::Order::Middle);
     let area = if phone { area.pivot(egui::Align2::LEFT_BOTTOM).fixed_pos(egui::pos2(rect.left(), rect.bottom())) } else { area.fixed_pos(rect.min + egui::vec2(10.0, 10.0)) };
@@ -561,6 +567,34 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 }
                             }
                         }
+                    }
+                    Op::Custom { name, values, op: bop, .. } => {
+                        match custom_defs.iter().find(|d| d.name == *name) {
+                            Some(def) => {
+                                for p in &def.params {
+                                    let v = values.entry(p.name.clone()).or_insert_with(|| p.default.clone());
+                                    match p.kind.as_str() {
+                                        "bool" => {
+                                            let mut b = matches!(v.trim(), "true" | "1" | "yes");
+                                            check(ui, &p.name, &mut b, &mut changed);
+                                            *v = b.to_string();
+                                        }
+                                        k => {
+                                            let kind = match k {
+                                                "length" => Kind::Length,
+                                                "angle" => Kind::Angle,
+                                                _ => Kind::Count,
+                                            };
+                                            val(ui, &p.name, v, kind, &mut changed);
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                ui.label(RichText::new(format!("No definition named \"{name}\"")).color(theme::error_soft()));
+                            }
+                        }
+                        combo(ui, "Operation", bop, &bool_ops, &mut changed);
                     }
                     Op::Rib { thickness, flip, .. } => {
                         val(ui, "Thickness", thickness, Kind::Length, &mut changed);

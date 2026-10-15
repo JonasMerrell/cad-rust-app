@@ -129,6 +129,7 @@ pub struct App {
     pub parts_open: bool,
     pub tool_search: String,
     pub dark: bool,
+    pub script_editor: Option<crate::script_ui::ScriptEditor>,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -197,6 +198,7 @@ impl App {
             parts_open: true,
             tool_search: String::new(),
             dark,
+            script_editor: None,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -1004,6 +1006,7 @@ impl App {
                 }
             });
         }
+        crate::script_ui::toolbar(self, ui, ready);
     }
 
     /// View toggles for the phone dock (the desktop has them beside the viewport).
@@ -1952,6 +1955,7 @@ impl eframe::App for App {
                 if self.dialog.is_some() {
                     crate::dialog::show(self, ui);
                 }
+                crate::script_ui::window(self, ui.ctx());
             }
         });
         if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {

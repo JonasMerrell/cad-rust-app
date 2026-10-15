@@ -216,8 +216,16 @@ impl Session {
             }
             "add_feature" => {
                 let kind = str_arg(a, "kind")?;
-                let op = build_op(&kind, a.get("params").unwrap_or(&json!({})), self)?;
-                let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| self.doc.next_name(&kind));
+                let mut op = build_op(&kind, a.get("params").unwrap_or(&json!({})), self)?;
+                if let Op::Custom { name, select, .. } = &mut op {
+                    let def = self.doc.custom_features.iter().find(|d| d.name == *name).ok_or_else(|| format!("no custom feature named {name:?}; define it with define_custom_feature"))?;
+                    *select = def.selection.clone();
+                }
+                let auto = match &op {
+                    Op::Custom { name, .. } => format!("{name} {}", self.doc.features.iter().filter(|f| matches!(&f.op, Op::Custom { name: n, .. } if n == name)).count() + 1),
+                    _ => self.doc.next_name(&kind),
+                };
+                let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or(auto);
                 let id = self.doc.insert(name, op);
                 self.rebuild()?;
                 let mut v = self.status();
@@ -868,6 +876,7 @@ fn tools() -> Value {
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
         {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}}), &["path"])},
+        {"name": "define_custom_feature", "description": "Define (or replace) a scripted custom feature in the active Part Studio, then use it with add_feature kind 'custom', params {name, values: {param: expression}, refs: [point or face refs], op: new|add|remove|intersect}. The source is Rhai: parameters are variables (lengths mm, angles degrees, counts integers, bools); `points` and `normals` are arrays of [x,y,z] from refs. Shapes: cube(w,d,h), cube_centered(w,d,h), cylinder(r,h), cone(r1,r2,h), sphere(r), torus(R,r), prism([[x,y],...], h), revolve([[r,z],...], deg). Methods: .move(x,y,z), .rotate_x/y/z(deg), .rotate([ax,ay,az], deg), .mirror([nx,ny,nz]), .scale(f), .fillet(r), .chamfer(d), .place(point, normal), .volume(). a + b joins, a - b cuts, a & b intersects. Return a shape or an array of shapes. params: [{name, kind: length|angle|number|count|bool, default}]; selection: '' | 'points' | 'faces'.", "inputSchema": obj(json!({"name": {"type": "string"}, "params": {"type": "array"}, "selection": {"type": "string"}, "source": {"type": "string"}}), &["name", "source"])},
         {"name": "new_part_studio", "description": "Add another Part Studio to the document and make it active (sketches/features go there). Parts from different studios can be combined in assemblies; describe lists all studios, assemblies and drawings.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
         {"name": "switch_part_studio", "description": "Make another Part Studio (by index) the active one.", "inputSchema": obj(json!({"index": {"type": "integer"}}), &["index"])},
         {"name": "create_assembly", "description": "Add an Assembly tab. Returns its index.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},

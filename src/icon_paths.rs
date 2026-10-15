@@ -133,4 +133,5 @@ pub const ICONS: &[(&str, &str)] = &[
     ("gdt", "M2 8h20v8H2zM9 8v8M15 8v8M5.5 12m-2 0a2 2 0 1 0 4 0a2 2 0 1 0 -4 0M3 12h5M5.5 9.5v5"),
     ("datum", "M8 3h8v8H8zM12 11v5M8 21l4-5 4 5z"),
     ("autoDim", "M4 18h12M4 15v6M16 15v6M4 4h8v8H4zM19 3l1 2 2 1-2 1-1 2-1-2-2-1 2-1z"),
+    ("custom", "M4 20L14 10M15 4v2M15 12v2M11 8h2M17 8h2M13 6l-1-1M18 11l-1-1M18 5l-1 1"),
 ];

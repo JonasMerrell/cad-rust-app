@@ -15,6 +15,8 @@ mod kernel;
 mod occ;
 mod regions;
 mod render;
+mod script;
+mod script_ui;
 mod sketch;
 mod sketcher;
 mod text;

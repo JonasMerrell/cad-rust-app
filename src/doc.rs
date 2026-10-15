@@ -399,6 +399,20 @@ pub enum Op {
         faces: Vec<Ref>,
         distance: String,
     },
+    /// A user-defined feature: runs the document's script `name` with these values.
+    Custom {
+        name: String,
+        /// Parameter name -> expression.
+        #[serde(default)]
+        values: std::collections::BTreeMap<String, String>,
+        #[serde(default)]
+        refs: Vec<Ref>,
+        /// What `refs` holds: "points" or "faces" (copied from the definition).
+        #[serde(default)]
+        select: String,
+        #[serde(default)]
+        op: BoolOp,
+    },
     /// Rib from sketch lines: thickness about the sketch plane, filled towards the part.
     Rib {
         profile: Vec<Ref>,
@@ -461,6 +475,7 @@ impl Op {
             Op::OffsetSurface { .. } => "offsetSurface",
             Op::Knit { .. } => "knit",
             Op::Rib { .. } => "rib",
+            Op::Custom { .. } => "custom",
         }
     }
 
@@ -485,6 +500,7 @@ impl Op {
             "knit" => Op::Knit { bodies: vec![], solid: true },
             "moveFace" => Op::MoveFace { faces: vec![], distance: s("2") },
             "rib" => Op::Rib { profile: vec![], thickness: s("2"), flip: false },
+            "custom" => Op::Custom { name: String::new(), values: Default::default(), refs: vec![], select: String::new(), op: BoolOp::New },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
             "extrude" => {
                 Op::Extrude { profiles: vec![], end: EndType::Blind, depth: s("10"), opposite: false, second: false, depth2: s("10"), up_to: None, op: BoolOp::New, draft: s("0") }
@@ -558,6 +574,7 @@ pub fn kind_label(kind: &str) -> &'static str {
         "offsetSurface" => "Offset surface",
         "knit" => "Knit",
         "rib" => "Rib",
+        "custom" => "Custom feature",
         _ => "Feature",
     }
 }
@@ -627,6 +644,9 @@ pub struct Document {
     pub configs: Vec<Config>,
     #[serde(default)]
     pub active_config: Option<usize>,
+    /// Custom feature types defined by scripts.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub custom_features: Vec<crate::script::CustomDef>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -648,6 +668,7 @@ impl Default for Document {
             parts: Default::default(),
             configs: vec![],
             active_config: None,
+            custom_features: vec![],
         }
     }
 }

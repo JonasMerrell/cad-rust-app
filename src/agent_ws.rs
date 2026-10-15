@@ -498,6 +498,34 @@ impl Session {
                 v["part_studio"] = json!(i);
                 v
             }
+            "define_custom_feature" => {
+                let def = crate::script::CustomDef {
+                    name: a.get("name").and_then(|n| n.as_str()).ok_or("give name")?.to_string(),
+                    params: a
+                        .get("params")
+                        .and_then(|p| p.as_array())
+                        .map(|ps| {
+                            ps.iter()
+                                .map(|p| crate::script::ParamDef {
+                                    name: p.get("name").and_then(|v| v.as_str()).unwrap_or("p").to_string(),
+                                    kind: p.get("kind").and_then(|v| v.as_str()).unwrap_or("length").to_string(),
+                                    default: p.get("default").map(super::val_str).unwrap_or_else(|| "0".into()),
+                                })
+                                .collect()
+                        })
+                        .unwrap_or_default(),
+                    selection: a.get("selection").and_then(|v| v.as_str()).unwrap_or("").to_string(),
+                    source: a.get("source").and_then(|v| v.as_str()).ok_or("give source")?.to_string(),
+                };
+                match self.doc.custom_features.iter_mut().find(|d| d.name == def.name) {
+                    Some(d) => *d = def,
+                    None => self.doc.custom_features.push(def),
+                }
+                self.rebuild()?;
+                let mut v = self.status();
+                v["defined"] = json!(a.get("name"));
+                v
+            }
             "create_assembly" => {
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| format!("Assembly {}", self.ws.assemblies.len() + 1));
                 self.ws.assemblies.push(Assembly { name, ..Default::default() });

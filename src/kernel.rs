@@ -12,6 +12,7 @@ use serde::{Deserialize, Serialize};
 use crate::doc::{BodyId, BoolOp, BooleanKind, Document, EndType, FeatId, HoleType, Op, OriginPlane, Ref};
 use crate::expr::{Kind, Units};
 use crate::occ;
+use crate::script;
 use crate::regions::{Region, Seg, find_regions};
 use crate::sketch::Frame;
 
@@ -142,6 +143,9 @@ impl<'a> Model<'a> {
     }
     fn ang(&self, s: &str) -> R<f64> {
         crate::doc::eval(s, Kind::Angle, &self.vars, self.units())
+    }
+    fn num(&self, s: &str) -> R<f64> {
+        crate::doc::eval(s, Kind::Count, &self.vars, self.units())
     }
     fn count(&self, s: &str) -> R<usize> {
         let v = crate::doc::eval(s, Kind::Count, &self.vars, self.units())?;
@@ -662,6 +666,38 @@ impl<'a> Model<'a> {
                     self.bodies[bi].shape = shape;
                 }
                 Ok(())
+            }
+            Op::Custom { name, values, refs, op, .. } => {
+                let def = self.doc.custom_features.iter().find(|d| d.name == *name).cloned().ok_or_else(|| format!("no custom feature named \"{name}\" in this document"))?;
+                let mut vals = vec![];
+                for p in &def.params {
+                    let expr = values.get(&p.name).cloned().unwrap_or_else(|| p.default.clone());
+                    let v = match p.kind.as_str() {
+                        "length" => script::Value::Num(self.len(&expr)?),
+                        "angle" => script::Value::Num(self.ang(&expr)?),
+                        "count" => script::Value::Int(self.num(&expr)?.round() as i64),
+                        "bool" => script::Value::Bool(matches!(expr.trim(), "true" | "1" | "yes")),
+                        _ => script::Value::Num(self.num(&expr)?),
+                    };
+                    vals.push((p.name.clone(), v));
+                }
+                let mut sel = vec![];
+                for r in refs {
+                    let n = match r {
+                        Ref::Face { normal, .. } => v3(*normal),
+                        Ref::SketchPoint { sketch, .. } => self.sketch(*sketch).map(|(_, fr)| fr.normal()).unwrap_or(DVec3::Z),
+                        _ => DVec3::Z,
+                    };
+                    sel.push((self.point_of(r)?, n));
+                }
+                let (tools, log) = script::run(&def, vals, &sel)?;
+                if !log.is_empty() {
+                    eprintln!("[{}] {}", name, log.join("\n"));
+                }
+                if tools.is_empty() {
+                    return Err("the script made no shapes".into());
+                }
+                self.apply(fid, tools, *op)
             }
             Op::Rib { profile, thickness, flip } => {
                 let t = self.len(thickness)?;
@@ -3067,5 +3103,43 @@ mod feature_option_tests {
         let r = run(&doc);
         let want = PI * 36.0 * 10.0;
         assert!((r.bodies[0].volume - want).abs() < 2.0, "{} want {want}", r.bodies[0].volume);
+    }
+}
+
+#[cfg(test)]
+mod custom_tests {
+    use super::*;
+    use crate::script::{CustomDef, ParamDef};
+    use std::collections::BTreeMap;
+
+    #[test]
+    fn scripted_features() {
+        let mut doc = Document::default();
+        doc.custom_features.push(CustomDef {
+            name: "Holed block".into(),
+            params: vec![ParamDef { name: "size".into(), kind: "length".into(), default: "10".into() }, ParamDef { name: "n".into(), kind: "count".into(), default: "2".into() }],
+            selection: String::new(),
+            source: "let b = cube(size, size, size);\nfor i in 0..n { b = b - cylinder(1, size).move(2.5 + i * 5, 5, 0); }\nprint(`holes: ${n}`);\nb".into(),
+        });
+        doc.custom_features.push(CustomDef { name: "Bosses".into(), params: vec![ParamDef { name: "h".into(), kind: "length".into(), default: "5".into() }], selection: "points".into(), source: "points.map(|p| cylinder(1, h).place(p, [0, 0, 1]))".into() });
+        let mut values = BTreeMap::new();
+        values.insert("size".to_string(), "20".to_string());
+        doc.insert("C1".into(), Op::Custom { name: "Holed block".into(), values, refs: vec![], select: String::new(), op: BoolOp::New });
+        doc.insert(
+            "C2".into(),
+            Op::Custom { name: "Bosses".into(), values: BTreeMap::new(), refs: vec![Ref::Vertex { point: [10.0, 10.0, 20.0] }], select: "points".into(), op: BoolOp::Add },
+        );
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        let pi = std::f64::consts::PI;
+        let want = 8000.0 - 2.0 * pi * 20.0 + pi * 5.0;
+        assert_eq!(r.bodies.len(), 1);
+        assert!((r.bodies[0].volume - want).abs() < 0.5, "{} want {want}", r.bodies[0].volume);
+        // script errors come back as feature errors
+        doc.custom_features[0].source = "cube(1, 2)".into();
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(r.features.iter().any(|f| f.error.as_deref().map(|e| e.contains("script")).unwrap_or(false)));
     }
 }
