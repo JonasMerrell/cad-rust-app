@@ -1861,8 +1861,8 @@ impl App {
                         self.studio_results = std::mem::take(&mut self.studio_results).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
                         self.studio_undo = std::mem::take(&mut self.studio_undo).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
                         for a in &mut self.ws.assemblies {
-                            a.instances.retain(|x| x.studio != i);
-                            for x in &mut a.instances {
+                            a.instances.retain(|x| x.sub.is_some() || x.studio != i);
+                            for x in a.instances.iter_mut().filter(|x| x.sub.is_none()) {
                                 x.studio = fix(x.studio);
                             }
                         }
@@ -1876,6 +1876,13 @@ impl App {
                     }
                     Tab::Assembly(i) => {
                         self.ws.assemblies.remove(i);
+                        // drop instances of it in other assemblies and renumber the rest
+                        for a in &mut self.ws.assemblies {
+                            a.instances.retain(|x| x.sub != Some(i));
+                            for x in &mut a.instances {
+                                x.sub = x.sub.map(|k| if k > i { k - 1 } else { k });
+                            }
+                        }
                     }
                     Tab::Drawing(i) => {
                         self.ws.drawings.remove(i);

@@ -16,9 +16,11 @@ use crate::workspace::Tab;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Hit {
     pub inst: u64,
+    /// Which part of the instance (for sub-assemblies).
+    pub leaf: usize,
     pub face: Option<usize>,
     pub edge: Option<usize>,
-    /// Hit point in the instance's own coordinates.
+    /// Hit point in the part's own coordinates.
     pub local: [f64; 3],
 }
 
@@ -55,8 +57,10 @@ pub struct AsmUi {
     pub clashes: Option<Vec<(u64, u64, f64)>>,
     pub clash_ids: Vec<u64>,
     pub checking: bool,
-    /// Exploded view distance factor (0 = assembled).
+    /// Exploded view distance factor (0 = assembled); with explode steps, 0..1 runs through them.
     pub explode: f32,
+    /// Measure tool picks: world point and face normal (None for edges).
+    pub measure: Option<Vec<(DVec3, Option<DVec3>)>>,
 }
 
 fn asm_index(app: &App) -> Option<usize> {
@@ -109,6 +113,17 @@ fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
     if app.asm.explode <= 0.0 {
         return inst.pose;
     }
+    if !a.explode_steps.is_empty() {
+        let total = app.asm.explode.clamp(0.0, 1.0) as f64 * a.explode_steps.len() as f64;
+        let mut p = inst.pose;
+        for (i, st) in a.explode_steps.iter().enumerate() {
+            if st.insts.contains(&inst.id) {
+                let f = (total - i as f64).clamp(0.0, 1.0);
+                p.t = (DVec3::from(p.t) + DVec3::from(st.dir).normalize_or_zero() * st.distance * f).into();
+            }
+        }
+        return p;
+    }
     let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
     let c = cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64;
     let mine = inst.pose.apply(centroid_local(app, inst));
@@ -117,16 +132,49 @@ fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
     p
 }
 
-fn mesh_of<'a>(app: &'a App, inst: &Instance) -> Option<&'a crate::kernel::BodyMesh> {
-    app.studio_bodies(inst.studio).iter().find(|b| b.id == inst.body)
+/// A part drawn for an instance: its mesh, pose inside the instance and colour.
+struct Part<'a> {
+    local: Pose,
+    mesh: &'a crate::kernel::BodyMesh,
+    color: Color32,
 }
 
-fn part_color(app: &App, inst: &Instance) -> Color32 {
-    app.studio_doc(inst.studio).and_then(|d| d.parts.get(&crate::doc::body_key(inst.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body())
+/// The parts of an instance (one, or all of a sub-assembly's), indexed by `Hit::leaf`.
+fn parts_of<'a>(app: &'a App, inst: &Instance) -> Vec<Option<Part<'a>>> {
+    assembly::leaves(&app.ws.assemblies, inst)
+        .into_iter()
+        .map(|l| {
+            let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body)?;
+            let color = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
+            Some(Part { local: l.pose, mesh, color })
+        })
+        .collect()
 }
 
 fn centroid_local(app: &App, inst: &Instance) -> DVec3 {
-    mesh_of(app, inst).map(|m| DVec3::from(m.centroid)).unwrap_or(DVec3::ZERO)
+    let (mut sum, mut w) = (DVec3::ZERO, 0.0);
+    for p in parts_of(app, inst).into_iter().flatten() {
+        let v = p.mesh.volume.abs().max(1e-9);
+        sum += p.local.apply(DVec3::from(p.mesh.centroid)) * v;
+        w += v;
+    }
+    if w > 0.0 { sum / w } else { DVec3::ZERO }
+}
+
+/// World bounding box of an instance at its assembled pose.
+fn world_bbox(app: &App, x: &Instance) -> Option<(DVec3, DVec3)> {
+    let mut lo = DVec3::splat(f64::INFINITY);
+    let mut hi = DVec3::splat(f64::NEG_INFINITY);
+    for p in parts_of(app, x).into_iter().flatten() {
+        let pose = x.pose.compose(&p.local);
+        let m = p.mesh;
+        for c in 0..8 {
+            let w = pose.apply(DVec3::new(m.bbox[c & 1][0], m.bbox[(c >> 1) & 1][1], m.bbox[(c >> 2) & 1][2]));
+            lo = lo.min(w);
+            hi = hi.max(w);
+        }
+    }
+    lo.x.is_finite().then_some((lo, hi))
 }
 
 /// Solve the mates of the open assembly, holding `hold` still.
@@ -203,12 +251,18 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     });
     App::group(ui, |ui| {
         let on = app.asm.explode > 0.0;
-        if app.tool_button(ui, "transform", "Explode", "Exploded view", false, on, true).clicked() {
-            app.asm.explode = if on { 0.0 } else { 0.8 };
+        let stepped = asm(app).map(|a| !a.explode_steps.is_empty()).unwrap_or(false);
+        if app.tool_button(ui, "transform", "Explode", "Exploded view (add steps in the sidebar)", false, on, true).clicked() {
+            app.asm.explode = if on { 0.0 } else if stepped { 1.0 } else { 0.8 };
             app.asm.scene_dirty = true;
         }
-        if on && ui.add(egui::Slider::new(&mut app.asm.explode, 0.05..=3.0).show_value(false)).on_hover_text("Explode distance").changed() {
+        let range = if stepped { 0.0..=1.0 } else { 0.05..=3.0 };
+        if on && ui.add(egui::Slider::new(&mut app.asm.explode, range).show_value(false)).on_hover_text(if stepped { "Play through the explode steps" } else { "Explode distance" }).changed() {
             app.asm.scene_dirty = true;
+        }
+        let measuring = app.asm.measure.is_some();
+        if app.tool_button(ui, "measure", "Measure", "Measure distance or angle between two picks", false, measuring, true).clicked() {
+            app.asm.measure = if measuring { None } else { Some(vec![]) };
         }
     });
 }
@@ -268,6 +322,8 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if pressed(egui::Key::Escape) {
         if app.asm.dialog.is_some() {
             mate_cancel(app);
+        } else if app.asm.measure.is_some() {
+            app.asm.measure = None;
         } else {
             app.asm.sel.clear();
             app.asm.sel_mate = None;
@@ -302,13 +358,9 @@ fn fit(app: &mut App) {
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
     for x in &a.instances {
-        if let Some(m) = mesh_of(app, x) {
-            for c in 0..8 {
-                let p = DVec3::new(m.bbox[c & 1][0], m.bbox[(c >> 1) & 1][1], m.bbox[(c >> 2) & 1][2]);
-                let w = x.pose.apply(p);
-                lo = lo.min(w);
-                hi = hi.max(w);
-            }
+        if let Some((l, h)) = world_bbox(app, x) {
+            lo = lo.min(l);
+            hi = hi.max(h);
         }
     }
     if lo.x.is_finite() {
@@ -331,6 +383,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         if app.asm.relation.is_some() || asm(app).map(|a| !a.relations.is_empty()).unwrap_or(false) {
             section(ui, "Relations", |ui| relations(app, ui));
+        }
+        if app.asm.explode > 0.0 {
+            section(ui, "Exploded view", |ui| explode_ui(app, ui));
         }
         section(ui, "Bill of materials", |ui| bom_ui(app, ui));
     });
@@ -367,32 +422,56 @@ fn insert_panel(app: &mut App, ui: &mut Ui) {
             }
         }
     }
+    // other assemblies, as rigid sub-assemblies
+    let cur = asm_index(app);
+    let subs: Vec<(usize, String)> = app
+        .ws
+        .assemblies
+        .iter()
+        .enumerate()
+        .filter(|(k, a)| cur.map(|c| !assembly::contains(&app.ws.assemblies, *k, c)).unwrap_or(true) && !a.instances.is_empty())
+        .map(|(k, a)| (k, a.name.clone()))
+        .collect();
+    let mut add_sub = None;
+    if !subs.is_empty() {
+        ui.label(RichText::new("Assemblies").color(theme::muted()).size(12.0));
+        for (k, name) in subs {
+            if ui
+                .add(egui::Button::image_and_text(icons::image("assembly", 14.0).tint(theme::text()), RichText::new(&name).size(12.5)))
+                .on_hover_text("Insert as a sub-assembly")
+                .clicked()
+            {
+                add_sub = Some((k, name));
+            }
+        }
+    }
     if let Some((studio, body, name)) = add {
-        insert(app, studio, body, name);
+        insert(app, studio, body, None, name);
+    }
+    if let Some((k, name)) = add_sub {
+        insert(app, 0, (0, 0), Some(k), name);
     }
 }
 
-fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, name: String) {
+fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Option<usize>, name: String) {
     checkpoint(app);
     // place new instances beside what is already there
     let mut max_x = f64::NEG_INFINITY;
     if let Some(a) = asm(app) {
         for x in &a.instances {
-            if let Some(m) = mesh_of(app, x) {
-                for c in 0..8 {
-                    let p = DVec3::new(m.bbox[c & 1][0], m.bbox[(c >> 1) & 1][1], m.bbox[(c >> 2) & 1][2]);
-                    max_x = max_x.max(x.pose.apply(p).x);
-                }
+            if let Some((_, hi)) = world_bbox(app, x) {
+                max_x = max_x.max(hi.x);
             }
         }
     }
-    let min_x = app.studio_bodies(studio).iter().find(|b| b.id == body).map(|m| m.bbox[0][0]).unwrap_or(0.0);
+    let probe = Instance { id: 0, name: String::new(), studio, body, pose: Pose::default(), fixed: false, hidden: false, sub };
+    let min_x = world_bbox(app, &probe).map(|b| b.0.x).unwrap_or(0.0);
     let t = if max_x.is_finite() { [max_x + 10.0 - min_x, 0.0, 0.0] } else { [0.0; 3] };
     let Some(a) = asm_mut(app) else { return };
     let id = a.new_id();
-    let n = a.instances.iter().filter(|x| x.studio == studio && x.body == body).count() + 1;
+    let n = a.instances.iter().filter(|x| x.sub == sub && (sub.is_some() || (x.studio == studio && x.body == body))).count() + 1;
     let fixed = a.instances.is_empty();
-    a.instances.push(Instance { id, name: format!("{name} <{n}>"), studio, body, pose: Pose { t, ..Default::default() }, fixed, hidden: false });
+    a.instances.push(Instance { id, name: format!("{name} <{n}>"), studio, body, pose: Pose { t, ..Default::default() }, fixed, hidden: false, sub });
     app.asm.scene_dirty = true;
     if fixed {
         fit(app);
@@ -517,14 +596,15 @@ fn mates(app: &mut App, ui: &mut Ui) {
 /// (item, part name, quantity, material, mass each in g)
 pub fn bom(app: &App, a: &Assembly) -> Vec<(usize, String, usize, String, Option<f64>)> {
     let mut rows: Vec<((usize, crate::doc::BodyId), String, usize, String, Option<f64>)> = vec![];
-    for x in &a.instances {
-        let key = (x.studio, x.body);
+    for leaf in a.instances.iter().flat_map(|x| assembly::leaves(&app.ws.assemblies, x).into_iter().map(move |l| (x, l))) {
+        let (x, l) = leaf;
+        let key = (l.studio, l.body);
         if let Some(r) = rows.iter_mut().find(|r| r.0 == key) {
             r.2 += 1;
             continue;
         }
-        let props = app.studio_doc(x.studio).and_then(|d| d.parts.get(&crate::doc::body_key(x.body))).cloned().unwrap_or_default();
-        let mesh = mesh_of(app, x);
+        let props = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).cloned().unwrap_or_default();
+        let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body);
         let name = props.name.clone().or_else(|| mesh.map(|m| m.name.clone())).unwrap_or_else(|| x.name.clone());
         let density = props.material.as_ref().and_then(|m| crate::doc::MATERIALS.iter().find(|q| q.0 == m)).map(|q| q.1);
         let mass = match (density, mesh) {
@@ -534,6 +614,71 @@ pub fn bom(app: &App, a: &Assembly) -> Vec<(usize, String, usize, String, Option
         rows.push((key, name, 1, props.material.unwrap_or_default(), mass));
     }
     rows.into_iter().enumerate().map(|(i, r)| (i + 1, r.1, r.2, r.3, r.4)).collect()
+}
+
+const DIRS: [(&str, [f64; 3]); 6] = [("+X", [1.0, 0.0, 0.0]), ("−X", [-1.0, 0.0, 0.0]), ("+Y", [0.0, 1.0, 0.0]), ("−Y", [0.0, -1.0, 0.0]), ("+Z", [0.0, 0.0, 1.0]), ("−Z", [0.0, 0.0, -1.0])];
+
+fn explode_ui(app: &mut App, ui: &mut Ui) {
+    let Some(a) = asm(app) else { return };
+    let steps = a.explode_steps.clone();
+    let names = |ids: &[u64]| ids.iter().filter_map(|i| a.instance(*i).map(|x| x.name.clone())).collect::<Vec<_>>().join(", ");
+    let labels: Vec<String> = steps.iter().map(|s| names(&s.insts)).collect();
+    if steps.is_empty() {
+        ui.label(RichText::new("Spreading parts out from the centre. Select parts and add steps to explode them in order.").color(theme::muted()).size(12.0));
+    }
+    let mut edited = steps.clone();
+    let mut delete = None;
+    for (i, st) in edited.iter_mut().enumerate() {
+        ui.label(RichText::new(format!("Step {} · {}", i + 1, labels[i])).size(12.5));
+        ui.horizontal(|ui| {
+            let cur = DIRS.iter().find(|d| d.1 == st.dir).map(|d| d.0).unwrap_or("custom");
+            egui::ComboBox::from_id_salt(("xdir", i)).width(54.0).selected_text(cur).show_ui(ui, |ui| {
+                for (n, d) in DIRS {
+                    if ui.selectable_label(st.dir == d, n).clicked() {
+                        st.dir = d;
+                    }
+                }
+            });
+            ui.add(egui::DragValue::new(&mut st.distance).speed(1.0).suffix(" mm"));
+            if ui.small_button("✕").on_hover_text("Delete step").clicked() {
+                delete = Some(i);
+            }
+        });
+    }
+    let sel = app.asm.sel.clone();
+    let add = ui.add_enabled(!sel.is_empty(), egui::Button::new("Add step from selection")).on_disabled_hover_text("Select parts to move in this step").clicked();
+    if edited != steps || delete.is_some() || add {
+        checkpoint(app);
+        let n = edited.len();
+        if let Some(a) = asm_mut(app) {
+            a.explode_steps = edited;
+            if let Some(i) = delete {
+                a.explode_steps.remove(i);
+            }
+            if add {
+                a.explode_steps.push(assembly::ExplodeStep { insts: sel, dir: [0.0, 0.0, 1.0], distance: 50.0 });
+            }
+        }
+        if add || (n == 0) {
+            app.asm.explode = 1.0;
+        }
+        app.asm.scene_dirty = true;
+    }
+}
+
+/// Distance / angle text and the two world points of the measure picks.
+fn measure_result(picks: &[(DVec3, Option<DVec3>)]) -> Option<(DVec3, DVec3, String)> {
+    let [(a, na), (b, nb)] = picks else { return None };
+    let f = |v: f64| crate::expr::trim(v, 3);
+    if let (Some(na), Some(nb)) = (na, nb) {
+        if na.cross(*nb).length() < 1e-6 {
+            let d = (*b - *a).dot(*na).abs();
+            return Some((*b - *na * (*b - *a).dot(*na), *b, format!("distance {} mm", f(d))));
+        }
+        return Some((*a, *b, format!("angle {}°", crate::expr::trim(na.angle_between(*nb).to_degrees(), 2))));
+    }
+    let dd = *b - *a;
+    Some((*a, *b, format!("distance {} mm (dx {}, dy {}, dz {})", f(dd.length()), f(dd.x.abs()), f(dd.y.abs()), f(dd.z.abs()))))
 }
 
 fn bom_ui(app: &mut App, ui: &mut Ui) {
@@ -587,8 +732,10 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     // edges first
     let mut best: Option<(f32, Hit)> = None;
     for x in a.instances.iter().filter(|x| !x.hidden) {
-        let Some(m) = mesh_of(app, x) else { continue };
-        let pose = display_pose(app, a, x);
+      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
+        let Some(part) = part else { continue };
+        let m = part.mesh;
+        let pose = display_pose(app, a, x).compose(&part.local);
         for (ei, e) in m.edges.iter().enumerate() {
             let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3())).collect();
             for w in pts.windows(2) {
@@ -596,10 +743,11 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
                 let t = if d.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
                 let dist = (w[0] + d * t - s).length();
                 if dist < 6.0 && best.as_ref().map(|b| dist < b.0).unwrap_or(true) {
-                    best = Some((dist, Hit { inst: x.id, face: None, edge: Some(ei), local: e.mid }));
+                    best = Some((dist, Hit { inst: x.id, leaf, face: None, edge: Some(ei), local: e.mid }));
                 }
             }
         }
+      }
     }
     if let Some((_, h)) = best {
         return Some(h);
@@ -608,19 +756,22 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let (o, d) = (o.as_dvec3(), d.as_dvec3());
     let mut best: Option<(f64, Hit)> = None;
     for x in a.instances.iter().filter(|x| !x.hidden) {
-        let Some(m) = mesh_of(app, x) else { continue };
-        // ray into the instance's coordinates
-        let pose = display_pose(app, a, x);
+      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
+        let Some(part) = part else { continue };
+        let m = part.mesh;
+        // ray into the part's coordinates
+        let pose = display_pose(app, a, x).compose(&part.local);
         let lo = pose.inverse_apply(o);
         let ld = pose.inverse_dir(d);
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
             if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
                 if best.as_ref().map(|b| tt < b.0).unwrap_or(true) {
-                    best = Some((tt, Hit { inst: x.id, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
+                    best = Some((tt, Hit { inst: x.id, leaf, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
                 }
             }
         }
+      }
     }
     best.map(|b| b.1)
 }
@@ -651,8 +802,21 @@ fn ray_tri(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
 fn connector_for(app: &App, h: &Hit) -> Option<Connector> {
     let a = asm(app)?;
     let x = a.instance(h.inst)?;
-    let m = mesh_of(app, x)?;
-    assembly::infer_connector(h.inst, m, h.face, h.edge, h.local.into())
+    let part = parts_of(app, x).into_iter().nth(h.leaf)??;
+    let c = assembly::infer_connector(h.inst, part.mesh, h.face, h.edge, h.local.into())?;
+    // from the part's coordinates into the instance's
+    let l = part.local;
+    Some(Connector { origin: l.apply(c.origin.into()).into(), z: l.dir(c.z.into()).into(), x: l.dir(c.x.into()).into(), ..c })
+}
+
+/// World point and (for faces) normal of a hit, at its displayed pose.
+fn hit_world(app: &App, h: &Hit) -> Option<(DVec3, Option<DVec3>)> {
+    let a = asm(app)?;
+    let x = a.instance(h.inst)?;
+    let part = parts_of(app, x).into_iter().nth(h.leaf)??;
+    let pose = display_pose(app, a, x).compose(&part.local);
+    let n = h.face.and_then(|f| part.mesh.faces.get(f)).filter(|f| f.planar).map(|f| pose.dir(DVec3::from(f.normal)).normalize());
+    Some((pose.apply(h.local.into()), n))
 }
 
 fn build_scene(app: &App) -> SceneData {
@@ -663,11 +827,13 @@ fn build_scene(app: &App) -> SceneData {
     let mate_insts: Vec<u64> =
         app.asm.sel_mate.and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
     for x in a.instances.iter().filter(|x| !x.hidden) {
-        let Some(m) = mesh_of(app, x) else { continue };
+      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
+        let Some(part) = part else { continue };
+        let m = part.mesh;
         let sel = app.asm.sel.contains(&x.id) || mate_insts.contains(&x.id);
-        let base = part_color(app, x);
-        let hov_face = app.asm.hover.filter(|h| h.inst == x.id).and_then(|h| h.face);
-        let pose = display_pose(app, a, x);
+        let base = part.color;
+        let hov_face = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.face);
+        let pose = display_pose(app, a, x).compose(&part.local);
         let rot = pose.m().as_mat3();
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let fi = m.tri_face[ti] as usize;
@@ -685,13 +851,14 @@ fn build_scene(app: &App) -> SceneData {
                 s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0) });
             }
         }
-        let hov_edge = app.asm.hover.filter(|h| h.inst == x.id).and_then(|h| h.edge);
+        let hov_edge = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.edge);
         for (ei, e) in m.edges.iter().enumerate() {
             let pts: Vec<Vec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
             let hov = hov_edge == Some(ei);
             s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::hover() } else { vp::edge() }, 1.0), hov);
         }
         let _ = world_tri;
+      }
     }
     // mate connectors being picked
     let size = (app.camera.wpp() * 28.0) as f64;
@@ -745,7 +912,15 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     // clicks: mate picks or selection
     if resp.clicked_by(egui::PointerButton::Primary) {
         let h = app.asm.hover;
-        if let Some(d) = &app.asm.dialog {
+        if app.asm.measure.is_some() {
+            if let Some(p) = h.and_then(|h| hit_world(app, &h)) {
+                let m = app.asm.measure.as_mut().unwrap();
+                if m.len() >= 2 {
+                    m.clear();
+                }
+                m.push(p);
+            }
+        } else if let Some(d) = &app.asm.dialog {
             if let Some(h) = h {
                 if let Some(c) = connector_for(app, &h) {
                     let (mid, active) = (d.mate, d.active);
@@ -858,22 +1033,42 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             crate::viewport::label_box(&painter, p + egui::vec2(14.0, 18.0), &format!("{} · {what}", x.name), theme::text());
         }
     }
+    if let Some(m) = &app.asm.measure {
+        let to_screen = |p: DVec3| {
+            let v = app.camera.project(p.as_vec3());
+            rect.min + egui::vec2(v.x, v.y)
+        };
+        for (p, _) in m {
+            painter.circle_filled(to_screen(*p), 4.0, vp::dim());
+        }
+        let text = match measure_result(m) {
+            Some((a, b, label)) => {
+                let (sa, sb) = (to_screen(a), to_screen(b));
+                painter.line_segment([sa, sb], Stroke::new(1.4, vp::dim()));
+                crate::viewport::label_box(&painter, sa + (sb - sa) / 2.0 + egui::vec2(0.0, -14.0), &label, vp::dim());
+                format!("Measure: {label} · click again to start over")
+            }
+            None => "Measure: click a face or edge, then another".into(),
+        };
+        crate::viewport::label_box(&painter, rect.left_top() + egui::vec2(rect.width() / 2.0 - 120.0, 16.0), &text, theme::text());
+    }
     mate_dialog(app, ui, rect);
 }
 
 fn check_interference(app: &mut App) {
     let Some(a) = asm(app) else { return };
-    let items: Vec<(usize, crate::doc::BodyId, [f64; 12])> = a
-        .instances
-        .iter()
-        .filter(|x| !x.hidden)
-        .map(|x| {
-            let m = x.pose.m();
-            let t = x.pose.t;
-            (x.studio, x.body, [m.x_axis.x, m.y_axis.x, m.z_axis.x, t[0], m.x_axis.y, m.y_axis.y, m.z_axis.y, t[1], m.x_axis.z, m.y_axis.z, m.z_axis.z, t[2]])
-        })
-        .collect();
-    app.asm.clash_ids = a.instances.iter().filter(|x| !x.hidden).map(|x| x.id).collect();
+    let mut items: Vec<(usize, crate::doc::BodyId, [f64; 12])> = vec![];
+    let mut ids = vec![];
+    for x in a.instances.iter().filter(|x| !x.hidden) {
+        for l in assembly::leaves(&app.ws.assemblies, x) {
+            let p = x.pose.compose(&l.pose);
+            let m = p.m();
+            let t = p.t;
+            items.push((l.studio, l.body, [m.x_axis.x, m.y_axis.x, m.z_axis.x, t[0], m.x_axis.y, m.y_axis.y, m.z_axis.y, t[1], m.x_axis.z, m.y_axis.z, m.z_axis.z, t[2]]));
+            ids.push(x.id);
+        }
+    }
+    app.asm.clash_ids = ids;
     let docs = app.studio_docs();
     app.kernel.set_studios(docs);
     app.kernel.interference(items);
@@ -883,7 +1078,8 @@ fn check_interference(app: &mut App) {
 
 pub fn interference_result(app: &mut App, pairs: Vec<(usize, usize, f64)>) {
     let ids = app.asm.clash_ids.clone();
-    app.asm.clashes = Some(pairs.into_iter().filter_map(|(i, j, v)| Some((*ids.get(i)?, *ids.get(j)?, v))).collect());
+    // clashes inside one sub-assembly belong to that assembly, not this one
+    app.asm.clashes = Some(pairs.into_iter().filter_map(|(i, j, v)| Some((*ids.get(i)?, *ids.get(j)?, v))).filter(|(p, q, _)| p != q).collect());
     app.asm.checking = false;
     app.asm.scene_dirty = true;
 }

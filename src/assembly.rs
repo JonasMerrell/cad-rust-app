@@ -40,6 +40,10 @@ impl Pose {
     pub fn inverse_dir(&self, d: DVec3) -> DVec3 {
         self.m().transpose() * d
     }
+    /// `self` after `inner`: maps `inner`'s coordinates through both poses.
+    pub fn compose(&self, inner: &Pose) -> Pose {
+        Pose { r: (self.m() * inner.m()).to_cols_array(), t: self.apply(DVec3::from(inner.t)).into() }
+    }
     /// Pose after a small rotation `w` (axis-angle, about the world origin of
     /// the part's centre `c`) and translation `v`.
     pub fn perturbed(&self, w: DVec3, v: DVec3, c: DVec3) -> Pose {
@@ -70,6 +74,54 @@ pub struct Instance {
     pub fixed: bool,
     #[serde(default)]
     pub hidden: bool,
+    /// A whole assembly (index into the workspace's assemblies) placed rigidly,
+    /// in place of a single part.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sub: Option<usize>,
+}
+
+/// One part inside an instance: a Part Studio body and its pose relative to the instance.
+#[derive(Clone, Copy, Debug)]
+pub struct Leaf {
+    pub studio: usize,
+    pub body: BodyId,
+    pub pose: Pose,
+}
+
+/// The parts an instance stands for: itself, or every part of its sub-assembly (recursively).
+pub fn leaves(all: &[Assembly], inst: &Instance) -> Vec<Leaf> {
+    fn rec(all: &[Assembly], inst: &Instance, acc: Pose, depth: usize, out: &mut Vec<Leaf>) {
+        match inst.sub {
+            None => out.push(Leaf { studio: inst.studio, body: inst.body, pose: acc }),
+            Some(k) if depth < 8 => {
+                if let Some(a) = all.get(k) {
+                    for c in a.instances.iter().filter(|c| !c.hidden) {
+                        rec(all, c, acc.compose(&c.pose), depth + 1, out);
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+    let mut out = vec![];
+    rec(all, inst, Pose::default(), 0, &mut out);
+    out
+}
+
+/// Whether assembly `k` is `target` or contains it at any depth (inserting it would loop).
+pub fn contains(all: &[Assembly], k: usize, target: usize) -> bool {
+    fn rec(all: &[Assembly], k: usize, target: usize, depth: usize) -> bool {
+        k == target || (depth < 8 && all.get(k).map(|a| a.instances.iter().filter_map(|x| x.sub).any(|s| rec(all, s, target, depth + 1))).unwrap_or(false))
+    }
+    rec(all, k, target, 0)
+}
+
+/// A step of an exploded view: instances moved along a direction.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct ExplodeStep {
+    pub insts: Vec<u64>,
+    pub dir: [f64; 3],
+    pub distance: f64,
 }
 
 /// A mate connector in the instance's own coordinates.
@@ -186,6 +238,8 @@ pub struct Assembly {
     pub next_id: u64,
     #[serde(default)]
     pub relations: Vec<Relation>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub explode_steps: Vec<ExplodeStep>,
 }
 
 impl Assembly {
@@ -493,7 +547,25 @@ mod tests {
     use super::*;
 
     fn inst(id: u64, fixed: bool, t: [f64; 3]) -> Instance {
-        Instance { id, name: format!("i{id}"), studio: 0, body: (1, 0), pose: Pose { t, ..Default::default() }, fixed, hidden: false }
+        Instance { id, name: format!("i{id}"), studio: 0, body: (1, 0), pose: Pose { t, ..Default::default() }, fixed, hidden: false, sub: None }
+    }
+
+    #[test]
+    fn sub_assembly_leaves_compose_poses() {
+        // sub: two parts 10 apart; top: the sub turned 90° about Z and moved to (100, 0, 0)
+        let sub = Assembly { name: "sub".into(), instances: vec![inst(1, true, [0.0; 3]), inst(2, false, [10.0, 0.0, 0.0])], ..Default::default() };
+        let rot = DMat3::from_rotation_z(std::f64::consts::FRAC_PI_2);
+        let mut top_i = inst(1, true, [100.0, 0.0, 0.0]);
+        top_i.pose.r = rot.to_cols_array();
+        top_i.sub = Some(0);
+        let top = Assembly { name: "top".into(), instances: vec![top_i.clone()], ..Default::default() };
+        let all = vec![sub, top];
+        let l = leaves(&all, &top_i);
+        assert_eq!(l.len(), 2);
+        let world = top_i.pose.compose(&l[1].pose).apply(DVec3::ZERO);
+        assert!((world - DVec3::new(100.0, 10.0, 0.0)).length() < 1e-9, "{world:?}");
+        assert!(contains(&all, 1, 0));
+        assert!(!contains(&all, 0, 1));
     }
 
     #[test]
