@@ -78,6 +78,8 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
             let mut v = vec![("Profiles", Profiles, Slot::Many(profiles))];
             if *end == EndType::UpToFace {
                 v.push(("Up to face", Face, Slot::One(up_to)));
+            } else if *end == EndType::UpToVertex {
+                v.push(("Up to vertex", Points, Slot::One(up_to)));
             }
             v
         }
@@ -389,7 +391,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 val(ui, "Second depth", depth2, Kind::Length, &mut changed);
                             }
                         }
-                        let _ = draft;
+                        if matches!(end, EndType::Blind | EndType::UpToNext | EndType::UpToVertex) && !*second {
+                            val(ui, "Draft angle (°)", draft, Kind::Angle, &mut changed);
+                        }
                     }
                     Op::Revolve { mode, angle, op: bop, .. } => {
                         combo(ui, "Operation", bop, &bool_ops, &mut changed);
@@ -416,7 +420,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                             val(ui, "End radius", end_radius, Kind::Length, &mut changed);
                         }
                     }
-                    Op::Chamfer { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
+                    Op::Chamfer { distance, mode, distance2, angle, .. } => {
+                        let mut m = match mode.as_str() {
+                            "two" => 1,
+                            "angle" => 2,
+                            _ => 0,
+                        };
+                        combo(ui, "Type", &mut m, &[(0, "Equal distance"), (1, "Two distances"), (2, "Distance and angle")], &mut changed);
+                        *mode = ["equal", "two", "angle"][m].into();
+                        val(ui, "Distance", distance, Kind::Length, &mut changed);
+                        if m == 1 {
+                            val(ui, "Second distance", distance2, Kind::Length, &mut changed);
+                        } else if m == 2 {
+                            val(ui, "Angle (°)", angle, Kind::Angle, &mut changed);
+                        }
+                    }
                     Op::Shell { thickness, .. } => val(ui, "Thickness", thickness, Kind::Length, &mut changed),
                     Op::Hole { hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, tapped, .. } => {
                         ui.horizontal(|ui| {

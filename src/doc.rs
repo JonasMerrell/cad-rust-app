@@ -140,16 +140,20 @@ pub enum EndType {
     Symmetric,
     ThroughAll,
     UpToFace,
+    UpToNext,
+    UpToVertex,
 }
 
 impl EndType {
-    pub const ALL: [EndType; 4] = [EndType::Blind, EndType::Symmetric, EndType::ThroughAll, EndType::UpToFace];
+    pub const ALL: [EndType; 6] = [EndType::Blind, EndType::Symmetric, EndType::ThroughAll, EndType::UpToNext, EndType::UpToFace, EndType::UpToVertex];
     pub fn label(self) -> &'static str {
         match self {
             EndType::Blind => "Blind",
             EndType::Symmetric => "Symmetric",
             EndType::ThroughAll => "Through all",
             EndType::UpToFace => "Up to face",
+            EndType::UpToNext => "Up to next",
+            EndType::UpToVertex => "Up to vertex",
         }
     }
 }
@@ -232,6 +236,13 @@ pub enum Op {
     Chamfer {
         edges: Vec<Ref>,
         distance: String,
+        /// "equal", "two" (two distances) or "angle" (distance and angle)
+        #[serde(default = "equal")]
+        mode: String,
+        #[serde(default = "one")]
+        distance2: String,
+        #[serde(default = "deg45")]
+        angle: String,
     },
     Shell {
         faces: Vec<Ref>,
@@ -482,7 +493,7 @@ impl Op {
             "sweep" => Op::Sweep { profiles: vec![], path: vec![], op: BoolOp::New },
             "loft" => Op::Loft { profiles: vec![], ruled: false, op: BoolOp::New },
             "fillet" => Op::Fillet { edges: vec![], radius: s("2"), variable: false, end_radius: s("4") },
-            "chamfer" => Op::Chamfer { edges: vec![], distance: s("1") },
+            "chamfer" => Op::Chamfer { edges: vec![], distance: s("1"), mode: s("equal"), distance2: s("1"), angle: s("45") },
             "shell" => Op::Shell { faces: vec![], thickness: s("1") },
             "hole" => Op::Hole {
                 points: vec![],
@@ -702,6 +713,15 @@ fn plane_mode() -> String {
 }
 fn zero() -> String {
     "0".into()
+}
+fn equal() -> String {
+    "equal".into()
+}
+fn one() -> String {
+    "1".into()
+}
+fn deg45() -> String {
+    "45".into()
 }
 fn part() -> String {
     "part".into()

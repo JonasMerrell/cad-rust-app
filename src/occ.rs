@@ -155,6 +155,17 @@ pub fn compound(shapes: &[&Shape]) -> R<Shape> {
     take(ex::ex_compound(&l), "compound")
 }
 
+/// mode 0: two distances; mode 1: distance and angle (radians).
+pub fn chamfer2(s: &Shape, edges: &[Edge], d1: f64, d2: f64, mode: i32) -> R<Shape> {
+    let l = list(edges.iter().map(edge_shape));
+    take(ex::ex_chamfer2(&s.inner, &l, d1, d2, mode), "chamfer")
+}
+
+pub fn offset_faces(s: &Shape, faces: &[Face], d: f64) -> R<Shape> {
+    let l = list(faces.iter().map(face_shape));
+    take(ex::ex_offset_faces(&s.inner, &l, d), "move face")
+}
+
 pub fn sew(shapes: &[&Shape], solid: bool) -> R<Shape> {
     let l = list(shapes.iter().map(|s| &*s.inner));
     take(ex::ex_sew(&l, 1e-4, solid), "knit")

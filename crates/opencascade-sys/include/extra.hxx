@@ -8,6 +8,9 @@
 #include <string>
 
 #include <BRepAlgoAPI_Common.hxx>
+#include <BRepOffset_MakeOffset.hxx>
+#include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
+#include <TopExp.hxx>
 #include <BRepBuilderAPI_Sewing.hxx>
 #include <BRepBuilderAPI_MakeSolid.hxx>
 #include <BRepOffsetAPI_MakeFilling.hxx>
@@ -435,4 +438,42 @@ inline std::unique_ptr<TopoDS_Shape> ex_offset_shape(const TopoDS_Shape &s, doub
     return ex_null("offset failed");
   return ex_wrap(mk.Shape());
   EX_CATCH("offset")
+}
+
+/// Chamfer with two distances (mode 0) or a distance and an angle in radians (mode 1),
+/// measured on the first face next to each edge.
+inline std::unique_ptr<TopoDS_Shape> ex_chamfer2(const TopoDS_Shape &s, const TopTools_ListOfShape &edges, double d1, double d2, int mode) {
+  EX_TRY
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  BRepFilletAPI_MakeChamfer mk(s);
+  for (auto it = edges.begin(); it != edges.end(); ++it) {
+    const TopoDS_Edge &e = TopoDS::Edge(*it);
+    if (!map.Contains(e) || map.FindFromKey(e).IsEmpty())
+      return ex_null("an edge is not on the part");
+    const TopoDS_Face &f = TopoDS::Face(map.FindFromKey(e).First());
+    if (mode == 0)
+      mk.Add(d1, d2, e, f);
+    else
+      mk.AddDA(d1, d2, e, f);
+  }
+  mk.Build();
+  if (!mk.IsDone())
+    return ex_null("the chamfer could not be built (too large?)");
+  return ex_wrap(mk.Shape());
+  EX_CATCH("chamfer")
+}
+
+/// Move faces of a solid along their normals, keeping the rest in place.
+inline std::unique_ptr<TopoDS_Shape> ex_offset_faces(const TopoDS_Shape &s, const TopTools_ListOfShape &faces, double d) {
+  EX_TRY
+  BRepOffset_MakeOffset mo;
+  mo.Initialize(s, 0.0, 1e-5, BRepOffset_Skin, Standard_True, Standard_False, GeomAbs_Intersection, Standard_False, Standard_False);
+  for (auto it = faces.begin(); it != faces.end(); ++it)
+    mo.SetOffsetOnFace(TopoDS::Face(*it), d);
+  mo.MakeOffsetShape();
+  if (!mo.IsDone())
+    return ex_null("the faces could not be moved");
+  return ex_wrap(ex_unify_raw(mo.Shape()));
+  EX_CATCH("move face")
 }

@@ -384,16 +384,23 @@ impl<'a> Model<'a> {
             }
             Op::Extrude { profiles, end, depth, opposite, second, depth2, up_to, op, draft } => {
                 let faces = self.profile_faces(profiles)?;
+                let sign = if *opposite { -1.0 } else { 1.0 };
                 let d = match end {
                     EndType::ThroughAll | EndType::UpToFace => self.model_size() * 2.0,
+                    EndType::UpToNext => self.up_to_next(&faces, sign, *op)?,
+                    EndType::UpToVertex => {
+                        let r = up_to.as_ref().ok_or("select the vertex or point to extrude up to")?;
+                        let p = self.point_of(r)?;
+                        let (_, fr) = &faces[0];
+                        ((p - DVec3::from(fr.origin)).dot(fr.normal() * sign)).abs()
+                    }
                     _ => self.len(depth)?,
                 };
                 if d <= 0.0 {
                     return Err("depth must be positive".into());
                 }
                 let d2 = if *second { self.len(depth2)? } else { 0.0 };
-                let _ = self.ang(draft)?;
-                let sign = if *opposite { -1.0 } else { 1.0 };
+                let draft_a = self.ang(draft)?.to_radians();
                 let build = |sign: f64| -> R<Vec<Shape>> {
                     let mut tools = vec![];
                     for (face, fr) in &faces {
@@ -408,6 +415,13 @@ impl<'a> Model<'a> {
                                 }
                                 s
                             }
+                        };
+                        // tapered sides
+                        let solid = if draft_a.abs() > 1e-9 && matches!(end, EndType::Blind | EndType::UpToNext | EndType::UpToVertex) && !*second {
+                            let sides: Vec<Face> = unique_faces(&solid).into_iter().filter(|f| face_geom(f).normal.dot(n).abs() < 1e-6).collect();
+                            occ::draft(&solid, &sides, n, draft_a, DVec3::from(fr.origin), n)?
+                        } else {
+                            solid
                         };
                         let solid = if *end == EndType::UpToFace {
                             let r = up_to.as_ref().ok_or("select the face to extrude up to")?;
@@ -426,7 +440,7 @@ impl<'a> Model<'a> {
                 let mut tools = build(sign)?;
                 // Cutting away from the material does nothing: go into it instead, as the original does.
                 let cutting = matches!(op, BoolOp::Remove | BoolOp::Intersect);
-                if cutting && *end != EndType::Symmetric && !*second && !tools.iter().any(|t| self.bodies.iter().any(|b| overlaps_volume(&b.shape, t))) {
+                if cutting && !matches!(end, EndType::Symmetric | EndType::UpToNext | EndType::UpToVertex) && !*second && !tools.iter().any(|t| self.bodies.iter().any(|b| overlaps_volume(&b.shape, t))) {
                     tools = build(-sign)?;
                 }
                 self.apply(fid, tools, *op)
@@ -470,12 +484,22 @@ impl<'a> Model<'a> {
                 let r2 = if *variable { self.len(end_radius)? } else { r };
                 self.edge_op(edges, |shape, es| occ::fillet(shape, es, r, r2))
             }
-            Op::Chamfer { edges, distance } => {
+            Op::Chamfer { edges, distance, mode, distance2, angle } => {
                 let d = self.len(distance)?;
                 if d <= 0.0 {
                     return Err("distance must be positive".into());
                 }
-                self.edge_op(edges, |shape, es| occ::chamfer(shape, es, d))
+                match mode.as_str() {
+                    "two" => {
+                        let d2 = self.len(distance2)?;
+                        self.edge_op(edges, |shape, es| occ::chamfer2(shape, es, d, d2, 0))
+                    }
+                    "angle" => {
+                        let a = self.ang(angle)?.to_radians();
+                        self.edge_op(edges, |shape, es| occ::chamfer2(shape, es, d, a, 1))
+                    }
+                    _ => self.edge_op(edges, |shape, es| occ::chamfer(shape, es, d)),
+                }
             }
             Op::Shell { faces, thickness } => {
                 let t = self.len(thickness)?;
@@ -628,7 +652,9 @@ impl<'a> Model<'a> {
                     for f in &fs {
                         let g = face_geom(f);
                         if !g.planar {
-                            return Err("only flat faces can be moved".into());
+                            // curved faces: offset the face within the solid
+                            shape = occ::offset_faces(&shape, std::slice::from_ref(f), d)?;
+                            continue;
                         }
                         let prism = occ::prism(&Shape::from(f), g.normal * d)?;
                         shape = if d >= 0.0 { occ::fuse(&shape, &prism)? } else { occ::cut(&shape, &prism)? };
@@ -667,7 +693,18 @@ impl<'a> Model<'a> {
                         hi = hi.max(bb.max());
                     }
                     let bbox = Shape::box_from_corners(lo, hi);
-                    tools.push(occ::common(&slab, &bbox)?);
+                    let mut region = occ::common(&slab, &bbox)?;
+                    // drop pieces that don't touch the rib line (they would fill recesses elsewhere)
+                    for b in &self.bodies {
+                        region = occ::cut(&region, &b.shape)?;
+                    }
+                    let (wa, wb) = (fr.to_world(pa), fr.to_world(pb));
+                    let near_line = |sh: &Shape| unique_faces(sh).iter().flat_map(face_tris).flatten().any(|p| polyline_distance(&[wa, wb], p) < t + 1e-3);
+                    for piece in solids_of(&region) {
+                        if near_line(&piece) {
+                            tools.push(piece);
+                        }
+                    }
                 }
                 if tools.is_empty() {
                     return Err("select the rib lines".into());
@@ -1187,6 +1224,36 @@ impl<'a> Model<'a> {
             (poly, [(q0 + ww * ba / 2.0).into(), (q1 + ww * ba / 2.0).into()])
         });
         Ok((solid, relief, flat_add))
+    }
+
+    /// Depth to the next part along the profile normal: up to where material starts
+    /// (adding) or where the first material run ends (cutting).
+    fn up_to_next(&self, faces: &[(Face, Frame)], sign: f64, op: BoolOp) -> R<f64> {
+        let size = self.model_size() * 2.0;
+        let mut best: Option<f64> = None;
+        for (face, fr) in faces {
+            let n = fr.normal() * sign;
+            let o = DVec3::from(fr.origin);
+            let long = occ::prism(&Shape::from(face), n * size)?;
+            for b in &self.bodies {
+                if bbox_apart(&b.shape, &long) {
+                    continue;
+                }
+                let Ok(c) = occ::common(&b.shape, &long) else { continue };
+                // distances along n of the overlap's vertices
+                let tris: Vec<f64> = unique_faces(&c).iter().flat_map(face_tris).flat_map(|t| t.map(|p| (p - o).dot(n))).collect();
+                if tris.is_empty() {
+                    continue;
+                }
+                let lo = tris.iter().cloned().fold(f64::INFINITY, f64::min);
+                let hi = tris.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+                let d = if matches!(op, BoolOp::Remove | BoolOp::Intersect) { hi } else { lo };
+                if d > 1e-6 && best.map(|x| d < x).unwrap_or(true) {
+                    best = Some(d);
+                }
+            }
+        }
+        best.ok_or_else(|| "there is no part ahead of the profile".to_string())
     }
 
     /// Add an open surface (shell or face) as a body of its own.
@@ -2825,5 +2892,180 @@ mod flange_tests {
         let flat = r.flats.iter().find(|f| f.feature == sm).unwrap();
         assert_eq!(flat.bends.len(), 1);
         assert!(r.bodies[0].bbox[1][2] > 13.9, "flange goes up: {:?}", r.bodies[0].bbox);
+    }
+}
+
+#[cfg(test)]
+mod feature_option_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+    use std::f64::consts::PI;
+
+    fn sketch_on(doc: &mut Document, plane: Ref, frame: Frame, f: impl FnOnce(&mut Sketch)) -> FeatId {
+        let mut s = Sketch::default();
+        f(&mut s);
+        doc.insert("S".into(), Op::Sketch { plane, sketch: s, frame })
+    }
+
+    fn rect(s: &mut Sketch, x0: f64, y0: f64, w: f64, h: f64) {
+        let p: Vec<_> = [(x0, y0), (x0 + w, y0), (x0 + w, y0 + h), (x0, y0 + h)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+    }
+
+    fn extrude(doc: &mut Document, sk: FeatId, at: [f64; 2], f: impl FnOnce(&mut Op)) {
+        let mut o = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, .. } = &mut o {
+            profiles.push(Ref::Region { sketch: sk, point: at });
+        }
+        f(&mut o);
+        doc.insert("E".into(), o);
+    }
+
+    fn run(doc: &Document) -> RebuildResult {
+        let r = rebuild(doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "feature {} failed: {:?}", f.id, f.error);
+        }
+        r
+    }
+
+    fn top() -> Ref {
+        Ref::OriginPlane { plane: OriginPlane::Top }
+    }
+
+    fn cube(doc: &mut Document, size: f64) {
+        let s = sketch_on(doc, top(), Frame::TOP, |s| rect(s, 0.0, 0.0, size, size));
+        extrude(doc, s, [1.0, 1.0], |o| {
+            if let Op::Extrude { depth, .. } = o {
+                *depth = size.to_string();
+            }
+        });
+    }
+
+    #[test]
+    fn chamfer_types() {
+        for (mode, want) in [("equal", 0.5 * 2.0 * 2.0 * 20.0), ("two", 0.5 * 2.0 * 4.0 * 20.0), ("angle", 0.5 * 2.0 * 2.0 * (60f64).to_radians().tan() * 20.0)] {
+            let mut doc = Document::default();
+            cube(&mut doc, 20.0);
+            let mut c = Op::new_default("chamfer").unwrap();
+            if let Op::Chamfer { edges, distance, mode: m, distance2, angle } = &mut c {
+                edges.push(Ref::Edge { point: [10.0, 0.0, 20.0] });
+                *distance = "2".into();
+                *m = mode.into();
+                *distance2 = "4".into();
+                *angle = "60".into();
+            }
+            doc.insert("C".into(), c);
+            let r = run(&doc);
+            let removed = 8000.0 - r.bodies[0].volume;
+            assert!((removed - want).abs() < 0.5, "{mode}: removed {removed} want {want}");
+        }
+    }
+
+    #[test]
+    fn extrude_up_to_next_and_vertex() {
+        // plate 40x20x5, a separate block above it from z=15..25; extrude a square up from the plate's top to the next part
+        let mut doc = Document::default();
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| rect(s, 0.0, 0.0, 40.0, 20.0));
+        extrude(&mut doc, s, [1.0, 1.0], |o| {
+            if let Op::Extrude { depth, .. } = o {
+                *depth = "5".into();
+            }
+        });
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| rect(s, 0.0, 0.0, 40.0, 20.0));
+        extrude(&mut doc, s, [1.0, 1.0], |o| {
+            if let Op::Extrude { depth, depth2, second, opposite, op, .. } = o {
+                // a 10 mm slab from z = 15 to 25: extrude 25 then cut the bottom 15 later is awkward; use second direction
+                *depth = "25".into();
+                *second = false;
+                *opposite = false;
+                *op = BoolOp::New;
+                let _ = depth2;
+            }
+        });
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| rect(s, -1.0, -1.0, 42.0, 22.0));
+        extrude(&mut doc, s, [-0.5, -0.5], |o| {
+            if let Op::Extrude { depth, op, .. } = o {
+                *depth = "15".into();
+                *op = BoolOp::Remove;
+            }
+        });
+        // now only a block z = 15..25 remains; put the plate back
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| rect(s, 0.0, 0.0, 40.0, 20.0));
+        extrude(&mut doc, s, [1.0, 1.0], |o| {
+            if let Op::Extrude { depth, op, .. } = o {
+                *depth = "5".into();
+                *op = BoolOp::New;
+            }
+        });
+        let face = Ref::Face { point: [20.0, 10.0, 5.0], normal: [0.0, 0.0, 1.0] };
+        let s = sketch_on(&mut doc, face, Frame::TOP, |s| rect(s, 15.0, 5.0, 10.0, 10.0));
+        extrude(&mut doc, s, [20.0, 10.0], |o| {
+            if let Op::Extrude { end, op, .. } = o {
+                *end = EndType::UpToNext;
+                *op = BoolOp::New;
+            }
+        });
+        let r = run(&doc);
+        let post = r.bodies.iter().find(|b| (b.volume - 1000.0).abs() < 1.0);
+        assert!(post.is_some(), "volumes {:?}", r.bodies.iter().map(|b| b.volume).collect::<Vec<_>>());
+
+        // up to vertex: a cube with a boss up to a point at z = 30
+        let mut doc = Document::default();
+        cube(&mut doc, 20.0);
+        let face = Ref::Face { point: [10.0, 10.0, 20.0], normal: [0.0, 0.0, 1.0] };
+        let s = sketch_on(&mut doc, face, Frame::TOP, |s| rect(s, 5.0, 5.0, 10.0, 10.0));
+        extrude(&mut doc, s, [10.0, 10.0], |o| {
+            if let Op::Extrude { end, up_to, op, .. } = o {
+                *end = EndType::UpToVertex;
+                *up_to = Some(Ref::Vertex { point: [50.0, 50.0, 30.0] });
+                *op = BoolOp::Add;
+            }
+        });
+        let r = run(&doc);
+        assert!((r.bodies[0].volume - 9000.0).abs() < 1.0, "{}", r.bodies[0].volume);
+    }
+
+    #[test]
+    fn extrude_draft_tapers_inward() {
+        let mut doc = Document::default();
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| rect(s, 0.0, 0.0, 20.0, 20.0));
+        extrude(&mut doc, s, [1.0, 1.0], |o| {
+            if let Op::Extrude { depth, draft, .. } = o {
+                *depth = "10".into();
+                *draft = "5".into();
+            }
+        });
+        let r = run(&doc);
+        let t = 10.0 * (5f64).to_radians().tan();
+        let top = 20.0 - 2.0 * t;
+        // frustum volume
+        let want = 10.0 / 3.0 * (400.0 + top * top + 20.0 * top);
+        assert!((r.bodies[0].volume - want).abs() < 1.0, "{} want {want}", r.bodies[0].volume);
+    }
+
+    #[test]
+    fn move_curved_face() {
+        let mut doc = Document::default();
+        let s = sketch_on(&mut doc, top(), Frame::TOP, |s| {
+            let c = s.add_point(DVec2::ZERO);
+            s.add_curve(Geom::Circle { c, r: 5.0 }, false);
+        });
+        extrude(&mut doc, s, [0.0, 0.0], |o| {
+            if let Op::Extrude { depth, .. } = o {
+                *depth = "10".into();
+            }
+        });
+        let mut mf = Op::new_default("moveFace").unwrap();
+        if let Op::MoveFace { faces, distance } = &mut mf {
+            faces.push(Ref::Face { point: [5.0, 0.0, 5.0], normal: [1.0, 0.0, 0.0] });
+            *distance = "1".into();
+        }
+        doc.insert("MF".into(), mf);
+        let r = run(&doc);
+        let want = PI * 36.0 * 10.0;
+        assert!((r.bodies[0].volume - want).abs() < 2.0, "{} want {want}", r.bodies[0].volume);
     }
 }

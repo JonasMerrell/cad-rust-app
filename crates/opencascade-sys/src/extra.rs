@@ -38,6 +38,8 @@ mod inner {
         pub fn ex_hlr(s: &TopoDS_Shape, dx: f64, dy: f64, dz: f64, ux: f64, uy: f64, uz: f64, kind: i32) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_is_valid(s: &TopoDS_Shape) -> bool;
         pub fn ex_compound(shapes: &TopTools_ListOfShape) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_chamfer2(s: &TopoDS_Shape, edges: &TopTools_ListOfShape, d1: f64, d2: f64, mode: i32) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_offset_faces(s: &TopoDS_Shape, faces: &TopTools_ListOfShape, d: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_sew(shapes: &TopTools_ListOfShape, tol: f64, solid: bool) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_fill(edges: &TopTools_ListOfShape) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_offset_shape(s: &TopoDS_Shape, d: f64) -> UniquePtr<TopoDS_Shape>;
