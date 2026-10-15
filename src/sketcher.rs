@@ -1774,7 +1774,7 @@ fn project_at(app: &mut App, _raw: DVec2) {
     let local = glam::Vec2::new(pos.x - app.viewport_rect.min.x, pos.y - app.viewport_rect.min.y);
     let cam = app.camera.clone();
     let (_, fr) = app.sk();
-    let mut best: Option<(f32, Vec<[f32; 3]>, bool)> = None;
+    let mut best: Option<(f32, Vec<[f32; 3]>, bool, Option<([f64; 3], [f64; 3], f64)>)> = None;
     for b in &app.result.bodies {
         for e in &b.edges {
             let pts: Vec<glam::Vec2> = e.pts.iter().map(|p| cam.project(Vec3::from(*p))).collect();
@@ -1783,24 +1783,101 @@ fn project_at(app: &mut App, _raw: DVec2) {
                 let t = if d.length_squared() < 1e-9 { 0.0 } else { ((local - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
                 let dist = (w[0] + d * t - local).length();
                 if dist < 7.0 && best.as_ref().map(|b| dist < b.0).unwrap_or(true) {
-                    best = Some((dist, e.pts.clone(), e.linear));
+                    best = Some((dist, e.pts.clone(), e.linear, e.circle));
                 }
             }
         }
     }
-    let Some((_, pts, linear)) = best else {
+    let Some((_, pts, linear, circle)) = best else {
         app.flash("Click a model edge to project it", ToastKind::Info);
         return;
     };
     app.sk_checkpoint();
     let local: Vec<DVec2> = pts.iter().map(|p| fr.to_local(glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64))).collect();
+    let closed = local.len() > 2 && (local[0] - *local.last().unwrap()).length() < 1e-5;
+    let n = fr.normal();
     let sk = app.sk_mut();
     let fix = |sk: &mut Sketch, p: DVec2| {
         let id = sk.add_point(p);
         sk.constraints.push(Constraint::Fix { p: id, x: p.x, y: p.y });
         id
     };
-    if linear || local.len() == 2 {
+    // Circles and arcs project exactly from their true centre, axis and radius (the
+    // display polyline is only an approximation, and stops short of the real edge).
+    let done = 'exact: {
+        if let Some((c3, ax, r)) = circle {
+            let (c3, ax) = (glam::DVec3::from(c3), glam::DVec3::from(ax).normalize());
+            let c = fr.to_local(c3);
+            let tilt = ax.dot(n).abs();
+            if tilt < 1e-6 {
+                // seen edge-on: a straight line, along the circle's in-plane direction
+                let d3 = ax.cross(n).normalize();
+                let d = (fr.to_local(c3 + d3) - c).normalize();
+                let (a, b) = if closed {
+                    (c - d * r, c + d * r)
+                } else {
+                    let ts: Vec<f64> = local.iter().map(|p| (*p - c).dot(d)).collect();
+                    let lo = ts.iter().cloned().fold(f64::INFINITY, f64::min).max(-r);
+                    let hi = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max).min(r);
+                    // snap to the exact extremes when the arc reaches them
+                    let snap = |t: f64| if (t.abs() - r).abs() < 1e-2 * r.max(1.0) { r * t.signum() } else { t };
+                    (c + d * snap(lo), c + d * snap(hi))
+                };
+                let a = fix(sk, a);
+                let b = fix(sk, b);
+                sk.add_curve(Geom::Line { a, b }, false);
+                break 'exact true;
+            }
+            if closed && tilt < 1.0 - 1e-9 {
+                // tilted circle: an ellipse with the full radius across the tilt
+                let m3 = ax.cross(n).normalize();
+                let m = (fr.to_local(c3 + m3) - c).normalize();
+                let cid = fix(sk, c);
+                let aid = fix(sk, c + m * r);
+                sk.add_curve(Geom::Ellipse { c: cid, a: aid, rmin: r * tilt }, false);
+                break 'exact true;
+            }
+            if closed {
+                let cid = fix(sk, c);
+                let ci = sk.add_curve(Geom::Circle { c: cid, r }, false);
+                sk.constraints.push(Constraint::Radius { c: ci, dim: Dim { expr: format!("{r} mm"), offset: [r * 0.7, r * 0.7] } });
+                break 'exact true;
+            }
+            if tilt > 1.0 - 1e-9 {
+                let cid = fix(sk, c);
+                let (p0, p1) = (c + (local[0] - c).normalize() * r, c + (*local.last().unwrap() - c).normalize() * r);
+                let a = fix(sk, p0);
+                let b = fix(sk, p1);
+                let mid = local[local.len() / 2];
+                let (t0, t1) = arc_angles(c, p0, p1);
+                let mut tm = (mid - c).to_angle();
+                while tm < t0 {
+                    tm += std::f64::consts::TAU;
+                }
+                sk.add_curve(if tm <= t1 { Geom::Arc { c: cid, a, b } } else { Geom::Arc { c: cid, a: b, b: a } }, false);
+                break 'exact true;
+            }
+        }
+        // any other edge that lands on a straight line becomes one line between its ends
+        let collinear = local.len() > 2 && {
+            let (a, b) = (local[0], local.iter().cloned().max_by(|p, q| (*p - local[0]).length().total_cmp(&(*q - local[0]).length())).unwrap());
+            let d = (b - a).normalize_or_zero();
+            d != DVec2::ZERO && local.iter().all(|p| (*p - a).perp_dot(d).abs() < 1e-4)
+        };
+        if collinear {
+            let d = (local.iter().cloned().max_by(|p, q| (*p - local[0]).length().total_cmp(&(*q - local[0]).length())).unwrap() - local[0]).normalize();
+            let ts: Vec<f64> = local.iter().map(|p| (*p - local[0]).dot(d)).collect();
+            let lo = ts.iter().cloned().fold(f64::INFINITY, f64::min);
+            let hi = ts.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let a = fix(sk, local[0] + d * lo);
+            let b = fix(sk, local[0] + d * hi);
+            sk.add_curve(Geom::Line { a, b }, false);
+            break 'exact true;
+        }
+        false
+    };
+    if done {
+    } else if linear || local.len() == 2 {
         let a = fix(sk, local[0]);
         let b = fix(sk, *local.last().unwrap());
         sk.add_curve(Geom::Line { a, b }, false);
