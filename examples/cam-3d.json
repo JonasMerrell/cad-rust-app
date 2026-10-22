@@ -1,0 +1,27 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [80, 60]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 16}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [
+    {"kind": "edge", "point": [0, 0, 8]}, {"kind": "edge", "point": [80, 0, 8]}, {"kind": "edge", "point": [80, 60, 8]}, {"kind": "edge", "point": [0, 60, 8]}], "radius": 12}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [
+    {"kind": "edge", "point": [40, 0, 16]}, {"kind": "edge", "point": [80, 30, 16]}, {"kind": "edge", "point": [40, 60, 16]}, {"kind": "edge", "point": [0, 30, 16]}], "radius": 6}}},
+  {"tool": "create_sketch", "args": {"plane": {"kind": "face", "point": [40, 30, 16], "normal": [0, 0, 1]}}},
+  {"tool": "sketch_add", "args": {"sketch_id": 5, "items": [{"type": "rect", "corner1": [25, 20], "corner2": [55, 40]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 5}], "depth": 6, "op": "remove"}}},
+
+  {"tool": "create_cam", "args": {"name": "Mould", "stock": {"side": 4, "top": 1, "bottom": 0, "material": "Aluminium"}, "post": "linuxcnc"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø8 flat"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6 ball"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6 90° chamfer"}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "adaptive", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "parallel", "tool": 2, "angle": 45, "slope_max": 50}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "waterline", "tool": 2, "slope_min": 40, "stepdown": 0.4}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "deburr", "tool": 3, "chamfer": 0.3}},
+  {"tool": "cam_info", "args": {"cam": 0}},
+  {"tool": "simulate_cam", "args": {"cam": 0, "path": "mould-sim.png"}},
+  {"tool": "render_cam", "args": {"cam": 0, "path": "mould-paths.png"}},
+  {"tool": "export_gcode", "args": {"cam": 0, "path": "mould.ngc"}},
+  {"tool": "save_document", "args": {"path": "mould.json"}}
+]

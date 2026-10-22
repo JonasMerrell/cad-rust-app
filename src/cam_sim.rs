@@ -93,7 +93,8 @@ impl Cutter {
             }
             prof.last().map(|p| p.1).unwrap_or(0.0)
         };
-        let lut = if undercut { vec![] } else { (0..=((r / LUT_STEP).ceil() as usize)).map(|i| height_at((i as f64 * LUT_STEP).min(r)) as f32).collect() };
+        let exact = |rho: f64| crate::cam_3d::tool_height(t, rho).unwrap_or_else(|| height_at(rho));
+        let lut = if undercut { vec![] } else { (0..=((r / LUT_STEP).ceil() as usize)).map(|i| exact((i as f64 * LUT_STEP).min(r)) as f32).collect() };
         let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
         let neck = if undercut { if t.neck_diameter > 0.0 { t.neck_diameter / 2.0 } else { r * 0.6 } } else { (t.shank_diameter / 2.0).max(0.1) };
         let stick = t.stickout.max(flutes + 1.0);
@@ -197,7 +198,7 @@ impl Sim {
             let Some(tool) = cam.tool(tp.tool) else { continue };
             let op = cam.op(tp.op);
             let allowance = match op.map(|o| o.kind) {
-                Some(OpKind::Chamfer) => op.map(|o| o.chamfer * 2.0 + 0.1).unwrap_or(1.0) as f32,
+                Some(OpKind::Chamfer) | Some(OpKind::Deburr) => op.map(|o| o.chamfer * 2.0 + 0.3).unwrap_or(1.0) as f32,
                 Some(OpKind::Tap) | Some(OpKind::Thread) => f32::INFINITY,
                 _ => 0.02,
             };
@@ -268,6 +269,22 @@ impl Sim {
         work
     }
 
+    /// sqrt(1 + slope²) of the part's height map at a cell (gentler of the two sides along each axis).
+    fn slope_factor(&self, i: i32, j: i32) -> f32 {
+        let (nx, ny) = (self.nx as i32, self.ny as i32);
+        let h = |i: i32, j: i32| if i < 0 || j < 0 || i >= nx || j >= ny { f32::NEG_INFINITY } else { self.part[(j * nx + i) as usize] };
+        let c = h(i, j);
+        let side = |a: f32, b: f32| {
+            let d = |q: f32| if q.is_finite() { (q - c).abs() } else { f32::INFINITY };
+            let m = d(a).min(d(b));
+            if m.is_finite() { m } else { 0.0 }
+        };
+        let cell = self.cell as f32;
+        let gx = side(h(i - 1, j), h(i + 1, j)) / cell;
+        let gy = side(h(i, j - 1), h(i, j + 1)) / cell;
+        (1.0 + gx * gx + gy * gy).sqrt()
+    }
+
     fn cell_of(&self, p: DVec3) -> (i32, i32) {
         (((p.x - self.x0) / self.cell).round() as i32, ((p.y - self.y0) / self.cell).round() as i32)
     }
@@ -313,8 +330,13 @@ impl Sim {
                         deepest = deepest.max(s - z);
                         self.stock[k] = z;
                         if rho <= inner && self.part[k] > z + c.allowance {
-                            gouge = gouge.max(self.part[k] - z);
-                            self.gouged[k] = true;
+                            // depth across the surface, not straight down: on a steep wall a hair's
+                            // breadth sideways reads as a deep cut from above
+                            let d = (self.part[k] - z) / self.slope_factor(i, j);
+                            if d > c.allowance {
+                                gouge = gouge.max(d);
+                                self.gouged[k] = true;
+                            }
                         }
                     }
                 }

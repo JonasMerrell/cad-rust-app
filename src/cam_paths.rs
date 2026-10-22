@@ -142,7 +142,7 @@ pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
 
 // ---------------------------------------------------------------- 2D helpers
 
-fn flat(s: &Shapes) -> Vec<Contour> {
+pub(crate) fn flat(s: &Shapes) -> Vec<Contour> {
     s.iter().flat_map(|sh| sh.iter().cloned()).collect()
 }
 
@@ -268,7 +268,7 @@ fn perimeter(c: &[P2]) -> f64 {
     (0..n).map(|i| DVec2::from(c[i]).distance(DVec2::from(c[(i + 1) % n]))).sum()
 }
 
-fn rect(lo: DVec3, hi: DVec3) -> Shapes {
+pub(crate) fn rect(lo: DVec3, hi: DVec3) -> Shapes {
     vec![vec![vec![[lo.x, lo.y], [hi.x, lo.y], [hi.x, hi.y], [lo.x, hi.y]]]]
 }
 
@@ -403,7 +403,7 @@ pub struct Hole {
 }
 
 /// Cutting levels from just below `top` down to `bottom`, including the given floors in between.
-fn levels(top: f64, bottom: f64, stepdown: f64, floors: &[f64]) -> Vec<f64> {
+pub(crate) fn levels(top: f64, bottom: f64, stepdown: f64, floors: &[f64]) -> Vec<f64> {
     if top <= bottom + 1e-6 {
         return vec![bottom];
     }
@@ -422,33 +422,33 @@ fn levels(top: f64, bottom: f64, stepdown: f64, floors: &[f64]) -> Vec<f64> {
 
 // ---------------------------------------------------------------- path builder
 
-struct Pb<'a> {
-    tool: &'a Tool,
-    moves: Vec<Move>,
-    pos: Option<DVec3>,
-    safe: f64,
-    retract: f64,
-    ramp: f64,
-    feed: f64,
-    plunge: f64,
+pub(crate) struct Pb<'a> {
+    pub tool: &'a Tool,
+    pub moves: Vec<Move>,
+    pub pos: Option<DVec3>,
+    pub safe: f64,
+    pub retract: f64,
+    pub ramp: f64,
+    pub feed: f64,
+    pub plunge: f64,
 }
 
 impl<'a> Pb<'a> {
-    fn rapid(&mut self, p: DVec3) {
+    pub(crate) fn rapid(&mut self, p: DVec3) {
         if self.pos.map(|q| q.distance(p) > 1e-6).unwrap_or(true) {
             self.moves.push(Move::Rapid(p.to_array()));
             self.pos = Some(p);
         }
     }
 
-    fn cut(&mut self, p: DVec3, f: f64) {
+    pub(crate) fn cut(&mut self, p: DVec3, f: f64) {
         if self.pos.map(|q| q.distance(p) > 1e-6).unwrap_or(true) {
             self.moves.push(Move::Feed(p.to_array(), f));
             self.pos = Some(p);
         }
     }
 
-    fn up(&mut self) {
+    pub(crate) fn up(&mut self) {
         if let Some(p) = self.pos {
             if p.z < self.safe - 1e-6 {
                 self.rapid(DVec3::new(p.x, p.y, self.safe));
@@ -457,7 +457,7 @@ impl<'a> Pb<'a> {
     }
 
     /// Retract, move over (x, y) and come down to just above `z_top`.
-    fn approach(&mut self, x: f64, y: f64, z_top: f64) {
+    pub(crate) fn approach(&mut self, x: f64, y: f64, z_top: f64) {
         self.up();
         self.rapid(DVec3::new(x, y, self.safe));
         self.rapid(DVec3::new(x, y, (z_top + self.retract).min(self.safe)));
@@ -467,7 +467,7 @@ impl<'a> Pb<'a> {
     /// When the tool is within `link` of the start at `z_from` it feeds straight over instead of retracting
     /// (if `region` is given the link must stay inside it).
     /// `tabs`: (count, width, top) raises the cut over holding tabs.
-    fn cut_loop(&mut self, c: &[P2], z: f64, z_from: f64, link: f64, region: Option<&Shapes>, tabs: Option<(u32, f64, f64)>) {
+    pub(crate) fn cut_loop(&mut self, c: &[P2], z: f64, z_from: f64, link: f64, region: Option<&Shapes>, tabs: Option<(u32, f64, f64)>) {
         if c.len() < 2 {
             return;
         }
@@ -645,7 +645,7 @@ impl<'a> Ctx<'a> {
         self.geo.part
     }
 
-    fn wz(&self, z: Option<f64>) -> Option<f64> {
+    pub(crate) fn wz(&self, z: Option<f64>) -> Option<f64> {
         z.map(|z| z + self.origin.z)
     }
 
@@ -688,7 +688,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         feed: tool.feed.max(1.0),
         plunge: tool.plunge_feed.max(1.0),
     };
-    if matches!(op.kind, OpKind::Clear | OpKind::Pocket | OpKind::Bore) && matches!(tool.kind, ToolKind::Ball) {
+    if matches!(op.kind, OpKind::Clear | OpKind::Pocket | OpKind::Bore | OpKind::Adaptive) && matches!(tool.kind, ToolKind::Ball) {
         tp.warnings.push("ball end mill: floors will have scallops; use a flat end mill to finish them".into());
     }
     match op.kind {
@@ -698,6 +698,11 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         OpKind::Contour => contour(ctx, op, &mut pb, &mut tp),
         OpKind::Chamfer => chamfer(ctx, op, &mut pb, &mut tp),
         OpKind::Drill | OpKind::Bore | OpKind::Thread | OpKind::Tap => holes_op(ctx, op, &mut pb, &mut tp),
+        OpKind::Adaptive => crate::cam_3d::adaptive(ctx, op, &mut pb, &mut tp),
+        OpKind::Parallel => crate::cam_3d::parallel(ctx, op, &mut pb, &mut tp),
+        OpKind::Waterline => crate::cam_3d::waterline(ctx, op, &mut pb, &mut tp),
+        OpKind::Scallop => crate::cam_3d::scallop(ctx, op, &mut pb, &mut tp),
+        OpKind::Deburr => crate::cam_3d::deburr(ctx, op, &mut pb, &mut tp),
     }
     pb.up();
     // deepest cut below the stock top against the flute length
@@ -713,11 +718,11 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
     tp
 }
 
-fn stepdown(op: &Operation, tool: &Tool) -> f64 {
+pub(crate) fn stepdown(op: &Operation, tool: &Tool) -> f64 {
     op.stepdown.unwrap_or(tool.stepdown).max(0.01)
 }
 
-fn stepover(op: &Operation, tool: &Tool) -> f64 {
+pub(crate) fn stepover(op: &Operation, tool: &Tool) -> f64 {
     (op.stepover.unwrap_or(tool.stepover).clamp(0.01, 1.0)) * tool.diameter
 }
 

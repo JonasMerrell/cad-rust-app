@@ -492,10 +492,35 @@ pub enum OpKind {
     Thread,
     /// Tapping (rigid or floating).
     Tap,
+    /// 3D roughing with cycloidal (trochoidal) loops that keep the tool's engagement constant.
+    Adaptive,
+    /// 3D finishing along parallel lines.
+    Parallel,
+    /// 3D finishing at constant heights (steep walls).
+    Waterline,
+    /// 3D finishing with a constant stepover measured over the surface.
+    Scallop,
+    /// Chamfer or break every sharp edge in 3D (or the picked ones).
+    Deburr,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 9] = [OpKind::Face, OpKind::Clear, OpKind::Pocket, OpKind::Contour, OpKind::Chamfer, OpKind::Drill, OpKind::Bore, OpKind::Thread, OpKind::Tap];
+    pub const ALL: [OpKind; 14] = [
+        OpKind::Face,
+        OpKind::Clear,
+        OpKind::Pocket,
+        OpKind::Contour,
+        OpKind::Chamfer,
+        OpKind::Drill,
+        OpKind::Bore,
+        OpKind::Thread,
+        OpKind::Tap,
+        OpKind::Adaptive,
+        OpKind::Parallel,
+        OpKind::Waterline,
+        OpKind::Scallop,
+        OpKind::Deburr,
+    ];
 
     pub fn label(self) -> &'static str {
         match self {
@@ -508,6 +533,11 @@ impl OpKind {
             OpKind::Bore => "Bore",
             OpKind::Thread => "Thread",
             OpKind::Tap => "Tap",
+            OpKind::Adaptive => "Adaptive",
+            OpKind::Parallel => "Parallel",
+            OpKind::Waterline => "Waterline",
+            OpKind::Scallop => "Scallop",
+            OpKind::Deburr => "Deburr",
         }
     }
 
@@ -522,6 +552,11 @@ impl OpKind {
             OpKind::Bore => "bore",
             OpKind::Thread => "thread",
             OpKind::Tap => "tap",
+            OpKind::Adaptive => "adaptive",
+            OpKind::Parallel => "parallel",
+            OpKind::Waterline => "waterline",
+            OpKind::Scallop => "scallop",
+            OpKind::Deburr => "deburr",
         }
     }
 
@@ -529,9 +564,13 @@ impl OpKind {
         let s = s.trim().to_lowercase();
         OpKind::ALL.into_iter().find(|k| k.key() == s || k.label().to_lowercase() == s).or(match s.as_str() {
             "facing" => Some(OpKind::Face),
-            "rough" | "roughing" | "adaptive" | "clearing" => Some(OpKind::Clear),
+            "rough" | "roughing" | "clearing" => Some(OpKind::Clear),
+            "adaptive_clear" | "trochoidal" | "cycloidal" | "hsm" => Some(OpKind::Adaptive),
+            "raster" | "parallel_finish" => Some(OpKind::Parallel),
+            "z_level" | "zlevel" | "contour_3d" => Some(OpKind::Waterline),
+            "constant_stepover" => Some(OpKind::Scallop),
+            "chamfer_3d" | "3d_chamfer" | "edge_break" => Some(OpKind::Deburr),
             "profile" | "outline" => Some(OpKind::Contour),
-            "deburr" => Some(OpKind::Chamfer),
             "spot" | "ream" | "peck" => Some(OpKind::Drill),
             "helix" | "helical" | "circular" => Some(OpKind::Bore),
             "thread_mill" | "threadmill" => Some(OpKind::Thread),
@@ -551,6 +590,11 @@ impl OpKind {
             OpKind::Bore => "Helically interpolates holes bigger than the end mill.",
             OpKind::Thread => "Mills internal threads in holes with a thread mill.",
             OpKind::Tap => "Taps holes; rigid tapping on LinuxCNC/Fanuc, floating on GRBL.",
+            OpKind::Adaptive => "3D roughing level by level with cycloidal loops: the tool takes a constant small stepover at full depth, so it can cut deep and fast.",
+            OpKind::Parallel => "3D finishing along parallel lines at an angle, optionally only on shallow or steep areas.",
+            OpKind::Waterline => "3D finishing at constant heights; best on steep walls.",
+            OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
+            OpKind::Deburr => "Chamfers or breaks every sharp convex edge in 3D with a chamfer mill or V-bit (or only the picked edges).",
         }
     }
 
@@ -565,6 +609,9 @@ impl OpKind {
             OpKind::Bore => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball),
             OpKind::Thread => k == ToolKind::ThreadMill,
             OpKind::Tap => k == ToolKind::Tap,
+            OpKind::Adaptive => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball),
+            OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall),
+            OpKind::Deburr => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
         }
     }
 }
@@ -632,6 +679,17 @@ pub struct Operation {
     pub slot_depth: f64,
     /// Coolant on (overrides the tool's setting when true).
     pub coolant: bool,
+    /// Adaptive: radius of the cycloidal loops, mm (0 = 40% of the tool diameter).
+    pub trochoid: f64,
+    /// Parallel: direction of the passes, degrees from X.
+    pub angle: f64,
+    /// 3D finishing: only where the surface slopes between these angles (degrees from horizontal).
+    pub slope_min: f64,
+    pub slope_max: f64,
+    /// Deburr: points (work coordinates) on the edges to chamfer; empty = every sharp edge.
+    pub edges: Vec<[f64; 3]>,
+    /// Deburr: edges sharper than this angle between faces, degrees.
+    pub edge_angle: f64,
 }
 
 impl Default for Operation {
@@ -667,8 +725,19 @@ impl Default for Operation {
             left_hand: false,
             slot_depth: 0.0,
             coolant: false,
+            trochoid: 0.0,
+            angle: 0.0,
+            slope_min: 0.0,
+            slope_max: 90.0,
+            edges: vec![],
+            edge_angle: 30.0,
         }
     }
+}
+
+/// Round to 0.1 mm.
+fn fmt_round(v: f64) -> f64 {
+    (v * 10.0).round() / 10.0
 }
 
 // ---------------------------------------------------------------- setup
@@ -823,6 +892,22 @@ impl Cam {
         if kind == OpKind::Clear {
             op.leave = 0.3;
             op.leave_floor = 0.2;
+        }
+        let tl = self.tool(tool).cloned();
+        match kind {
+            OpKind::Adaptive => {
+                op.leave = 0.3;
+                op.leave_floor = 0.2;
+                op.ramp_angle = 2.0;
+                op.stepover = Some(0.1);
+                if let Some(t) = &tl {
+                    op.stepdown = Some(fmt_round((t.diameter * 1.5).min(t.flute_length * 0.9).max(t.stepdown)));
+                }
+            }
+            OpKind::Parallel | OpKind::Scallop => op.stepover = Some(0.1),
+            OpKind::Waterline => op.stepdown = Some(0.3),
+            OpKind::Deburr => op.chamfer = 0.3,
+            _ => {}
         }
         if kind == OpKind::Drill && self.tool(tool).map(|t| t.kind == ToolKind::Drill && t.diameter > 0.0).unwrap_or(false) {
             op.peck = self.tool(tool).map(|t| t.diameter).unwrap_or(0.0);
