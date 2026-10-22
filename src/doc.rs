@@ -699,6 +699,25 @@ pub struct Document {
     /// Custom feature types defined by scripts.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub custom_features: Vec<crate::script::CustomDef>,
+    /// Images laid on faces (labels, logos).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub decals: Vec<Decal>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Decal {
+    pub id: u64,
+    pub name: String,
+    /// The image file (PNG or JPEG), compressed and base64-encoded.
+    pub image: String,
+    /// Centre on the face, and the face's outward normal.
+    pub at: [f64; 3],
+    pub normal: [f64; 3],
+    /// Width in mm (height follows the image's proportions).
+    pub width: f64,
+    /// Turn about the normal, degrees.
+    #[serde(default)]
+    pub angle: f64,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -721,6 +740,7 @@ impl Default for Document {
             configs: vec![],
             active_config: None,
             custom_features: vec![],
+            decals: vec![],
         }
     }
 }

@@ -49,6 +49,24 @@ pub struct PointInst {
     pub color: [f32; 4],
 }
 
+/// An image laid on the model (a decal): RGBA pixels and the quad's corners
+/// (bottom-left, bottom-right, top-right, top-left).
+#[derive(Clone)]
+pub struct DecalDraw {
+    /// Identifies the image, so its texture is uploaded once.
+    pub key: u64,
+    pub rgba: Arc<Vec<u8>>,
+    pub size: [u32; 2],
+    pub corners: [[f32; 3]; 4],
+}
+
+#[repr(C)]
+#[derive(Clone, Copy, Pod, Zeroable, Debug, Default)]
+struct DecalVertex {
+    pos: [f32; 3],
+    uv: [f32; 2],
+}
+
 #[repr(C)]
 #[derive(Clone, Copy, Pod, Zeroable)]
 struct Uniforms {
@@ -68,6 +86,7 @@ pub struct SceneData {
     /// Lines drawn without depth testing (overlays such as the sketch being edited).
     pub lines_top: Vec<LineInst>,
     pub points: Vec<PointInst>,
+    pub decals: Vec<DecalDraw>,
 }
 
 impl SceneData {
@@ -133,6 +152,13 @@ pub struct Renderer {
     lines: wgpu::RenderPipeline,
     lines_top: wgpu::RenderPipeline,
     points: wgpu::RenderPipeline,
+    decal_pipeline: wgpu::RenderPipeline,
+    decal_bgl: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    textures: std::collections::HashMap<u64, wgpu::BindGroup>,
+    b_decals: Buf,
+    /// Texture key of each decal quad in `b_decals`, in order.
+    decal_keys: Vec<u64>,
     version: u64,
     b_opaque: Buf,
     b_transparent: Buf,
@@ -206,6 +232,22 @@ struct MOut { @builtin(position) pos: vec4<f32>, @location(0) n: vec3<f32>, @loc
 fn i3(f: f32) -> i32 { return i32(f + 0.5); }
 
 struct LOut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32>, @location(1) w: vec3<f32> };
+
+@group(1) @binding(0) var dtex: texture_2d<f32>;
+@group(1) @binding(1) var dsamp: sampler;
+struct DOut { @builtin(position) pos: vec4<f32>, @location(0) uv: vec2<f32>, @location(1) w: vec3<f32> };
+@vertex fn vs_decal(@location(0) p: vec3<f32>, @location(1) uv: vec2<f32>) -> DOut {
+    var o: DOut;
+    o.pos = u.view_proj * vec4<f32>(p, 1.0);
+    o.uv = uv; o.w = p;
+    return o;
+}
+@fragment fn fs_decal(i: DOut) -> @location(0) vec4<f32> {
+    if (clip_dist(i.w) < 0.0) { discard; }
+    let c = textureSample(dtex, dsamp, i.uv);
+    if (c.a < 0.02) { discard; }
+    return c;
+}
 
 @vertex fn vs_line(@builtin(vertex_index) vi: u32,
                    @location(0) a: vec3<f32>, @location(1) width: f32,
@@ -352,9 +394,54 @@ impl Renderer {
             cache: None,
         });
 
+        let decal_bgl = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
+            label: Some("decal"),
+            entries: &[
+                wgpu::BindGroupLayoutEntry {
+                    binding: 0,
+                    visibility: wgpu::ShaderStages::FRAGMENT,
+                    ty: wgpu::BindingType::Texture { sample_type: wgpu::TextureSampleType::Float { filterable: true }, view_dimension: wgpu::TextureViewDimension::D2, multisampled: false },
+                    count: None,
+                },
+                wgpu::BindGroupLayoutEntry { binding: 1, visibility: wgpu::ShaderStages::FRAGMENT, ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering), count: None },
+            ],
+        });
+        let decal_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor { label: None, bind_group_layouts: &[Some(&bgl), Some(&decal_bgl)], immediate_size: 0 });
+        let decal_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x2];
+        let decal_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("decals"),
+            layout: Some(&decal_layout),
+            vertex: wgpu::VertexState {
+                module: &shader,
+                entry_point: Some("vs_decal"),
+                buffers: &[Some(wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<DecalVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &decal_attrs })],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState { module: &shader, entry_point: Some("fs_decal"), targets: &target, compilation_options: Default::default() }),
+            primitive: wgpu::PrimitiveState::default(),
+            // pulled towards the camera so it sits on the face it covers
+            depth_stencil: depth(false, wgpu::CompareFunction::LessEqual, -4),
+            multisample: ms,
+            multiview_mask: None,
+            cache: None,
+        });
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            label: Some("decal"),
+            mag_filter: wgpu::FilterMode::Linear,
+            min_filter: wgpu::FilterMode::Linear,
+            mipmap_filter: wgpu::MipmapFilterMode::Linear,
+            ..Default::default()
+        });
+
         let r = Renderer {
             uniform,
             bind,
+            decal_pipeline,
+            decal_bgl,
+            sampler,
+            textures: Default::default(),
+            b_decals: Buf { buf: None, count: 0 },
+            decal_keys: vec![],
             mesh_opaque,
             mesh_transparent,
             lines,
@@ -388,6 +475,43 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             r.b_lines.upload(device, &self.scene.lines, v);
             r.b_lines_top.upload(device, &self.scene.lines_top, v);
             r.b_points.upload(device, &self.scene.points, v);
+            // decals: one textured quad each, textures uploaded once per image
+            let mut verts: Vec<DecalVertex> = vec![];
+            r.decal_keys.clear();
+            for d in &self.scene.decals {
+                if !r.textures.contains_key(&d.key) {
+                    let tex = device.create_texture(&wgpu::TextureDescriptor {
+                        label: Some("decal"),
+                        size: wgpu::Extent3d { width: d.size[0].max(1), height: d.size[1].max(1), depth_or_array_layers: 1 },
+                        mip_level_count: 1,
+                        sample_count: 1,
+                        dimension: wgpu::TextureDimension::D2,
+                        format: wgpu::TextureFormat::Rgba8UnormSrgb,
+                        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+                        view_formats: &[],
+                    });
+                    queue.write_texture(
+                        wgpu::TexelCopyTextureInfo { texture: &tex, mip_level: 0, origin: wgpu::Origin3d::ZERO, aspect: wgpu::TextureAspect::All },
+                        &d.rgba,
+                        wgpu::TexelCopyBufferLayout { offset: 0, bytes_per_row: Some(4 * d.size[0]), rows_per_image: Some(d.size[1]) },
+                        wgpu::Extent3d { width: d.size[0], height: d.size[1], depth_or_array_layers: 1 },
+                    );
+                    let view = tex.create_view(&Default::default());
+                    let bg = device.create_bind_group(&wgpu::BindGroupDescriptor {
+                        label: Some("decal"),
+                        layout: &r.decal_bgl,
+                        entries: &[wgpu::BindGroupEntry { binding: 0, resource: wgpu::BindingResource::TextureView(&view) }, wgpu::BindGroupEntry { binding: 1, resource: wgpu::BindingResource::Sampler(&r.sampler) }],
+                    });
+                    r.textures.insert(d.key, bg);
+                }
+                let c = d.corners;
+                let uv = [[0.0, 1.0], [1.0, 1.0], [1.0, 0.0], [0.0, 0.0]];
+                for k in [0, 1, 2, 0, 2, 3] {
+                    verts.push(DecalVertex { pos: c[k], uv: uv[k] });
+                }
+                r.decal_keys.push(d.key);
+            }
+            r.b_decals.upload(device, &verts, v);
             r.version = self.scene.version;
         }
         let _ = sd;
@@ -409,6 +533,19 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
             rp.set_pipeline(&r.mesh_opaque);
             rp.set_vertex_buffer(0, b.slice(..));
             rp.draw(0..r.b_opaque.count, 0..1);
+        }
+        if let Some(b) = &r.b_decals.buf {
+            if !r.decal_keys.is_empty() {
+                rp.set_pipeline(&r.decal_pipeline);
+                rp.set_vertex_buffer(0, b.slice(..));
+                for (i, k) in r.decal_keys.iter().enumerate() {
+                    if let Some(bg) = r.textures.get(k) {
+                        rp.set_bind_group(1, bg, &[]);
+                        rp.draw(i as u32 * 6..i as u32 * 6 + 6, 0..1);
+                    }
+                }
+                rp.set_bind_group(0, &r.bind, &[]);
+            }
         }
         if let Some(b) = &r.b_lines.buf {
             rp.set_pipeline(&r.lines);

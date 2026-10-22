@@ -256,6 +256,26 @@ impl Session {
                 self.status()
             }
             "list_geometry" => self.geometry(a),
+            "add_decal" => {
+                let path = str_arg(a, "image")?;
+                let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                image::load_from_memory(&bytes).map_err(|_| "the image must be a PNG or JPEG")?;
+                let face = a.get("face").ok_or("give face: a planar face ref {point, normal}")?;
+                let at = face.get("point").and_then(pt3).ok_or("face.point")?;
+                let normal = face.get("normal").and_then(pt3).ok_or("face.normal")?;
+                let id = self.doc.decals.iter().map(|d| d.id).max().unwrap_or(0) + 1;
+                let name = std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Decal".into());
+                self.doc.decals.push(crate::doc::Decal {
+                    id,
+                    name,
+                    image: crate::import::pack(&bytes),
+                    at: at.into(),
+                    normal: normal.into(),
+                    width: a.get("width").and_then(|w| w.as_f64()).unwrap_or(20.0),
+                    angle: a.get("angle").and_then(|w| w.as_f64()).unwrap_or(0.0),
+                });
+                json!({"decal": id, "note": "Decals show in the editor (not in render, STL or STEP)."})
+            }
             "set_part" => {
                 let b = a.get("body").and_then(|b| b.as_array()).ok_or("give body [f,i]")?;
                 let id: crate::doc::BodyId = (b.first().and_then(|v| v.as_u64()).ok_or("body [f,i]")?, b.get(1).and_then(|v| v.as_u64()).ok_or("body [f,i]")? as u32);
@@ -980,6 +1000,7 @@ fn tools() -> Value {
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
         {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Steel, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass) or hidden.", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}}), &["body"])},
+        {"name": "add_decal", "description": "Lay a PNG/JPEG image on a flat face (a label or logo), centred on face.point. width in mm (height keeps the image's proportions), angle turns it about the face normal. Shown in the editor; not exported.", "inputSchema": obj(json!({"image": {"type": "string"}, "face": {"type": "object"}, "width": {"type": "number"}, "angle": {"type": "number"}}), &["image", "face"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},

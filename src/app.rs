@@ -146,6 +146,8 @@ pub struct App {
     pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
     /// Studio lighting with reflections, for presentation.
     pub realistic: bool,
+    /// Decoded decal images by (id, data hash): RGBA pixels and size.
+    pub decal_images: std::cell::RefCell<std::collections::HashMap<(u64, u64), (Arc<Vec<u8>>, [u32; 2])>>,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -224,6 +226,7 @@ impl App {
             pending_send: None,
             send_result: Default::default(),
             realistic: false,
+            decal_images: Default::default(),
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -1233,7 +1236,8 @@ impl App {
                 let props = self.picks.iter().any(|r| matches!(r, Ref::Body { .. }));
                 let props_h = if props { 190.0f32.min(total * 0.35) } else { 0.0 };
                 let issues_h = if self.result.issues.is_empty() { 0.0 } else { (90.0 + 34.0 * self.result.issues.len().min(4) as f32).min(total * 0.35) };
-                let top_h = (total - parts_h - props_h - issues_h).max(80.0);
+                let decals_h = if self.doc.decals.is_empty() { 0.0 } else { (40.0 + 52.0 * self.doc.decals.len().min(3) as f32).min(total * 0.25) };
+                let top_h = (total - parts_h - props_h - issues_h - decals_h).max(80.0);
                 ui.allocate_ui(egui::vec2(ui.available_width(), top_h), |ui| {
                     egui::ScrollArea::vertical().id_salt("feature-scroll").auto_shrink([false, false]).show(ui, |ui| {
                         Frame::new().inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 }).show(ui, |ui| self.feature_tree(ui));
@@ -1244,6 +1248,11 @@ impl App {
                 Frame::new().inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 }).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("parts-scroll").max_height(parts_h - 6.0).auto_shrink([false, true]).show(ui, |ui| self.parts_list(ui));
                 });
+                if !self.doc.decals.is_empty() {
+                    egui::ScrollArea::vertical().id_salt("decals-scroll").max_height(decals_h).auto_shrink([false, true]).show(ui, |ui| {
+                        section(ui, "Decals", |ui| self.decals_ui(ui));
+                    });
+                }
                 if !self.result.issues.is_empty() {
                     egui::ScrollArea::vertical().id_salt("issues-scroll").max_height(issues_h).auto_shrink([false, true]).show(ui, |ui| {
                         section(ui, "Model check", |ui| self.issues_ui(ui));
@@ -1661,6 +1670,87 @@ impl App {
                 self.start_feature("heal");
             }
         });
+    }
+
+    /// Lay an image on a flat face.
+    pub fn add_decal(&mut self, at: [f64; 3], normal: [f64; 3]) {
+        let Some(p) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"]).pick_file() else { return };
+        let bytes = match std::fs::read(&p) {
+            Ok(b) => b,
+            Err(e) => return self.flash(format!("Could not read {}: {e}", p.display()), ToastKind::Error),
+        };
+        if image::load_from_memory(&bytes).is_err() {
+            return self.flash("That file is not a PNG or JPEG image", ToastKind::Error);
+        }
+        let (lo, hi) = self.model_bounds();
+        let size = if lo.x.is_finite() { (hi - lo).length() } else { 50.0 };
+        self.checkpoint();
+        let id = self.doc.decals.iter().map(|d| d.id).max().unwrap_or(0) + 1;
+        let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Decal".into());
+        self.doc.decals.push(doc::Decal { id, name, image: crate::import::pack(&bytes), at, normal, width: (size * 0.25).max(5.0).round(), angle: 0.0 });
+        self.changed();
+    }
+
+    fn decals_ui(&mut self, ui: &mut Ui) {
+        let mut del = None;
+        let mut edits: Vec<(usize, f64, f64)> = vec![];
+        for (i, d) in self.doc.decals.iter().enumerate() {
+            ui.label(RichText::new(&d.name).size(12.5));
+            ui.horizontal(|ui| {
+                let (mut w, mut a) = (d.width, d.angle);
+                let r1 = ui.add(egui::DragValue::new(&mut w).range(0.1..=10000.0).speed(0.5).prefix("width ").suffix(" mm"));
+                let r2 = ui.add(egui::DragValue::new(&mut a).range(-360.0..=360.0).speed(1.0).prefix("turn ").suffix("°"));
+                if r1.changed() || r2.changed() {
+                    edits.push((i, w, a));
+                }
+                if ui.add(egui::Button::image(icons::image("close", 12.0).tint(theme::muted())).frame(false)).on_hover_text("Remove").clicked() {
+                    del = Some(i);
+                }
+            });
+        }
+        if !edits.is_empty() || del.is_some() {
+            self.checkpoint();
+            for (i, w, a) in edits {
+                self.doc.decals[i].width = w;
+                self.doc.decals[i].angle = a;
+            }
+            if let Some(i) = del {
+                self.doc.decals.remove(i);
+            }
+            // decals are display only: no rebuild needed
+            self.scene_dirty = true;
+        }
+    }
+
+    /// Decals as textured quads for the renderer.
+    pub fn decal_draws(&self) -> Vec<crate::render::DecalDraw> {
+        use std::hash::{Hash, Hasher};
+        let mut out = vec![];
+        for d in &self.doc.decals {
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            d.image.hash(&mut h);
+            let key = (d.id, h.finish());
+            let mut cache = self.decal_images.borrow_mut();
+            if !cache.contains_key(&key) {
+                let Ok(img) = crate::import::unpack(&d.image).and_then(|b| image::load_from_memory(&b).map_err(|e| e.to_string())) else { continue };
+                // keep textures a sensible size
+                let img = if img.width().max(img.height()) > 2048 { img.thumbnail(2048, 2048) } else { img };
+                let rgba = img.to_rgba8();
+                let size = [rgba.width(), rgba.height()];
+                cache.insert(key, (Arc::new(rgba.into_raw()), size));
+            }
+            let (rgba, size) = cache[&key].clone();
+            let n = glam::DVec3::from(d.normal).normalize_or(glam::DVec3::Z);
+            let fr = crate::kernel::frame_from(glam::DVec3::from(d.at), n);
+            let rot = glam::DMat3::from_axis_angle(n, d.angle.to_radians());
+            let (x, y) = (rot * glam::DVec3::from(fr.x), rot * glam::DVec3::from(fr.y));
+            let (w, hgt) = (d.width, d.width * size[1] as f64 / size[0].max(1) as f64);
+            let c = glam::DVec3::from(d.at) + n * 0.01;
+            let corner = |sx: f64, sy: f64| (c + x * (sx * w / 2.0) + y * (sy * hgt / 2.0)).as_vec3().to_array();
+            let k = key.0.wrapping_mul(0x9e37_79b9_7f4a_7c15) ^ key.1;
+            out.push(crate::render::DecalDraw { key: k, rgba, size, corners: [corner(-1.0, -1.0), corner(1.0, -1.0), corner(1.0, 1.0), corner(-1.0, 1.0)] });
+        }
+        out
     }
 
     /// Point the camera at a model-check problem and mark it.

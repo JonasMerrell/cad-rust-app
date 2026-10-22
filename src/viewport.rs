@@ -429,6 +429,7 @@ fn is_picked(app: &App, r: &Ref) -> bool {
 
 fn build_scene(app: &App) -> SceneData {
     let mut s = SceneData::default();
+    s.decals = app.decal_draws();
     let in_sketch = app.sketch.as_ref().map(|k| k.feature);
     let rolled = rolled_ids(app);
     let size = plane_size(app);
@@ -1070,6 +1071,13 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         app.picks.clear();
                         app.changed();
                         close = true;
+                    }
+                }
+                if let Ref::Face { point, normal } = t {
+                    if t.is_planar() && ui.button("Add decal (image)…").clicked() {
+                        let (p, n) = (*point, *normal);
+                        close = true;
+                        app.add_decal(p, n);
                     }
                 }
                 if t.is_planar() && ui.button("New sketch here").clicked() {

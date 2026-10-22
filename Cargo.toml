@@ -1,6 +1,6 @@
 [package]
 name = "cad-rust-app"
-version = "0.1.2"
+version = "0.2.0"
 edition = "2024"
 
 [dependencies]
@@ -13,7 +13,7 @@ egui_extras = { version = "0.36.2", features = ["svg", "image"] }
 env_logger = "0.11.11"
 epaint_default_fonts = "0.36"
 glam = { version = "0.34.1", features = ["bytemuck", "serde"] }
-image = { version = "0.25.10", default-features = false, features = ["png"] }
+image = { version = "0.25.10", default-features = false, features = ["png", "jpeg"] }
 log = "0.4.34"
 opencascade = "0.3"
 opencascade-sys = "0.3"
