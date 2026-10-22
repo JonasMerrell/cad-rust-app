@@ -166,6 +166,10 @@ pub fn offset_faces(s: &Shape, faces: &[Face], d: f64) -> R<Shape> {
     take(ex::ex_offset_faces(&s.inner, &l, d), "move face")
 }
 
+pub fn heal(s: &Shape, tol: f64) -> R<Shape> {
+    take(ex::ex_heal(&s.inner, tol), "heal")
+}
+
 /// A solid (or shell) from triangles: shared vertices `pts`, index triples `tris`.
 /// With `merge`, coplanar neighbouring triangles become one flat face.
 pub fn mesh_solid(pts: &[f64], tris: &[u32], merge: bool) -> R<Shape> {

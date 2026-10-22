@@ -25,7 +25,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
     &["thicken", "rib", "helix", "transform", "moveFace", "deleteFace"],
     &["surfaceExtrude", "surfaceRevolve", "surfaceLoft", "fill", "offsetSurface", "knit"],
-    &["sheetMetal", "flange", "tab", "convertSheet", "derived"],
+    &["sheetMetal", "flange", "tab", "convertSheet", "derived", "heal"],
 ];
 /// Buttons whose label is shown on the desktop toolbar (`jm`).
 pub const PRIMARY: &[&str] = &["sketch"];
@@ -133,6 +133,8 @@ pub struct App {
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
     pub awaiting_sketch_plane: bool,
     pub was_narrow: Option<bool>,
+    /// Model-check problem being pointed at in the viewport.
+    pub issue_focus: Option<[f64; 3]>,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -204,6 +206,7 @@ impl App {
             script_editor: None,
             awaiting_sketch_plane: false,
             was_narrow: None,
+            issue_focus: None,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -729,6 +732,7 @@ impl App {
                 self.measure = None;
             } else {
                 self.picks.clear();
+                self.issue_focus = None;
             }
             self.scene_dirty = true;
         }
@@ -1128,7 +1132,8 @@ impl App {
                 let parts_h = if self.parts_open { (24.0 + 23.0 * self.result.bodies.len().max(1) as f32 + 12.0).min(total * 0.4) } else { 30.0 };
                 let props = self.picks.iter().any(|r| matches!(r, Ref::Body { .. }));
                 let props_h = if props { 190.0f32.min(total * 0.35) } else { 0.0 };
-                let top_h = (total - parts_h - props_h).max(80.0);
+                let issues_h = if self.result.issues.is_empty() { 0.0 } else { (90.0 + 34.0 * self.result.issues.len().min(4) as f32).min(total * 0.35) };
+                let top_h = (total - parts_h - props_h - issues_h).max(80.0);
                 ui.allocate_ui(egui::vec2(ui.available_width(), top_h), |ui| {
                     egui::ScrollArea::vertical().id_salt("feature-scroll").auto_shrink([false, false]).show(ui, |ui| {
                         Frame::new().inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 }).show(ui, |ui| self.feature_tree(ui));
@@ -1139,6 +1144,11 @@ impl App {
                 Frame::new().inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 }).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("parts-scroll").max_height(parts_h - 6.0).auto_shrink([false, true]).show(ui, |ui| self.parts_list(ui));
                 });
+                if !self.result.issues.is_empty() {
+                    egui::ScrollArea::vertical().id_salt("issues-scroll").max_height(issues_h).auto_shrink([false, true]).show(ui, |ui| {
+                        section(ui, "Model check", |ui| self.issues_ui(ui));
+                    });
+                }
                 if props {
                     // fits in what is left above the tab bar, scrolling if the panel is short
                     egui::ScrollArea::vertical().id_salt("props-scroll").max_height(ui.available_height()).auto_shrink([false, true]).show(ui, |ui| {
@@ -1503,6 +1513,41 @@ impl App {
                 });
             });
         }
+    }
+
+    fn issues_ui(&mut self, ui: &mut Ui) {
+        let issues = self.result.issues.clone();
+        for (i, is) in issues.iter().enumerate() {
+            let on = self.issue_focus == Some(is.at);
+            let text = format!("{} · {}", is.describe(), self.part_name(is.body));
+            let r = ui.add(
+                egui::Button::image_and_text(icons::image("warning", 14.0).tint(theme::error_soft()), RichText::new(text).size(12.0))
+                    .selected(on)
+                    .min_size(egui::vec2(ui.available_width(), 20.0)),
+            );
+            if r.on_hover_text("Show where it is").clicked() {
+                self.focus_issue(i);
+            }
+        }
+        ui.horizontal(|ui| {
+            if ui.add(egui::Button::image_and_text(icons::image("heal", 14.0).tint(theme::text()), "Heal parts")).on_hover_text("Add a Heal feature: removes tiny edges and faces and closes small gaps").clicked() {
+                self.picks = issues.iter().map(|i| Ref::Body { body: i.body }).collect::<Vec<_>>();
+                self.picks.dedup();
+                self.start_feature("heal");
+            }
+        });
+    }
+
+    /// Point the camera at a model-check problem and mark it.
+    pub fn focus_issue(&mut self, i: usize) {
+        let Some(is) = self.result.issues.get(i) else { return };
+        let p = glam::DVec3::from(is.at);
+        self.camera.target = p.as_vec3();
+        let (lo, hi) = self.model_bounds();
+        let size = if lo.x.is_finite() { (hi - lo).length() } else { 50.0 };
+        self.camera.half_height = ((size * 0.08) as f32).max(1.0);
+        self.issue_focus = Some(is.at);
+        self.scene_dirty = true;
     }
 
     fn properties(&mut self, ui: &mut Ui) {

@@ -695,6 +695,22 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
             label_box(painter, sa + (sb - sa) / 2.0, l, vp::dim());
         }
     }
+    // model-check problem being shown
+    if let Some(at) = app.issue_focus {
+        if app.result.issues.iter().any(|i| i.at == at) {
+            let c = to_screen(DVec3::from(at));
+            let t = painter.ctx().input(|i| i.time) as f32;
+            let r = 14.0 + 4.0 * (t * 4.0).sin();
+            painter.circle_stroke(c, r, Stroke::new(2.5, crate::theme::error()));
+            painter.circle_filled(c, 3.0, crate::theme::error());
+            if let Some(is) = app.result.issues.iter().find(|i| i.at == at) {
+                label_box(painter, c + egui::vec2(0.0, -r - 14.0), &is.describe(), crate::theme::error());
+            }
+            painter.ctx().request_repaint();
+        } else {
+            app.issue_focus = None;
+        }
+    }
     // hover label
     if let (Some(h), Some(p)) = (&app.hover, painter.ctx().pointer_hover_pos()) {
         if rect.contains(p) && app.nav.is_none() {

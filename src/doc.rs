@@ -399,6 +399,12 @@ pub enum Op {
         faces: Vec<Ref>,
         distance: String,
     },
+    /// Repair parts: drop slivers and tiny edges/faces, close small gaps.
+    Heal {
+        bodies: Vec<Ref>,
+        /// Features smaller than this are removed and gaps up to it are closed.
+        tolerance: String,
+    },
     /// A user-defined feature: runs the document's script `name` with these values.
     Custom {
         name: String,
@@ -489,6 +495,7 @@ impl Op {
             Op::Knit { .. } => "knit",
             Op::Rib { .. } => "rib",
             Op::Custom { .. } => "custom",
+            Op::Heal { .. } => "heal",
         }
     }
 
@@ -513,6 +520,7 @@ impl Op {
             "knit" => Op::Knit { bodies: vec![], solid: true },
             "moveFace" => Op::MoveFace { faces: vec![], distance: s("2") },
             "rib" => Op::Rib { profile: vec![], thickness: s("2"), flip: false },
+            "heal" => Op::Heal { bodies: vec![], tolerance: s("0.01") },
             "custom" => Op::Custom { name: String::new(), values: Default::default(), refs: vec![], select: String::new(), op: BoolOp::New },
             "sheetMetal" => Op::SheetMetal { profile: vec![], thickness: s("1"), radius: s("1"), k_factor: s("0.45"), depth: s("40"), flip: false, op: BoolOp::New },
             "extrude" => {
@@ -588,6 +596,7 @@ pub fn kind_label(kind: &str) -> &'static str {
         "knit" => "Knit",
         "rib" => "Rib",
         "custom" => "Custom feature",
+        "heal" => "Heal",
         _ => "Feature",
     }
 }

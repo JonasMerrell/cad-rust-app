@@ -90,6 +90,7 @@ impl Session {
                 "centroid_mm": b.centroid.map(round),
             })).collect::<Vec<_>>(),
             "errors": errors,
+            "warnings": self.result.issues.iter().map(|i| json!({"body": [i.body.0, i.body.1], "kind": i.kind, "message": i.describe(), "at": i.at.map(round)})).collect::<Vec<_>>(),
         })
     }
 

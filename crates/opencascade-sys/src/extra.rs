@@ -13,7 +13,10 @@ mod inner {
         pub fn ex_fixed(s: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_unify(s: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_mesh(s: &TopoDS_Shape, linear: f64, angular: f64) -> bool;
+        pub fn ex_mesh_careful(s: &TopoDS_Shape, linear: f64, angular: f64, level: i32) -> bool;
         pub fn ex_feature_edges(s: &TopoDS_Shape, angle: f64, faceted_from: i32) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_invalid_spots(s: &TopoDS_Shape) -> Vec<f64>;
+        pub fn ex_heal(s: &TopoDS_Shape, tol: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_mesh_solid(pts: &[f64], faces: &[u32]) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_boolean(a: &TopoDS_Shape, b: &TopoDS_Shape, op: i32) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_prism(profile: &TopoDS_Shape, dx: f64, dy: f64, dz: f64) -> UniquePtr<TopoDS_Shape>;

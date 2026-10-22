@@ -93,6 +93,7 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
             _ => vec![],
         },
         Op::Shell { faces, .. } => vec![("Faces to remove", Faces, Slot::Many(faces))],
+        Op::Heal { bodies, .. } => vec![("Parts", Bodies, Slot::Many(bodies))],
         Op::Hole { points, .. } => vec![("Hole points", Points, Slot::Many(points))],
         Op::Draft { faces, neutral, .. } => vec![("Faces", Faces, Slot::Many(faces)), ("Neutral plane", Planar, Slot::One(neutral))],
         Op::LinearPattern { kind, bodies, direction, second, .. } => vec![
@@ -442,6 +443,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         }
                     }
                     Op::Shell { thickness, .. } => val(ui, "Thickness", thickness, Kind::Length, &mut changed),
+                    Op::Heal { tolerance, .. } => {
+                        val(ui, "Tolerance", tolerance, Kind::Length, &mut changed);
+                        ui.label(RichText::new("Removes faces and edges smaller than this and closes gaps up to it").color(theme::muted()).size(11.5));
+                    }
                     Op::Hole { hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, tapped, .. } => {
                         ui.horizontal(|ui| {
                             ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new("ISO size").color(theme::muted())));

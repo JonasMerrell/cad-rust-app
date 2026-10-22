@@ -9,6 +9,7 @@
 
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
+#include <IMeshTools_Parameters.hxx>
 #include <BRepTools.hxx>
 #include <BRepOffset_MakeOffset.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -48,6 +49,11 @@
 #include <HLRBRep_Algo.hxx>
 #include <HLRBRep_HLRToShape.hxx>
 #include <ShapeFix_Shape.hxx>
+#include <ShapeFix_Wireframe.hxx>
+#include <Bnd_Box.hxx>
+#include <BRepBndLib.hxx>
+#include <ShapeFix_FixSmallFace.hxx>
+#include <ShapeBuild_ReShape.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
@@ -256,6 +262,123 @@ inline std::unique_ptr<TopoDS_Shape> ex_mesh_solid(rust::Slice<const double> pts
   return ex_wrap(result);  EX_CATCH("mesh import")
 }
 
+// Repair a part: remove edges and faces smaller than `tol`, sew gaps up to `tol`,
+// fix tolerances and orientation, merge faces that lie on the same surface.
+// Points on the faces and edges BRepCheck finds invalid, as xyz triples.
+inline rust::Vec<double> ex_invalid_spots(const TopoDS_Shape &s) {
+  rust::Vec<double> out;
+  try {
+    BRepCheck_Analyzer chk(s);
+    if (chk.IsValid())
+      return out;
+    for (TopAbs_ShapeEnum t : {TopAbs_FACE, TopAbs_EDGE}) {
+      for (TopExp_Explorer ex(s, t); ex.More(); ex.Next()) {
+        if (chk.IsValid(ex.Current()))
+          continue;
+        Bnd_Box b;
+        BRepBndLib::Add(ex.Current(), b);
+        if (b.IsVoid())
+          continue;
+        double x0, y0, z0, x1, y1, z1;
+        b.Get(x0, y0, z0, x1, y1, z1);
+        out.push_back((x0 + x1) / 2);
+        out.push_back((y0 + y1) / 2);
+        out.push_back((z0 + z1) / 2);
+      }
+      if (!out.empty())
+        break;
+    }
+  } catch (...) {
+  }
+  return out;
+}
+
+inline double ex_solid_volume(const TopoDS_Shape &s) {
+  double v = 0;
+  for (TopExp_Explorer ex(s, TopAbs_SOLID); ex.More(); ex.Next()) {
+    GProp_GProps props;
+    BRepGProp::VolumeProperties(ex.Current(), props);
+    v += props.Mass();
+  }
+  return v;
+}
+
+inline TopoDS_Shape ex_as_solid(const TopoDS_Shape &r) {
+  TopExp_Explorer has(r, TopAbs_SOLID);
+  if (has.More())
+    return r;
+  BRepBuilderAPI_MakeSolid ms;
+  bool any = false;
+  for (TopExp_Explorer ex(r, TopAbs_SHELL); ex.More(); ex.Next()) {
+    ms.Add(TopoDS::Shell(ex.Current()));
+    any = true;
+  }
+  if (!any || !ms.IsDone())
+    return r;
+  TopoDS_Shape so = ms.Shape();
+  if (ex_solid_volume(so) < 0)
+    so.Reverse();
+  return so;
+}
+
+// Repair a part: close gaps up to `tol`, drop edges and faces smaller than it, fix
+// tolerances, merge faces on the same surface. Each step is kept only if the part
+// stays a valid solid of (almost) the same volume, so healing never breaks a part.
+inline std::unique_ptr<TopoDS_Shape> ex_heal(const TopoDS_Shape &s, double tol) {
+  EX_TRY
+  TopoDS_Shape r = s;
+  double v0 = ex_solid_volume(s);
+  bool was_solid = v0 > 0;
+  auto accept = [&](TopoDS_Shape c) {
+    if (c.IsNull())
+      return;
+    if (was_solid) {
+      c = ex_as_solid(c);
+      double v = ex_solid_volume(c);
+      if (v <= 0 || std::abs(v - v0) > 0.01 * v0)
+        return;
+      BRepCheck_Analyzer chk(c);
+      BRepCheck_Analyzer before(r);
+      if (!chk.IsValid() && before.IsValid())
+        return;
+    }
+    r = c;
+  };
+  {
+    BRepBuilderAPI_Sewing sew(tol);
+    sew.Add(r);
+    sew.Perform();
+    accept(sew.SewedShape());
+  }
+  {
+    Handle(ShapeFix_Wireframe) wf = new ShapeFix_Wireframe(r);
+    wf->SetPrecision(tol);
+    wf->SetMaxTolerance(tol * 10);
+    wf->ModeDropSmallEdges() = Standard_True;
+    wf->FixSmallEdges();
+    wf->FixWireGaps();
+    accept(wf->Shape());
+  }
+  {
+    ShapeFix_FixSmallFace sf;
+    sf.Init(r);
+    sf.SetPrecision(tol);
+    sf.SetMaxTolerance(tol * 10);
+    sf.Perform();
+    accept(sf.FixShape());
+  }
+  {
+    Handle(ShapeFix_Shape) fix = new ShapeFix_Shape(r);
+    fix->SetPrecision(tol);
+    fix->SetMaxTolerance(tol * 10);
+    fix->Perform();
+    accept(fix->Shape());
+  }
+  accept(ex_unify_raw(r));
+  return ex_wrap(r);
+  EX_CATCH("heal")
+}
+
 // Edges worth drawing: every edge between two faces, except, on faceted shapes
 // (imported meshes), the ones between faces meeting at less than `angle` (radians).
 inline std::unique_ptr<TopoDS_Shape> ex_feature_edges(const TopoDS_Shape &s, double angle, int faceted_from) {
@@ -324,8 +447,27 @@ inline bool ex_mesh(const TopoDS_Shape &s, double linear, double angular) {
   }
 }
 
-inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, int op) {
-  EX_TRY
+// Remesh from scratch with more careful settings, for when the normal mesh has gaps.
+inline bool ex_mesh_careful(const TopoDS_Shape &s, double linear, double angular, int level) {
+  try {
+    BRepTools::Clean(s);
+    IMeshTools_Parameters p;
+    p.Deflection = linear / (level + 1);
+    p.Angle = angular;
+    p.InParallel = Standard_False;
+    p.Relative = Standard_False;
+    p.InternalVerticesMode = Standard_True;
+    p.ControlSurfaceDeflection = Standard_True;
+    p.MinSize = linear * 0.01;
+    p.AllowQualityDecrease = level >= 2;
+    BRepMesh_IncrementalMesh m(s, p);
+    return m.IsDone();
+  } catch (...) {
+    return false;
+  }
+}
+
+inline TopoDS_Shape ex_boolean_raw(const TopoDS_Shape &a, const TopoDS_Shape &b, int op, double fuzzy) {
   TopTools_ListOfShape args, tools;
   args.Append(a);
   tools.Append(b);
@@ -338,12 +480,43 @@ inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const Top
     bop.reset(new BRepAlgoAPI_Common());
   bop->SetArguments(args);
   bop->SetTools(tools);
-  bop->SetFuzzyValue(1e-6);
+  bop->SetFuzzyValue(fuzzy);
   bop->SetRunParallel(true);
   bop->Build();
   if (!bop->IsDone() || bop->HasErrors())
+    return TopoDS_Shape();
+  return bop->Shape();
+}
+
+inline int ex_face_count(const TopoDS_Shape &s) {
+  TopTools_IndexedMapOfShape fm;
+  TopExp::MapShapes(s, TopAbs_FACE, fm);
+  return fm.Extent();
+}
+
+// Boolean with a retry: when faces nearly touch (within a few microns) the exact
+// operation can leave slivers or invalid faces, so if the result fails the check it
+// is redone with a larger fuzzy tolerance that treats such near-misses as touching.
+inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, int op) {
+  EX_TRY
+  TopoDS_Shape r = ex_boolean_raw(a, b, op, 1e-6);
+  bool check = ex_face_count(a) + ex_face_count(b) < 1500;
+  if (check && (r.IsNull() || !BRepCheck_Analyzer(r).IsValid())) {
+    Bnd_Box bx;
+    BRepBndLib::Add(a, bx);
+    BRepBndLib::Add(b, bx);
+    double diag = bx.IsVoid() ? 1.0 : std::sqrt(bx.SquareExtent());
+    for (double f : {1e-5 * diag, 1e-4 * diag}) {
+      TopoDS_Shape r2 = ex_boolean_raw(a, b, op, std::min(f, 0.05));
+      if (!r2.IsNull() && BRepCheck_Analyzer(r2).IsValid()) {
+        r = r2;
+        break;
+      }
+    }
+  }
+  if (r.IsNull())
     return ex_null("boolean operation failed");
-  return ex_wrap(ex_unify_raw(bop->Shape()));
+  return ex_wrap(ex_unify_raw(r));
   EX_CATCH("boolean")
 }
 

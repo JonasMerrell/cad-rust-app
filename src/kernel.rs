@@ -82,6 +82,96 @@ pub struct RebuildResult {
     pub flats: Vec<FlatPattern>,
     /// Frames of plane and sketch features.
     pub frames: HashMap<FeatId, Frame>,
+    /// Problems found in the finished parts (slivers, tiny faces, gaps, invalid geometry).
+    #[serde(default)]
+    pub issues: Vec<Issue>,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Issue {
+    pub body: BodyId,
+    /// "sliver", "small_face", "short_edge", "open", "invalid"
+    pub kind: String,
+    /// Where it is (a point on it).
+    pub at: [f64; 3],
+    /// Its size in mm (sliver width, face area, edge length).
+    pub size: f64,
+}
+
+impl Issue {
+    pub fn describe(&self) -> String {
+        let n = |v: f64| crate::expr::trim(v, 4);
+        match self.kind.as_str() {
+            "sliver" => format!("Sliver face {} mm wide", n(self.size)),
+            "small_face" => format!("Tiny face, {} mm²", n(self.size)),
+            "short_edge" => format!("Tiny edge, {} mm long", n(self.size)),
+            "mesh_gap" => "Meshes with gaps here (exported STL would have holes)".into(),
+            "open" => "Not closed (has gaps)".into(),
+            _ => "Invalid geometry".into(),
+        }
+    }
+}
+
+/// Look for geometry that usually means a modelling slip: faces or edges far smaller
+/// than the part, thin slivers, gaps, and shapes OpenCascade reports as invalid.
+/// `valid` is the B-rep check, done before meshing (meshing can upset it).
+pub fn check_body(shape: &Shape, m: &BodyMesh, valid: bool) -> Vec<Issue> {
+    let mut out = vec![];
+    let id = m.id;
+    // the display/export mesh must be closed: open edges mean holes in an exported STL
+    if !m.surface {
+        let open = mesh_open_edges(m);
+        if let Some((a, b)) = open.first() {
+            let at = [0, 1, 2].map(|k| (a[k] + b[k]) / 2.0);
+            out.push(Issue { body: id, kind: "mesh_gap".into(), at, size: open.len() as f64 });
+        }
+    }
+    // imported meshes are made of thin triangles on purpose
+    if m.faces.len() >= 1500 {
+        return out;
+    }
+    let size = (DVec3::from(m.bbox[1]) - DVec3::from(m.bbox[0])).length().max(1e-9);
+    let small = (size * 1e-4).max(1e-3);
+    for e in &m.edges {
+        if e.length < small {
+            out.push(Issue { body: id, kind: "short_edge".into(), at: e.mid, size: e.length });
+        }
+    }
+    // per face: area and longest extent from its triangles
+    let mut ext: Vec<(DVec3, DVec3)> = vec![(DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)); m.faces.len()];
+    for (ti, t) in m.indices.chunks(3).enumerate() {
+        let f = m.tri_face[ti] as usize;
+        for &i in t {
+            let p = DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
+            ext[f].0 = ext[f].0.min(p);
+            ext[f].1 = ext[f].1.max(p);
+        }
+    }
+    for (fi, f) in m.faces.iter().enumerate() {
+        let len = (ext[fi].1 - ext[fi].0).length();
+        if !len.is_finite() || len <= 0.0 {
+            continue;
+        }
+        if f.area < small * small {
+            out.push(Issue { body: id, kind: "small_face".into(), at: f.center, size: f.area });
+        } else {
+            let width = f.area / len;
+            if width < small * 2.0 && len > 20.0 * width {
+                out.push(Issue { body: id, kind: "sliver".into(), at: f.center, size: width });
+            }
+        }
+    }
+    if !m.surface && !valid {
+        // point at the faulty faces or edges themselves
+        let spots = ffi::extra::ex_invalid_spots(&shape.inner);
+        if spots.is_empty() {
+            out.push(Issue { body: id, kind: "invalid".into(), at: m.centroid, size: 0.0 });
+        }
+        for p in spots.chunks(3).take(20) {
+            out.push(Issue { body: id, kind: "invalid".into(), at: [p[0], p[1], p[2]], size: 0.0 });
+        }
+    }
+    out
 }
 
 // ------------------------------------------------------------------ state
@@ -676,6 +766,22 @@ impl<'a> Model<'a> {
                         shape = if d >= 0.0 { occ::fuse(&shape, &prism)? } else { occ::cut(&shape, &prism)? };
                     }
                     self.bodies[bi].shape = shape;
+                }
+                Ok(())
+            }
+            Op::Heal { bodies, tolerance } => {
+                let tol = self.len(tolerance)?;
+                if tol <= 0.0 {
+                    return Err("tolerance must be positive".into());
+                }
+                let idx: Vec<usize> = if bodies.is_empty() { (0..self.bodies.len()).collect() } else { bodies.iter().map(|r| self.body_index(r)).collect::<R<_>>()? };
+                if idx.is_empty() {
+                    return Err("there are no parts to heal".into());
+                }
+                for i in idx {
+                    let healed = occ::heal(&self.bodies[i].shape, tol)?;
+                    let solids = solids_of(&healed);
+                    self.bodies[i].shape = if solids.len() == 1 { solids.into_iter().next().unwrap() } else { healed };
                 }
                 Ok(())
             }
@@ -1434,9 +1540,11 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
     }
     out.frames.extend(m.frames.iter().map(|(k, v)| (*k, *v)));
     for (i, b) in m.bodies.iter().enumerate() {
+        let valid = unique_faces(&b.shape).len() >= 1500 || occ::is_valid(&b.shape);
         if let Ok(mut mesh) = mesh_body(&b.shape) {
             mesh.surface = solids_of(&b.shape).is_empty();
             mesh.id = b.id;
+            out.issues.extend(check_body(&b.shape, &mesh, valid));
             mesh.name = if mesh.surface { format!("Surface {}", i + 1) } else { format!("Part {}", i + 1) };
             out.bodies.push(mesh);
         }
@@ -1936,13 +2044,50 @@ fn circle_from_points(pts: &[DVec3]) -> Option<(DVec3, DVec3)> {
 /// Triangulate a body face by face, keeping the face index of each triangle,
 /// and collect its edges as polylines.
 pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
+    let m = mesh_body_level(shape, 0)?;
+    if m.faces.len() >= 1500 || m.surface || mesh_open_edges(&m).is_empty() {
+        return Ok(m);
+    }
+    // the mesher left gaps (it struggles with tiny edges): try more careful settings
+    for level in 1..=3 {
+        if let Ok(m2) = mesh_body_level(shape, level) {
+            if mesh_open_edges(&m2).is_empty() {
+                return Ok(m2);
+            }
+        }
+    }
+    Ok(m)
+}
+
+/// Edges of a mesh used by only one triangle (or unevenly), as welded vertex pairs.
+pub fn mesh_open_edges(m: &BodyMesh) -> Vec<([f64; 3], [f64; 3])> {
+    let key = |i: u32| {
+        let p = &m.positions[3 * i as usize..3 * i as usize + 3];
+        [(p[0] as f64 * 1e4).round() as i64, (p[1] as f64 * 1e4).round() as i64, (p[2] as f64 * 1e4).round() as i64]
+    };
+    let mut count: HashMap<([i64; 3], [i64; 3]), i32> = HashMap::new();
+    for t in m.indices.chunks(3) {
+        for k in 0..3 {
+            let (a, b) = (key(t[k]), key(t[(k + 1) % 3]));
+            if a != b {
+                *count.entry((a, b)).or_default() += 1;
+                *count.entry((b, a)).or_default() -= 1;
+            }
+        }
+    }
+    let f = |a: [i64; 3]| a.map(|v| v as f64 / 1e4);
+    count.into_iter().filter(|(_, v)| *v > 0).map(|((a, b), _)| (f(a), f(b))).collect()
+}
+
+fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
     let bb = opencascade::bounding_box::aabb(shape);
     let diag = (bb.max() - bb.min()).length().max(1.0);
     let tol = (diag * 0.0008).clamp(0.005, 0.5);
     let tt = std::time::Instant::now();
     let dbg = std::env::var("CAD_TIME").is_ok();
     // the angular limit keeps small and large curved faces smooth alike (~8.6°)
-    if !ffi::extra::ex_mesh(&shape.inner, tol, 0.15) {
+    let meshed = if level == 0 { ffi::extra::ex_mesh(&shape.inner, tol, 0.15) } else { ffi::extra::ex_mesh_careful(&shape.inner, tol, 0.15, level) };
+    if !meshed {
         return Err("meshing failed".into());
     }
     if dbg { eprintln!("  mesh {:?}", tt.elapsed()); }
@@ -3279,11 +3424,84 @@ mod validity_probe {
 
     #[test]
     #[ignore]
+    fn probe_steps() {
+        // validity after each feature
+        let path = std::env::var("PROBE").unwrap();
+        let ws = crate::workspace::Workspace::from_json(&std::fs::read_to_string(path).unwrap()).unwrap();
+        let mut doc = ws.studios[0].doc.clone();
+        for n in 1..=doc.features.len() {
+            doc.rollback = Some(n);
+            let bodies = build_bodies(&doc);
+            let f = &doc.features[n - 1];
+            eprintln!("{} {}: {:?}", f.name, f.op.kind(), bodies.iter().map(|b| (occ::is_valid(&b.shape), unique_faces(&b.shape).len(), (volume(&b.shape) * 10.0).round() / 10.0)).collect::<Vec<_>>());
+        }
+        doc.rollback = None;
+        let bodies = build_bodies(&doc);
+        let b = &bodies[0];
+        eprintln!("before mesh valid={}", occ::is_valid(&b.shape));
+        for f in unique_faces(&b.shape) {
+            let g = face_geom(&f);
+            let es = f.edges().count();
+            eprintln!("face planar={} area={:.3} n={:?} edges={} center={:?}", g.planar, g.area, g.normal.to_array().map(|v| (v * 1000.0).round() / 1000.0), es, g.center.to_array().map(|v| (v * 100.0).round() / 100.0));
+        }
+        let m = mesh_body(&b.shape).unwrap();
+        eprintln!("after mesh valid={}", occ::is_valid(&b.shape));
+        let _ = m;
+    }
+
+    #[test]
+    #[ignore]
     fn probe_step() {
         // read a STEP back like a slicer would, mesh it and write an STL to check
         let path = std::env::var("PROBE").unwrap();
         let s = Shape::read_step(&path).unwrap();
         eprintln!("valid={} faces={} vol={}", occ::is_valid(&s), unique_faces(&s).len(), volume(&s));
         s.write_stl_with_tolerance(format!("{path}.stl"), 0.05).unwrap();
+    }
+}
+
+#[cfg(test)]
+mod check_tests {
+    use super::*;
+    use crate::sketch::{Geom, Sketch};
+
+    fn rect(s: &mut Sketch, x0: f64, y0: f64, x1: f64, y1: f64) {
+        let p: Vec<_> = [(x0, y0), (x1, y0), (x1, y1), (x0, y1)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+    }
+
+    #[test]
+    fn finds_tiny_edges_and_heals_them() {
+        let mut doc = Document::default();
+        let top = Ref::OriginPlane { plane: OriginPlane::Top };
+        let mut s = Sketch::default();
+        rect(&mut s, 0.0, 0.0, 20.0, 20.0);
+        let s1 = doc.insert("S".into(), Op::Sketch { plane: top.clone(), sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, op, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: s1, point: [1.0, 1.0] });
+            *op = BoolOp::New;
+        }
+        doc.insert("E".into(), e);
+        // a second block 3 µm short of lining up with the first
+        let mut s = Sketch::default();
+        rect(&mut s, 19.997, 10.0, 30.0, 30.0);
+        let s2 = doc.insert("S2".into(), Op::Sketch { plane: top, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, op, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: s2, point: [25.0, 25.0] });
+            *depth = "5".into();
+            *op = BoolOp::Add;
+        }
+        doc.insert("E2".into(), e);
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(r.issues.iter().any(|i| i.kind == "short_edge"), "{:?}", r.issues);
+        doc.insert("H".into(), Op::Heal { bodies: vec![], tolerance: "0.01".into() });
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(r.features.iter().all(|f| f.error.is_none()));
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+        assert_eq!(r.bodies.len(), 1);
     }
 }
