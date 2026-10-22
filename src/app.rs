@@ -500,12 +500,22 @@ impl App {
     }
 
     pub fn import_step(&mut self) {
-        let Some(p) = rfd::FileDialog::new().add_filter("STEP / IGES", &["step", "stp", "STEP", "STP", "igs", "iges", "IGS", "IGES"]).pick_file() else { return };
-        match std::fs::read_to_string(&p) {
-            Ok(step) => {
+        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "STEP", "STP", "IGS", "IGES", "STL", "OBJ"];
+        let Some(p) = rfd::FileDialog::new().add_filter("STEP, IGES, STL, OBJ", &exts).pick_file() else { return };
+        self.import_path(&p);
+    }
+
+    pub fn import_path(&mut self, p: &std::path::Path) {
+        let Some(format) = crate::import::format_of(p) else {
+            self.flash("Import STEP, IGES, STL or OBJ files", ToastKind::Info);
+            return;
+        };
+        match std::fs::read(p) {
+            Ok(bytes) => {
                 self.checkpoint();
                 let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into());
-                self.doc.insert(name.clone(), Op::Import { name, step });
+                let op = Op::Import { name: name.clone(), step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale: "1".into(), merge: true };
+                self.doc.insert(name, op);
                 self.first_fit = true;
                 self.changed();
             }
@@ -849,7 +859,7 @@ impl App {
     fn document_menu(&mut self, ui: &mut Ui) {
         ui.set_min_width(220.0);
         let mut action = None;
-        for (a, icon, l) in [("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP / IGES…")]
+        for (a, icon, l) in [("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP, IGES, STL, OBJ…")]
         {
             if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
                 action = Some(a);
@@ -2071,6 +2081,15 @@ impl eframe::App for App {
             self.was_narrow = Some(narrow);
         }
         self.handle_screenshot(&ctx);
+        // files dropped on the window: open documents, import models
+        let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
+        for p in dropped {
+            if p.extension().map(|e| e.eq_ignore_ascii_case("json")).unwrap_or(false) {
+                self.open_path(p);
+            } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) {
+                self.import_path(&p);
+            }
+        }
         if self.awaiting_sketch_plane && self.sketch.is_none() && self.picks.iter().any(|r| r.is_planar() || matches!(r, Ref::FeaturePlane { .. })) {
             self.awaiting_sketch_plane = false;
             self.toast = None;

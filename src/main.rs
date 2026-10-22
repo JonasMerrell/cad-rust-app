@@ -14,6 +14,7 @@ mod drawing_ui;
 mod expr;
 mod icon_paths;
 mod icons;
+mod import;
 mod kernel;
 mod occ;
 mod regions;

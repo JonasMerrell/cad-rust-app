@@ -255,6 +255,20 @@ impl Session {
                 self.status()
             }
             "list_geometry" => self.geometry(a),
+            "import_file" => {
+                let path = str_arg(a, "path")?;
+                let p = std::path::Path::new(&path);
+                let format = crate::import::format_of(p).ok_or("import .step, .stp, .iges, .igs, .stl or .obj files")?;
+                let bytes = std::fs::read(p).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into()));
+                let scale = a.get("scale").map(val_str).unwrap_or_else(|| "1".into());
+                let merge = a.get("merge_faces").and_then(|m| m.as_bool()).unwrap_or(true);
+                let id = self.doc.insert(name.clone(), Op::Import { name, step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale, merge });
+                self.rebuild()?;
+                let mut v = self.status();
+                v["feature_id"] = json!(id);
+                v
+            }
             "export" => {
                 let format = str_arg(a, "format")?;
                 let path = str_arg(a, "path")?;
@@ -872,6 +886,7 @@ fn tools() -> Value {
         {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, mirror, boolean, split, transform, deleteBody, sheetMetal. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
+        {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}}), &["path"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},

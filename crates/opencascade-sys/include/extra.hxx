@@ -55,7 +55,22 @@
 #include <TopTools_ListOfShape.hxx>
 #include <TopoDS.hxx>
 #include <TopoDS_Compound.hxx>
+#include <TopTools_IndexedMapOfShape.hxx>
+#include <Geom_Plane.hxx>
+#include <Geom_Line.hxx>
+#include <Poly_Triangulation.hxx>
+#include <Poly_Triangle.hxx>
+#include <TopoDS_Wire.hxx>
 #include <BRep_Builder.hxx>
+#include <BRepBuilderAPI_MakeVertex.hxx>
+#include <BRepCheck_Analyzer.hxx>
+#include <BRep_Tool.hxx>
+#include <TopoDS_Shell.hxx>
+#include <TopoDS_Solid.hxx>
+#include <gp_Pln.hxx>
+#include <map>
+#include <unordered_map>
+#include <vector>
 #include <gp_Ax2.hxx>
 #include <gp_Ax3.hxx>
 #include <gp_Elips.hxx>
@@ -93,6 +108,11 @@ inline std::unique_ptr<TopoDS_Shape> ex_fixed(const TopoDS_Shape &s) {
 /// Merge coplanar faces and collinear edges left over by modelling operations.
 inline TopoDS_Shape ex_unify_raw(const TopoDS_Shape &s) {
   try {
+    // faceted shapes (imported meshes) are already merged, and unifying thousands of faces is slow
+    TopTools_IndexedMapOfShape fm;
+    TopExp::MapShapes(s, TopAbs_FACE, fm);
+    if (fm.Extent() >= 1500)
+      return s;
     ShapeUpgrade_UnifySameDomain u(s, Standard_True, Standard_True, Standard_False);
     u.Build();
     TopoDS_Shape r = u.Shape();
@@ -104,11 +124,199 @@ inline TopoDS_Shape ex_unify_raw(const TopoDS_Shape &s) {
 
 inline std::unique_ptr<TopoDS_Shape> ex_unify(const TopoDS_Shape &s) { return ex_wrap(ex_unify_raw(s)); }
 
+// A solid (or shell, if it doesn't close) from a triangle mesh: `pts` holds unique
+// vertices (xyz), `tris` vertex indices. Neighbouring triangles share edges, so no
+// sewing is needed; with `merge`, coplanar triangles are merged into larger faces.
+// `faces` is a flat list, per face: [nloops, (n, v0..vn-1)*nloops, ntris, (a, b, c)*ntris];
+// the first loop is the outer boundary (counter-clockwise about the normal), the rest holes,
+// and the triangles (vertex indices) are the face's display triangulation.
+inline std::unique_ptr<TopoDS_Shape> ex_mesh_solid(rust::Slice<const double> pts, rust::Slice<const uint32_t> faces) {
+  EX_TRY
+  // built directly with BRep_Builder: the API makers check too much to be fast on big meshes
+  const double tol = 1e-4; // covers float rounding in STL files
+  BRep_Builder bb;
+  size_t nv = pts.size() / 3;
+  std::vector<TopoDS_Vertex> verts(nv);
+  std::vector<gp_Pnt> P(nv);
+  for (size_t i = 0; i < nv; i++) {
+    P[i] = gp_Pnt(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]);
+    bb.MakeVertex(verts[i], P[i], tol);
+  }
+  // edge index by vertex pair; each entry also counts how many triangles use it
+  std::unordered_map<uint64_t, std::pair<TopoDS_Edge, int>> edges;
+  edges.reserve(faces.size());
+  auto edge = [&](uint32_t a, uint32_t b) -> TopoDS_Edge {
+    auto key = a < b ? std::make_pair(a, b) : std::make_pair(b, a);
+    uint64_t k = (uint64_t(key.first) << 32) | key.second;
+    auto it = edges.find(k);
+    if (it != edges.end()) {
+      it->second.second++;
+    } else {
+      const gp_Pnt &p = P[key.first], &q = P[key.second];
+      double len = p.Distance(q);
+      Handle(Geom_Line) ln = new Geom_Line(p, gp_Dir(gp_Vec(p, q)));
+      TopoDS_Edge e;
+      bb.MakeEdge(e, ln, tol);
+      TopoDS_Vertex v1 = TopoDS::Vertex(verts[key.first].Oriented(TopAbs_FORWARD));
+      TopoDS_Vertex v2 = TopoDS::Vertex(verts[key.second].Oriented(TopAbs_REVERSED));
+      bb.Add(e, v1);
+      bb.Add(e, v2);
+      bb.UpdateVertex(v1, 0.0, e, tol);
+      bb.UpdateVertex(v2, len, e, tol);
+      bb.Range(e, 0.0, len);
+      it = edges.emplace(k, std::make_pair(e, 1)).first;
+    }
+    return a == key.first ? it->second.first : TopoDS::Edge(it->second.first.Reversed());
+  };
+  TopoDS_Shell shell;
+  bb.MakeShell(shell);
+  size_t nfaces = 0;
+  double vol6 = 0; // six times the signed volume
+  size_t at = 0;
+  auto next = [&]() -> uint32_t { return at < faces.size() ? faces[at++] : 0; };
+  while (at < faces.size()) {
+    uint32_t nloops = next();
+    std::vector<std::vector<uint32_t>> loops(nloops);
+    for (auto &l : loops) {
+      uint32_t n = next();
+      for (uint32_t k = 0; k < n; k++)
+        l.push_back(next());
+    }
+    uint32_t nt = next();
+    std::vector<uint32_t> tri(3 * nt);
+    for (auto &x : tri)
+      x = next();
+    if (loops.empty() || loops[0].size() < 3 || nt == 0)
+      continue;
+    bool bad = false;
+    for (auto x : tri)
+      if (x >= nv)
+        bad = true;
+    for (auto &l : loops)
+      for (auto x : l)
+        if (x >= nv)
+          bad = true;
+    if (bad)
+      continue;
+    // plane from the triangles (area-weighted normal)
+    gp_XYZ nsum(0, 0, 0);
+    for (uint32_t t = 0; t < nt; t++) {
+      const gp_Pnt &a = P[tri[3 * t]], &b = P[tri[3 * t + 1]], &c = P[tri[3 * t + 2]];
+      gp_XYZ n = (b.XYZ() - a.XYZ()).Crossed(c.XYZ() - a.XYZ());
+      nsum += n;
+      vol6 += a.XYZ().Dot(b.XYZ().Crossed(c.XYZ()));
+    }
+    if (nsum.Modulus() < 1e-14)
+      continue;
+    Handle(Geom_Plane) pl = new Geom_Plane(P[loops[0][0]], gp_Dir(nsum));
+    TopoDS_Face f;
+    bb.MakeFace(f, pl, tol);
+    for (auto &l : loops) {
+      TopoDS_Wire w;
+      bb.MakeWire(w);
+      for (size_t k = 0; k < l.size(); k++)
+        bb.Add(w, edge(l[k], l[(k + 1) % l.size()]));
+      w.Closed(Standard_True);
+      bb.Add(f, w);
+    }
+    // the face's own triangles, so display needs no meshing
+    std::map<uint32_t, int> local;
+    for (auto x : tri)
+      local.emplace(x, 0);
+    int ni = 0;
+    for (auto &kv : local)
+      kv.second = ++ni;
+    Handle(Poly_Triangulation) pt = new Poly_Triangulation(ni, nt, Standard_False);
+    for (auto &kv : local)
+      pt->SetNode(kv.second, P[kv.first]);
+    for (uint32_t t = 0; t < nt; t++)
+      pt->SetTriangle(t + 1, Poly_Triangle(local[tri[3 * t]], local[tri[3 * t + 1]], local[tri[3 * t + 2]]));
+    pt->Deflection(0.0);
+    bb.UpdateFace(f, pt);
+    bb.Add(shell, f);
+    nfaces++;
+  }
+  if (nfaces == 0)
+    return ex_null("the mesh has no usable triangles");
+  TopoDS_Shape result = shell;
+  BRep_Builder sb;
+  TopoDS_Solid solid;
+  sb.MakeSolid(solid);
+  sb.Add(solid, shell);
+  bool closed = true;
+  for (auto &u : edges)
+    if (u.second.second != 2)
+      closed = false;
+  shell.Closed(closed);
+  if (closed) {
+    if (vol6 < 0)
+      solid.Reverse();
+    result = solid;
+  }
+  return ex_wrap(result);  EX_CATCH("mesh import")
+}
+
+// Edges worth drawing: every edge between two faces, except, on faceted shapes
+// (imported meshes), the ones between faces meeting at less than `angle` (radians).
+inline std::unique_ptr<TopoDS_Shape> ex_feature_edges(const TopoDS_Shape &s, double angle, int faceted_from) {
+  EX_TRY
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndUniqueAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  TopTools_IndexedMapOfShape faces;
+  TopExp::MapShapes(s, TopAbs_FACE, faces);
+  bool faceted = faces.Extent() >= faceted_from;
+  BRep_Builder bb;
+  TopoDS_Compound out;
+  bb.MakeCompound(out);
+  for (int i = 1; i <= map.Extent(); i++) {
+    const TopTools_ListOfShape &fl = map.FindFromIndex(i);
+    if (fl.Size() == 1)
+      continue;
+    if (faceted && fl.Size() == 2) {
+      TopoDS_Face f1 = TopoDS::Face(fl.First()), f2 = TopoDS::Face(fl.Last());
+      Handle(Geom_Plane) p1 = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(f1));
+      Handle(Geom_Plane) p2 = Handle(Geom_Plane)::DownCast(BRep_Tool::Surface(f2));
+      if (!p1.IsNull() && !p2.IsNull()) {
+        gp_Dir n1 = p1->Axis().Direction(), n2 = p2->Axis().Direction();
+        if (f1.Orientation() == TopAbs_REVERSED) n1.Reverse();
+        if (f2.Orientation() == TopAbs_REVERSED) n2.Reverse();
+        if (n1.Angle(n2) < angle)
+          continue;
+      }
+    }
+    bb.Add(out, map.FindKey(i));
+  }
+  return ex_wrap(out);
+  EX_CATCH("edges")
+}
+
 // Triangulate with a linear and an angular limit (radians); replaces coarser meshes.
 inline bool ex_mesh(const TopoDS_Shape &s, double linear, double angular) {
   try {
-    // drop triangulations made earlier with other limits, or they would be kept
-    BRepTools::Clean(s);
+    // drop triangulations made earlier with other limits, or they would be kept;
+    // faceted shapes (imported meshes) keep theirs, which are exact
+    TopTools_IndexedMapOfShape faces;
+    TopExp::MapShapes(s, TopAbs_FACE, faces);
+    if (faces.Extent() < 1500) {
+      BRepTools::Clean(s);
+    } else {
+      // mesh only the faces that have no triangulation yet (e.g. new faces from a cut)
+      BRep_Builder bb;
+      TopoDS_Compound todo;
+      bb.MakeCompound(todo);
+      int n = 0;
+      for (int i = 1; i <= faces.Extent(); i++) {
+        TopLoc_Location loc;
+        if (BRep_Tool::Triangulation(TopoDS::Face(faces(i)), loc).IsNull()) {
+          bb.Add(todo, faces(i));
+          n++;
+        }
+      }
+      if (n == 0)
+        return true;
+      BRepMesh_IncrementalMesh m(todo, linear, Standard_False, angular, Standard_True);
+      return m.IsDone();
+    }
     BRepMesh_IncrementalMesh m(s, linear, Standard_False, angular, Standard_True);
     return m.IsDone();
   } catch (...) {

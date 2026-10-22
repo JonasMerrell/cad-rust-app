@@ -351,8 +351,9 @@ impl<'a> Model<'a> {
                 }
                 let mut out = vec![];
                 for b in std::mem::take(&mut self.bodies) {
-                    let touched = overlaps(&b.shape, &tool);
-                    if op == BoolOp::Remove && !touched {
+                    // a cut that misses leaves the body as it was (checked by the cut itself:
+                    // a separate overlap test costs as much as the cut on large parts)
+                    if op == BoolOp::Remove && bbox_apart(&b.shape, &tool) {
                         out.push(b);
                         continue;
                     }
@@ -444,10 +445,21 @@ impl<'a> Model<'a> {
                 let mut tools = build(sign)?;
                 // Cutting away from the material does nothing: go into it instead, as the original does.
                 let cutting = matches!(op, BoolOp::Remove | BoolOp::Intersect);
-                if cutting && !matches!(end, EndType::Symmetric | EndType::UpToNext | EndType::UpToVertex) && !*second && !tools.iter().any(|t| self.bodies.iter().any(|b| overlaps_volume(&b.shape, t))) {
-                    tools = build(-sign)?;
+                let may_flip = cutting && !matches!(end, EndType::Symmetric | EndType::UpToNext | EndType::UpToVertex) && !*second;
+                if !may_flip {
+                    return self.apply(fid, tools, *op);
                 }
-                self.apply(fid, tools, *op)
+                // cut, and if that removed nothing, cut the other way instead (one boolean in the usual case)
+                let flipped = build(-sign)?;
+                let before: Vec<Body> = self.bodies.iter().map(|b| Body { id: b.id, shape: dup(&b.shape) }).collect();
+                let vol = |bs: &[Body]| bs.iter().map(|b| volume(&b.shape)).sum::<f64>();
+                let v0 = vol(&before);
+                self.apply(fid, tools, *op)?;
+                if (vol(&self.bodies) - v0).abs() <= 1e-9 * v0.abs().max(1.0) && self.bodies.len() == before.len() {
+                    self.bodies = before;
+                    return self.apply(fid, flipped, *op);
+                }
+                Ok(())
             }
             Op::Revolve { profiles, axis, mode, angle, op } => {
                 let faces = self.profile_faces(profiles)?;
@@ -1004,14 +1016,19 @@ impl<'a> Model<'a> {
                 self.bodies.retain(|b| !ids.contains(&b.id));
                 Ok(())
             }
-            Op::Import { step, .. } => {
-                let iges = step.trim_start().len() > 72 && step.lines().next().map(|l| l.len() >= 73 && l.as_bytes()[72] == b'S').unwrap_or(false);
-                let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{fid}.{}", std::process::id(), if iges { "igs" } else { "step" }));
-                std::fs::write(&path, step).map_err(|e| e.to_string())?;
-                let s = if iges { Shape::read_iges(&path) } else { Shape::read_step(&path) }.map_err(|e| format!("could not read the file: {e:?}"));
-                let _ = std::fs::remove_file(&path);
-                let s = s?;
-                for (i, so) in solids_of(&s).into_iter().enumerate() {
+            Op::Import { step, format, data, scale, merge, .. } => {
+                let scale = self.num(scale)?;
+                if !(scale > 0.0) {
+                    return Err("scale must be positive".into());
+                }
+                let shape = imported_shape(step, format, data, scale, *merge)?;
+                let solids = solids_of(&shape);
+                if solids.is_empty() {
+                    // an open mesh or surface model: keep it as a surface body
+                    self.add_surface(fid, shape);
+                    return Ok(());
+                }
+                for (i, so) in solids.into_iter().enumerate() {
                     self.bodies.push(Body { id: (fid, i as u32), shape: so });
                 }
                 Ok(())
@@ -1406,7 +1423,12 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
             Some("the kernel crashed on this feature".to_string())
         } else {
             progress(f.id);
-            m.run(f.id).err()
+            let t = std::time::Instant::now();
+            let e = m.run(f.id).err();
+            if std::env::var("CAD_TIME").is_ok() {
+                eprintln!("feature {} ({}) {:?}", f.id, f.op.kind(), t.elapsed());
+            }
+            e
         };
         out.features.push(FeatureStatus { id: f.id, error });
     }
@@ -1453,6 +1475,52 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
         "iges" => shape.write_iges(path).map_err(|e| format!("{e:?}")),
         _ => Err("unknown format".into()),
     }
+}
+
+// ------------------------------------------------------------------ import
+
+/// Imported files are parsed once per worker process and reused on every rebuild.
+static IMPORTS: std::sync::Mutex<Option<HashMap<u64, Shape>>> = std::sync::Mutex::new(None);
+
+fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool) -> R<Shape> {
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    (step, format, data, scale.to_bits(), merge).hash(&mut h);
+    let key = h.finish();
+    if let Some(s) = IMPORTS.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&key)).map(dup)) {
+        return Ok(s);
+    }
+    let bytes = if data.is_empty() { step.as_bytes().to_vec() } else { crate::import::unpack(data)? };
+    let format = if !format.is_empty() {
+        format.to_string()
+    } else {
+        // older documents: STEP or IGES text (IGES has a section letter in column 73)
+        let iges = String::from_utf8_lossy(&bytes).lines().next().map(|l| l.len() >= 73 && l.as_bytes()[72] == b'S').unwrap_or(false);
+        if iges { "iges" } else { "step" }.to_string()
+    };
+    let shape = match format.as_str() {
+        "step" | "iges" => {
+            let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{key:x}.{}", std::process::id(), if format == "iges" { "igs" } else { "step" }));
+            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+            let s = if format == "iges" { Shape::read_iges(&path) } else { Shape::read_step(&path) }.map_err(|e| format!("could not read the {} file: {e:?}", format.to_uppercase()));
+            let _ = std::fs::remove_file(&path);
+            let s = s?;
+            if (scale - 1.0).abs() > 1e-12 { occ::transform(&s, DMat3::from_diagonal(DVec3::splat(scale)), DVec3::ZERO)? } else { s }
+        }
+        "stl" | "obj" => {
+            let m = crate::import::read_mesh(&format, &bytes, scale)?;
+            occ::mesh_solid(&m.pts, &m.tris, merge)?
+        }
+        f => return Err(format!("can't import {f} files")),
+    };
+    if let Ok(mut m) = IMPORTS.lock() {
+        let m = m.get_or_insert_with(HashMap::new);
+        if m.len() > 16 {
+            m.clear();
+        }
+        m.insert(key, dup(&shape));
+    }
+    Ok(shape)
 }
 
 // ------------------------------------------------------------------ helpers
@@ -1649,6 +1717,11 @@ fn shares_face(a: &Shape, b: &Shape) -> bool {
 }
 
 pub fn volume(s: &Shape) -> f64 {
+    // faceted shapes (imported meshes): add up the triangles, far faster than exact integration
+    let faces = unique_faces(s);
+    if faces.len() >= 1500 {
+        return faces.iter().flat_map(face_tris).map(|[a, b, c]| a.dot(b.cross(c)) / 6.0).sum();
+    }
     let mut props = ffi::g_prop::GProps_new();
     ffi::b_rep_g_prop::BRepGProp::VolumeProperties(&s.inner, props.pin_mut(), true, false, false);
     props.Mass()
@@ -1866,11 +1939,22 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
     let bb = opencascade::bounding_box::aabb(shape);
     let diag = (bb.max() - bb.min()).length().max(1.0);
     let tol = (diag * 0.0008).clamp(0.005, 0.5);
+    let tt = std::time::Instant::now();
+    let dbg = std::env::var("CAD_TIME").is_ok();
     // the angular limit keeps small and large curved faces smooth alike (~8.6°)
     if !ffi::extra::ex_mesh(&shape.inner, tol, 0.15) {
         return Err("meshing failed".into());
     }
-    let mut out = BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), ..Default::default() };
+    if dbg { eprintln!("  mesh {:?}", tt.elapsed()); }
+    let nfaces = unique_faces(shape).len();
+    let faceted = nfaces >= 1500;
+    // faceted shapes: mass properties come from the (exact) triangles below, much faster
+    let mut out = if faceted {
+        BodyMesh { bbox: [bb.min().into(), bb.max().into()], ..Default::default() }
+    } else {
+        BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), ..Default::default() }
+    };
+    if dbg { eprintln!("  props {:?}", tt.elapsed()); }
     for (fi, face) in unique_faces(shape).into_iter().enumerate() {
         let mut loc = ffi::top_loc::Location_new();
         let th = ffi::b_rep::BRep_Tool_Triangulation(&face.inner, loc.pin_mut());
@@ -1937,8 +2021,29 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
         }
         out.bbox = [lo, hi];
     }
-    for e in visible_edges(shape) {
-        let pts: Vec<DVec3> = e.approximation_segments().collect();
+    if dbg { eprintln!("  faces {:?}", tt.elapsed()); }
+    // faceted shapes (imported meshes) only show edges where the surface turns by 20° or more
+    let shown = match ffi::extra::ex_feature_edges(&shape.inner, 20f64.to_radians(), 1500) {
+        p if !p.is_null() && !p.IsNull() => unique_edges(&Shape::from_shape(&p)),
+        _ => visible_edges(shape),
+    };
+    if faceted {
+        let p = |i: u32| DVec3::new(out.positions[3 * i as usize] as f64, out.positions[3 * i as usize + 1] as f64, out.positions[3 * i as usize + 2] as f64);
+        let (mut vol, mut area, mut c) = (0.0, 0.0, DVec3::ZERO);
+        for t in out.indices.chunks(3) {
+            let (a, b, cc) = (p(t[0]), p(t[1]), p(t[2]));
+            let v = a.dot(b.cross(cc)) / 6.0;
+            vol += v;
+            c += (a + b + cc) / 4.0 * v;
+            area += (b - a).cross(cc - a).length() / 2.0;
+        }
+        out.volume = vol;
+        out.area = area;
+        out.centroid = if vol.abs() > 1e-12 { (c / vol).into() } else { [0.0; 3] };
+    }
+    for e in shown {
+        // straight edges need just their ends (fast for faceted shapes with many edges)
+        let pts: Vec<DVec3> = if faceted && e_is_line(&e) { vec![e.start_point(), e.end_point()] } else { e.approximation_segments().collect() };
         if pts.len() < 2 {
             continue;
         }

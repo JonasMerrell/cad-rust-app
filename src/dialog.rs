@@ -596,6 +596,28 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         }
                         combo(ui, "Operation", bop, &bool_ops, &mut changed);
                     }
+                    Op::Import { name, format, scale, merge, .. } => {
+                        ui.label(RichText::new(format!("{name} · {}", if format.is_empty() { "STEP".to_string() } else { format.to_uppercase() })).color(theme::muted()).size(12.0));
+                        // the file's units: a model drawn in inches comes in 25.4× larger
+                        let mut unit = match scale.trim() {
+                            "1" => 0,
+                            "10" => 1,
+                            "1000" => 2,
+                            "25.4" => 3,
+                            _ => 4,
+                        };
+                        let before = unit;
+                        combo(ui, "File units", &mut unit, &[(0, "mm"), (1, "cm"), (2, "m"), (3, "inch"), (4, "Custom scale")], &mut changed);
+                        if unit != before && unit < 4 {
+                            *scale = ["1", "10", "1000", "25.4"][unit].into();
+                        }
+                        if unit == 4 {
+                            val(ui, "Scale", scale, Kind::Count, &mut changed);
+                        }
+                        if matches!(format.as_str(), "stl" | "obj") {
+                            check(ui, "Merge flat triangles into faces", merge, &mut changed);
+                        }
+                    }
                     Op::Rib { thickness, flip, .. } => {
                         val(ui, "Thickness", thickness, Kind::Length, &mut changed);
                         check(ui, "Other side of the line", flip, &mut changed);

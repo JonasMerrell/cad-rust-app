@@ -48,6 +48,7 @@ runs in this folder. Other MCP clients start the same command
 | `sketch_constrain` | geometric constraints and dimensions (values can be expressions) |
 | `sketch_info` | points, curves, degrees of freedom, regions |
 | `add_feature` / `edit_feature` / `delete_feature` | extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, patterns, mirror, boolean, split, transform, deleteBody, sheetMetal |
+| `import_file` | bring in STEP, IGES (exact solids), STL or OBJ (meshes become solids with merged flat faces); stored in the document |
 | `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |
 | `render` | shaded PNG from any standard or iso view (`iso_front_left`, `iso_back_right`, …) or a `direction`; sketches used by features are hidden unless `sketches: "all"` |
 | `export` | STEP, IGES, STL (binary unless `ascii: true`), OBJ |

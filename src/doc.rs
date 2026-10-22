@@ -432,8 +432,21 @@ pub enum Op {
     },
     Import {
         name: String,
-        /// STEP text, embedded so the document is self-contained.
+        /// STEP text from older documents (newer ones use `data`).
+        #[serde(default, skip_serializing_if = "String::is_empty")]
         step: String,
+        /// "step", "iges", "stl" or "obj"; empty means STEP/IGES in `step`.
+        #[serde(default)]
+        format: String,
+        /// The file, compressed and base64-encoded, so the document is self-contained.
+        #[serde(default, skip_serializing_if = "String::is_empty")]
+        data: String,
+        /// Scale factor applied on import, e.g. 25.4 for a model drawn in inches.
+        #[serde(default = "one")]
+        scale: String,
+        /// Meshes: merge coplanar triangles into flat faces (easier to sketch on and fillet).
+        #[serde(default = "yes")]
+        merge: bool,
     },
 }
 
@@ -743,6 +756,9 @@ fn equal() -> String {
 }
 fn one() -> String {
     "1".into()
+}
+fn yes() -> bool {
+    true
 }
 fn deg45() -> String {
     "45".into()

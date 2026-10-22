@@ -166,6 +166,13 @@ pub fn offset_faces(s: &Shape, faces: &[Face], d: f64) -> R<Shape> {
     take(ex::ex_offset_faces(&s.inner, &l, d), "move face")
 }
 
+/// A solid (or shell) from triangles: shared vertices `pts`, index triples `tris`.
+/// With `merge`, coplanar neighbouring triangles become one flat face.
+pub fn mesh_solid(pts: &[f64], tris: &[u32], merge: bool) -> R<Shape> {
+    let spec = crate::import::face_spec(pts, tris, merge);
+    take(ex::ex_mesh_solid(pts, &spec), "mesh import")
+}
+
 pub fn sew(shapes: &[&Shape], solid: bool) -> R<Shape> {
     let l = list(shapes.iter().map(|s| &*s.inner));
     take(ex::ex_sew(&l, 1e-4, solid), "knit")
