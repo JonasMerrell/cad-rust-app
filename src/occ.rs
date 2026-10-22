@@ -166,6 +166,11 @@ pub fn offset_faces(s: &Shape, faces: &[Face], d: f64) -> R<Shape> {
     take(ex::ex_offset_faces(&s.inner, &l, d), "move face")
 }
 
+/// Drop existing triangulations so the next mesh uses fresh settings.
+pub fn clean_mesh(s: &Shape) {
+    let _ = ex::ex_mesh_careful(&s.inner, 1e9, 1.0, 0);
+}
+
 pub fn heal(s: &Shape, tol: f64) -> R<Shape> {
     take(ex::ex_heal(&s.inner, tol), "heal")
 }

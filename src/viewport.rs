@@ -494,7 +494,12 @@ fn build_scene(app: &App) -> SceneData {
         .filter_map(|r| if let Ref::Face { point, .. } = r { Some(DVec3::from(*point)) } else { None })
         .collect();
     let body_alpha = if app.xray || in_sketch.is_some() { 0.35 } else { 1.0 };
+    // printability colouring: overhangs and thin walls, against the lowest point of all parts
+    let floor = app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)).map(|b| b.bbox[0][2]).fold(f64::INFINITY, f64::min);
     for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        let classes: Option<Vec<u8>> = (app.print_view && !b.surface).then(|| {
+            app.print_cache.borrow_mut().entry(b.id).or_insert_with(|| crate::printing::classify(b, floor, app.print.overhang, app.print.min_wall)).clone()
+        });
         let body_picked = is_picked(app, &Ref::Body { body: b.id });
         // which faces are highlighted
         let face_of = |p: DVec3| -> Option<usize> {
@@ -520,7 +525,11 @@ fn build_scene(app: &App) -> SceneData {
             } else if hov_f == Some(fi) {
                 vp::hover()
             } else {
-                app.part_color(b.id)
+                match classes.as_ref().and_then(|c| c.get(ti)) {
+                    Some(1) => egui::Color32::from_rgb(0xe0, 0x4f, 0x4f),
+                    Some(2) => egui::Color32::from_rgb(0xa8, 0x55, 0xd8),
+                    _ => app.part_color(b.id),
+                }
             };
             let list = if transparent { &mut s.transparent } else { &mut s.opaque };
             for &i in tri {
@@ -960,6 +969,10 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     }
                     if btn(ui, "normal", "Normal to: look straight at the selected plane or face (N)", false).clicked() {
                         app.view_normal_to_selection();
+                    }
+                    if btn(ui, "printer", "Printability: overhangs in red, walls thinner than the limit in purple (limits in 3D printing settings)", app.print_view).clicked() {
+                        app.print_view = !app.print_view;
+                        app.scene_dirty = true;
                     }
                     if btn(ui, "fit", "Zoom to fit (F)", false).clicked() {
                         app.fit_view();

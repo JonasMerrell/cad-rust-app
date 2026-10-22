@@ -1580,6 +1580,12 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
     match format {
         "step" => shape.write_step(path).map_err(|e| format!("{e:?}")),
         "stl" => shape.write_stl_with_tolerance(path, 0.01).map_err(|e| format!("{e:?}")),
+        // "stl@0.05": STL with that mesh tolerance (mm)
+        f if f.starts_with("stl@") => {
+            let tol: f64 = f[4..].parse().map_err(|_| "bad STL tolerance")?;
+            occ::clean_mesh(&shape);
+            shape.write_stl_with_tolerance(path, tol.clamp(0.001, 1.0)).map_err(|e| format!("{e:?}"))
+        }
         "iges" => shape.write_iges(path).map_err(|e| format!("{e:?}")),
         _ => Err("unknown format".into()),
     }

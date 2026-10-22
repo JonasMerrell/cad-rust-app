@@ -135,6 +135,15 @@ pub struct App {
     pub was_narrow: Option<bool>,
     /// Model-check problem being pointed at in the viewport.
     pub issue_focus: Option<[f64; 3]>,
+    pub print: crate::printing::PrintSettings,
+    /// Printability colouring (overhangs, thin walls) in the viewport.
+    pub print_view: bool,
+    /// Per-body triangle classes for the printability view.
+    pub print_cache: std::cell::RefCell<std::collections::HashMap<crate::doc::BodyId, Vec<u8>>>,
+    /// An STL export on its way to the slicer: (temp path, name).
+    pub pending_send: Option<(String, String)>,
+    /// Result of the upload, filled in by the upload thread.
+    pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -207,6 +216,11 @@ impl App {
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
+            print: crate::printing::load(),
+            print_view: false,
+            print_cache: Default::default(),
+            pending_send: None,
+            send_result: Default::default(),
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -557,8 +571,59 @@ impl App {
             _ => "stl",
         };
         let Some(p) = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("part.{ext}")).save_file() else { return };
-        self.kernel.export(&self.doc, format, p.to_string_lossy().to_string());
+        let format = if format == "stl" { format!("stl@{}", self.print.stl_tolerance) } else { format.to_string() };
+        self.kernel.export(&self.doc, &format, p.to_string_lossy().to_string());
         self.flash_info(format!("Exporting {}…", p.display()), None);
+    }
+
+    /// Make an STL of the parts and hand it to orcaweb.
+    pub fn send_to_slicer(&mut self) {
+        if self.result.bodies.is_empty() {
+            self.flash("There are no parts to print", ToastKind::Info);
+            return;
+        }
+        let name = self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part".into());
+        let tmp = std::env::temp_dir().join(format!("cad-app-send-{}.stl", std::process::id()));
+        let path = tmp.to_string_lossy().to_string();
+        self.pending_send = Some((path.clone(), name));
+        self.kernel.export(&self.doc, &format!("stl@{}", self.print.stl_tolerance), path);
+        self.flash_info("Sending to the slicer…", None);
+    }
+
+    fn print_settings_ui(&mut self, ui: &mut Ui) {
+        ui.set_min_width(300.0);
+        let before = self.print.clone();
+        let p = &mut self.print;
+        egui::Grid::new("print-settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("Slicer (orcaweb)");
+            ui.add(egui::TextEdit::singleline(&mut p.orcaweb).desired_width(190.0));
+            ui.end_row();
+            ui.label("STL detail");
+            let cur = match p.stl_tolerance {
+                t if t >= 0.04 => "Coarse",
+                t if t >= 0.008 => "Normal",
+                _ => "Fine",
+            };
+            egui::ComboBox::from_id_salt("stl-detail").selected_text(cur).show_ui(ui, |ui| {
+                for (t, l) in [(0.05, "Coarse (smaller files)"), (0.01, "Normal"), (0.002, "Fine (smooth curves)")] {
+                    if ui.selectable_label(cur == l.split(' ').next().unwrap(), l).clicked() {
+                        p.stl_tolerance = t;
+                    }
+                }
+            });
+            ui.end_row();
+            ui.label("Overhang limit");
+            ui.add(egui::DragValue::new(&mut p.overhang).range(10.0..=80.0).suffix("°"));
+            ui.end_row();
+            ui.label("Thinnest wall");
+            ui.add(egui::DragValue::new(&mut p.min_wall).range(0.0..=10.0).speed(0.05).suffix(" mm"));
+            ui.end_row();
+        });
+        if self.print != before {
+            crate::printing::save(&self.print);
+            self.print_cache.borrow_mut().clear();
+            self.scene_dirty = true;
+        }
     }
 
     pub fn screenshot(&mut self, ctx: &egui::Context) {
@@ -624,6 +689,7 @@ impl App {
                         }
                     }
                     self.result = r;
+                    self.print_cache.borrow_mut().clear();
                     self.scene_dirty = true;
                     if self.first_fit && !self.result.bodies.is_empty() {
                         self.first_fit = false;
@@ -632,11 +698,36 @@ impl App {
                 }
                 Outcome::Interference(pairs) => crate::asm_ui::interference_result(self, pairs),
                 Outcome::Projected(tag, key, views) => crate::drawing_ui::projected(self, tag, key, views),
+                Outcome::Exported(err, path) if self.pending_send.as_ref().map(|p| p.0 == path).unwrap_or(false) => {
+                    let (_, name) = self.pending_send.take().unwrap();
+                    match err {
+                        Some(e) => self.flash(format!("Could not make the STL: {e}"), ToastKind::Error),
+                        None => {
+                            let bytes = std::fs::read(&path).unwrap_or_default();
+                            let _ = std::fs::remove_file(&path);
+                            let url = self.print.orcaweb.clone();
+                            let slot = self.send_result.clone();
+                            std::thread::spawn(move || {
+                                let r = crate::printing::send_to_orcaweb(&url, &name, &bytes);
+                                *slot.lock().unwrap() = Some(r);
+                            });
+                        }
+                    }
+                }
                 Outcome::Exported(err, path) => match err {
                     None => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
                     Some(e) => self.flash(format!("Export failed: {e}"), ToastKind::Error),
                 },
             }
+        }
+        let sent = self.send_result.lock().ok().and_then(|mut s| s.take());
+        match sent {
+            Some(Ok(url)) => {
+                crate::printing::open_url(&url);
+                self.flash_info("Sent to the slicer · its page opens in your browser", Some(Duration::from_secs(4)));
+            }
+            Some(Err(e)) => self.flash(format!("Could not send to the slicer: {e}"), ToastKind::Error),
+            None => {}
         }
         if was_loading && self.kernel_ready() {
             if self.toast.as_ref().map(|t| t.text.starts_with("Loading")).unwrap_or(false) {
@@ -878,6 +969,11 @@ impl App {
                 }
             }
         });
+        if ui.add(egui::Button::image_and_text(icons::image("printer", 15.0).tint(theme::text()), "Send to slicer")).on_hover_text(format!("Open the parts in orcaweb ({}) to slice and print", self.print.orcaweb)).clicked() {
+            action = Some("send");
+            ui.close();
+        }
+        ui.menu_image_text_button(icons::image("printer", 15.0).tint(theme::text()), "3D printing settings", |ui| self.print_settings_ui(ui));
         ui.menu_image_text_button(icons::image("view", 15.0).tint(theme::text()), "View", |ui| self.view_items(ui));
         ui.separator();
         let (icon, l) = if self.dark { ("sun", "Light mode") } else { ("moon", "Dark mode") };
@@ -892,6 +988,7 @@ impl App {
             Some("import") => self.import_step(),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
             Some("obj") => self.export_obj(),
+            Some("send") => self.send_to_slicer(),
             Some("png") => self.screenshot(ui.ctx()),
             _ => {}
         }
@@ -1731,6 +1828,8 @@ impl App {
             "Insert views, add dimensions and notes, then export".to_string()
         } else if let Some(s) = &self.sketch {
             crate::sketcher::status_text(self, s)
+        } else if self.print_view && self.sketch.is_none() && self.dialog.is_none() {
+            format!("Printability · red: overhang past {}° needs support · purple: wall thinner than {} mm", self.print.overhang, crate::expr::trim(self.print.min_wall, 2))
         } else if self.awaiting_sketch_plane {
             "Select a plane or flat face to sketch on · Esc cancels".to_string()
         } else if let Some(m) = &self.measure {

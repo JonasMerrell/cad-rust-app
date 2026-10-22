@@ -18,6 +18,7 @@ mod import;
 mod kernel;
 mod occ;
 mod regions;
+mod printing;
 mod render;
 mod script;
 mod script_ui;

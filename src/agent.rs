@@ -256,6 +256,57 @@ impl Session {
                 self.status()
             }
             "list_geometry" => self.geometry(a),
+            "printability" => {
+                let st = crate::printing::PrintSettings::default();
+                let overhang = a.get("overhang").and_then(|v| v.as_f64()).unwrap_or(st.overhang);
+                let min_wall = a.get("min_wall").and_then(|v| v.as_f64()).unwrap_or(st.min_wall);
+                let floor = self.result.bodies.iter().map(|b| b.bbox[0][2]).fold(f64::INFINITY, f64::min);
+                let parts: Vec<Value> = self
+                    .result
+                    .bodies
+                    .iter()
+                    .filter(|b| !b.surface)
+                    .map(|b| {
+                        let cls = crate::printing::classify(b, floor, overhang, min_wall);
+                        let p = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+                        let (mut over, mut thin) = (0.0, 0.0);
+                        let (mut over_at, mut thin_at) = (vec![], vec![]);
+                        for (t, c) in b.indices.chunks(3).zip(&cls) {
+                            let (x, y, z) = (p(t[0]), p(t[1]), p(t[2]));
+                            let area = (y - x).cross(z - x).length() / 2.0;
+                            let mid = ((x + y + z) / 3.0).to_array().map(round);
+                            match c {
+                                1 => {
+                                    over += area;
+                                    if over_at.len() < 5 {
+                                        over_at.push(mid);
+                                    }
+                                }
+                                2 => {
+                                    thin += area;
+                                    if thin_at.len() < 5 {
+                                        thin_at.push(mid);
+                                    }
+                                }
+                                _ => {}
+                            }
+                        }
+                        json!({"body": [b.id.0, b.id.1], "overhang_area_mm2": round(over), "overhang_examples": over_at, "thin_wall_area_mm2": round(thin), "thin_wall_examples": thin_at})
+                    })
+                    .collect();
+                json!({"overhang_limit_deg": overhang, "min_wall_mm": min_wall, "build_plate_z": round(floor), "parts": parts})
+            }
+            "send_to_slicer" => {
+                let url = a.get("url").and_then(|u| u.as_str()).map(String::from).unwrap_or_else(|| crate::printing::load().orcaweb);
+                let tol = a.get("tolerance").and_then(|t| t.as_f64()).unwrap_or(0.01);
+                let tmp = std::env::temp_dir().join(format!("cad-agent-send-{}.stl", std::process::id()));
+                self.kernel.export_blocking(&self.doc, &format!("stl@{tol}"), tmp.to_string_lossy().to_string())?;
+                let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
+                let _ = std::fs::remove_file(&tmp);
+                let name = a.get("name").and_then(|n| n.as_str()).map(String::from).or_else(|| self.path.as_ref().and_then(|p| std::path::Path::new(p).file_stem().map(|s| s.to_string_lossy().to_string()))).unwrap_or("part".into());
+                let page = crate::printing::send_to_orcaweb(&url, &name, &bytes)?;
+                json!({"slice_page": page, "stl_bytes": bytes.len()})
+            }
             "import_file" => {
                 let path = str_arg(a, "path")?;
                 let p = std::path::Path::new(&path);
@@ -888,6 +939,8 @@ fn tools() -> Value {
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}}), &["path"])},
+        {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
+        {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
