@@ -137,4 +137,6 @@ pub const ICONS: &[(&str, &str)] = &[
     ("heal", "M4 14l6-6 4 4-6 6H4zM10 8l3-3a2.8 2.8 0 0 1 4 0l2 2a2.8 2.8 0 0 1 0 4l-3 3M14 12l-2-2"),
     ("warning", "M12 3l10 18H2zM12 10v5M12 18v.01"),
     ("printer", "M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"),
+    ("curvePattern", "M3 18c4-10 14-10 18 0M5 14.5h.01M8 10.5h.01M12 9h.01M16 10.5h.01M19 14.5h.01"),
+    ("pointPattern", "M5 5h4v4H5zM15 5h4v4h-4zM5 15h4v4H5zM16 16l2 2M18 16l-2 2"),
 ];

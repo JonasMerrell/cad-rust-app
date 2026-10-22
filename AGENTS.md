@@ -47,7 +47,7 @@ runs in this folder. Other MCP clients start the same command
 | `sketch_add` | points, lines, polylines, rectangles, circles, arcs, ellipses, splines, polygons, text |
 | `sketch_constrain` | geometric constraints and dimensions (values can be expressions) |
 | `sketch_info` | points, curves, degrees of freedom, regions |
-| `add_feature` / `edit_feature` / `delete_feature` | extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, patterns, mirror, boolean, split, transform, deleteBody, sheetMetal |
+| `add_feature` / `edit_feature` / `delete_feature` | extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linear/circular/curve/sketch-point patterns, mirror, boolean, split, transform, deleteBody, sheetMetal, heal |
 | `import_file` | bring in STEP, IGES (exact solids), STL or OBJ (meshes become solids with merged flat faces); stored in the document |
 | `printability` / `send_to_slicer` | overhang and thin-wall check; stage the parts as STL in the orcaweb slicer |
 | `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |

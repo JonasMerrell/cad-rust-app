@@ -101,6 +101,14 @@ fn sel_fields(op: &mut Op) -> Vec<(&'static str, Accept, Slot<'_>)> {
             ("Direction", Axis, Slot::One(direction)),
             ("Second direction", Axis, Slot::One(second)),
         ],
+        Op::CurvePattern { kind, bodies, path, .. } => vec![
+            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
+            ("Path", Path, Slot::Many(path)),
+        ],
+        Op::PointPattern { kind, bodies, points } => vec![
+            if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) },
+            ("Points", Points, Slot::Many(points)),
+        ],
         Op::CircularPattern { kind, bodies, axis, .. } => {
             vec![if kind == "feature" { ("Features", Features, Slot::Many(bodies)) } else { ("Bodies", Bodies, Slot::Many(bodies)) }, ("Axis", Axis, Slot::One(axis))]
         }
@@ -514,6 +522,15 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         val(ui, "Total angle (°)", angle, Kind::Angle, &mut changed);
                     }
                     Op::Mirror { kind, .. } => pattern_kind(ui, kind, &mut changed),
+                    Op::CurvePattern { kind, count, align, .. } => {
+                        pattern_kind(ui, kind, &mut changed);
+                        val(ui, "Instances", count, Kind::Count, &mut changed);
+                        check(ui, "Turn with the curve", align, &mut changed);
+                    }
+                    Op::PointPattern { kind, .. } => {
+                        pattern_kind(ui, kind, &mut changed);
+                        ui.label(RichText::new("Copies move from the first point to each of the others").color(theme::muted()).size(11.5));
+                    }
                     Op::MoveFace { distance, .. } => val(ui, "Distance", distance, Kind::Length, &mut changed),
                     Op::SurfaceExtrude { depth, symmetric, opposite, .. } => {
                         val(ui, "Depth", depth, Kind::Length, &mut changed);

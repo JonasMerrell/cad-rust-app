@@ -22,7 +22,7 @@ pub const FEATURE_GROUPS: &[&[&str]] = &[
     &["sketch", "plane"],
     &["extrude", "revolve", "sweep", "loft"],
     &["fillet", "chamfer", "shell", "hole", "draft"],
-    &["linearPattern", "circularPattern", "mirror", "boolean", "split"],
+    &["linearPattern", "circularPattern", "curvePattern", "pointPattern", "mirror", "boolean", "split"],
     &["thicken", "rib", "helix", "transform", "moveFace", "deleteFace"],
     &["surfaceExtrude", "surfaceRevolve", "surfaceLoft", "fill", "offsetSurface", "knit"],
     &["sheetMetal", "flange", "tab", "convertSheet", "derived", "heal"],

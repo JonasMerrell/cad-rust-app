@@ -277,6 +277,24 @@ pub enum Op {
         spacing2: String,
         count2: String,
     },
+    /// Copies spaced evenly along a curve, optionally turning with it.
+    CurvePattern {
+        #[serde(default = "part")]
+        kind: String,
+        bodies: Vec<Ref>,
+        path: Vec<Ref>,
+        count: String,
+        /// Turn each copy to follow the curve's direction.
+        #[serde(default)]
+        align: bool,
+    },
+    /// A copy at each selected sketch point (moved from the first point, or the seed's centre).
+    PointPattern {
+        #[serde(default = "part")]
+        kind: String,
+        bodies: Vec<Ref>,
+        points: Vec<Ref>,
+    },
     CircularPattern {
         #[serde(default = "part")]
         kind: String,
@@ -472,6 +490,8 @@ impl Op {
             Op::Draft { .. } => "draft",
             Op::LinearPattern { .. } => "linearPattern",
             Op::CircularPattern { .. } => "circularPattern",
+            Op::CurvePattern { .. } => "curvePattern",
+            Op::PointPattern { .. } => "pointPattern",
             Op::Mirror { .. } => "mirror",
             Op::Boolean { .. } => "boolean",
             Op::Split { .. } => "split",
@@ -548,6 +568,8 @@ impl Op {
             "linearPattern" => {
                 Op::LinearPattern { kind: s("part"), bodies: vec![], direction: None, spacing: s("20"), count: s("3"), second: None, spacing2: s("20"), count2: s("1") }
             }
+            "curvePattern" => Op::CurvePattern { kind: s("part"), bodies: vec![], path: vec![], count: s("5"), align: true },
+            "pointPattern" => Op::PointPattern { kind: s("feature"), bodies: vec![], points: vec![] },
             "circularPattern" => Op::CircularPattern { kind: s("part"), bodies: vec![], axis: None, count: s("4"), angle: s("360") },
             "mirror" => Op::Mirror { kind: s("part"), bodies: vec![], plane: None },
             "boolean" => Op::Boolean { kind: BooleanKind::Union, target: None, tools: vec![], keep_tools: false },
@@ -571,6 +593,8 @@ pub fn kind_label(kind: &str) -> &'static str {
         "hole" => "Hole",
         "linearPattern" => "Linear pattern",
         "circularPattern" => "Circular pattern",
+        "curvePattern" => "Curve pattern",
+        "pointPattern" => "Sketch point pattern",
         "mirror" => "Mirror",
         "boolean" => "Boolean",
         "draft" => "Draft",

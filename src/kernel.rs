@@ -1018,6 +1018,45 @@ impl<'a> Model<'a> {
                 }
                 self.pattern(fid, kind, bodies, &xf)
             }
+            Op::CurvePattern { kind, bodies, path, count, align } => {
+                let n = self.count(count)?;
+                let pts = self.path_points(path)?;
+                // arc-length samples: copies at equal spacing from the start to the end (or around, if closed)
+                let mut acc = vec![0.0];
+                for w in pts.windows(2) {
+                    acc.push(acc.last().unwrap() + (w[1] - w[0]).length());
+                }
+                let total = *acc.last().unwrap();
+                if total < 1e-9 {
+                    return Err("the path has no length".into());
+                }
+                let closed = (pts[0] - *pts.last().unwrap()).length() < 1e-6 * total.max(1.0);
+                let at = |s: f64| -> (DVec3, DVec3) {
+                    let i = acc.partition_point(|a| *a < s).clamp(1, pts.len() - 1);
+                    let (a, b) = (pts[i - 1], pts[i]);
+                    let seg = (acc[i] - acc[i - 1]).max(1e-12);
+                    let t = ((s - acc[i - 1]) / seg).clamp(0.0, 1.0);
+                    (a.lerp(b, t), (b - a).normalize_or_zero())
+                };
+                let step = if closed { total / n as f64 } else { total / (n.max(2) - 1) as f64 };
+                let (p0, t0) = at(0.0);
+                let mut xf = vec![];
+                for i in 1..n {
+                    let (p, t) = at(step * i as f64);
+                    let m = if *align { rotation_between(t0, t) } else { DMat3::IDENTITY };
+                    // move p0 to p, turning about p
+                    xf.push((m, p - m * p0));
+                }
+                self.pattern(fid, kind, bodies, &xf)
+            }
+            Op::PointPattern { kind, bodies, points } => {
+                let pts: Vec<DVec3> = points.iter().map(|r| self.point_of(r)).collect::<R<_>>()?;
+                if pts.len() < 2 {
+                    return Err("select at least two sketch points: the first is where the original sits".into());
+                }
+                let xf: Vec<(DMat3, DVec3)> = pts[1..].iter().map(|p| (DMat3::IDENTITY, *p - pts[0])).collect();
+                self.pattern(fid, kind, bodies, &xf)
+            }
             Op::CircularPattern { kind, bodies, axis, count, angle } => {
                 let (o, d) = self.axis_of(axis.as_ref().ok_or("select an axis")?)?;
                 let n = self.count(count)?;
@@ -1217,6 +1256,37 @@ impl<'a> Model<'a> {
             return Err("degenerate curve".into());
         }
         Ok((pts[0], (pts[1] - pts[0]).normalize()))
+    }
+
+    /// Points along a chain of curves and edges, joined end to end.
+    fn path_points(&self, refs: &[Ref]) -> R<Vec<DVec3>> {
+        let mut out: Vec<DVec3> = vec![];
+        for r in refs {
+            let mut pts: Vec<DVec3> = match r {
+                Ref::Edge { point } => self.find_edge(v3(*point))?.0.approximation_segments().collect(),
+                Ref::Curve { feature } => self.curve_points(*feature)?,
+                Ref::SketchCurve { sketch, curve } => {
+                    let (sk, fr) = self.sketch(*sketch)?;
+                    let c = sk.curve(*curve).ok_or("the curve no longer exists")?;
+                    sk.tessellate(c, 0.2).into_iter().map(|p| fr.to_world(p)).collect()
+                }
+                _ => return Err("select curves or edges for the path".into()),
+            };
+            if let Some(last) = out.last().copied() {
+                // follow on from the nearer end
+                if (pts[pts.len() - 1] - last).length() < (pts[0] - last).length() {
+                    pts.reverse();
+                }
+                if (pts[0] - last).length() < 1e-6 {
+                    pts.remove(0);
+                }
+            }
+            out.extend(pts);
+        }
+        if out.len() < 2 {
+            return Err("select a path".into());
+        }
+        Ok(out)
     }
 
     fn curve_points(&self, feature: FeatId) -> R<Vec<DVec3>> {
@@ -1828,6 +1898,21 @@ fn shares_face(a: &Shape, b: &Shape) -> bool {
         let (c, n) = (g.center, g.normal);
         fa.iter().any(|(c2, n2)| n.dot(*n2) < -0.999 && (c - *c2).dot(n).abs() < 1e-6)
     })
+}
+
+/// Rotation turning direction `a` onto `b` (the shortest way).
+fn rotation_between(a: DVec3, b: DVec3) -> DMat3 {
+    let (a, b) = (a.normalize_or_zero(), b.normalize_or_zero());
+    let c = a.cross(b);
+    if c.length() < 1e-12 {
+        if a.dot(b) > 0.0 {
+            return DMat3::IDENTITY;
+        }
+        // opposite: half a turn about any perpendicular
+        let p = if a.x.abs() < 0.9 { a.cross(DVec3::X) } else { a.cross(DVec3::Y) }.normalize();
+        return DMat3::from_axis_angle(p, std::f64::consts::PI);
+    }
+    DMat3::from_axis_angle(c.normalize(), a.angle_between(b))
 }
 
 pub fn volume(s: &Shape) -> f64 {
