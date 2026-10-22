@@ -320,6 +320,61 @@ impl App {
     }
 
     /// Start a feature from the toolbar.
+    /// A new feature that turned sketches into geometry hides them (show them again from the list).
+    fn hide_used_sketches(&mut self, fid: FeatId) {
+        let Some(f) = self.doc.feature(fid) else { return };
+        if matches!(f.op, Op::Sketch { .. } | Op::Plane { .. }) {
+            return;
+        }
+        fn walk(v: &serde_json::Value, out: &mut Vec<u64>) {
+            match v {
+                serde_json::Value::Object(m) => {
+                    let is_sketch_ref = matches!(m.get("kind").and_then(|k| k.as_str()), Some("region" | "sketch_curve" | "sketch_point"));
+                    if is_sketch_ref {
+                        if let Some(id) = m.get("sketch").and_then(|s| s.as_u64()) {
+                            out.push(id);
+                        }
+                    }
+                    m.values().for_each(|x| walk(x, out));
+                }
+                serde_json::Value::Array(a) => a.iter().for_each(|x| walk(x, out)),
+                _ => {}
+            }
+        }
+        let mut ids = vec![];
+        walk(&serde_json::to_value(&f.op).unwrap_or_default(), &mut ids);
+        let mut any = false;
+        for id in ids {
+            if let Some(sk) = self.doc.feature_mut(id) {
+                if matches!(sk.op, Op::Sketch { .. }) && !sk.hidden {
+                    sk.hidden = true;
+                    any = true;
+                }
+            }
+        }
+        if any {
+            self.scene_dirty = true;
+        }
+    }
+
+    /// Finish the open sketch and start an Extrude of its regions (holes stay empty).
+    pub fn extrude_from_sketch(&mut self) {
+        let Some(fid) = self.sketch.as_ref().map(|s| s.feature) else { return };
+        crate::sketcher::finish(self);
+        let Some(Op::Sketch { sketch, .. }) = self.doc.feature(fid).map(|f| f.op.clone()) else { return };
+        let regions = crate::regions::find_regions(&sketch);
+        if regions.is_empty() {
+            self.flash("The sketch has no closed regions to extrude", ToastKind::Info);
+            return;
+        }
+        self.picks = regions
+            .iter()
+            .filter(|r| !regions.iter().any(|o| o.holes.iter().any(|h| crate::regions::point_in_poly(r.sample, &h.poly))))
+            .map(|r| Ref::Region { sketch: fid, point: r.sample.into() })
+            .collect();
+        self.start_feature("extrude");
+    }
+
     pub fn start_feature(&mut self, kind: &str) {
         if self.sketch.is_some() {
             return;
@@ -365,6 +420,8 @@ impl App {
         if let Some(d) = self.dialog.take() {
             if let Some(e) = self.errors.get(&d.feature) {
                 self.flash(format!("{}: {e}", self.doc.feature(d.feature).map(|f| f.name.clone()).unwrap_or_default()), ToastKind::Error);
+            } else if d.is_new {
+                self.hide_used_sketches(d.feature);
             }
         }
         self.picks.clear();
@@ -1067,6 +1124,10 @@ impl App {
                     if ui.add(b).on_hover_text("Finish sketch (Enter)").clicked() {
                         crate::sketcher::finish(self);
                     }
+                    let ex = egui::Button::image_and_text(icons::image("extrude", 18.0).tint(theme::text()), RichText::new("Extrude").size(12.5)).min_size(egui::vec2(26.0, 26.0));
+                    if ui.add(ex).on_hover_text("Finish the sketch and extrude its regions (Shift+E)").clicked() {
+                        self.extrude_from_sketch();
+                    }
                     if ui
                         .add(egui::Button::image(icons::image("close", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
                         .on_hover_text("Discard this sketch session's changes")
@@ -1320,11 +1381,33 @@ impl App {
                 self.geom_open = !self.geom_open;
             }
             if self.geom_open {
-                tree_row(ui, 1, "origin", "Origin", false, false, false, false, None).on_hover_text("Origin (0, 0, 0)");
+                let mut toggle: Option<String> = None;
+                let hid = self.doc.hidden_defaults.iter().any(|h| h == "Origin");
+                let resp = tree_row(ui, 1, "origin", "Origin", false, false, false, hid, None).on_hover_text("Origin (0, 0, 0)");
+                if eye_toggle(ui, &resp, resp.rect.right() - 12.0, hid, "eye-origin") {
+                    toggle = Some("Origin".into());
+                }
+                resp.context_menu(|ui| {
+                    if ui.button(if hid { "Show" } else { "Hide" }).clicked() {
+                        toggle = Some("Origin".into());
+                        ui.close();
+                    }
+                });
                 for p in OriginPlane::ALL {
                     let r = Ref::OriginPlane { plane: p };
                     let picked = self.picks.contains(&r);
-                    let resp = tree_row(ui, 1, "planeSheet", p.name().trim_end_matches(" plane"), picked, false, false, false, None);
+                    let label = p.name().trim_end_matches(" plane");
+                    let hid = self.doc.hidden_defaults.iter().any(|h| h == label);
+                    let resp = tree_row(ui, 1, "planeSheet", label, picked, false, false, hid, None);
+                    if eye_toggle(ui, &resp, resp.rect.right() - 12.0, hid, ("eye-plane", label)) {
+                        toggle = Some(label.to_string());
+                    }
+                    resp.context_menu(|ui| {
+                        if ui.button(if hid { "Show" } else { "Hide" }).clicked() {
+                            toggle = Some(label.to_string());
+                            ui.close();
+                        }
+                    });
                     if resp.clicked() {
                         self.pick_from_tree(r.clone(), ui.input(|i| i.modifiers.shift || i.modifiers.command));
                     }
@@ -1332,6 +1415,16 @@ impl App {
                         self.hover = Some(r);
                         self.scene_dirty = true;
                     }
+                }
+                if let Some(t) = toggle {
+                    // display only: no rebuild
+                    self.checkpoint();
+                    if let Some(i) = self.doc.hidden_defaults.iter().position(|h| *h == t) {
+                        self.doc.hidden_defaults.remove(i);
+                    } else {
+                        self.doc.hidden_defaults.push(t);
+                    }
+                    self.scene_dirty = true;
                 }
             }
         }
@@ -1511,6 +1604,10 @@ impl App {
             }
             None => self.flash("Select a plane or flat face to look at", ToastKind::Info),
         }
+    }
+
+    pub fn default_hidden(&self, name: &str) -> bool {
+        self.doc.hidden_defaults.iter().any(|h| h == name)
     }
 
     pub fn part_hidden(&self, id: doc::BodyId) -> bool {

@@ -133,7 +133,8 @@ const DARK_VP: ViewPalette = ViewPalette {
     body: hex(0x9aa9ba),
     edge: hex(0x1c2026),
     hover: hex(0xffb547),
-    picked: hex(0x4ea1ff),
+    // selection stands apart from blue sketch geometry and the amber hover
+    picked: hex(0xff6a3d),
     plane: hex(0x6f8fb3),
     sketch: hex(0x56b6ff),
     construction: hex(0x7d8a99),
@@ -156,7 +157,7 @@ const LIGHT_VP: ViewPalette = ViewPalette {
     body: hex(0x7a90a3),
     edge: hex(0x1b2630),
     hover: hex(0xf3a73b),
-    picked: hex(0x1a73d9),
+    picked: hex(0xe8451c),
     plane: hex(0x8fb2d9),
     sketch: hex(0x1a73d9),
     construction: hex(0x8a96a3),

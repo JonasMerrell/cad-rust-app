@@ -303,9 +303,13 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     }
     let size = plane_size(app) as f64;
     for p in OriginPlane::ALL {
+        if app.default_hidden(p.name().trim_end_matches(" plane")) {
+            continue;
+        }
         let fr = p.frame();
         if let Some((t, l)) = ray_plane(o, d, &fr) {
-            if l.x >= 0.0 && l.y >= 0.0 && l.x <= size && l.y <= size {
+            // the planes are centred on the origin
+            if l.x.abs() <= size / 2.0 && l.y.abs() <= size / 2.0 {
                 consider(&mut best, t + 1e-3, Ref::OriginPlane { plane: p });
             }
         }
@@ -440,7 +444,7 @@ fn build_scene(app: &App) -> SceneData {
         let fr = p.frame();
         let hov = app.hover.as_ref() == Some(&r);
         let picked = is_picked(app, &r);
-        if in_sketch.is_some() && !picked {
+        if (in_sketch.is_some() || app.default_hidden(p.name().trim_end_matches(" plane"))) && !picked {
             continue;
         }
         let col = if picked {
@@ -451,16 +455,20 @@ fn build_scene(app: &App) -> SceneData {
             vp::plane()
         };
         let q = |x: f32, y: f32| (fr.to_world(DVec2::new(x as f64, y as f64))).as_vec3();
-        let quad = [q(0.0, 0.0), q(size, 0.0), q(size, size), q(0.0, size)];
+        let h = size / 2.0;
+        let quad = [q(-h, -h), q(h, -h), q(h, h), q(-h, h)];
         s.quad(true, quad, rgba(col, if picked || hov { 0.22 } else { 0.07 }));
         let mut ring = quad.to_vec();
         ring.push(quad[0]);
         s.polyline(&ring, 1.2, rgba(col, if picked || hov { 0.95 } else { 0.55 }), false);
     }
-    let al = size * 0.45;
-    s.line(Vec3::ZERO, Vec3::X * al, 1.6, rgba(vp::axis_x(), 0.8));
-    s.line(Vec3::ZERO, Vec3::Y * al, 1.6, rgba(vp::axis_y(), 0.8));
-    s.line(Vec3::ZERO, Vec3::Z * al, 1.6, rgba(vp::axis_z(), 0.8));
+    if !app.default_hidden("Origin") {
+        let al = size * 0.45;
+        s.line(Vec3::ZERO, Vec3::X * al, 1.6, rgba(vp::axis_x(), 0.8));
+        s.line(Vec3::ZERO, Vec3::Y * al, 1.6, rgba(vp::axis_y(), 0.8));
+        s.line(Vec3::ZERO, Vec3::Z * al, 1.6, rgba(vp::axis_z(), 0.8));
+        s.point(Vec3::ZERO, 6.0, rgba(vp::geometry(), 0.9));
+    }
 
     // plane features
     for f in &app.doc.features {
@@ -564,7 +572,10 @@ fn build_scene(app: &App) -> SceneData {
                 (rgba(vp::edge(), 1.0), 1.4)
             };
             let pts: Vec<Vec3> = e.pts.iter().map(|p| Vec3::from(*p)).collect();
-            s.polyline(&pts, w, col, picked || hov || app.xray);
+            if picked {
+                s.polyline(&pts, 10.0, rgba(vp::picked(), 0.28), true);
+            }
+            s.polyline(&pts, if picked { 3.8 } else { w }, col, picked || hov || app.xray);
         }
     }
 

@@ -702,6 +702,9 @@ pub struct Document {
     /// Images laid on faces (labels, logos).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub decals: Vec<Decal>,
+    /// Default geometry hidden in the viewport: "Origin", "Top", "Front", "Right".
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub hidden_defaults: Vec<String>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -741,6 +744,7 @@ impl Default for Document {
             active_config: None,
             custom_features: vec![],
             decals: vec![],
+            hidden_defaults: vec![],
         }
     }
 }

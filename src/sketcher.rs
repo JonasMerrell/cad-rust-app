@@ -153,6 +153,8 @@ pub struct SketchSession {
     pub pattern: Option<(bool, u32, f64, f64)>,
     /// A size typed while drawing (line length, "w, h" for rectangles, circle diameter).
     pub typed: Option<String>,
+    /// Model corner or edge midpoint under the cursor (sketch coordinates), when no sketch geometry is.
+    pub model_hover: Option<DVec2>,
 }
 
 // ---------------------------------------------------------------- access
@@ -267,6 +269,7 @@ impl App {
             text_editing: None,
             pattern: None,
             typed: None,
+            model_hover: None,
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
             view_normal(self, &fr);
@@ -492,6 +495,10 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if typed_input(app, ctx) {
         return;
     }
+    if crate::app::key_mods(ctx).1 && ctx.input(|i| i.key_pressed(Key::E)) {
+        app.extrude_from_sketch();
+        return;
+    }
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
     let shift = crate::app::key_mods(ctx).1;
     if pressed(Key::Escape) {
@@ -704,7 +711,26 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
     let shift = ui.input(|i| i.modifiers.shift || i.modifiers.command);
 
     // hover
-    let h = if pointer.is_some() { hit(app, s, rect, raw) } else { None };
+    let mut h = if pointer.is_some() { hit(app, s, rect, raw) } else { None };
+    // model corners and edge midpoints can be picked too (to dimension or constrain to)
+    let model_pt = if h.is_none() && pointer.is_some() && matches!(tool, Tool::Select | Tool::Dimension) { model_point_near(app, s, rect) } else { None };
+    if app.sketch.as_ref().unwrap().model_hover != model_pt {
+        app.sketch.as_mut().unwrap().model_hover = model_pt;
+        app.scene_dirty = true;
+    }
+    if let (Some(p), true) = (model_pt, resp.clicked_by(egui::PointerButton::Primary)) {
+        // becomes a fixed sketch point at the projected position (reusing one already there)
+        app.sk_checkpoint();
+        let existing = app.sk().0.points.iter().find(|q| (q.v() - p).length() < 1e-6).map(|q| q.id);
+        let id = existing.unwrap_or_else(|| {
+            let sk = app.sk_mut();
+            let id = sk.add_point(p);
+            sk.constraints.push(Constraint::Fix { p: id, x: p.x, y: p.y });
+            id
+        });
+        h = Some(Sel::Point(id));
+        app.after_sketch_edit();
+    }
     let exclude: HashSet<Id> = match &app.sketch.as_ref().unwrap().drag {
         Some(Drag::Geometry { points, .. }) => points.iter().map(|p| p.0).collect(),
         _ => HashSet::new(),
@@ -913,6 +939,29 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
         }
         app.scene_dirty = true;
     }
+}
+
+/// A model vertex or edge midpoint near the cursor, projected onto the sketch plane.
+fn model_point_near(app: &App, s: Pos2, rect: egui::Rect) -> Option<DVec2> {
+    let (_, fr) = app.sk();
+    let to_screen = |p: DVec2| {
+        let v = app.camera.project(fr.to_world(p).as_vec3());
+        Pos2::new(rect.min.x + v.x, rect.min.y + v.y)
+    };
+    let mut best: Option<(f32, DVec2)> = None;
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        for e in &b.edges {
+            let ends = [e.pts.first(), e.pts.last()].map(|p| p.map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)));
+            for w in ends.into_iter().flatten().chain(std::iter::once(glam::DVec3::from(e.mid))) {
+                let m = fr.to_local(w);
+                let d = (to_screen(m) - s).length();
+                if d < 8.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, m));
+                }
+            }
+        }
+    }
+    best.map(|b| b.1)
 }
 
 fn open_dim_edit(app: &mut App, i: usize) {
@@ -2478,14 +2527,19 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
             vp::under_defined()
         };
         let pts: Vec<Vec3> = sk.tessellate(c, (app.camera.wpp() * 3.0) as f64).iter().map(|p| w(*p)).collect();
+        if sel {
+            // a soft halo under selected curves
+            s.polyline(&pts, 10.0, rgba(col, 0.25), true);
+        }
         if c.construction {
-            crate::viewport::dashed(s, &pts, if sel || hov { 2.0 } else { 1.3 }, rgba(col, 1.0), app.camera.wpp() * 6.0);
+            crate::viewport::dashed(s, &pts, if sel { 2.6 } else if hov { 2.0 } else { 1.3 }, rgba(col, 1.0), app.camera.wpp() * 6.0);
         } else {
-            s.polyline(&pts, if sel || hov { 2.8 } else { 2.0 }, rgba(col, 1.0), true);
+            s.polyline(&pts, if sel { 3.6 } else if hov { 2.8 } else { 2.0 }, rgba(col, 1.0), true);
         }
     }
+    let sel_ends: std::collections::HashSet<Id> = sk.curves.iter().filter(|c| sess.sel.contains(&Sel::Curve(c.id))).flat_map(|c| Sketch::curve_points(&c.geom)).collect();
     for p in &sk.points {
-        let sel = sess.sel.contains(&Sel::Point(p.id));
+        let sel = sess.sel.contains(&Sel::Point(p.id)) || sel_ends.contains(&p.id);
         let hov = sess.hover == Some(Sel::Point(p.id)) || sess.dim_pending.contains(&Sel::Point(p.id));
         let col = if sel {
             vp::picked()
@@ -2500,6 +2554,10 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
     }
     // origin
     s.point(w(DVec2::ZERO), 6.0, rgba(vp::fixed(), 0.9));
+    // a model point that a click would pick
+    if let Some(m) = sess.model_hover {
+        s.point(w(m), 9.0, rgba(vp::hover(), 1.0));
+    }
 
     // tool preview
     if let Some(c) = sess.cursor {
