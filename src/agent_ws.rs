@@ -76,11 +76,12 @@ impl Session {
             "part_studios": self.ws.studios.iter().enumerate().map(|(i, s)| json!({"index": i, "name": s.name, "active": i == self.cur})).collect::<Vec<_>>(),
             "assemblies": self.ws.assemblies.iter().enumerate().map(|(i, a)| json!({"index": i, "name": a.name, "instances": a.instances.len(), "mates": a.mates.len()})).collect::<Vec<_>>(),
             "drawings": self.ws.drawings.iter().enumerate().map(|(i, d)| json!({"index": i, "name": d.name, "sheets": d.sheet_count(), "views": d.views.len()})).collect::<Vec<_>>(),
+            "manufacture": self.ws.cams.iter().enumerate().map(|(i, c)| json!({"index": i, "name": c.name, "studio": c.studio, "tools": c.tools.len(), "operations": c.ops.len()})).collect::<Vec<_>>(),
         })
     }
 
     /// Make sure a Part Studio other than the active one has been built.
-    fn ensure_built(&mut self, studio: usize) -> R<()> {
+    pub(super) fn ensure_built(&mut self, studio: usize) -> R<()> {
         if studio == self.cur || self.others.contains_key(&studio) {
             return Ok(());
         }
@@ -716,7 +717,7 @@ impl Session {
                 }
                 return Ok((json!({"drawing": di, "saved": a.get("path")}), Some(png)));
             }
-            _ => return Err(format!("unknown tool {name}")),
+            _ => return self.cam_call(name, a),
         };
         Ok((v, None))
     }

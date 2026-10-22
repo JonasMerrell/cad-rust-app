@@ -10,7 +10,8 @@ with a wgpu viewport and the OpenCascade (OCCT 7.8) kernel.
 - **Part Studio:** sketches (line, rectangles, circle, arcs, tangent arc, slot, polygon, ellipse, spline, text, point; trim, extend, sketch fillet, offset, mirror, project, sketch patterns, construction) with a constraint solver (coincident, horizontal, vertical, parallel, perpendicular, tangent, equal, midpoint, concentric, fix, symmetric) and driving dimensions that accept expressions and variables. Features: extrude (blind, symmetric, through all, up to face, second direction, add/remove/intersect), revolve, sweep (including along a helix), loft, fillet (constant/variable), chamfer, shell, hole (simple/counterbore/countersink, ISO sizes), draft, thicken, rib, move face, delete face, helix, plane (offset, angle, 3 points, normal to curve, mid plane), linear/circular pattern and mirror of parts or features, boolean, split, transform/copy, delete body, sheet metal (bent profile or plate, K-factor flat pattern DXF), STEP/IGES import. Variables and configurations, rollback bar, suppress/hide, part names, colours, materials and mass properties, measure, section view, X-ray.
 - **Assemblies:** insert parts, fastened/revolute/slider/cylindrical/planar/ball mates with a mate solver, drag to move, fix/hide instances, exploded view, section view, bill of materials (CSV).
 - **Drawings:** hidden-line projected views (standard layout), section views with hatching, detail views, title block, dimensions, notes, BOM table, PDF/DXF/SVG export.
-- **Export:** STEP, IGES, STL, OBJ, PNG.
+- **Manufacture (CAM):** 2.5D milling setups (orientation, stock, work zero, material), a tool library with ~80 presets (flat, ball, bull nose, tapered ball, chamfer, slot, V-bits, face mills, drills, spot and centre drills, reamers, thread mills, taps) and your own tools, operations (face, clearing, pocket, contour with tabs, chamfer, drill/peck, bore, thread mill, tap) with suggested feeds and speeds, a toolpath simulator with crash detection (rapids into stock, shank/holder collisions, gouges), and G-code posts for GRBL, LinuxCNC, Fanuc and Mach3.
+- **Export:** STEP, IGES, STL, OBJ, PNG, G-code.
 
 ## Build and run
 
@@ -36,6 +37,11 @@ marked with an error and the rest of the part still rebuilds.
 | `src/kernel.rs` | feature evaluation on OpenCascade, meshing |
 | `src/worker.rs` | kernel worker process protocol |
 | `src/expr.rs` | expressions and units |
+| `src/cam.rs` | CAM model: tools, presets, operations, setups |
+| `src/cam_paths.rs` | 2.5D toolpath generation (shadow slicing, offsets, holes) |
+| `src/cam_sim.rs` | heightmap simulator and collision checks |
+| `src/cam_post.rs` | G-code post processors |
+| `src/cam_ui.rs` | Manufacture tab |
 | `crates/` | vendored `opencascade`/`opencascade-sys` bindings (internals made public) |
 | `tools/gui/` | headless Xvfb rig for screenshots |
 | `ref/` | material extracted from the original HTML app |

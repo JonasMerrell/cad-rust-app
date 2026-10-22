@@ -61,6 +61,11 @@ runs in this folder. Other MCP clients start the same command
 | `assembly_info` / `render_assembly` / `assembly_explode` | poses, BOM, interference check; shaded and exploded renders |
 | `create_drawing` / `drawing_add` / `drawing_info` / `render_drawing` | Drawing tabs: views, auto or explicit dimensions (linear, radius, diameter, angle), notes, GD&T frames and datums, BOM tables, more sheets |
 | `export_drawing` | PDF (all sheets)/SVG/DXF/PNG of a Drawing tab, or a quick four-view sheet of the active Part Studio |
+| `create_cam` / `edit_cam` | Manufacture tabs: Part Studio, bodies, up direction, stock margins or size, material, work zero, clearance, machine (post) |
+| `cam_tool_library` / `cam_tool` | search the preset tool library; add a preset or a tool by kind with overrides, edit or delete tools |
+| `cam_op` / `cam_info` | add, edit, reorder or delete operations; toolpath stats, cycle time and warnings |
+| `simulate_cam` / `render_cam` | material removal simulation with crash detection (rapids into stock, shank/holder hits, gouges), optional PNG; toolpath render |
+| `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |
 
 The tool descriptions returned by `tools/list` give the full argument formats.
 
@@ -72,7 +77,9 @@ assembly and a drawing and hand the file to the GUI. Mate sides are given as
 its own coordinates, the same numbers `list_geometry` reports. A cylindrical
 face or circular edge mates on its axis. `drawing_info` lists each view's
 corner points, straight lines and circles in view coordinates, ready to pass to
-`dimension` items. `examples/assembly-drawing.json` walks through all of it.
+`dimension` items. `examples/assembly-drawing.json` walks through all of it, and
+`examples/cam-plate.json` machines a plate (face, pocket, drill, thread mill,
+chamfer, contour with tabs), simulates it and writes G-code.
 
 ## Example
 
