@@ -151,4 +151,9 @@ pub const ICONS: &[(&str, &str)] = &[
     ("camTools", "M4 3h4v18H4zM10 3h4v18h-4zM16 3h4v18h-4zM4 8h4M10 11h4M16 6h4"),
     ("camSim", "M7 4l13 8-13 8z"),
     ("camGcode", "M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"),
+    ("camAdaptive", "M3 20h18M4 16a3 3 0 1 1 4 0a3 3 0 1 1 4 0a3 3 0 1 1 4 0a3 3 0 1 1 4 0M10 3h4v7h-4z"),
+    ("camParallel", "M3 18c3-6 6-9 9-9s6 3 9 9M5 4v10M9 4v6M13 4v5M17 4v7M21 4v12"),
+    ("camWaterline", "M3 20c2-10 6-15 9-15s7 5 9 15M6 15h12M8 10h8M4.5 19h15"),
+    ("camScallop", "M3 19c3-8 6-12 9-12s6 4 9 12M7 19c2-5 3-7 5-7s3 2 5 7M10.5 19c.5-2 1-3 1.5-3s1 1 1.5 3"),
+    ("camDeburr", "M4 20V9l5-5h11v16zM4 9h5V4M14 2l-2 4 2 4M16 2l-2 4 2 4"),
 ];

@@ -63,7 +63,7 @@ runs in this folder. Other MCP clients start the same command
 | `export_drawing` | PDF (all sheets)/SVG/DXF/PNG of a Drawing tab, or a quick four-view sheet of the active Part Studio |
 | `create_cam` / `edit_cam` | Manufacture tabs: Part Studio, bodies, up direction, stock margins or size, material, work zero, clearance, machine (post) |
 | `cam_tool_library` / `cam_tool` | search the preset tool library; add a preset or a tool by kind with overrides, edit or delete tools |
-| `cam_op` / `cam_info` | add, edit, reorder or delete operations; toolpath stats, cycle time and warnings |
+| `cam_op` / `cam_info` | add, edit, reorder or delete operations (2.5D, plus 3D adaptive, parallel, waterline, scallop and deburr); toolpath stats, cycle time and warnings |
 | `simulate_cam` / `render_cam` | material removal simulation with crash detection (rapids into stock, shank/holder hits, gouges), optional PNG; toolpath render |
 | `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |
 
@@ -80,6 +80,8 @@ corner points, straight lines and circles in view coordinates, ready to pass to
 `dimension` items. `examples/assembly-drawing.json` walks through all of it, and
 `examples/cam-plate.json` machines a plate (face, pocket, drill, thread mill,
 chamfer, contour with tabs), simulates it and writes G-code.
+`examples/cam-3d.json` does the same for a filleted mould block with 3D ops
+(adaptive roughing, parallel and waterline finishing, deburr).
 
 ## Example
 

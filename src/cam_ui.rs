@@ -48,6 +48,8 @@ pub struct CamUi {
     undo: Vec<Cam>,
     redo: Vec<Cam>,
     last_ck: Option<Instant>,
+    /// Picking edges for this deburr operation.
+    pub pick_edges: Option<u64>,
 }
 
 fn cam_index(app: &App) -> Option<usize> {
@@ -205,6 +207,13 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        for (k, icon) in [(OpKind::Adaptive, "camAdaptive"), (OpKind::Parallel, "camParallel"), (OpKind::Waterline, "camWaterline"), (OpKind::Scallop, "camScallop"), (OpKind::Deburr, "camDeburr")] {
+            if app.tool_button(ui, icon, k.label(), k.description(), matches!(k, OpKind::Adaptive | OpKind::Parallel), false, true).clicked() {
+                add_op(app, k);
+            }
+        }
+    });
+    App::group(ui, |ui| {
         if app.tool_button(ui, "camTools", "Tool library", "Pick tools from the library", true, app.cam.library_open, true).clicked() {
             app.cam.library_open = !app.cam.library_open;
         }
@@ -233,7 +242,8 @@ fn add_op(app: &mut App, k: OpKind) {
                     OpKind::Face => t.kind == ToolKind::Flat && t.diameter >= 10.0,
                     OpKind::Drill => t.kind == ToolKind::Drill,
                     OpKind::Thread | OpKind::Tap => true,
-                    OpKind::Chamfer => t.kind == ToolKind::Chamfer,
+                    OpKind::Chamfer | OpKind::Deburr => t.kind == ToolKind::Chamfer,
+                    OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => t.kind == ToolKind::Ball && t.diameter >= 6.0,
                     _ => t.kind == ToolKind::Flat && t.diameter >= 6.0,
                 }
         });
@@ -497,6 +507,11 @@ fn kind_icon(k: OpKind) -> &'static str {
         OpKind::Bore => "hole",
         OpKind::Thread => "camThread",
         OpKind::Tap => "camTap",
+        OpKind::Adaptive => "camAdaptive",
+        OpKind::Parallel => "camParallel",
+        OpKind::Waterline => "camWaterline",
+        OpKind::Scallop => "camScallop",
+        OpKind::Deburr => "camDeburr",
     }
 }
 
@@ -666,6 +681,26 @@ fn tool_combo(ui: &mut Ui, c: &Cam, kind: OpKind, tool: &mut u64) {
     });
 }
 
+fn stepover_row(ui: &mut Ui, label: &str, v: &mut Option<f64>, auto: f64) {
+    row(ui, label, |ui| {
+        let mut on = v.is_some();
+        if ui.checkbox(&mut on, "").changed() {
+            *v = if on { Some(auto) } else { None };
+        }
+        match v {
+            Some(v) => {
+                let mut pct = *v * 100.0;
+                if ui.add(egui::DragValue::new(&mut pct).range(1.0..=100.0).suffix(" % of Ø")).changed() {
+                    *v = pct / 100.0;
+                }
+            }
+            None => {
+                ui.label(RichText::new(format!("auto ({:.0} % of Ø)", auto * 100.0)).color(theme::muted()).size(12.0));
+            }
+        }
+    });
+}
+
 fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
     let warnings: Vec<String> = app.cam.paths.iter().find(|p| p.op == id).map(|p| p.warnings.clone()).unwrap_or_default();
     let stats = app.cam.paths.iter().find(|p| p.op == id).map(|p| (p.time, p.cut_length));
@@ -704,23 +739,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                 opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
             }
             if o.kind != OpKind::Contour {
-                row(ui, "Stepover", |ui| {
-                    let mut on = o.stepover.is_some();
-                    if ui.checkbox(&mut on, "").changed() {
-                        o.stepover = if on { Some(so) } else { None };
-                    }
-                    match &mut o.stepover {
-                        Some(v) => {
-                            let mut pct = *v * 100.0;
-                            if ui.add(egui::DragValue::new(&mut pct).range(1.0..=100.0).suffix(" % of Ø")).changed() {
-                                *v = pct / 100.0;
-                            }
-                        }
-                        None => {
-                            ui.label(RichText::new(format!("auto ({:.0} % of Ø)", so * 100.0)).color(theme::muted()).size(12.0));
-                        }
-                    }
-                });
+                stepover_row(ui, "Stepover", &mut o.stepover, so);
             }
             if o.kind != OpKind::Face {
                 num(ui, "Leave on walls", &mut o.leave, " mm", -5.0..=50.0, 0.05);
@@ -769,6 +788,78 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                     ui.radio_value(&mut o.climb, false, "conventional");
                 });
             }
+        }
+        OpKind::Adaptive => {
+            opt(ui, "Top", &mut o.top, stock_top, " mm", "the top of the stock");
+            opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
+            opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
+            stepover_row(ui, "Optimal load", &mut o.stepover, so);
+            row(ui, "Loop radius", |ui| {
+                let mut on = o.trochoid > 0.0;
+                let auto = tool.as_ref().map(|t| t.diameter * 0.4).unwrap_or(2.0);
+                if ui.checkbox(&mut on, "").on_hover_text("Radius of the cycloidal loops").changed() {
+                    o.trochoid = if on { (auto * 10.0).round() / 10.0 } else { 0.0 };
+                }
+                if on {
+                    ui.add(egui::DragValue::new(&mut o.trochoid).range(0.05..=100.0).speed(0.05).suffix(" mm"));
+                } else {
+                    ui.label(RichText::new(format!("auto ({} mm)", cam::fmt_mm(auto))).color(theme::muted()).size(12.0));
+                }
+            });
+            num(ui, "Leave on walls", &mut o.leave, " mm", -5.0..=50.0, 0.05);
+            num(ui, "Leave on floors", &mut o.leave_floor, " mm", 0.0..=50.0, 0.05);
+            num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
+            row(ui, "Loops", |ui| {
+                ui.radio_value(&mut o.climb, true, "climb");
+                ui.radio_value(&mut o.climb, false, "conventional");
+            });
+        }
+        OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => {
+            if o.kind == OpKind::Waterline {
+                opt(ui, "Top", &mut o.top, part_top, " mm", "the top of the part");
+                opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
+            } else {
+                stepover_row(ui, "Stepover", &mut o.stepover, so);
+            }
+            opt(ui, "Lowest", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
+            if o.kind == OpKind::Parallel {
+                num(ui, "Angle", &mut o.angle, "°", -180.0..=180.0, 1.0);
+            }
+            row(ui, "Slopes", |ui| {
+                let tip = "Only where the surface slopes between these angles from horizontal: e.g. 0–45° for parallel and 45–90° for waterline";
+                ui.add(egui::DragValue::new(&mut o.slope_min).range(0.0..=90.0).speed(0.5).suffix("°")).on_hover_text(tip);
+                ui.label("to");
+                ui.add(egui::DragValue::new(&mut o.slope_max).range(0.0..=90.0).speed(0.5).suffix("°")).on_hover_text(tip);
+            });
+            num(ui, "Leave", &mut o.leave, " mm", -1.0..=10.0, 0.02);
+            if o.kind != OpKind::Parallel {
+                row(ui, "Direction", |ui| {
+                    ui.radio_value(&mut o.climb, true, "climb");
+                    ui.radio_value(&mut o.climb, false, "conventional");
+                });
+            }
+        }
+        OpKind::Deburr => {
+            num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=20.0, 0.05);
+            num(ui, "Sharper than", &mut o.edge_angle, "°", 5.0..=170.0, 1.0);
+            row(ui, "Edges", |ui| {
+                if o.edges.is_empty() {
+                    ui.label(RichText::new("every sharp edge").color(theme::muted()).size(12.0));
+                } else {
+                    ui.label(format!("{} picked", o.edges.len()));
+                    if ui.small_button("All edges").clicked() {
+                        o.edges.clear();
+                    }
+                }
+            });
+            let picking = app.cam.pick_edges == Some(id);
+            if ui.selectable_label(picking, if picking { "Click edges in the view… (done)" } else { "Pick edges" }).on_hover_text("Click near edges in the view to chamfer only those").clicked() {
+                app.cam.pick_edges = if picking { None } else { Some(id) };
+            }
+            row(ui, "Direction", |ui| {
+                ui.radio_value(&mut o.climb, true, "climb");
+                ui.radio_value(&mut o.climb, false, "conventional");
+            });
         }
         OpKind::Chamfer => {
             num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=50.0, 0.05);
@@ -1249,6 +1340,19 @@ fn build_scene(app: &App) -> SceneData {
             prev = Some(p1);
         }
     }
+    // sharp edges while picking them for a deburr, and the picks of the selected deburr
+    if let Some(op) = sel.and_then(|id| c.op(id)).filter(|o| o.kind == OpKind::Deburr) {
+        let origin = cam_paths::work_origin(c, part);
+        if app.cam.pick_edges == Some(op.id) {
+            for (pts, _, _) in crate::cam_3d::sharp_edges(part, op.edge_angle) {
+                let v: Vec<Vec3> = pts.iter().map(|p| to(*p)).collect();
+                s.polyline(&v, 2.0, rgba(Color32::from_rgb(0xd0, 0x60, 0xd0), 0.9), false);
+            }
+        }
+        for e in &op.edges {
+            s.point(to(DVec3::from(*e) + origin), 9.0, rgba(theme::accent(), 1.0));
+        }
+    }
     // the tool where the simulation is
     if sim_on {
         if let Some(sim) = &app.cam.sim {
@@ -1304,6 +1408,45 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     crate::viewport::navigate(app, ui, &resp, true);
     if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
         app.cam.scene_dirty = true;
+    }
+    if let (Some(id), true) = (app.cam.pick_edges, resp.clicked()) {
+        if let (Some(pos), Some(part), Some(c)) = (resp.interact_pointer_pos(), app.cam.part.clone(), cam(app)) {
+            let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
+            let origin = cam_paths::work_origin(c, &part);
+            let angle = c.op(id).map(|o| o.edge_angle).unwrap_or(30.0);
+            let scr = |p: DVec3| app.camera.project(part.to_part(p).as_vec3());
+            let existing: Vec<[f64; 3]> = c.op(id).map(|o| o.edges.clone()).unwrap_or_default();
+            // clicking a pick again removes it
+            if let Some(k) = existing.iter().position(|e| scr(DVec3::from(*e) + origin).distance(local) < 8.0) {
+                edit(app, |c| {
+                    if let Some(o) = c.ops.iter_mut().find(|o| o.id == id) {
+                        o.edges.remove(k);
+                    }
+                });
+            } else {
+                let mut best: Option<(f32, DVec3)> = None;
+                for (pts, _, _) in crate::cam_3d::sharp_edges(&part, angle) {
+                    for w in pts.windows(2) {
+                        let (a, b) = (scr(w[0]), scr(w[1]));
+                        let ab = b - a;
+                        let t = if ab.length_squared() > 1e-6 { ((local - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                        let d = (a + ab * t).distance(local);
+                        if d < 12.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                            best = Some((d, w[0].lerp(w[1], t as f64)));
+                        }
+                    }
+                }
+                if let Some((_, p)) = best {
+                    let q = ((p - origin) * 1000.0).round() / 1000.0;
+                    edit(app, |c| {
+                        if let Some(o) = c.ops.iter_mut().find(|o| o.id == id) {
+                            o.edges.push(q.to_array());
+                        }
+                    });
+                }
+            }
+            app.cam.scene_dirty = true;
+        }
     }
     if !app.cam.fitted && app.cam.part.is_some() {
         app.cam.fitted = true;
