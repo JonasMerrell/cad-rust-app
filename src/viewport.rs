@@ -31,7 +31,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         app.scene_dirty = true;
     }
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
-    paint_background(ui.painter(), rect);
+    paint_background(ui.painter(), rect, app.realistic);
 
     let free = app.sketch.is_none() && app.hover.is_none();
     navigate(app, ui, &resp, free);
@@ -81,6 +81,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         clip,
         size_px: [rect.width() * ppp, rect.height() * ppp],
         pixels_per_point: ppp,
+        realistic: app.realistic,
     };
     ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
 
@@ -97,9 +98,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 }
 
 /// Viewport background: a soft vertical gradient.
-pub fn paint_background(painter: &egui::Painter, rect: egui::Rect) {
+pub fn paint_background(painter: &egui::Painter, rect: egui::Rect, realistic: bool) {
     let mut m = egui::Mesh::default();
-    let (a, b) = (vp::background(), vp::background_2());
+    // a photo-studio sweep for realistic mode
+    let (a, b) = if realistic {
+        if crate::theme::is_dark() { (egui::Color32::from_rgb(0x3a, 0x3f, 0x47), egui::Color32::from_rgb(0x16, 0x18, 0x1c)) } else { (egui::Color32::from_rgb(0xf4, 0xf5, 0xf7), egui::Color32::from_rgb(0xb8, 0xbd, 0xc4)) }
+    } else {
+        (vp::background(), vp::background_2())
+    };
     m.colored_vertex(rect.left_top(), a);
     m.colored_vertex(rect.right_top(), a);
     m.colored_vertex(rect.right_bottom(), b);
@@ -518,6 +524,9 @@ fn build_scene(app: &App) -> SceneData {
         let transparent = body_alpha < 1.0;
         let list_len = if transparent { s.transparent.len() } else { s.opaque.len() };
         let _ = list_len;
+        let finish = if classes.is_some() { 0.0 } else { app.part_finish(b.id) };
+        // glass is drawn see-through
+        let transparent = transparent || (finish == 5.0);
         for (ti, tri) in b.indices.chunks(3).enumerate() {
             let fi = b.tri_face[ti] as usize;
             let col = if body_picked || picked_f.contains(&fi) {
@@ -538,6 +547,7 @@ fn build_scene(app: &App) -> SceneData {
                     pos: [b.positions[3 * i], b.positions[3 * i + 1], b.positions[3 * i + 2]],
                     normal: [b.normals[3 * i], b.normals[3 * i + 1], b.normals[3 * i + 2]],
                     color: rgba(col, body_alpha),
+                    finish,
                 });
             }
         }
@@ -973,6 +983,11 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     if btn(ui, "printer", "Printability: overhangs in red, walls thinner than the limit in purple (limits in 3D printing settings)", app.print_view).clicked() {
                         app.print_view = !app.print_view;
                         app.scene_dirty = true;
+                    }
+                    if btn(ui, "sun", "Realistic: studio lighting and reflections (set finishes under a part's Appearance)", app.realistic).clicked() {
+                        app.realistic = !app.realistic;
+                        app.scene_dirty = true;
+                        app.asm.scene_dirty = true;
                     }
                     if btn(ui, "fit", "Zoom to fit (F)", false).clicked() {
                         app.fit_view();

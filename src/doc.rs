@@ -649,6 +649,9 @@ pub struct PartProps {
     /// Hidden in the viewport.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub hidden: bool,
+    /// Surface finish: "matte", "satin", "glossy", "metal" or "glass".
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub finish: Option<String>,
 }
 
 /// (name, density g/cm³)

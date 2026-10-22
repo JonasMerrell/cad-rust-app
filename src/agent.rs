@@ -256,6 +256,44 @@ impl Session {
                 self.status()
             }
             "list_geometry" => self.geometry(a),
+            "set_part" => {
+                let b = a.get("body").and_then(|b| b.as_array()).ok_or("give body [f,i]")?;
+                let id: crate::doc::BodyId = (b.first().and_then(|v| v.as_u64()).ok_or("body [f,i]")?, b.get(1).and_then(|v| v.as_u64()).ok_or("body [f,i]")? as u32);
+                if !self.result.bodies.iter().any(|x| x.id == id) {
+                    return Err(format!("no part {id:?}"));
+                }
+                let key = crate::doc::body_key(id);
+                let mut p = self.doc.parts.get(&key).cloned().unwrap_or_default();
+                if let Some(n) = a.get("name").and_then(|v| v.as_str()) {
+                    p.name = Some(n.to_string());
+                }
+                if let Some(c) = a.get("color") {
+                    p.color = match c {
+                        Value::String(h) => {
+                            let h = h.trim_start_matches('#');
+                            let v = u32::from_str_radix(h, 16).map_err(|_| "color: #rrggbb or [r,g,b]")?;
+                            Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+                        }
+                        Value::Array(v) if v.len() == 3 => Some([0, 1, 2].map(|k| v[k].as_u64().unwrap_or(0).min(255) as u8)),
+                        _ => None,
+                    };
+                }
+                if let Some(m) = a.get("material").and_then(|v| v.as_str()) {
+                    if !crate::doc::MATERIALS.iter().any(|x| x.0 == m) {
+                        return Err(format!("material must be one of {}", crate::doc::MATERIALS.iter().map(|x| x.0).collect::<Vec<_>>().join(", ")));
+                    }
+                    p.material = Some(m.to_string());
+                }
+                if let Some(f) = a.get("finish").and_then(|v| v.as_str()) {
+                    p.finish = if f.is_empty() || f == "default" { None } else { Some(f.to_string()) };
+                }
+                if let Some(h) = a.get("hidden").and_then(|v| v.as_bool()) {
+                    p.hidden = h;
+                }
+                self.doc.parts.insert(key, p);
+                self.rebuild()?;
+                self.status()
+            }
             "printability" => {
                 let st = crate::printing::PrintSettings::default();
                 let overhang = a.get("overhang").and_then(|v| v.as_f64()).unwrap_or(st.overhang);
@@ -941,6 +979,7 @@ fn tools() -> Value {
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}}), &["path"])},
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
+        {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Steel, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass) or hidden.", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}}), &["body"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},

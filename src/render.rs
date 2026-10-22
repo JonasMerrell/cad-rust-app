@@ -19,6 +19,15 @@ pub struct MeshVertex {
     pub pos: [f32; 3],
     pub normal: [f32; 3],
     pub color: [f32; 4],
+    /// Surface finish (see `Finish`): 0 is the plain CAD shading.
+    pub finish: f32,
+}
+
+/// Surface finishes for part appearance.
+pub const FINISHES: &[(&str, &str, f32)] = &[("", "Default", 0.0), ("matte", "Matte", 1.0), ("satin", "Satin", 2.0), ("glossy", "Glossy", 3.0), ("metal", "Metal", 4.0), ("glass", "Glass", 5.0)];
+
+pub fn finish_code(name: Option<&str>) -> f32 {
+    FINISHES.iter().find(|f| Some(f.0) == name).map(|f| f.2).unwrap_or(0.0)
 }
 
 #[repr(C)]
@@ -66,7 +75,7 @@ impl SceneData {
         let n = (p[1] - p[0]).cross(p[2] - p[0]).normalize_or_zero();
         let list = if transparent { &mut self.transparent } else { &mut self.opaque };
         for v in p {
-            list.push(MeshVertex { pos: v.into(), normal: n.into(), color });
+            list.push(MeshVertex { pos: v.into(), normal: n.into(), color, finish: 0.0 });
         }
     }
 
@@ -99,6 +108,8 @@ pub struct ViewportCallback {
     /// Viewport size in physical pixels.
     pub size_px: [f32; 2],
     pub pixels_per_point: f32,
+    /// Studio lighting and reflections.
+    pub realistic: bool,
 }
 
 struct Buf {
@@ -139,12 +150,12 @@ fn clip_dist(p: vec3<f32>) -> f32 {
     return u.clip.w - dot(u.clip.xyz, p);
 }
 
-struct MOut { @builtin(position) pos: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec4<f32>, @location(2) w: vec3<f32> };
+struct MOut { @builtin(position) pos: vec4<f32>, @location(0) n: vec3<f32>, @location(1) c: vec4<f32>, @location(2) w: vec3<f32>, @location(3) f: f32 };
 
-@vertex fn vs_mesh(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>) -> MOut {
+@vertex fn vs_mesh(@location(0) p: vec3<f32>, @location(1) n: vec3<f32>, @location(2) c: vec4<f32>, @location(3) f: f32) -> MOut {
     var o: MOut;
     o.pos = u.view_proj * vec4<f32>(p, 1.0);
-    o.n = n; o.c = c; o.w = p;
+    o.n = n; o.c = c; o.w = p; o.f = f;
     return o;
 }
 
@@ -152,13 +163,47 @@ struct MOut { @builtin(position) pos: vec4<f32>, @location(0) n: vec3<f32>, @loc
     if (clip_dist(i.w) < 0.0) { discard; }
     var n = normalize(i.n);
     if (dot(n, n) < 0.5) { return i.c; }
-    if (dot(n, u.eye_dir.xyz) < 0.0) { n = -n; }
-    let key = normalize(u.eye_dir.xyz + vec3<f32>(0.25, 0.15, 0.45));
+    let v = u.eye_dir.xyz;
+    if (dot(n, v) < 0.0) { n = -n; }
+    let key = normalize(v + vec3<f32>(0.25, 0.15, 0.45));
     let d = max(dot(n, key), 0.0);
-    let h = max(dot(n, u.eye_dir.xyz), 0.0);
-    let l = 0.42 + 0.38 * d + 0.25 * pow(h, 6.0);
-    return vec4<f32>(i.c.rgb * l, i.c.a);
+    let h = max(dot(n, v), 0.0);
+    let realistic = u.eye_dir.w > 0.5;
+    let finish = i3(i.f);
+    if (finish == 0 && !realistic) {
+        let l = 0.42 + 0.38 * d + 0.25 * pow(h, 6.0);
+        return vec4<f32>(i.c.rgb * l, i.c.a);
+    }
+    // finishes: roughness and metalness
+    var rough = 0.5;
+    var metal = 0.0;
+    if (finish == 1) { rough = 0.9; }
+    if (finish == 3) { rough = 0.15; }
+    if (finish == 4) { rough = 0.3; metal = 1.0; }
+    if (finish == 5) { rough = 0.05; }
+    let up = vec3<f32>(0.0, 0.0, 1.0);
+    // sky above, darker ground below
+    let ambient = mix(vec3<f32>(0.28, 0.27, 0.26), vec3<f32>(0.62, 0.66, 0.72), 0.5 + 0.5 * dot(n, up));
+    let fill = normalize(vec3<f32>(-v.y, v.x, 0.3));
+    let diffuse = ambient * 0.75 + vec3<f32>(0.62 * d + 0.18 * max(dot(n, fill), 0.0));
+    let hv = normalize(key + v);
+    let shin = mix(8.0, 300.0, 1.0 - rough);
+    let spec = pow(max(dot(n, hv), 0.0), shin) * (1.0 - rough) * 1.4;
+    let fres = pow(1.0 - h, 5.0);
+    let r = reflect(-v, n);
+    // a studio: bright ceiling, a softbox band just above the horizon, dark floor
+    let band = exp(-pow((r.z - 0.18) * 5.0, 2.0)) * 0.55;
+    let env = mix(vec3<f32>(0.32, 0.31, 0.30), vec3<f32>(0.95, 0.96, 0.98), smoothstep(-0.35, 0.45, r.z)) + vec3<f32>(band);
+    let spec_col = mix(vec3<f32>(1.0), i.c.rgb, metal);
+    let env_amt = mix(0.08, 0.85, metal) * (1.0 - 0.6 * rough) + fres * 0.25 * (1.0 - rough);
+    let base = i.c.rgb * diffuse * (1.0 - 0.55 * metal);
+    var col = base + spec_col * (spec + env * env_amt);
+    var a = i.c.a;
+    if (finish == 5) { a = min(a, 0.35 + 0.5 * fres); }
+    return vec4<f32>(col, a);
 }
+
+fn i3(f: f32) -> i32 { return i32(f + 0.5); }
 
 struct LOut { @builtin(position) pos: vec4<f32>, @location(0) c: vec4<f32>, @location(1) w: vec3<f32> };
 
@@ -249,7 +294,7 @@ impl Renderer {
         };
         let ms = wgpu::MultisampleState { count: MSAA, mask: !0, alpha_to_coverage_enabled: false };
 
-        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4];
+        let mesh_attrs = wgpu::vertex_attr_array![0 => Float32x3, 1 => Float32x3, 2 => Float32x4, 3 => Float32];
         let mesh_layout = wgpu::VertexBufferLayout { array_stride: std::mem::size_of::<MeshVertex>() as u64, step_mode: wgpu::VertexStepMode::Vertex, attributes: &mesh_attrs };
         let mesh = |write: bool, bias: i32, label: &str| {
             device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
@@ -348,7 +393,7 @@ impl egui_wgpu::CallbackTrait for ViewportCallback {
         let _ = sd;
         let u = Uniforms {
             view_proj: self.view_proj.to_cols_array_2d(),
-            eye_dir: self.eye_dir.extend(0.0).into(),
+            eye_dir: self.eye_dir.extend(if self.realistic { 1.0 } else { 0.0 }).into(),
             viewport: [self.size_px[0], self.size_px[1], self.pixels_per_point, 0.0],
             clip: self.clip,
         };

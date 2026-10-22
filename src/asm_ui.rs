@@ -853,7 +853,7 @@ fn build_scene(app: &App) -> SceneData {
                 let i = i as usize;
                 let p = pose.apply(DVec3::new(m.positions[3 * i] as f64, m.positions[3 * i + 1] as f64, m.positions[3 * i + 2] as f64));
                 let n = rot * Vec3::new(m.normals[3 * i], m.normals[3 * i + 1], m.normals[3 * i + 2]);
-                s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0) });
+                s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0), finish: if app.realistic { 2.0 } else { 0.0 } });
             }
         }
         let hov_edge = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.edge);
@@ -893,7 +893,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         app.asm.scene_dirty = true;
     }
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
-    crate::viewport::paint_background(ui.painter(), rect);
+    crate::viewport::paint_background(ui.painter(), rect, app.realistic);
     let before = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height);
     let free = app.asm.hover.is_none() && app.asm.dialog.is_none() && app.asm.measure.is_none();
     crate::viewport::navigate(app, ui, &resp, free);
@@ -1029,6 +1029,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         },
         size_px: [rect.width() * ppp, rect.height() * ppp],
         pixels_per_point: ppp,
+        realistic: app.realistic,
     };
     ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     let painter = ui.painter_at(rect);

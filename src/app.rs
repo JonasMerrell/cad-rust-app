@@ -144,6 +144,8 @@ pub struct App {
     pub pending_send: Option<(String, String)>,
     /// Result of the upload, filled in by the upload thread.
     pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    /// Studio lighting with reflections, for presentation.
+    pub realistic: bool,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -221,6 +223,7 @@ impl App {
             print_cache: Default::default(),
             pending_send: None,
             send_result: Default::default(),
+            realistic: false,
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
@@ -1514,6 +1517,21 @@ impl App {
         p.name.unwrap_or_else(|| self.result.bodies.iter().find(|b| b.id == id).map(|b| b.name.clone()).unwrap_or_default())
     }
 
+    /// Finish code for the shader: the part's own, else one that suits its material.
+    pub fn part_finish(&self, id: doc::BodyId) -> f32 {
+        let p = self.part_props(id);
+        if p.finish.is_some() {
+            return crate::render::finish_code(p.finish.as_deref());
+        }
+        match p.material.as_deref() {
+            Some(m) if ["Aluminium", "Steel", "Stainless", "Brass", "Copper", "Titanium"].iter().any(|k| m.starts_with(k)) => crate::render::finish_code(Some("metal")),
+            Some(m) if ["PLA", "PETG"].iter().any(|k| m.starts_with(k)) => crate::render::finish_code(Some("satin")),
+            Some(_) => crate::render::finish_code(Some("matte")),
+            None if self.realistic => crate::render::finish_code(Some("satin")),
+            None => 0.0,
+        }
+    }
+
     pub fn part_color(&self, id: doc::BodyId) -> Color32 {
         self.part_props(id).color.map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(theme::vp::body())
     }
@@ -1593,6 +1611,16 @@ impl App {
                     if egui::color_picker::color_picker_color32(ui, &mut c, egui::color_picker::Alpha::Opaque) {
                         self.set_part(id, |p| p.color = Some([c.r(), c.g(), c.b()]));
                     }
+                    ui.horizontal_wrapped(|ui| {
+                        let cur = self.part_props(id).finish;
+                        for (key, label, _) in crate::render::FINISHES {
+                            let on = cur.as_deref().unwrap_or("") == *key;
+                            if ui.selectable_label(on, *label).clicked() {
+                                let v = (!key.is_empty()).then(|| key.to_string());
+                                self.set_part(id, |p| p.finish = v);
+                            }
+                        }
+                    });
                     if ui.button("Default").clicked() {
                         self.set_part(id, |p| p.color = None);
                     }
