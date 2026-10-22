@@ -93,6 +93,10 @@ pub enum Snap {
     Curve(Id),
     Origin,
     Grid,
+    /// Midpoint of a sketch line.
+    Mid(Id),
+    /// A model vertex or edge midpoint, projected onto the sketch plane.
+    Model,
 }
 
 pub enum Drag {
@@ -147,6 +151,8 @@ pub struct SketchSession {
     pub text_editing: Option<usize>,
     /// Sketch pattern popup: (circular?, count, spacing x / angle, spacing y).
     pub pattern: Option<(bool, u32, f64, f64)>,
+    /// A size typed while drawing (line length, "w, h" for rectangles, circle diameter).
+    pub typed: Option<String>,
 }
 
 // ---------------------------------------------------------------- access
@@ -260,6 +266,7 @@ impl App {
             text_edit: None,
             text_editing: None,
             pattern: None,
+            typed: None,
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
             view_normal(self, &fr);
@@ -478,8 +485,11 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
 // ---------------------------------------------------------------- keyboard
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
-    let editing_dim = app.sketch.as_ref().map(|s| s.dim_edit.is_some()).unwrap_or(false);
+    let editing_dim = app.sketch.as_ref().map(|s| s.dim_edit.is_some() || s.text_edit.is_some() || s.pattern.is_some()).unwrap_or(false);
     if editing_dim {
+        return;
+    }
+    if typed_input(app, ctx) {
         return;
     }
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
@@ -593,6 +603,35 @@ fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>)
     let o = (to_screen(DVec2::ZERO) - s).length();
     if o < 9.0 {
         return (DVec2::ZERO, Some(Snap::Origin));
+    }
+    // midpoints of sketch lines
+    for c in &sk.curves {
+        if let Geom::Line { a, b } = c.geom {
+            if exclude.contains(&a) || exclude.contains(&b) {
+                continue;
+            }
+            let m = (sk.pv(a) + sk.pv(b)) / 2.0;
+            let d = (to_screen(m) - s).length();
+            if d < 8.0 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, m, Snap::Mid(c.id)));
+            }
+        }
+    }
+    // model corners and edge midpoints, projected onto the sketch plane
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        for e in &b.edges {
+            let ends = [e.pts.first(), e.pts.last()].map(|p| p.map(|p| glam::DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)));
+            for w in ends.into_iter().flatten().chain(std::iter::once(glam::DVec3::from(e.mid))) {
+                let m = fr.to_local(w);
+                let d = (to_screen(m) - s).length();
+                if d < 7.0 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
+                    best = Some((d, m, Snap::Model));
+                }
+            }
+        }
+    }
+    if let Some((_, p, sn)) = best {
+        return (p, Some(sn));
     }
     let wpp = app.camera.wpp() as f64;
     for c in &sk.curves {
@@ -907,7 +946,164 @@ fn point_at(app: &mut App, p: DVec2, snp: Option<Snap>) -> Id {
             sk.constraints.push(Constraint::Fix { p: id, x: 0.0, y: 0.0 });
             id
         }
+        Some(Snap::Mid(l)) => {
+            let sk = app.sk_mut();
+            let id = sk.add_point(p);
+            sk.constraints.push(Constraint::Midpoint { p: id, l });
+            id
+        }
+        Some(Snap::Model) => {
+            let sk = app.sk_mut();
+            let id = sk.add_point(p);
+            sk.constraints.push(Constraint::Fix { p: id, x: p.x, y: p.y });
+            id
+        }
         _ => app.sk_mut().add_point(p),
+    }
+}
+
+/// Typing a size while drawing: digits (and expressions) collect in `typed`; Enter places
+/// the line, rectangle or circle at that size along the cursor, with a dimension.
+/// Returns true when the key presses were used.
+fn typed_input(app: &mut App, ctx: &egui::Context) -> bool {
+    let Some(sess) = app.sketch.as_ref() else { return false };
+    let active = match sess.tool {
+        Tool::Line => sess.chain.is_some(),
+        Tool::Rect | Tool::CenterRect | Tool::Circle => sess.clicks.len() == 1,
+        _ => false,
+    };
+    if !active {
+        if sess.typed.is_some() {
+            app.sketch.as_mut().unwrap().typed = None;
+        }
+        return false;
+    }
+    let (texts, enter, back, esc) = ctx.input(|i| {
+        let t: String = i.events.iter().filter_map(|e| if let egui::Event::Text(t) = e { Some(t.clone()) } else { None }).collect();
+        (t, i.key_pressed(Key::Enter), i.key_pressed(Key::Backspace), i.key_pressed(Key::Escape))
+    });
+    let mut typed = sess.typed.clone();
+    let mut used = false;
+    // start only on something number-like, so tool letters keep working
+    let starts = |t: &str| t.chars().next().map(|c| c.is_ascii_digit() || c == '.' || c == '(').unwrap_or(false);
+    if !texts.is_empty() && (typed.is_some() || starts(&texts)) {
+        typed.get_or_insert_with(String::new).push_str(&texts);
+        used = true;
+    }
+    if typed.is_some() {
+        if back {
+            let t = typed.as_mut().unwrap();
+            t.pop();
+            if t.is_empty() {
+                typed = None;
+            }
+            used = true;
+        } else if esc {
+            typed = None;
+            used = true;
+        } else if enter {
+            let t = typed.take().unwrap_or_default();
+            app.sketch.as_mut().unwrap().typed = None;
+            commit_typed(app, &t);
+            return true;
+        }
+    }
+    app.sketch.as_mut().unwrap().typed = typed;
+    if used {
+        app.scene_dirty = true;
+    }
+    used
+}
+
+fn commit_typed(app: &mut App, text: &str) {
+    let (vars, _) = app.doc.var_values();
+    let units = app.doc.units;
+    let eval = |s: &str| crate::doc::eval(s.trim(), crate::expr::Kind::Length, &vars, units);
+    let sess = app.sketch.as_ref().unwrap();
+    let tool = sess.tool;
+    let cursor = sess.cursor.unwrap_or_default();
+    let construction = sess.construction;
+    let dim = |expr: &str, off: [f64; 2]| Dim { expr: expr.trim().to_string(), offset: off };
+    match tool {
+        Tool::Line => {
+            let Ok(len) = eval(text) else {
+                app.flash(format!("\"{text}\" is not a length"), ToastKind::Error);
+                return;
+            };
+            let a = sess.chain.unwrap();
+            let pa = app.sk().0.pv(a);
+            let mut dir = (cursor - pa).normalize_or(DVec2::X);
+            let hv = hv_infer(app, pa, pa + dir);
+            match hv {
+                Some(true) => dir = DVec2::new(dir.x.signum(), 0.0),
+                Some(false) => dir = DVec2::new(0.0, dir.y.signum()),
+                None => {}
+            }
+            if len <= 0.0 {
+                return;
+            }
+            app.sk_checkpoint();
+            let sk = app.sk_mut();
+            let b = sk.add_point(pa + dir * len);
+            let l = sk.add_curve(Geom::Line { a, b }, construction);
+            match hv {
+                Some(true) => sk.constraints.push(Constraint::Horizontal { l }),
+                Some(false) => sk.constraints.push(Constraint::Vertical { l }),
+                None => {}
+            }
+            let n = dir.perp() * (len * 0.15).max(2.0);
+            sk.constraints.push(Constraint::Length { l, dim: dim(text, [n.x, n.y]) });
+            app.sketch.as_mut().unwrap().chain = Some(b);
+            app.after_sketch_edit();
+        }
+        Tool::Rect | Tool::CenterRect => {
+            let parts: Vec<&str> = text.split(|c| c == ',' || c == 'x' || c == '×' || c == '*').filter(|s| !s.trim().is_empty()).collect();
+            let (wt, ht) = match parts.as_slice() {
+                [w] => (*w, *w),
+                [w, h, ..] => (*w, *h),
+                _ => return,
+            };
+            let (Ok(w), Ok(h)) = (eval(wt), eval(ht)) else {
+                app.flash(format!("\"{text}\" is not a size (type width, height)"), ToastKind::Error);
+                return;
+            };
+            let a = sess.clicks[0];
+            let sx = if cursor.x < a.x { -1.0 } else { 1.0 };
+            let sy = if cursor.y < a.y { -1.0 } else { 1.0 };
+            let centered = tool == Tool::CenterRect;
+            let b = if centered { a + DVec2::new(sx * w / 2.0, sy * h / 2.0) } else { a + DVec2::new(sx * w, sy * h) };
+            let first = FIRST_SNAP.with(|f| f.get());
+            app.sketch.as_mut().unwrap().clicks.clear();
+            app.sk_checkpoint();
+            let before = app.sk().0.curves.len();
+            make_rect(app, a, b, first, None, construction, centered);
+            let sk = app.sk_mut();
+            let new: Vec<Id> = sk.curves[before..].iter().filter(|c| !c.construction || construction).map(|c| c.id).collect();
+            if new.len() >= 2 {
+                sk.constraints.push(Constraint::Length { l: new[0], dim: dim(wt, [0.0, -sy * 4.0]) });
+                sk.constraints.push(Constraint::Length { l: new[1], dim: dim(ht, [sx * 4.0, 0.0]) });
+            }
+            app.after_sketch_edit();
+        }
+        Tool::Circle => {
+            let Ok(d) = eval(text) else {
+                app.flash(format!("\"{text}\" is not a diameter"), ToastKind::Error);
+                return;
+            };
+            if d <= 0.0 {
+                return;
+            }
+            let a = sess.clicks[0];
+            let first = FIRST_SNAP.with(|f| f.get());
+            app.sketch.as_mut().unwrap().clicks.clear();
+            app.sk_checkpoint();
+            let c = point_at(app, a, first);
+            let sk = app.sk_mut();
+            let ci = sk.add_curve(Geom::Circle { c, r: d / 2.0 }, construction);
+            sk.constraints.push(Constraint::Diameter { c: ci, dim: dim(text, [d * 0.5, d * 0.5]) });
+            app.after_sketch_edit();
+        }
+        _ => {}
     }
 }
 
@@ -1699,6 +1895,7 @@ fn mirror_selection(app: &mut App) {
     };
     let sel: Vec<Sel> = sess.sel.iter().copied().collect();
     let mut out = sk.clone();
+    let mut equal: Vec<(Id, Id)> = vec![];
     let mut map = std::collections::HashMap::new();
     let mut new_point = |out: &mut Sketch, id: Id| -> Id {
         *map.entry(id).or_insert_with(|| {
@@ -1724,8 +1921,21 @@ fn mirror_selection(app: &mut App) {
                 Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| new_point(&mut out, *p)).collect(), closed },
                 Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().rev().map(|p| refl(DVec2::from(*p)).into()).collect(), closed },
             };
-            out.add_curve(g, c.construction);
+            let round = matches!(c.geom, Geom::Circle { .. } | Geom::Arc { .. });
+            let nid = out.add_curve(g, c.construction);
+            if round {
+                equal.push((id, nid));
+            }
         }
+    }
+    // keep the copy linked: each point mirrors its original across the axis, round curves keep the same size
+    for (&orig, &copy) in &map {
+        if orig != copy {
+            out.constraints.push(Constraint::Symmetric { a: orig, b: copy, l: axis });
+        }
+    }
+    for (a, b) in equal {
+        out.constraints.push(Constraint::Equal { a, b });
     }
     app.sk_checkpoint();
     *app.sk_mut() = out;
@@ -2424,7 +2634,7 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         }
         if sess.tool != Tool::Select {
             let col = match sess.snap {
-                Some(Snap::Point(_)) | Some(Snap::Origin) => vp::snap(),
+                Some(Snap::Point(_)) | Some(Snap::Origin) | Some(Snap::Mid(_)) | Some(Snap::Model) => vp::snap(),
                 Some(Snap::Curve(_)) => vp::hover(),
                 _ => vp::preview(),
             };
@@ -2656,8 +2866,16 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                 Tool::Select => None,
                 _ => None,
             };
-            if let Some(t) = text {
-                crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &t, theme::text());
+            let typed = sess.typed.clone();
+            if let Some(t) = typed {
+                let hint = match sess.tool {
+                    Tool::Rect | Tool::CenterRect => "width, height",
+                    Tool::Circle => "diameter",
+                    _ => "length",
+                };
+                crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &format!("{t}  ({hint}, Enter)"), theme::accent());
+            } else if let Some(t) = text {
+                crate::viewport::label_box(painter, p + egui::vec2(16.0, 20.0), &format!("{t}  · type a size"), theme::text());
             }
         }
     }
