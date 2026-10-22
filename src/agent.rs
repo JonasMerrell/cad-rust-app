@@ -18,6 +18,8 @@ use crate::regions::find_regions;
 use crate::sketch::{Constraint, Dim, Frame, Geom, Id, Sketch};
 use crate::worker::KernelClient;
 
+#[path = "agent_cam.rs"]
+mod cam;
 #[path = "agent_ws.rs"]
 mod ws;
 
@@ -1021,6 +1023,13 @@ fn tools() -> Value {
         {"name": "drawing_info", "description": "A drawing's views (with dimensionable points, straight lines and circles in view coordinates), dimensions, notes and GD&T.", "inputSchema": obj(json!({"drawing": {"type": "integer"}}), &["drawing"])},
         {"name": "render_drawing", "description": "PNG of one drawing sheet (sheet: 1-based, width px) to check the layout.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "sheet": {"type": "integer"}, "width": {"type": "integer"}, "path": {"type": "string"}}), &["drawing"])}
     ])
+    .as_array()
+    .cloned()
+    .map(|mut v| {
+        v.extend(cam::tools());
+        Value::Array(v)
+    })
+    .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- MCP server

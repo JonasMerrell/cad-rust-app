@@ -139,4 +139,16 @@ pub const ICONS: &[(&str, &str)] = &[
     ("printer", "M6 9V3h12v6M6 18H4a2 2 0 0 1-2-2v-5a2 2 0 0 1 2-2h16a2 2 0 0 1 2 2v5a2 2 0 0 1-2 2h-2M6 14h12v7H6z"),
     ("curvePattern", "M3 18c4-10 14-10 18 0M5 14.5h.01M8 10.5h.01M12 9h.01M16 10.5h.01M19 14.5h.01"),
     ("pointPattern", "M5 5h4v4H5zM15 5h4v4h-4zM5 15h4v4H5zM16 16l2 2M18 16l-2 2"),
+    // CAM
+    ("cam", "M10 2h4v8h-4zM9 10h6l-1 11h-4zM9.6 13l4.6 2.4M9.8 17l4 2"),
+    ("camFace", "M3 17h18M3 20h18M9 3h6v6H9zM8 9h8v4H8z"),
+    ("camClear", "M4 4h16v16H4zM8 8h8v8H8zM11 11h2v2h-2z"),
+    ("camPocket", "M3 6h18v13H3zM7 9h10v7H7zM10 12h4"),
+    ("camContour", "M7 4h10a3 3 0 0 1 3 3v10a3 3 0 0 1-3 3H7a3 3 0 0 1-3-3V7a3 3 0 0 1 3-3zM9 9h6v6H9z"),
+    ("camDrill", "M10 2h4v8h-4zM10 10l2 11 2-11M10 13l4 2"),
+    ("camThread", "M7 4h10M7 8h10M7 12h10M7 16h10M7 20h10M7 4l10 4M7 8l10 4M7 12l10 4M7 16l10 4"),
+    ("camTap", "M12 2v3M9 5h6v11l-3 5-3-5zM9 8l6 2M9 11l6 2M9 14l6 2"),
+    ("camTools", "M4 3h4v18H4zM10 3h4v18h-4zM16 3h4v18h-4zM4 8h4M10 11h4M16 6h4"),
+    ("camSim", "M7 4l13 8-13 8z"),
+    ("camGcode", "M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"),
 ];
