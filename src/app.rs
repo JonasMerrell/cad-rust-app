@@ -1451,12 +1451,16 @@ impl App {
         let mut action: Option<(&'static str, FeatId)> = None;
         let mut drop_rollback: Option<usize> = None;
         let n = self.doc.features.len();
+        // feature row extents, for dragging the rollback bar between them
+        let mut rows: Vec<(usize, egui::Rangef)> = vec![];
+        let mut bar_resp: Option<egui::Response> = None;
         for i in 0..=n {
             if i == rb {
                 let resp = rollbar(ui, self.doc.rollback.is_some());
-                if resp.clicked() {
+                if resp.clicked() && self.doc.rollback.is_some() {
                     drop_rollback = Some(usize::MAX);
                 }
+                bar_resp = Some(resp);
             }
             if i == n {
                 break;
@@ -1485,6 +1489,7 @@ impl App {
             if !shown(&f.name, doc::kind_label(f.op.kind())) {
                 continue;
             }
+            rows.push((i, egui::Rangef::new(ui.cursor().top(), ui.cursor().top() + 24.0)));
             let picked = self.picks.iter().any(|r| matches!(r, Ref::FeaturePlane { feature } if *feature == id));
             let err = self.errors.get(&id).cloned();
             let resp = tree_row(ui, 0, f.op.kind(), &f.name, picked || editing, i >= rb, f.suppressed, f.hidden, err.as_deref());
@@ -1542,6 +1547,24 @@ impl App {
                     ui.close();
                 }
             });
+        }
+        // drag the bar up or down the list to roll the model back or forward
+        if let Some(resp) = bar_resp {
+            if resp.dragged() || resp.drag_stopped() {
+                if let Some(p) = ui.input(|i| i.pointer.interact_pos()) {
+                    // the bar goes after every row whose middle is above the pointer
+                    let at = rows.iter().filter(|(_, r)| r.center() < p.y).map(|(i, _)| i + 1).max().unwrap_or(0);
+                    let y = rows.iter().find(|(i, _)| *i + 1 == at).map(|(_, r)| r.max).or_else(|| rows.first().map(|(_, r)| r.min)).unwrap_or(p.y);
+                    let x = resp.rect.x_range();
+                    ui.painter().hline(x, y, Stroke::new(3.0, theme::accent()));
+                    ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+                    if resp.drag_stopped() && at != rb {
+                        drop_rollback = Some(at);
+                    }
+                }
+            } else if resp.hovered() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::Grab);
+            }
         }
         if let Some(r) = drop_rollback {
             self.checkpoint();
@@ -2680,7 +2703,7 @@ fn disclosure_row(ui: &mut Ui, label: &str, open: bool) -> egui::Response {
 
 /// Onshape-style rollback bar: a thick grey bar under the last active feature.
 fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), Sense::click_and_drag());
     let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 2.0, rect.center().y - 3.0), egui::pos2(rect.right() - 4.0, rect.center().y + 3.0));
     let c = if rolled {
         theme::accent()
@@ -2690,7 +2713,7 @@ fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
         theme::rollbar()
     };
     ui.painter().rect_filled(bar, CornerRadius::same(1), c);
-    resp.on_hover_text(if rolled { "Rollback bar: click to roll to the end" } else { "Rollback bar: new features are inserted here" })
+    resp.on_hover_text(if rolled { "Rollback bar: drag it to roll back or forward, click to roll to the end" } else { "Rollback bar: drag it up to roll the model back; new features go here" })
 }
 
 fn is_ident(s: &str) -> bool {
