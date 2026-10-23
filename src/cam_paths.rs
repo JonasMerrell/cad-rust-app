@@ -701,9 +701,88 @@ impl<'a> Ctx<'a> {
         z.map(|z| z + self.origin.z)
     }
 
-    pub(crate) fn safe(&self) -> f64 {
-        self.stock.1.z.max(self.part().hi.z) + self.cam.clearance
+    /// Clear of the stock, the parts and the fixtures.
+    pub fn safe(&self) -> f64 {
+        let fix = fixture_boxes(self.cam, self.origin).iter().map(|f| f.2.z).fold(f64::NEG_INFINITY, f64::max);
+        self.stock.1.z.max(self.part().hi.z).max(fix) + self.cam.clearance
     }
+}
+
+/// The setup's fixtures as boxes in setup coordinates (`origin`: the work zero).
+pub fn fixture_boxes(cam: &Cam, origin: DVec3) -> Vec<(String, DVec3, DVec3)> {
+    cam.fixtures
+        .iter()
+        .map(|f| {
+            let (a, b) = (DVec3::from(f.min) + origin, DVec3::from(f.max) + origin);
+            (f.name.clone(), a.min(b), a.max(b))
+        })
+        .collect()
+}
+
+/// Lift the toolpath over the fixtures: wherever the tool (`r` plus a 1 mm margin) would pass over one lower
+/// than `retract` above its top, it goes up there, across, and back down. Returns how many times it lifts.
+fn avoid_fixtures(moves: Vec<Move>, boxes: &[(String, DVec3, DVec3)], r: f64, retract: f64, start: DVec3) -> (Vec<Move>, usize) {
+    let mut moves = moves;
+    let mut lifts = 0;
+    for (_, lo, hi) in boxes {
+        let (blo, bhi) = (lo.truncate() - DVec2::splat(r + 1.0), hi.truncate() + DVec2::splat(r + 1.0));
+        let zc = hi.z + retract;
+        let blocked = |p: DVec3| p.z < zc - 1e-9 && p.x > blo.x && p.x < bhi.x && p.y > blo.y && p.y < bhi.y;
+        // split each straight move where it crosses the box's sides or its clearance height
+        let mut out: Vec<Move> = vec![];
+        let mut pos = start;
+        let mut inside = false;
+        for m in moves {
+            let (to, rapid, f) = match m {
+                Move::Rapid(p) => (DVec3::from(p), true, 0.0),
+                Move::Feed(p, f) => (DVec3::from(p), false, f),
+                Move::Tap { .. } | Move::Dwell(_) => {
+                    if !inside {
+                        out.push(m);
+                    }
+                    continue;
+                }
+            };
+            let mut ts = vec![0.0, 1.0];
+            let d = to - pos;
+            for (a, lim) in [(0usize, blo.x), (0, bhi.x), (1, blo.y), (1, bhi.y)] {
+                let da = d.to_array()[a];
+                if da.abs() > 1e-12 {
+                    ts.push((lim - pos.to_array()[a]) / da);
+                }
+            }
+            if d.z.abs() > 1e-12 {
+                ts.push((zc - pos.z) / d.z);
+            }
+            ts.retain(|t| (0.0..=1.0).contains(t));
+            ts.sort_by(|a, b| a.total_cmp(b));
+            ts.dedup_by(|a, b| (*a - *b).abs() < 1e-12);
+            for w in ts.windows(2) {
+                let (a, b) = (pos + d * w[0], pos + d * w[1]);
+                let now = blocked((a + b) / 2.0);
+                let lift = |p: DVec3| DVec3::new(p.x, p.y, p.z.max(zc));
+                let mv = |p: DVec3| if rapid { Move::Rapid(p.to_array()) } else { Move::Feed(p.to_array(), f) };
+                if now && !inside {
+                    // straight up where it reaches the fixture
+                    out.push(Move::Rapid(lift(a).to_array()));
+                    lifts += 1;
+                } else if !now && inside {
+                    // and back down where it leaves
+                    out.push(mv(a));
+                }
+                inside = now;
+                // over it, along the path at the clearance height (at the feed rate when cutting: for the
+                // holder that height can still be in the stock)
+                out.push(mv(if now { lift(b) } else { b }));
+            }
+            pos = to;
+        }
+        if inside {
+            out.push(Move::Rapid(DVec3::new(pos.x, pos.y, zc.max(pos.z)).to_array()));
+        }
+        moves = out;
+    }
+    (moves, lifts)
 }
 
 /// Make the toolpaths of every operation that isn't suppressed.
@@ -1098,7 +1177,25 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
             tp.warnings.push(format!("cuts {} mm deep but the flutes are only {} mm long", crate::cam::fmt_mm(top - low), crate::cam::fmt_mm(tool.flute_length)));
         }
     }
-    tp.moves = pb.moves;
+    let boxes = fixture_boxes(ctx.cam, ctx.origin);
+    if boxes.is_empty() {
+        tp.moves = pb.moves;
+    } else {
+        let start = DVec3::new(0.0, 0.0, pb.safe);
+        // each band of the tool and holder clears the fixtures: the holder can reach them while the tip cuts beside them
+        let mut moves = pb.moves;
+        let mut lifts = 0;
+        for (r, z0) in crate::cam_sim::tool_body(tool) {
+            let lowered: Vec<_> = boxes.iter().map(|(n, lo, hi)| (n.clone(), *lo, *hi - DVec3::Z * z0)).collect();
+            let (m, n) = avoid_fixtures(moves, &lowered, r, ctx.cam.retract.max(1.0), start);
+            moves = m;
+            lifts = lifts.max(n);
+        }
+        tp.moves = moves;
+        if lifts > 0 {
+            tp.warnings.push(format!("lifts over the fixtures {lifts} time{}", if lifts == 1 { "" } else { "s" }));
+        }
+    }
     stats(&mut tp, tool, ctx.cam);
     tp
 }
@@ -1751,6 +1848,43 @@ mod tests {
         sim.run_to(usize::MAX, usize::MAX);
         assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Rapid));
         assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Gouge));
+    }
+
+    #[test]
+    fn toolpaths_lift_over_fixtures() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.add_op(OpKind::Face, t);
+        c.add_op(OpKind::Clear, t);
+        let (stock, o) = (stock_box(&c, &part), work_origin(&c, &part));
+        c.fixtures.push(crate::cam::place_fixture("Toe clamp", [20.0, 16.0, 12.0], stock, o, 0));
+        let (_, lo, hi) = fixture_boxes(&c, o).remove(0);
+        // over the left edge of the stock, on top of it
+        assert!(lo.x < stock.0.x && hi.x > stock.0.x && (lo.z - stock.1.z).abs() < 1e-9);
+        let paths = generate(&c, &part);
+        let zc = hi.z + c.retract.max(1.0);
+        for tp in &paths {
+            assert!(tp.warnings.iter().any(|w| w.contains("fixture")), "{:?}", tp.warnings);
+            let mut prev = DVec3::new(0.0, 0.0, zc + 10.0);
+            for m in &tp.moves {
+                let p = m.end(prev);
+                for k in 0..=10 {
+                    let q = prev.lerp(p, k as f64 / 10.0);
+                    let near = q.x > lo.x - 4.0 + 1e-6 && q.x < hi.x + 4.0 - 1e-6 && q.y > lo.y - 4.0 + 1e-6 && q.y < hi.y + 4.0 - 1e-6;
+                    assert!(!near || q.z > zc - 1e-6, "{} passes through the clamp at {q}", tp.op);
+                }
+                prev = p;
+            }
+        }
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &paths, 300);
+        sim.run_to(usize::MAX, usize::MAX);
+        assert!(!sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Fixture), "{:?}", sim.events.first());
+        // a move straight through it is a hit
+        let y = (lo.y + hi.y) / 2.0;
+        let bad = Toolpath { op: 1, tool: t, moves: vec![Move::Rapid([lo.x - 20.0, y, hi.z - 2.0]), Move::Rapid([hi.x + 20.0, y, hi.z - 2.0])], ..Default::default() };
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &[bad], 300);
+        sim.run_to(usize::MAX, usize::MAX);
+        assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Fixture));
     }
 
     #[test]

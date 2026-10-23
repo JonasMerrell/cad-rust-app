@@ -940,6 +940,56 @@ impl Default for Machine {
     }
 }
 
+/// Something holding the work that the tool must keep clear of (a clamp, a vise jaw, a screw head),
+/// as a box in work coordinates (relative to the work zero).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Fixture {
+    pub name: String,
+    pub min: [f64; 3],
+    pub max: [f64; 3],
+}
+
+impl Default for Fixture {
+    fn default() -> Self {
+        Fixture { name: "Clamp".into(), min: [0.0, 0.0, 0.0], max: [20.0, 40.0, 12.0] }
+    }
+}
+
+/// Fixture presets: name and size (X, Y, Z).
+pub const FIXTURES: [(&str, [f64; 3]); 5] = [
+    ("Toe clamp", [20.0, 40.0, 12.0]),
+    ("Strap clamp", [25.0, 60.0, 20.0]),
+    ("Screw head", [10.0, 10.0, 6.0]),
+    ("Vise jaw", [150.0, 20.0, 40.0]),
+    ("Bolt and washer", [24.0, 24.0, 15.0]),
+];
+
+/// A fixture preset placed against the stock (`lo`, `hi` in setup coordinates): vise jaws along the
+/// front and back faces, clamps and screws over the edges in turn (left, right, front, back), each
+/// overlapping the stock by a quarter of its size. Returned in work coordinates.
+pub fn place_fixture(name: &str, size: [f64; 3], (lo, hi): (glam::DVec3, glam::DVec3), origin: glam::DVec3, n: usize) -> Fixture {
+    use glam::DVec3;
+    let s = DVec3::from(size);
+    let mid = (lo + hi) / 2.0;
+    let (a, b) = if name.contains("jaw") {
+        let y = if n % 2 == 0 { lo.y - s.y } else { hi.y };
+        (DVec3::new(mid.x - s.x / 2.0, y, lo.z), DVec3::new(mid.x + s.x / 2.0, y + s.y, lo.z + s.z))
+    } else {
+        // lies on top of the stock, over an edge
+        let (w, d) = if n % 4 < 2 { (s.x, s.y) } else { (s.y, s.x) };
+        let (x, y) = match n % 4 {
+            0 => (lo.x - w * 0.75, mid.y - d / 2.0),
+            1 => (hi.x - w * 0.25, mid.y - d / 2.0),
+            2 => (mid.x - w / 2.0, lo.y - d * 0.75),
+            _ => (mid.x - w / 2.0, hi.y - d * 0.25),
+        };
+        (DVec3::new(x, y, hi.z), DVec3::new(x + w, y + d, hi.z + s.z))
+    };
+    let r = |v: DVec3| [(v.x * 100.0).round() / 100.0, (v.y * 100.0).round() / 100.0, (v.z * 100.0).round() / 100.0];
+    Fixture { name: name.into(), min: r(a - origin), max: r(b - origin) }
+}
+
 /// Machine presets: name, travel, max rpm, max feed, rapid XY, rapid Z, tool changer.
 pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
     ("Desktop router (3018 class)", [300.0, 180.0, 45.0], 10000.0, 1000.0, 1500.0, 600.0, false),
@@ -996,6 +1046,8 @@ pub struct Cam {
     pub follows: String,
     /// Write arcs (G2/G3) where the toolpath runs along circles, instead of many short lines.
     pub arcs: bool,
+    /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
+    pub fixtures: Vec<Fixture>,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -1019,6 +1071,7 @@ impl Default for Cam {
             machine: Machine::default(),
             follows: String::new(),
             arcs: true,
+            fixtures: vec![],
             tools: vec![],
             ops: vec![],
             next_id: 1,

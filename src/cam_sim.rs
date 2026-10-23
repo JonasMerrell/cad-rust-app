@@ -20,6 +20,8 @@ pub enum EventKind {
     Holder,
     /// The tool cut into the finished part.
     Gouge,
+    /// The tool or its holder ran into a fixture (clamp, vise jaw).
+    Fixture,
 }
 
 impl EventKind {
@@ -29,6 +31,7 @@ impl EventKind {
             EventKind::Shank => "shank hits the stock",
             EventKind::Holder => "holder hits the stock",
             EventKind::Gouge => "cuts into the part",
+            EventKind::Fixture => "hits a fixture",
         }
     }
 }
@@ -58,6 +61,8 @@ struct Cutter {
     undercut: bool,
     /// How deep it may cut into the part without it counting (chamfers, taps, threads).
     allowance: f32,
+    /// The tool and holder as bands from the tip up: (radius, height of the band's bottom above the tip).
+    body: Vec<(f64, f64)>,
 }
 
 pub const LUT_STEP: f64 = 0.002;
@@ -85,6 +90,27 @@ pub fn tool_lut(t: &Tool) -> Vec<f32> {
     };
     let exact = |rho: f64| crate::cam_3d::tool_height(t, rho).unwrap_or_else(|| height_at(rho));
     (0..=((r / LUT_STEP).ceil() as usize)).map(|i| exact((i as f64 * LUT_STEP).min(r)) as f32).collect()
+}
+
+/// The tool and holder as bands from the tip up: (radius, height of the band's bottom above the tip),
+/// each reaching up to the next one's bottom (the last one has no top).
+pub fn tool_body(t: &Tool) -> Vec<(f64, f64)> {
+    let r = t.radius();
+    let undercut = matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill);
+    let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
+    let neck = if undercut {
+        if t.neck_diameter > 0.0 {
+            t.neck_diameter / 2.0
+        } else {
+            r * 0.6
+        }
+    } else {
+        (t.shank_diameter / 2.0).max(0.1)
+    };
+    let stick = t.stickout.max(flutes + 1.0);
+    let mut body = vec![(r, 0.0), (neck, flutes)];
+    body.extend(t.holder_outline().iter().map(|(hr, h)| (*hr, stick + h)));
+    body
 }
 
 impl Cutter {
@@ -115,7 +141,8 @@ impl Cutter {
                 }
             }
         }
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance }
+        let body = tool_body(t);
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body }
     }
 }
 
@@ -162,6 +189,8 @@ pub struct Sim {
     pub events: Vec<SimEvent>,
     pub removed: f64,
     max_h: f32,
+    /// Fixtures (setup coordinates).
+    fixtures: Vec<(DVec3, DVec3)>,
 }
 
 impl Sim {
@@ -195,6 +224,7 @@ impl Sim {
             events: vec![],
             removed: 0.0,
             max_h: hi.z as f32,
+            fixtures: crate::cam_paths::fixture_boxes(cam, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
         for t in &part.tris {
@@ -330,6 +360,9 @@ impl Sim {
         let mut work = 0;
         for k in 1..=n {
             let p = from.lerp(to, k as f64 / n as f64);
+            if !self.fixtures.is_empty() {
+                self.hit_fixtures(ci, op, step, p);
+            }
             // nothing to touch above the stock
             if p.z as f32 > self.max_h + 1e-3 {
                 continue;
@@ -339,6 +372,27 @@ impl Sim {
         }
         self.pos = to;
         work
+    }
+
+    /// Whether the tool or holder at `p` overlaps a fixture.
+    fn hit_fixtures(&mut self, ci: usize, op: u64, step: usize, p: DVec3) {
+        let mut worst = 0.0f64;
+        let body = &self.cutters[ci].body;
+        for (lo, hi) in &self.fixtures {
+            let dx = (lo.x - p.x).max(p.x - hi.x).max(0.0);
+            let dy = (lo.y - p.y).max(p.y - hi.y).max(0.0);
+            let d = dx.hypot(dy);
+            for (k, (r, z0)) in body.iter().enumerate() {
+                let z1 = body.get(k + 1).map(|b| b.1).unwrap_or(f64::INFINITY);
+                let (b0, b1) = (p.z + z0, p.z + z1);
+                if d < *r - 1e-6 && b0 < hi.z - 1e-6 && b1 > lo.z {
+                    worst = worst.max(hi.z - b0);
+                }
+            }
+        }
+        if worst > 0.0 {
+            self.event(EventKind::Fixture, op, step, p, worst);
+        }
     }
 
     /// sqrt(1 + slope²) of the part's height map at a cell (gentler of the two sides along each axis).

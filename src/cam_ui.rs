@@ -577,6 +577,45 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         num(ui, "Clearance", &mut c.clearance, " mm", 1.0..=500.0, 0.5);
         num(ui, "Retract", &mut c.retract, " mm", 0.1..=100.0, 0.1);
         ui.add_space(4.0);
+        ui.label(RichText::new("FIXTURES").color(theme::muted()).size(11.0).strong())
+            .on_hover_text("Clamps, vise jaws and screws as boxes in work coordinates: toolpaths lift over them and the simulation flags any hit");
+        let mut gone = None;
+        for (k, f) in c.fixtures.iter_mut().enumerate() {
+            ui.horizontal(|ui| {
+                ui.add(egui::TextEdit::singleline(&mut f.name).desired_width(140.0));
+                if ui.small_button("✕").on_hover_text("Remove this fixture").clicked() {
+                    gone = Some(k);
+                }
+            });
+            row(ui, "From X/Y/Z", |ui| {
+                for v in f.min.iter_mut() {
+                    ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2));
+                }
+            });
+            row(ui, "To X/Y/Z", |ui| {
+                for v in f.max.iter_mut() {
+                    ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2));
+                }
+            });
+        }
+        if let Some(k) = gone {
+            c.fixtures.remove(k);
+        }
+        let mut add = None;
+        egui::ComboBox::from_id_salt("cam-fixture-add").selected_text("Add a fixture").width(150.0).show_ui(ui, |ui| {
+            for (n, size) in cam::FIXTURES {
+                if ui.selectable_label(false, n).clicked() {
+                    add = Some((n, size));
+                }
+            }
+        });
+        if let Some((n, size)) = add {
+            c.fixtures.push(match &app.cam.part {
+                Some(p) => cam::place_fixture(n, size, cam_paths::stock_box(c, p), cam_paths::work_origin(c, p), c.fixtures.len()),
+                None => cam::Fixture { name: n.into(), min: [0.0; 3], max: size },
+            });
+        }
+        ui.add_space(4.0);
         ui.label(RichText::new("MACHINE").color(theme::muted()).size(11.0).strong());
         row(ui, "Machine", |ui| {
             let label = if c.machine.name.is_empty() { "custom".to_string() } else { c.machine.name.clone() };
@@ -1365,8 +1404,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
 
 pub fn gcode_for(c: &Cam, part: &Part, paths: &[Toolpath]) -> String {
     let ctx = cam_paths::Ctx::new(c, part);
-    let safe = ctx.stock.1.z.max(part.hi.z) + c.clearance;
-    crate::cam_post::gcode(c, paths, ctx.origin, safe)
+    crate::cam_post::gcode(c, paths, ctx.origin, ctx.safe())
 }
 
 fn export_dialog(app: &mut App) {
@@ -1581,6 +1619,17 @@ fn build_scene(app: &App) -> SceneData {
     }
     // work zero
     let o = cam_paths::work_origin(c, part);
+    // fixtures
+    let fix_col = rgba(Color32::from_rgb(0xe0, 0x5a, 0x2a), 0.95);
+    for (_, lo, hi) in cam_paths::fixture_boxes(c, o) {
+        let corner = |k: usize| to(DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z, hi.z][(k >> 2) & 1]));
+        for (a, b) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+            s.line(corner(a), corner(b), 1.6, fix_col);
+        }
+        for f in [[0, 1, 3], [0, 3, 2], [4, 5, 7], [4, 7, 6], [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 3, 7], [1, 7, 5]] {
+            s.tri(true, [corner(f[0]), corner(f[1]), corner(f[2])], rgba(Color32::from_rgb(0xe0, 0x5a, 0x2a), 0.25));
+        }
+    }
     let size = (app.camera.wpp() * 40.0) as f64;
     for (d, col) in [(DVec3::X, vp::axis_x()), (DVec3::Y, vp::axis_y()), (DVec3::Z, vp::axis_z())] {
         s.lines_top.push(crate::render::LineInst { a: to(o).into(), b: to(o + d * size).into(), width: 2.5, bias: 0.0, color: rgba(col, 1.0) });
