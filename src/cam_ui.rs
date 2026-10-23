@@ -56,6 +56,8 @@ pub struct CamUi {
     pub pick_edges: Option<u64>,
     /// Show the part (see-through) over the simulated stock.
     pub show_part: bool,
+    /// Name to save the operations under as a template.
+    tpl_name: String,
 }
 
 fn cam_index(app: &App) -> Option<usize> {
@@ -911,6 +913,7 @@ fn ops_ui(app: &mut App, ui: &mut Ui) {
             }
         });
     }
+    templates_ui(app, ui);
     if !app.cam.paths.is_empty() || app.cam.computing {
         let total: f64 = app.cam.paths.iter().map(|p| p.time).sum();
         ui.add_space(4.0);
@@ -921,6 +924,64 @@ fn ops_ui(app: &mut App, ui: &mut Ui) {
                 ui.label(RichText::new("updating").color(theme::muted()).size(12.0));
             }
         });
+    }
+}
+
+/// Save the setup's operations as a template, or add a saved template's operations.
+fn templates_ui(app: &mut App, ui: &mut Ui) {
+    let Some(has_ops) = cam(app).map(|c| c.ops.iter().any(|o| !o.suppressed)) else { return };
+    let mut save = false;
+    let mut add = None;
+    let mut gone = None;
+    ui.add_space(2.0);
+    ui.menu_button(RichText::new("Templates").size(12.5), |ui| {
+        ui.set_min_width(240.0);
+        ui.label(RichText::new("SAVE THESE OPERATIONS").color(theme::muted()).size(11.0).strong());
+        ui.horizontal(|ui| {
+            ui.add(egui::TextEdit::singleline(&mut app.cam.tpl_name).hint_text("Template name").desired_width(150.0));
+            if ui.add_enabled(has_ops && !app.cam.tpl_name.trim().is_empty(), egui::Button::new("Save")).on_hover_text("The operations that aren't suppressed and their tools; heights and picked holes, points, edges and sketches are left out").clicked() {
+                save = true;
+                ui.close();
+            }
+        });
+        ui.separator();
+        let all = crate::cam_template::list();
+        if all.is_empty() {
+            ui.label(RichText::new("No templates saved yet").color(theme::muted()).size(12.0));
+        }
+        for t in &all {
+            ui.horizontal(|ui| {
+                if ui.button(&t.name).on_hover_text(t.ops.iter().map(|o| o.name.as_str()).collect::<Vec<_>>().join(", ")).clicked() {
+                    add = Some(t.clone());
+                    ui.close();
+                }
+                ui.label(RichText::new(format!("{} ops", t.ops.len())).color(theme::muted()).size(11.5));
+                if ui.small_button("✕").on_hover_text("Delete this template").clicked() {
+                    gone = Some(t.name.clone());
+                }
+            });
+        }
+    });
+    if save {
+        let Some(c) = cam(app) else { return };
+        let t = crate::cam_template::from_cam(c, &app.cam.tpl_name, &[]);
+        match crate::cam_template::save(&t) {
+            Ok(_) => app.flash_info(format!("Saved template \"{}\"", t.name), Some(std::time::Duration::from_secs(2))),
+            Err(e) => app.flash(format!("Could not save the template: {e}"), ToastKind::Error),
+        }
+    }
+    if let Some(name) = gone {
+        if let Err(e) = crate::cam_template::delete(&name) {
+            app.flash(format!("Could not delete the template: {e}"), ToastKind::Error);
+        }
+    }
+    if let Some(t) = add {
+        let sketch = cam(app).and_then(|c| app.studio_doc(c.studio)).and_then(|d| sketch_input(d).into_iter().rev().find(|s| !s.paths.is_empty())).map(|s| s.id);
+        let mut ids = vec![];
+        edit(app, |c| ids = crate::cam_template::apply(c, &t, sketch));
+        app.cam.sel_op = ids.first().copied();
+        app.cam.sel_tool = None;
+        app.flash_info(format!("Added {} operation{} from \"{}\"", ids.len(), if ids.len() == 1 { "" } else { "s" }, t.name), Some(std::time::Duration::from_secs(2)));
     }
 }
 
