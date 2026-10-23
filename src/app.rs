@@ -129,6 +129,7 @@ pub struct App {
     pub geom_open: bool,
     pub parts_open: bool,
     pub tool_search: String,
+    pub palette: crate::palette::Palette,
     pub dark: bool,
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
@@ -218,6 +219,7 @@ impl App {
             geom_open: true,
             parts_open: true,
             tool_search: String::new(),
+            palette: Default::default(),
             dark,
             script_editor: None,
             awaiting_sketch_plane: false,
@@ -1016,6 +1018,9 @@ impl App {
                 if ui.add(egui::Button::image(icons::image(mode.0, 17.0).tint(theme::text()))).on_hover_text(mode.1).clicked() {
                     self.phone = !self.phone;
                     self.sidebar_open = !self.phone;
+                }
+                if ui.add(egui::Button::image(icons::image("search", 17.0).tint(theme::text()))).on_hover_text("Search commands (S, / or Ctrl+K)").clicked() {
+                    crate::palette::open(self);
                 }
                 let (txt, col) = match self.kernel.state {
                     KernelState::Loading => ("Kernel loading", theme::muted()),
@@ -2307,7 +2312,7 @@ impl App {
         }
     }
 
-    fn tab_action(&mut self, a: &str, t: crate::workspace::Tab) {
+    pub(crate) fn tab_action(&mut self, a: &str, t: crate::workspace::Tab) {
         use crate::workspace::Tab;
         let name_of = |ws: &crate::workspace::Workspace, t: Tab| match t {
             Tab::Studio(i) => ws.studios.get(i).map(|s| s.name.clone()),
@@ -2555,6 +2560,7 @@ impl eframe::App for App {
             self.start_sketch();
         }
         self.pump_kernel();
+        crate::palette::shortcut(self, &ctx);
         self.shortcuts(&ctx);
 
         let header = Frame::new().fill(theme::header()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 3 });
@@ -2596,6 +2602,7 @@ impl eframe::App for App {
         if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {
             self.hint_ui(&ctx, central.response.rect);
         }
+        crate::palette::window(self, &ctx);
         if self.phone && self.sidebar_open {
             self.drawer(&ctx, central.response.rect);
         }

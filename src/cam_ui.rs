@@ -292,11 +292,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
         let on = app.cam.sim_on;
         if app.tool_button(ui, "camSim", "Simulate", "Play the toolpaths on the stock and check for crashes", true, on, !app.cam.paths.is_empty()).clicked() {
-            app.cam.sim_on = !on;
-            app.cam.scene_dirty = true;
-            if app.cam.sim_on && app.cam.sim.is_none() {
-                start_sim(app, true);
-            }
+            toggle_sim(app);
         }
         if app.tool_button(ui, "camGcode", "G-code", "Export G-code for the machine", true, false, !app.cam.paths.is_empty()).clicked() {
             export_dialog(app);
@@ -307,7 +303,18 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     });
 }
 
-fn add_op(app: &mut App, k: OpKind) {
+pub(crate) fn toggle_sim(app: &mut App) {
+    if app.cam.paths.is_empty() {
+        return;
+    }
+    app.cam.sim_on = !app.cam.sim_on;
+    app.cam.scene_dirty = true;
+    if app.cam.sim_on && app.cam.sim.is_none() {
+        start_sim(app, true);
+    }
+}
+
+pub(crate) fn add_op(app: &mut App, k: OpKind) {
     // a pencil pass wants a tool smaller than the ones before it
     let small = |c: &Cam| c.tools.iter().filter(|t| t.kind == ToolKind::Ball && t.diameter <= 3.0).map(|t| t.id).next();
     let missing = cam(app).map(|c| if k == OpKind::Pencil { small(c).is_none() } else { !c.tools.iter().any(|t| k.accepts(t.kind)) }).unwrap_or(true);
@@ -370,7 +377,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn fit(app: &mut App) {
+pub(crate) fn fit(app: &mut App) {
     let Some(part) = app.cam.part.clone() else { return };
     let Some(c) = cam(app) else { return };
     let (lo, hi) = cam_paths::stock_box(c, &part);
@@ -747,7 +754,7 @@ pub fn ensure_built(app: &mut App, studio: usize) {
     }
 }
 
-fn kind_icon(k: OpKind) -> &'static str {
+pub(crate) fn kind_icon(k: OpKind) -> &'static str {
     match k {
         OpKind::Face => "camFace",
         OpKind::Clear => "camClear",
@@ -1546,7 +1553,7 @@ pub fn gcode_for(c: &Cam, part: &Part, paths: &[Toolpath]) -> String {
     crate::cam_post::gcode(c, paths, ctx.origin, ctx.safe())
 }
 
-fn export_dialog(app: &mut App) {
+pub(crate) fn export_dialog(app: &mut App) {
     let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
     if app.cam.computing {
         app.flash("Toolpaths are still being made", ToastKind::Info);
@@ -1575,7 +1582,7 @@ fn export_dialog(app: &mut App) {
     }
 }
 
-fn sheet_dialog(app: &mut App) {
+pub(crate) fn sheet_dialog(app: &mut App) {
     let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
     if app.cam.computing {
         app.flash("Toolpaths are still being made", ToastKind::Info);
