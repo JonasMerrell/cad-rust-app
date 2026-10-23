@@ -606,6 +606,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         num(ui, "Rapid X/Y", &mut c.rapid_rate, " mm/min", 100.0..=100000.0, 50.0);
         num(ui, "Rapid Z", &mut c.machine.rapid_z, " mm/min", 0.0..=100000.0, 50.0);
         ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) for you to change tools");
+        ui.checkbox(&mut c.arcs, "Arcs in the G-code (G2/G3)").on_hover_text("Write arcs where the toolpath runs along circles: shorter files and smoother motion than many short lines");
         // hand edits make it a custom machine
         if (c.machine.clone(), c.max_rpm, c.rapid_rate) != before {
             c.machine.name.clear();
@@ -923,6 +924,18 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                         num(ui, "Tab height", &mut o.tab_height, " mm", 0.1..=100.0, 0.1);
                     }
                     num(ui, "Breakthrough", &mut o.breakthrough, " mm", 0.0..=10.0, 0.05);
+                    row(ui, "Lead in/out", |ui| {
+                        let mut on = o.lead > 0.0;
+                        let tip = "Arc onto the wall and off it again instead of ramping along it (leaves no mark where the cut starts)";
+                        if ui.checkbox(&mut on, "").on_hover_text(tip).changed() {
+                            o.lead = if on { tool.as_ref().map(|t| (t.diameter * 0.5 * 10.0).round() / 10.0).unwrap_or(3.0) } else { 0.0 };
+                        }
+                        if on {
+                            ui.add(egui::DragValue::new(&mut o.lead).range(0.1..=100.0).speed(0.05).prefix("R ").suffix(" mm"));
+                        } else {
+                            ui.label(RichText::new("ramp along the wall").color(theme::muted()).size(12.0)).on_hover_text(tip);
+                        }
+                    });
                 }
             }
             if o.kind == OpKind::Pocket {
