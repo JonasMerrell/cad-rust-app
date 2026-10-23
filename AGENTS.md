@@ -63,7 +63,7 @@ runs in this folder. Other MCP clients start the same command
 | `export_drawing` | PDF (all sheets)/SVG/DXF/PNG of a Drawing tab, or a quick four-view sheet of the active Part Studio |
 | `create_cam` / `edit_cam` | Manufacture tabs (setups): Part Studio, bodies, up direction, stock margins or size, material, work zero, clearance, post, machine preset or limits; `follows` starts a setup from the stock an earlier one leaves (flip the part) |
 | `cam_tool_library` / `cam_tool` | search the preset tool library; add a preset or a tool by kind with overrides (including a holder preset or outline), edit or delete tools |
-| `cam_op` / `cam_info` | add, edit, reorder or delete operations (2.5D, plus 3D adaptive, parallel, waterline, scallop, pencil and deburr; `rest` to cut only what is left); toolpath stats, cycle time and warnings |
+| `cam_op` / `cam_info` | add, edit, reorder or delete operations (2.5D, plus 3D adaptive, parallel, waterline, scallop, pencil and deburr, and trace / vcarve on the Part Studio's `sketches`; `rest` to cut only what is left); toolpath stats, cycle time and warnings |
 | `simulate_cam` / `render_cam` | material removal simulation with crash detection (rapids into stock, shank/holder hits, gouges), optional PNG; toolpath render |
 | `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |
 
@@ -85,6 +85,8 @@ chamfer, contour with tabs), simulates it and writes G-code.
 `examples/cam-setups.json` machines a part from both sides: rest roughing with a
 smaller tool, pencil clean-up of the pocket's fillets, then a second setup that
 flips the part and starts from the stock the first one left.
+`examples/cam-engrave.json` V-carves text from a sketch into a plate and traces
+a border and a line drawing from another sketch.
 
 ## Example
 

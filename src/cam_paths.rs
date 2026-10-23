@@ -81,6 +81,23 @@ pub fn orient_matrix(orient: &str) -> DMat3 {
 /// A circular edge: centre, axis, radius.
 pub type Circle = ([f64; 3], [f64; 3], f64);
 
+/// A sketch's curves, as polylines (closed ones flagged), for the operations that follow or carve them.
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct SketchPaths {
+    /// The sketch feature's id in the Part Studio.
+    pub id: u64,
+    pub name: String,
+    pub paths: Vec<(Vec<DVec3>, bool)>,
+}
+
+/// What a setup machines, in part coordinates: the parts' triangles and circular edges, and the sketches.
+#[derive(Clone, Debug, Default)]
+pub struct PartInput {
+    pub tris: Vec<[DVec3; 3]>,
+    pub circles: Vec<Circle>,
+    pub sketches: Vec<SketchPaths>,
+}
+
 /// The parts being machined, in setup coordinates.
 pub struct Part {
     pub tris: Vec<[DVec3; 3]>,
@@ -89,6 +106,7 @@ pub struct Part {
     pub hi: DVec3,
     /// Part → setup rotation.
     pub rot: DMat3,
+    pub sketches: Vec<SketchPaths>,
 }
 
 impl Part {
@@ -108,7 +126,18 @@ impl Part {
             lo = DVec3::ZERO;
             hi = DVec3::ZERO;
         }
-        Part { tris, circles, lo, hi, rot }
+        Part { tris, circles, lo, hi, rot, sketches: vec![] }
+    }
+
+    pub fn from_input(input: &PartInput, orient: &str) -> Part {
+        let mut p = Part::new(&input.tris, &input.circles, orient);
+        let rot = p.rot;
+        p.sketches = input
+            .sketches
+            .iter()
+            .map(|s| SketchPaths { id: s.id, name: s.name.clone(), paths: s.paths.iter().map(|(pts, closed)| (pts.iter().map(|q| rot * *q).collect(), *closed)).collect() })
+            .collect();
+        p
     }
 
     /// Setup → part coordinates.
@@ -156,6 +185,15 @@ pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
 
 pub(crate) fn flat(s: &Shapes) -> Vec<Contour> {
     s.iter().flat_map(|sh| sh.iter().cloned()).collect()
+}
+
+/// The area inside an odd number of the loops (text: the holes of letters stay open).
+pub fn even_odd(contours: &[Contour]) -> Shapes {
+    if contours.is_empty() {
+        return vec![];
+    }
+    let mut ov = FloatOverlay::with_subj(contours);
+    clean(ov.overlay(OverlayRule::Subject, FillRule::EvenOdd))
 }
 
 pub fn union_all(contours: &[Contour]) -> Shapes {
@@ -655,7 +693,7 @@ impl<'a> Ctx<'a> {
         Ctx { cam, geo: Geo::new(part), stock: stock_box(cam, part), origin: work_origin(cam, part), stock_in: None }
     }
 
-    fn part(&self) -> &Part {
+    pub(crate) fn part(&self) -> &Part {
         self.geo.part
     }
 
@@ -663,7 +701,7 @@ impl<'a> Ctx<'a> {
         z.map(|z| z + self.origin.z)
     }
 
-    fn safe(&self) -> f64 {
+    pub(crate) fn safe(&self) -> f64 {
         self.stock.1.z.max(self.part().hi.z) + self.cam.clearance
     }
 }
@@ -776,6 +814,15 @@ fn part_hash(part: &Part) -> u64 {
         }
         for (c, n, r) in &part.circles {
             (c.to_array().map(f64::to_bits), n.to_array().map(f64::to_bits), r.to_bits()).hash(h);
+        }
+        for sk in &part.sketches {
+            sk.id.hash(h);
+            for (pts, closed) in &sk.paths {
+                closed.hash(h);
+                for q in pts {
+                    q.to_array().map(f64::to_bits).hash(h);
+                }
+            }
         }
     })
 }
@@ -973,7 +1020,7 @@ pub fn setup_chain(cams: &[Cam], ci: usize) -> Result<Vec<usize>, String> {
 
 /// Bring the stock boxes of `ci` and the setups before it up to date (each carries the box of the one it follows),
 /// and return the stock the earlier setups leave for it (None for a first setup).
-pub fn link_setups(cams: &mut [Cam], ci: usize, tris: &[[DVec3; 3]], circles: &[Circle]) -> Result<Option<StockMap>, String> {
+pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Option<StockMap>, String> {
     let chain = setup_chain(cams, ci)?;
     if chain.is_empty() {
         cams[ci].stock.carried = None;
@@ -985,7 +1032,7 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, tris: &[[DVec3; 3]], circles: &[
     let mut stock: Option<StockMap> = None;
     for w in order.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let pa = Part::new(tris, circles, &cams[a].orient);
+        let pa = Part::from_input(input, &cams[a].orient);
         let (lo, hi) = stock_box(&cams[a], &pa);
         let (p, q) = (pa.to_part(lo), pa.to_part(hi));
         cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);
@@ -1039,6 +1086,8 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         OpKind::Scallop => crate::cam_3d::scallop(ctx, op, &mut pb, &mut tp),
         OpKind::Deburr => crate::cam_3d::deburr(ctx, op, &mut pb, &mut tp),
         OpKind::Pencil => crate::cam_3d::pencil(ctx, op, &mut pb, &mut tp),
+        OpKind::Trace => crate::cam_engrave::trace(ctx, op, &mut pb, &mut tp),
+        OpKind::VCarve => crate::cam_engrave::vcarve(ctx, op, &mut pb, &mut tp),
     }
     pb.up();
     // deepest cut below the stock top against the flute length

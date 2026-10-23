@@ -83,13 +83,13 @@ impl Session {
         self.sync();
         let c = self.ws.cams[ci].clone();
         self.ensure_built(c.studio)?;
-        let (tris, circles) = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
-        if tris.is_empty() {
+        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
+        if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
         }
-        let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &tris, &circles)?;
+        let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &input)?;
         let c = &self.ws.cams[ci];
-        let part = Part::new(&tris, &circles, &c.orient);
+        let part = Part::from_input(&input, &c.orient);
         let paths = cam_paths::generate_from(c, &part, stock.as_ref());
         Ok((part, paths, stock))
     }
@@ -129,6 +129,7 @@ impl Session {
             "tools": c.tools.iter().map(tool_json).collect::<Vec<_>>(),
             "operations": ops,
             "holes": holes,
+            "sketches": part.sketches.iter().map(|s| json!({"id": s.id, "name": s.name, "curves": s.paths.len(), "closed": s.paths.iter().filter(|p| p.1).count()})).collect::<Vec<_>>(),
             "cycle_time_s": total.round(),
         }))
     }
@@ -310,13 +311,32 @@ impl Session {
                 };
                 let c = &mut self.ws.cams[ci];
                 let i = c.ops.iter().position(|o| o.id == id).ok_or(format!("no operation {id}"))?;
-                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side"])?;
+                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side", "sketches"])?;
                 if let Some(t) = a.get("tool") {
                     op.tool = tool_ref(c, t)?;
                 }
                 if let Some(s) = a.get("side").and_then(|s| s.as_str()) {
                     op.side = serde_json::from_value(json!(s)).map_err(|_| "side: outside, inside or both")?;
                 }
+                let studio = c.studio;
+                let known = self.studio_doc(studio).map(crate::cam_ui::sketch_input).unwrap_or_default();
+                if let Some(v) = a.get("sketches") {
+                    let list = if v.is_array() { v.as_array().cloned().unwrap_or_default() } else { vec![v.clone()] };
+                    op.sketches = list
+                        .iter()
+                        .map(|x| {
+                            known
+                                .iter()
+                                .find(|s| x.as_u64() == Some(s.id) || x.as_str().map(|n| n.trim().eq_ignore_ascii_case(&s.name)).unwrap_or(false))
+                                .map(|s| s.id)
+                                .ok_or(format!("no sketch {x} (sketches: {})", known.iter().map(|s| format!("{} \"{}\"", s.id, s.name)).collect::<Vec<_>>().join(", ")))
+                        })
+                        .collect::<R<Vec<u64>>>()?;
+                } else if matches!(op.kind, OpKind::Trace | OpKind::VCarve) && op.sketches.is_empty() {
+                    // start on the latest sketch
+                    op.sketches = known.iter().rev().find(|s| !s.paths.is_empty()).map(|s| vec![s.id]).unwrap_or_default();
+                }
+                let c = &mut self.ws.cams[ci];
                 c.ops[i] = op;
                 let (_, paths) = self.cam_build(ci)?;
                 let tp = paths.iter().find(|p| p.op == id);
@@ -492,7 +512,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "machine": {}, "follows": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_tool_library", "description": "List the tool library (the user's tools and built-in presets): flat, ball, bull, tapered_ball, chamfer, engrave, slot, thread_mill, face_mill, drill, spot_drill, center_drill, tap, reamer. Filter by kind and/or search words (e.g. '6 flat', 'M5').", "inputSchema": obj(json!({"kind": {"type": "string"}, "search": {"type": "string"}}), &[])}),
         json!({"name": "cam_tool", "description": "Add a tool to a Manufacture tab: preset (a library search such as 'Ø6 flat end mill' or 'M5 × 0.8 tap') and/or kind plus any fields to override: number, name, diameter, corner_radius, tip_diameter, angle (included; per side for tapered_ball), flute_length, stickout, shank_diameter, holder_diameter, holder (a preset: \"ER11 collet, router spindle Ø52\", \"ER11 collet chuck\", \"ER16 collet chuck\", \"ER20 collet, router spindle Ø80\", \"ER20 collet chuck\", \"ER25 collet chuck\", \"ER32 collet chuck\", \"Shrink-fit holder Ø6\", \"Shrink-fit holder Ø12\", \"Side-lock (Weldon) holder\"; or an outline [[diameter, height], …] from the holder's bottom face up, for collision checks), flutes, pitch, cutting_width, neck_diameter, material (carbide/hss/cobalt), coolant, rpm, feed, plunge_feed (mm/min), stepdown, stepover (fraction of Ø). Feeds and speeds are suggested for the stock material. With id: edit that tool, or delete:true. Returns the tool with its id.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "preset": {"type": "string"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "delete": {"type": "boolean"}, "diameter": {"type": "number"}}), &["cam"])}),
-        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing with cycloidal loops at constant engagement; stepover = optimal load, fraction of Ø, default 0.1; trochoid = loop radius mm, 0 = 40% of Ø; big stepdown), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), pencil (clean up inside corners and fillets a bigger tool left material in, with a small ball mill; ref_diameter = that bigger tool as a ball, default the smallest bigger tool used before), deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). rest:true makes clear, pocket, adaptive and finishing ops cut only the material the operations before them (and earlier setups) left, skipping air; it is on by default for roughing after roughing, and in a setup that follows another every such op starts from that setup's leftover stock. Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
+        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing with cycloidal loops at constant engagement; stepover = optimal load, fraction of Ø, default 0.1; trochoid = loop radius mm, 0 = 40% of Ø; big stepdown), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), pencil (clean up inside corners and fillets a bigger tool left material in, with a small ball mill; ref_diameter = that bigger tool as a ball, default the smallest bigger tool used before), trace (follow the curves of sketches depth mm below the part's surface, in passes of stepdown: engraved lines or cutting along a drawing; closed shapes on the line (side both, default) or beside them (outside/inside, offset by the tool radius + leave)), vcarve (carve the closed shapes of sketches, e.g. text, with a V-bit or chamfer mill, deeper where they are wider so walls meet in sharp corners; depth = deepest cut, 0 = as deep as the cone goes; stepover fraction of Ø, default 0.02). trace and vcarve take sketches: [sketch feature id or name, …] (default the latest sketch; cam_info lists them). deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). rest:true makes clear, pocket, adaptive and finishing ops cut only the material the operations before them (and earlier setups) left, skipping air; it is on by default for roughing after roughing, and in a setup that follows another every such op starts from that setup's leftover stock. Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
         json!({"name": "cam_info", "description": "A Manufacture tab's setup, stock and part extents (work coordinates), tools, operations with times and warnings, the holes found in the part, and the cycle time.", "inputSchema": obj(json!({"cam": {"type": "integer"}}), &["cam"])}),
         json!({"name": "simulate_cam", "description": "Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
         json!({"name": "render_cam", "description": "PNG of the part with the stock box and the cutting moves (blue) of all operations, or of one (operation: id).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "operation": {"type": "integer"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["cam"])}),

@@ -2307,7 +2307,7 @@ mod tests {
         b.op_mut(bid).unwrap().leave = 0.0;
         b.op_mut(bid).unwrap().leave_floor = 0.0;
         let mut cams = vec![a, b];
-        let left = crate::cam_paths::link_setups(&mut cams, 1, &part_tris, &[]).unwrap().expect("carried stock");
+        let left = crate::cam_paths::link_setups(&mut cams, 1, &crate::cam_paths::PartInput { tris: part_tris.clone(), ..Default::default() }).unwrap().expect("carried stock");
         let pb = Part::new(&part_tris, &[], "bottom");
         // the same stock box seen upside down
         let (lo, hi) = stock_box(&cams[1], &pb);

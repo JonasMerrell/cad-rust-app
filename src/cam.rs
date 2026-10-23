@@ -571,10 +571,15 @@ pub enum OpKind {
     Deburr,
     /// 3D clean-up of the corners and fillets a bigger tool couldn't reach.
     Pencil,
+    /// Follow sketch curves at a depth below the surface (engraving lines, cutting along a drawing).
+    Trace,
+    /// Carve the closed shapes of a sketch (text, logos) with a V-bit: deeper where they are wider,
+    /// so the walls meet in sharp corners.
+    VCarve,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 15] = [
+    pub const ALL: [OpKind; 17] = [
         OpKind::Face,
         OpKind::Clear,
         OpKind::Pocket,
@@ -590,6 +595,8 @@ impl OpKind {
         OpKind::Scallop,
         OpKind::Deburr,
         OpKind::Pencil,
+        OpKind::Trace,
+        OpKind::VCarve,
     ];
 
     pub fn label(self) -> &'static str {
@@ -609,6 +616,8 @@ impl OpKind {
             OpKind::Scallop => "Scallop",
             OpKind::Deburr => "Deburr",
             OpKind::Pencil => "Pencil",
+            OpKind::Trace => "Trace",
+            OpKind::VCarve => "V-carve",
         }
     }
 
@@ -629,6 +638,8 @@ impl OpKind {
             OpKind::Scallop => "scallop",
             OpKind::Deburr => "deburr",
             OpKind::Pencil => "pencil",
+            OpKind::Trace => "trace",
+            OpKind::VCarve => "vcarve",
         }
     }
 
@@ -648,6 +659,8 @@ impl OpKind {
             "helix" | "helical" | "circular" => Some(OpKind::Bore),
             "thread_mill" | "threadmill" => Some(OpKind::Thread),
             "tapping" => Some(OpKind::Tap),
+            "engrave" | "engraving" | "follow" | "sketch" | "2d_contour" => Some(OpKind::Trace),
+            "v_carve" | "v-carve" | "vcarving" | "v_carving" | "carve" => Some(OpKind::VCarve),
             _ => None,
         })
     }
@@ -669,6 +682,8 @@ impl OpKind {
             OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
             OpKind::Deburr => "Chamfers or breaks every sharp convex edge in 3D with a chamfer mill or V-bit (or only the picked edges).",
             OpKind::Pencil => "3D clean-up with a small tool along the inside corners and fillets that a bigger (reference) tool left material in.",
+            OpKind::Trace => "Follows the curves of sketches at a depth below the surface: engraved lines, or cutting along a drawing (on the line, or beside closed shapes).",
+            OpKind::VCarve => "Carves the closed shapes of sketches (text, logos) with a V-bit, deeper where they are wider so the walls meet in sharp corners.",
         }
     }
 
@@ -691,6 +706,8 @@ impl OpKind {
             OpKind::Adaptive => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball),
             OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall),
             OpKind::Deburr => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
+            OpKind::Trace => matches!(k, ToolKind::Flat | ToolKind::Ball | ToolKind::Bull | ToolKind::TaperedBall | ToolKind::Chamfer | ToolKind::Engrave),
+            OpKind::VCarve => matches!(k, ToolKind::Engrave | ToolKind::Chamfer),
         }
     }
 }
@@ -773,6 +790,10 @@ pub struct Operation {
     pub rest: bool,
     /// Pencil: diameter of the bigger tool whose leftovers to clean up (0 = the largest tool used before it).
     pub ref_diameter: f64,
+    /// Trace and V-carve: the sketches (feature ids in the Part Studio) whose curves to follow.
+    pub sketches: Vec<u64>,
+    /// Trace: depth below the surface; V-carve: deepest cut (0 = as deep as the V-bit goes).
+    pub depth: f64,
 }
 
 impl Default for Operation {
@@ -816,6 +837,8 @@ impl Default for Operation {
             edge_angle: 30.0,
             rest: false,
             ref_diameter: 0.0,
+            sketches: vec![],
+            depth: 0.0,
         }
     }
 }
@@ -1057,6 +1080,11 @@ impl Cam {
                 op.stepover = Some(0.1);
                 op.leave = 0.0;
             }
+            OpKind::Trace => {
+                op.side = Side::Both;
+                op.depth = 0.5;
+            }
+            OpKind::VCarve => op.stepover = Some(0.02),
             _ => {}
         }
         if kind == OpKind::Drill && self.tool(tool).map(|t| t.kind == ToolKind::Drill && t.diameter > 0.0).unwrap_or(false) {
@@ -1070,7 +1098,6 @@ impl Cam {
         self.ops.iter().find(|o| o.id == id)
     }
 
-    #[cfg(test)]
     pub fn op_mut(&mut self, id: u64) -> Option<&mut Operation> {
         self.ops.iter_mut().find(|o| o.id == id)
     }

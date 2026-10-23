@@ -245,6 +245,9 @@ impl Sim {
         let allowance = match op.map(|o| o.kind) {
             Some(OpKind::Chamfer) | Some(OpKind::Deburr) => op.map(|o| o.chamfer * 2.0 + 0.3).unwrap_or(1.0) as f32,
             Some(OpKind::Tap) | Some(OpKind::Thread) => f32::INFINITY,
+            // engraving cuts into the part on purpose, as deep as asked
+            Some(OpKind::Trace) => op.map(|o| o.depth + 0.05).unwrap_or(1.0) as f32,
+            Some(OpKind::VCarve) => op.map(|o| if o.depth > 0.0 { o.depth + 0.05 } else { tool.flute_length }).unwrap_or(1.0) as f32,
             _ => 0.02,
         };
         self.cutters.push(Cutter::new(tool, self.cell, allowance));
