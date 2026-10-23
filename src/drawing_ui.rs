@@ -1582,7 +1582,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
 fn export(app: &mut App, format: &str) {
     let Some(d) = dwg(app).cloned() else { return };
     let ext = format;
-    let Some(path) = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("{}.{ext}", d.name)).save_file() else { return };
+    let Some(path) = app.save_file_dialog(&ext.to_uppercase(), &[ext], format!("{}.{ext}", d.name)) else { return };
     let prims = sheet_prims(app, &d, app.dwg.cur_sheet);
     let size = sheet_size(&d.sheet);
     let data = match format {

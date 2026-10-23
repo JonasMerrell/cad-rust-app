@@ -228,7 +228,7 @@ impl App {
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
-            side_w: 260.0,
+            side_w: 300.0,
             side_tab: None,
             print: crate::printing::load(),
             print_view: false,
@@ -253,6 +253,42 @@ impl App {
 
     pub fn flash_info(&mut self, text: impl Into<String>, dur: Option<Duration>) {
         self.toast = Some(Toast { text: text.into(), kind: ToastKind::Info, until: dur.map(|d| Instant::now() + d) });
+    }
+
+    // ------------------------------------------------------------ file dialogs
+
+    /// Ask where to save a file. A dialog that comes back at once means the system has none (no
+    /// desktop portal), so the file goes next to the document, or in the home folder, instead.
+    pub fn save_file_dialog(&mut self, filter: &str, exts: &[&str], name: impl Into<String>) -> Option<std::path::PathBuf> {
+        let name = name.into();
+        let t = Instant::now();
+        let picked = rfd::FileDialog::new().add_filter(filter, exts).set_file_name(name.clone()).save_file();
+        if picked.is_some() || t.elapsed() > Duration::from_millis(300) {
+            return picked;
+        }
+        let dir = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())).filter(|d| d.is_dir());
+        let dir = dir.or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from)).unwrap_or_else(|| ".".into());
+        log::warn!("no file dialog available; saving into {}", dir.display());
+        // never overwrite something without asking
+        let path = std::path::Path::new(&name);
+        let (stem, ext) = (path.file_stem().and_then(|x| x.to_str()).unwrap_or("file"), path.extension().and_then(|x| x.to_str()));
+        let mut out = dir.join(&name);
+        let mut n = 2;
+        while out.exists() {
+            out = dir.join(match ext { Some(e) => format!("{stem} ({n}).{e}"), None => format!("{stem} ({n})") });
+            n += 1;
+        }
+        Some(out)
+    }
+
+    /// Ask for a file to open; says so when the system has no file dialog.
+    pub fn open_file_dialog(&mut self, filter: &str, exts: &[&str]) -> Option<std::path::PathBuf> {
+        let t = Instant::now();
+        let picked = rfd::FileDialog::new().add_filter(filter, exts).pick_file();
+        if picked.is_none() && t.elapsed() < Duration::from_millis(300) {
+            self.flash("No file dialog is available on this system (install xdg-desktop-portal)", ToastKind::Error);
+        }
+        picked
     }
 
     // ------------------------------------------------------------ document edits
@@ -581,7 +617,7 @@ impl App {
     // ------------------------------------------------------------ files
 
     pub fn open_dialog(&mut self) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("Part", &["json"]).pick_file() {
+        if let Some(p) = self.open_file_dialog("Part", &["json"]) {
             self.open_path(p);
         }
     }
@@ -597,7 +633,7 @@ impl App {
     }
 
     pub fn save(&mut self, ask: bool) {
-        let path = if ask || self.path.is_none() { rfd::FileDialog::new().add_filter("Part", &["json"]).set_file_name("part.json").save_file() } else { self.path.clone() };
+        let path = if ask || self.path.is_none() { self.save_file_dialog("Part", &["json"], "part.json") } else { self.path.clone() };
         if let Some(p) = path {
             self.sync_ws();
             match std::fs::write(&p, self.ws.to_json()) {
@@ -612,7 +648,7 @@ impl App {
 
     pub fn import_step(&mut self) {
         let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG"];
-        let Some(p) = rfd::FileDialog::new().add_filter("STEP, IGES, STL, OBJ, DXF, SVG", &exts).pick_file() else { return };
+        let Some(p) = self.open_file_dialog("STEP, IGES, STL, OBJ, DXF, SVG", &exts) else { return };
         self.import_path(&p);
     }
 
@@ -638,7 +674,7 @@ impl App {
     }
 
     pub fn export_obj(&mut self) {
-        let Some(p) = rfd::FileDialog::new().add_filter("OBJ", &["obj"]).set_file_name("part.obj").save_file() else { return };
+        let Some(p) = self.save_file_dialog("OBJ", &["obj"], "part.obj") else { return };
         let mut out = String::from("# cad-app\n");
         let mut base = 1usize;
         for b in &self.result.bodies {
@@ -667,7 +703,7 @@ impl App {
             "iges" => "igs",
             _ => "stl",
         };
-        let Some(p) = rfd::FileDialog::new().add_filter(ext.to_uppercase(), &[ext]).set_file_name(format!("part.{ext}")).save_file() else { return };
+        let Some(p) = self.save_file_dialog(&ext.to_uppercase(), &[ext], format!("part.{ext}")) else { return };
         let format = if format == "stl" { format!("stl@{}", self.print.stl_tolerance) } else { format.to_string() };
         self.kernel.export(&self.doc, &format, p.to_string_lossy().to_string());
         self.flash_info(format!("Exporting {}…", p.display()), None);
@@ -724,7 +760,7 @@ impl App {
     }
 
     pub fn screenshot(&mut self, ctx: &egui::Context) {
-        if let Some(p) = rfd::FileDialog::new().add_filter("PNG", &["png"]).set_file_name("part.png").save_file() {
+        if let Some(p) = self.save_file_dialog("PNG", &["png"], "part.png") {
             self.screenshot_pending = Some(p);
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
         }
@@ -1847,7 +1883,7 @@ impl App {
 
     /// Lay an image on a flat face.
     pub fn add_decal(&mut self, at: [f64; 3], normal: [f64; 3]) {
-        let Some(p) = rfd::FileDialog::new().add_filter("Image", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"]).pick_file() else { return };
+        let Some(p) = self.open_file_dialog("Image", &["png", "jpg", "jpeg", "PNG", "JPG", "JPEG"]) else { return };
         let bytes = match std::fs::read(&p) {
             Ok(b) => b,
             Err(e) => return self.flash(format!("Could not read {}: {e}", p.display()), ToastKind::Error),

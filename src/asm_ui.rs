@@ -725,7 +725,7 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
         for (i, n, q, m, mass) in &rows {
             csv.push_str(&format!("{i},\"{}\",{q},{m},{}\n", n.replace('"', "'"), mass.map(|v| format!("{v:.2}")).unwrap_or_default()));
         }
-        if let Some(p) = rfd::FileDialog::new().add_filter("CSV", &["csv"]).set_file_name("bom.csv").save_file() {
+        if let Some(p) = app.save_file_dialog("CSV", &["csv"], "bom.csv") {
             match std::fs::write(&p, csv) {
                 Ok(()) => app.flash_info(format!("Exported {}", p.display()), Some(std::time::Duration::from_secs(3))),
                 Err(e) => app.flash(format!("Could not export: {e}"), ToastKind::Error),

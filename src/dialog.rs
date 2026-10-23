@@ -747,7 +747,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     });
     if export_flat {
         if let Some(f) = &flat {
-            if let Some(p) = rfd::FileDialog::new().add_filter("DXF", &["dxf"]).set_file_name("flat-pattern.dxf").save_file() {
+            if let Some(p) = app.save_file_dialog("DXF", &["dxf"], "flat-pattern.dxf") {
                 match std::fs::write(&p, crate::kernel::flat_dxf(f)) {
                     Ok(()) => app.flash_info(format!("Exported {}", p.display()), Some(std::time::Duration::from_secs(3))),
                     Err(e) => app.flash(format!("Could not export: {e}"), crate::app::ToastKind::Error),

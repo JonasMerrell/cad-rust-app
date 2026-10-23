@@ -404,7 +404,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             _ => {}
         }
         if app.tool_button(ui, "import", "Import", "Import a DXF or SVG drawing into the sketch", false, false, true).clicked() {
-            if let Some(p) = rfd::FileDialog::new().add_filter("DXF, SVG", &["dxf", "svg", "DXF", "SVG"]).pick_file() {
+            if let Some(p) = app.open_file_dialog("DXF, SVG", &["dxf", "svg", "DXF", "SVG"]) {
                 app.import_drawing(&p);
             }
         }

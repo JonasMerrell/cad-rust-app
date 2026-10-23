@@ -419,6 +419,19 @@ fn num(ui: &mut Ui, label: &str, v: &mut f64, unit: &str, range: std::ops::Range
     });
 }
 
+/// A machine limit where 0 means "not set" (nothing is checked against it).
+fn limit_value<'a>(v: &'a mut f64, unit: &'a str) -> egui::DragValue<'a> {
+    egui::DragValue::new(v)
+        .range(0.0..=100000.0)
+        .speed(1.0)
+        .max_decimals(1)
+        .custom_formatter(move |x, _| if x == 0.0 { "not set".into() } else { format!("{}{unit}", cam::fmt_mm((x * 10.0).round() / 10.0)) })
+        .custom_parser(|t| {
+            let t = t.trim();
+            if t.is_empty() || t.starts_with("not") { Some(0.0) } else { t.trim_end_matches(|c: char| c.is_alphabetic() || c == '/' || c == ' ').parse().ok() }
+        })
+}
+
 /// A value that can be left to the app ("auto") or set.
 fn opt(ui: &mut Ui, label: &str, v: &mut Option<f64>, auto: f64, unit: &str, tip: &str) {
     row(ui, label, |ui| {
@@ -649,13 +662,17 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         });
         row(ui, "Travel X/Y/Z", |ui| {
             for v in c.machine.travel.iter_mut() {
-                ui.add(egui::DragValue::new(v).range(0.0..=10000.0).speed(1.0).max_decimals(1)).on_hover_text("0 = not checked");
+                ui.add(limit_value(v, "")).on_hover_text("Travel the toolpaths are checked against; not set: no check");
             }
         });
         num(ui, "Max spindle", &mut c.max_rpm, " rpm", 1000.0..=100000.0, 100.0);
-        num(ui, "Max feed", &mut c.machine.max_feed, " mm/min", 0.0..=100000.0, 50.0);
+        row(ui, "Max feed", |ui| {
+            ui.add(limit_value(&mut c.machine.max_feed, " mm/min")).on_hover_text("Feeds above this are capped; not set: no cap");
+        });
         num(ui, "Rapid X/Y", &mut c.rapid_rate, " mm/min", 100.0..=100000.0, 50.0);
-        num(ui, "Rapid Z", &mut c.machine.rapid_z, " mm/min", 0.0..=100000.0, 50.0);
+        row(ui, "Rapid Z", |ui| {
+            ui.add(limit_value(&mut c.machine.rapid_z, " mm/min")).on_hover_text("Z rapid rate for cycle times; not set: same as Rapid X/Y");
+        });
         ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) for you to change tools");
         ui.checkbox(&mut c.arcs, "Arcs in the G-code (G2/G3)").on_hover_text("Write arcs where the toolpath runs along circles: shorter files and smoother motion than many short lines");
         row(ui, "Tool probing", |ui| {
@@ -1480,7 +1497,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
         });
         ui.horizontal(|ui| {
             if ui.button("Import library…").on_hover_text("Add the tools of a Fusion 360 tool library (.json or .tools) or another tools.json to My tools").clicked() {
-                if let Some(p) = rfd::FileDialog::new().add_filter("Tool library", &["json", "tools"]).pick_file() {
+                if let Some(p) = app.open_file_dialog("Tool library", &["json", "tools"]) {
                     imported = Some(crate::cam_tool_import::import_file(&p));
                 }
             }
@@ -1567,7 +1584,7 @@ pub(crate) fn export_dialog(app: &mut App) {
         "gcode"
     };
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
-    let Some(p) = rfd::FileDialog::new().add_filter("G-code", &[ext, "nc", "gcode", "ngc", "tap"]).set_file_name(format!("{name}.{ext}")).save_file() else { return };
+    let Some(p) = app.save_file_dialog("G-code", &[ext, "nc", "gcode", "ngc", "tap"], format!("{name}.{ext}")) else { return };
     let text = gcode_for(&c, &part, &app.cam.paths);
     match std::fs::write(&p, text) {
         Ok(()) => {
@@ -1589,7 +1606,7 @@ pub(crate) fn sheet_dialog(app: &mut App) {
         return;
     }
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
-    let Some(p) = rfd::FileDialog::new().add_filter("Web page", &["html", "htm"]).set_file_name(format!("{name} setup sheet.html")).save_file() else { return };
+    let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} setup sheet.html")) else { return };
     let png = crate::cam_sheet::picture(&c, &part, 640, 480);
     match std::fs::write(&p, crate::cam_sheet::html(&c, &part, &app.cam.paths, png.as_deref())) {
         Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
