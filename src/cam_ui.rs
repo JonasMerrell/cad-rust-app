@@ -646,6 +646,58 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         num(ui, "Rapid Z", &mut c.machine.rapid_z, " mm/min", 0.0..=100000.0, 50.0);
         ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) for you to change tools");
         ui.checkbox(&mut c.arcs, "Arcs in the G-code (G2/G3)").on_hover_text("Write arcs where the toolpath runs along circles: shorter files and smoother motion than many short lines");
+        row(ui, "Tool probing", |ui| {
+            let label = |m: &str| match m {
+                "plate" => "touch plate",
+                "setter" => "tool setter",
+                _ => "off",
+            };
+            egui::ComboBox::from_id_salt("cam-probe").selected_text(label(&c.probe.mode)).show_ui(ui, |ui| {
+                ui.selectable_value(&mut c.probe.mode, "off".to_string(), "off");
+                ui.selectable_value(&mut c.probe.mode, "plate".to_string(), "touch plate")
+                    .on_hover_text("After each tool is loaded, probe down onto a touch plate on the work and set the work Z zero from it");
+                ui.selectable_value(&mut c.probe.mode, "setter".to_string(), "tool setter").on_hover_text(
+                    "After each tool is loaded, measure it on a fixed tool setter and set its length offset against the first tool (set the work Z zero with the first tool). Needs LinuxCNC, Mach3 or Fanuc",
+                );
+            });
+        });
+        match c.probe.mode.as_str() {
+            "plate" => {
+                row(ui, "Plate at X/Y/Z", |ui| {
+                    for v in c.probe.plate_at.iter_mut() {
+                        ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2)).on_hover_text("Where the plate lies, in work coordinates; Z is the surface under it (0 = stock top with the default work zero)");
+                    }
+                });
+                num(ui, "Plate thickness", &mut c.probe.plate_thickness, " mm", 0.0..=100.0, 0.05);
+            }
+            "setter" => {
+                if c.post == "grbl" {
+                    ui.label(RichText::new("GRBL can't keep a setter measurement: choose another controller or a touch plate.").color(theme::muted()).size(12.0));
+                }
+                row(ui, "Setter X/Y/Z", |ui| {
+                    for v in c.probe.setter.iter_mut() {
+                        ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2)).on_hover_text("Machine coordinates (G53) above the setter; Z is where probing starts");
+                    }
+                });
+            }
+            _ => {}
+        }
+        if c.probe.mode != "off" {
+            num(ui, "Probe travel", &mut c.probe.travel, " mm", 1.0..=1000.0, 1.0);
+            num(ui, "Probe feed", &mut c.probe.fast, " mm/min", 1.0..=5000.0, 5.0);
+            num(ui, "Second touch", &mut c.probe.slow, " mm/min", 1.0..=1000.0, 1.0);
+        }
+        ui.collapsing("Custom G-code", |ui| {
+            ui.label(RichText::new("Placeholders: {tool} {name} {desc} {diameter} {rpm} {program} {setup}").color(theme::muted()).size(11.5));
+            for (label, text, hint) in [
+                ("Start", &mut c.post_text.header, "after the units and work offset"),
+                ("Tool change", &mut c.post_text.tool_change, "replaces the standard tool change, e.g. M0 / T{tool} M6"),
+                ("End", &mut c.post_text.footer, "before M30, e.g. park the spindle"),
+            ] {
+                ui.label(label);
+                ui.add(egui::TextEdit::multiline(text).code_editor().desired_rows(2).desired_width(f32::INFINITY).hint_text(hint));
+            }
+        });
         // hand edits make it a custom machine
         if (c.machine.clone(), c.max_rpm, c.rapid_rate) != before {
             c.machine.name.clear();
