@@ -597,14 +597,17 @@ impl App {
     }
 
     pub fn import_step(&mut self) {
-        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "STEP", "STP", "IGS", "IGES", "STL", "OBJ"];
-        let Some(p) = rfd::FileDialog::new().add_filter("STEP, IGES, STL, OBJ", &exts).pick_file() else { return };
+        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG"];
+        let Some(p) = rfd::FileDialog::new().add_filter("STEP, IGES, STL, OBJ, DXF, SVG", &exts).pick_file() else { return };
         self.import_path(&p);
     }
 
     pub fn import_path(&mut self, p: &std::path::Path) {
+        if crate::sketch_import::is_drawing(p) {
+            return self.import_drawing(p);
+        }
         let Some(format) = crate::import::format_of(p) else {
-            self.flash("Import STEP, IGES, STL or OBJ files", ToastKind::Info);
+            self.flash("Import STEP, IGES, STL, OBJ, DXF or SVG files", ToastKind::Info);
             return;
         };
         match std::fs::read(p) {

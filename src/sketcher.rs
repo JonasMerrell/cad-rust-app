@@ -231,6 +231,32 @@ impl App {
         self.open_session(id, before, true);
     }
 
+    /// Bring a DXF or SVG drawing into the open sketch, or into a new sketch on the Top plane.
+    pub fn import_drawing(&mut self, p: &std::path::Path) {
+        let d = match crate::sketch_import::read(p) {
+            Ok(d) => d,
+            Err(e) => return self.flash(e, ToastKind::Error),
+        };
+        let n = if self.sketch.is_some() {
+            self.sk_checkpoint();
+            let n = crate::sketch_import::add_to_sketch(self.sk_mut(), &d, 1.0, DVec2::ZERO);
+            self.after_sketch_edit();
+            n
+        } else {
+            self.checkpoint();
+            let mut sk = Sketch::default();
+            let n = crate::sketch_import::add_to_sketch(&mut sk, &d, 1.0, DVec2::ZERO);
+            let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| self.doc.next_name("sketch"));
+            let plane = Ref::OriginPlane { plane: crate::doc::OriginPlane::Top };
+            self.doc.insert(name, Op::Sketch { plane, sketch: sk, frame: Frame::TOP });
+            self.first_fit = true;
+            self.changed();
+            n
+        };
+        let skipped = if d.skipped.is_empty() { String::new() } else { format!(" (left out {})", crate::sketch_import::skipped_text(&d.skipped)) };
+        self.flash(format!("Imported {n} curves from {}{skipped}", p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default()), ToastKind::Info);
+    }
+
     pub fn edit_sketch(&mut self, id: FeatId) {
         let before = self.doc.clone();
         self.checkpoint();
@@ -376,6 +402,11 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
                 ui.add(egui::DragValue::new(&mut s.text_height).range(0.01..=1e5).speed(0.1)).on_hover_text("Text height");
             }
             _ => {}
+        }
+        if app.tool_button(ui, "import", "Import", "Import a DXF or SVG drawing into the sketch", false, false, true).clicked() {
+            if let Some(p) = rfd::FileDialog::new().add_filter("DXF, SVG", &["dxf", "svg", "DXF", "SVG"]).pick_file() {
+                app.import_drawing(&p);
+            }
         }
         if app.tool_button(ui, "linearPattern", "Linear pattern", "Linear pattern of the selection", false, false, has_sel).clicked() {
             app.sketch.as_mut().unwrap().pattern = Some((false, 3, 20.0, 0.0));
