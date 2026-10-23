@@ -471,7 +471,7 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Fillet2d => "Click a corner where two lines meet",
         Tool::Offset => "Click on the side to offset the selected curves to",
         Tool::Project => "Click model edges to bring them into the sketch",
-        Tool::Dimension => "Click a line, circle or arc (then where to put it), or two items to dimension between",
+        Tool::Dimension => "Click a line, circle, arc or two items, then click where the dimension goes and type its value; click a dimension to change it",
     };
     let dof = if let Some(e) = &s.status.error {
         format!(" · {e}")
@@ -735,7 +735,7 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
         Some(Drag::Geometry { points, .. }) => points.iter().map(|p| p.0).collect(),
         _ => HashSet::new(),
     };
-    let (snapped, snp) = if tool == Tool::Select { (raw, None) } else { snap(app, s, rect, raw, &exclude) };
+    let (snapped, snp) = if matches!(tool, Tool::Select | Tool::Dimension) { (raw, None) } else { snap(app, s, rect, raw, &exclude) };
     {
         let sess = app.sketch.as_mut().unwrap();
         if sess.hover != h || sess.cursor != Some(snapped) || sess.snap != snp {
@@ -754,9 +754,10 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
             return;
         }
         let sess = app.sketch.as_mut().unwrap();
-        if !sess.clicks.is_empty() || sess.chain.is_some() {
+        if !sess.clicks.is_empty() || sess.chain.is_some() || !sess.dim_pending.is_empty() {
             sess.clicks.clear();
             sess.chain = None;
+            sess.dim_pending.clear();
             app.context_menu = None;
             app.scene_dirty = true;
         }
@@ -764,6 +765,8 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
 
     match tool {
         Tool::Select => select_input(app, ui, resp, rect, s, raw, h, shift),
+        // dimension labels can be dragged without leaving the tool
+        Tool::Dimension if label_drag(app, ui, resp, rect, raw) => {}
         _ => {
             if resp.clicked_by(egui::PointerButton::Primary) {
                 if resp.double_clicked() && tool == Tool::Line {
@@ -856,16 +859,7 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                 app.changed();
             }
         }
-        Some(Drag::Label { idx, start, offset }) => {
-            let d = raw - start;
-            if let Some(dim) = app.sk_mut().constraints.get_mut(idx).and_then(|c| c.dim_mut()) {
-                dim.offset = [offset[0] + d.x, offset[1] + d.y];
-            }
-            app.scene_dirty = true;
-            if dragging {
-                app.sketch.as_mut().unwrap().drag = Some(Drag::Label { idx, start, offset });
-            }
-        }
+        Some(Drag::Label { idx, start, offset }) => move_label(app, idx, start, offset, raw, dragging),
         Some(Drag::Box { start }) => {
             if dragging {
                 let sess = app.sketch.as_mut().unwrap();
@@ -938,6 +932,42 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
             None => sess.sel.clear(),
         }
         app.scene_dirty = true;
+    }
+}
+
+fn move_label(app: &mut App, idx: usize, start: DVec2, offset: [f64; 2], raw: DVec2, dragging: bool) {
+    let d = raw - start;
+    if let Some(dim) = app.sk_mut().constraints.get_mut(idx).and_then(|c| c.dim_mut()) {
+        dim.offset = [offset[0] + d.x, offset[1] + d.y];
+    }
+    app.scene_dirty = true;
+    if dragging {
+        app.sketch.as_mut().unwrap().drag = Some(Drag::Label { idx, start, offset });
+    }
+}
+
+/// Starts or continues dragging a dimension label; true while one is being dragged.
+fn label_drag(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect, raw: DVec2) -> bool {
+    if resp.drag_started_by(egui::PointerButton::Primary) {
+        let press = ui.input(|i| i.pointer.press_origin());
+        let raw0 = press.and_then(|p| sketch_cursor(app, p, rect)).unwrap_or(raw);
+        if let Some(Sel::Constraint(i)) = press.and_then(|p| hit(app, p, rect, raw0)) {
+            if let Some(d) = app.sk().0.constraints[i].dim() {
+                let offset = d.offset;
+                app.sk_checkpoint();
+                app.sketch.as_mut().unwrap().drag = Some(Drag::Label { idx: i, start: raw0, offset });
+            }
+        }
+    }
+    match app.sketch.as_mut().unwrap().drag.take() {
+        Some(Drag::Label { idx, start, offset }) => {
+            move_label(app, idx, start, offset, raw, ui.input(|i| i.pointer.primary_down()));
+            true
+        }
+        other => {
+            app.sketch.as_mut().unwrap().drag = other;
+            false
+        }
     }
 }
 
@@ -2330,113 +2360,178 @@ pub fn constrain(app: &mut App, kind: &str) {
 
 // ---------------------------------------------------------------- dimensions
 
+/// Dimension tool clicks: pick one or two items, then click where the label goes.
+/// Until then the dimension follows the cursor (see `pending_dimension`).
 fn dimension_click(app: &mut App, h: Option<Sel>, raw: DVec2) {
-    let sk = app.sk().0.clone();
-    let sess = app.sketch.as_mut().unwrap();
-    let h = h.filter(|x| !matches!(x, Sel::Constraint(_)));
-    match h {
-        Some(x) if !sess.dim_pending.contains(&x) => {
-            sess.dim_pending.push(x);
-            if sess.dim_pending.len() < 2 {
-                // a lone circle/arc gets its dimension straight away
-                if let Sel::Curve(c) = x {
-                    if !matches!(sk.curve(c).map(|c| &c.geom), Some(Geom::Line { .. })) {
-                        create_dimension(app, raw);
-                    }
-                }
-                app.scene_dirty = true;
-                return;
-            }
-            create_dimension(app, raw);
-        }
-        _ => {
-            // click in empty space (or on the same item again) places a single-item dimension
-            if !sess.dim_pending.is_empty() {
-                create_dimension(app, raw);
+    let pending = app.sketch.as_ref().unwrap().dim_pending.clone();
+    // clicking an existing dimension (with nothing picked) edits it
+    if let (Some(Sel::Constraint(i)), true) = (h, pending.is_empty()) {
+        open_dim_edit(app, i);
+        return;
+    }
+    match h.filter(|x| !matches!(x, Sel::Constraint(_))) {
+        Some(x) if pending.len() < 2 && !pending.contains(&x) => {
+            let mut next = pending;
+            next.push(x);
+            if build_dimension(app, &next, raw).is_some() {
+                app.sketch.as_mut().unwrap().dim_pending = next;
+            } else if next.len() == 1 {
+                app.flash("Pick a line, circle, arc or point to dimension", ToastKind::Info);
+            } else {
+                app.flash("Those two can't be dimensioned together; click empty space to place the first one's dimension", ToastKind::Info);
             }
         }
+        // a click in empty space (or on a picked item, or after two picks) places the dimension
+        _ if !pending.is_empty() => create_dimension(app, raw),
+        _ => {}
     }
     app.scene_dirty = true;
 }
 
-fn create_dimension(app: &mut App, at: DVec2) {
-    let pending = std::mem::take(&mut app.sketch.as_mut().unwrap().dim_pending);
+/// The dimension the picked items would get with its label at `at`, or None
+/// when they can't be dimensioned (more items may still make it valid).
+fn build_dimension(app: &App, pending: &[Sel], at: DVec2) -> Option<Constraint> {
     let (sk, _) = app.sk();
     let u = app.doc.units;
     let fmt_len = |v: f64| expr::trim(v / u.scale(), 3);
     let mk = |v: String| Dim { expr: v, offset: [0.0, 0.0] };
-    let line = |id: Id| match sk.curve(id).map(|c| c.geom.clone()) {
-        Some(Geom::Line { a, b }) => Some((a, b)),
+    let line = |id: Id| match sk.curve(id).map(|c| &c.geom) {
+        Some(Geom::Line { a, b }) => Some((*a, *b)),
         _ => None,
     };
-    let c = match pending.as_slice() {
-        [Sel::Curve(l)] if line(*l).is_some() => {
-            let (a, b) = line(*l).unwrap();
-            Constraint::Length { l: *l, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) }
+    let circular = |id: Id| matches!(sk.curve(id).map(|c| &c.geom), Some(Geom::Circle { .. } | Geom::Arc { .. }));
+    let center = |id: Id| Sketch::curve_points(&sk.curve(id).unwrap().geom)[0];
+    // horizontal, vertical or aligned distance between two points, from where the label goes
+    let linear = |a: Id, b: Id, aligned: Constraint| {
+        let d = sk.pv(b) - sk.pv(a);
+        match linear_axis(sk.pv(a), sk.pv(b), at) {
+            Some(0) => Constraint::AxisDistance { a, b, axis: 0, dim: mk(fmt_len(d.x.abs())) },
+            Some(_) => Constraint::AxisDistance { a, b, axis: 1, dim: mk(fmt_len(d.y.abs())) },
+            None => aligned,
         }
-        [Sel::Curve(c)] => match sk.curve(*c).map(|x| x.geom.clone()) {
-            Some(Geom::Circle { r, .. }) => Constraint::Diameter { c: *c, dim: mk(fmt_len(2.0 * r)) },
-            Some(Geom::Arc { c: cc, a, .. }) => Constraint::Radius { c: *c, dim: mk(fmt_len((sk.pv(a) - sk.pv(cc)).length())) },
-            _ => return,
+    };
+    let c = match *pending {
+        [Sel::Curve(l)] if line(l).is_some() => {
+            let (a, b) = line(l).unwrap();
+            linear(a, b, Constraint::Length { l, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
+        }
+        [Sel::Curve(c)] => match sk.curve(c).map(|x| &x.geom) {
+            Some(Geom::Circle { r, .. }) => Constraint::Diameter { c, dim: mk(fmt_len(2.0 * r)) },
+            Some(Geom::Arc { c: cc, a, .. }) => Constraint::Radius { c, dim: mk(fmt_len((sk.pv(*a) - sk.pv(*cc)).length())) },
+            _ => return None,
         },
-        [Sel::Point(a), Sel::Point(b)] => {
-            let d = sk.pv(*b) - sk.pv(*a);
-            // place the label to pick horizontal/vertical/aligned
-            let mid = (sk.pv(*a) + sk.pv(*b)) / 2.0;
-            let off = at - mid;
-            if off.y.abs() > off.x.abs() * 2.0 && d.x.abs() > 1e-9 {
-                Constraint::AxisDistance { a: *a, b: *b, axis: 0, dim: mk(fmt_len(d.x.abs())) }
-            } else if off.x.abs() > off.y.abs() * 2.0 && d.y.abs() > 1e-9 {
-                Constraint::AxisDistance { a: *a, b: *b, axis: 1, dim: mk(fmt_len(d.y.abs())) }
-            } else {
-                Constraint::Distance { a: *a, b: *b, dim: mk(fmt_len(d.length())) }
-            }
-        }
-        [Sel::Point(p), Sel::Curve(l)] | [Sel::Curve(l), Sel::Point(p)] if line(*l).is_some() => {
-            let (a, b) = line(*l).unwrap();
-            let (pa, pb) = (sk.pv(a), sk.pv(b));
-            let dist = ((pb - pa).perp_dot(sk.pv(*p) - pa) / (pb - pa).length()).abs();
-            Constraint::PointLineDistance { p: *p, l: *l, dim: mk(fmt_len(dist)) }
-        }
-        [Sel::Curve(l1), Sel::Curve(l2)] if line(*l1).is_some() && line(*l2).is_some() => {
-            let (a, b) = line(*l1).unwrap();
-            let (c, d) = line(*l2).unwrap();
+        // a lone point waits for a second item
+        [Sel::Point(_)] => return None,
+        [Sel::Point(a), Sel::Point(b)] => linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) }),
+        [Sel::Point(p), Sel::Curve(l)] | [Sel::Curve(l), Sel::Point(p)] if line(l).is_some() => point_line(sk, p, l, &fmt_len)?,
+        [Sel::Curve(l1), Sel::Curve(l2)] if line(l1).is_some() && line(l2).is_some() => {
+            let (a, b) = line(l1).unwrap();
+            let (c, d) = line(l2).unwrap();
             let u1 = (sk.pv(b) - sk.pv(a)).normalize();
             let u2 = (sk.pv(d) - sk.pv(c)).normalize();
             if u1.perp_dot(u2).abs() < 1e-6 {
                 // parallel lines: distance between them
                 let dist = (u1.perp_dot(sk.pv(c) - sk.pv(a))).abs();
-                Constraint::PointLineDistance { p: c, l: *l1, dim: mk(fmt_len(dist)) }
+                Constraint::PointLineDistance { p: c, l: l1, dim: mk(fmt_len(dist)) }
             } else {
-                let ang = u1.angle_to(u2).to_degrees();
-                Constraint::Angle { a: *l1, b: *l2, dim: mk(expr::trim(ang, 3)) }
+                // the label's quadrant picks which of the four angles between the lines is meant
+                let x = line_intersection(sk.pv(a), sk.pv(b), sk.pv(c), sk.pv(d))?;
+                let (v1, v2) = angle_wedge(u1, u2, at - x);
+                let ang = v1.angle_to(v2).to_degrees();
+                // stored as a positive angle from the first line to the second
+                let (a, b) = if ang >= 0.0 { (l1, l2) } else { (l2, l1) };
+                Constraint::Angle { a, b, dim: mk(expr::trim(ang.abs(), 3)) }
             }
         }
-        [Sel::Point(p), Sel::Curve(c)] | [Sel::Curve(c), Sel::Point(p)] => {
-            // point to circle centre
-            let cc = Sketch::curve_points(&sk.curve(*c).unwrap().geom)[0];
-            Constraint::Distance { a: *p, b: cc, dim: mk(fmt_len((sk.pv(cc) - sk.pv(*p)).length())) }
+        // circle or arc centre to a line
+        [Sel::Curve(c), Sel::Curve(l)] | [Sel::Curve(l), Sel::Curve(c)] if circular(c) && line(l).is_some() => point_line(sk, center(c), l, &fmt_len)?,
+        [Sel::Point(p), Sel::Curve(c)] | [Sel::Curve(c), Sel::Point(p)] if circular(c) => {
+            let cc = center(c);
+            linear(p, cc, Constraint::Distance { a: p, b: cc, dim: mk(fmt_len((sk.pv(cc) - sk.pv(p)).length())) })
         }
-        [Sel::Curve(c1), Sel::Curve(c2)] => {
-            let a = Sketch::curve_points(&sk.curve(*c1).unwrap().geom)[0];
-            let b = Sketch::curve_points(&sk.curve(*c2).unwrap().geom)[0];
-            Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) }
+        [Sel::Curve(c1), Sel::Curve(c2)] if circular(c1) && circular(c2) => {
+            let (a, b) = (center(c1), center(c2));
+            linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
         }
-        _ => {
-            app.flash("Pick a line, circle or arc, or two items to dimension between", ToastKind::Info);
-            return;
-        }
+        _ => return None,
     };
-    app.sk_checkpoint();
-    let anchor = dim_anchor(app.sk().0, &c).unwrap_or(at);
+    let anchor = dim_anchor(sk, &c).unwrap_or(at);
     let mut c = c;
     if let Some(d) = c.dim_mut() {
         let off = at - anchor;
         d.offset = [off.x, off.y];
     }
+    Some(c)
+}
+
+fn point_line(sk: &Sketch, p: Id, l: Id, fmt_len: &dyn Fn(f64) -> String) -> Option<Constraint> {
+    let Some(Geom::Line { a, b }) = sk.curve(l).map(|c| &c.geom) else { return None };
+    let (pa, pb) = (sk.pv(*a), sk.pv(*b));
+    if p == *a || p == *b {
+        return None;
+    }
+    let dist = ((pb - pa).perp_dot(sk.pv(p) - pa) / (pb - pa).length()).abs();
+    Some(Constraint::PointLineDistance { p, l, dim: Dim { expr: fmt_len(dist), offset: [0.0; 2] } })
+}
+
+/// Which way a dimension between two points measures, from where its label goes:
+/// above or below the pair it is horizontal (0), beside it vertical (1), otherwise aligned (None).
+fn linear_axis(pa: DVec2, pb: DVec2, at: DVec2) -> Option<usize> {
+    let d = pb - pa;
+    let tol = d.length() * 1e-6;
+    if d.x.abs() <= tol || d.y.abs() <= tol {
+        // already horizontal or vertical: aligned is the same thing
+        return None;
+    }
+    let (lo, hi) = (pa.min(pb), pa.max(pb));
+    let in_x = at.x > lo.x && at.x < hi.x;
+    let in_y = at.y > lo.y && at.y < hi.y;
+    match (in_x, in_y) {
+        (true, false) => Some(0),
+        (false, true) => Some(1),
+        _ => None,
+    }
+}
+
+/// The directions (±u1, ±u2) bounding the angle between two lines that contains `w`.
+fn angle_wedge(u1: DVec2, u2: DVec2, w: DVec2) -> (DVec2, DVec2) {
+    for (s1, s2) in [(1.0, 1.0), (1.0, -1.0), (-1.0, 1.0), (-1.0, -1.0)] {
+        let (v1, v2) = (u1 * s1, u2 * s2);
+        let k = v1.perp_dot(v2).signum();
+        if v1.perp_dot(w) * k >= 0.0 && w.perp_dot(v2) * k >= 0.0 {
+            return (v1, v2);
+        }
+    }
+    (u1, u2)
+}
+
+fn create_dimension(app: &mut App, at: DVec2) {
+    let pending = std::mem::take(&mut app.sketch.as_mut().unwrap().dim_pending);
+    let Some(c) = build_dimension(app, &pending, at) else {
+        app.flash("Pick a line, circle or arc, or two items to dimension between", ToastKind::Info);
+        return;
+    };
+    // the same dimension again edits the one already there
+    let refs = |k: &Constraint| {
+        let mut r = k.refs();
+        r.sort();
+        (std::mem::discriminant(k), r, matches!(k, Constraint::AxisDistance { axis: 1, .. }))
+    };
+    let existing = app.sk().0.constraints.iter().position(|k| k.dim().is_some() && refs(k) == refs(&c));
+    if let Some(i) = existing {
+        app.flash("That's already dimensioned; change its value here", ToastKind::Info);
+        open_dim_edit(app, i);
+        return;
+    }
+    let dof = app.sketch.as_ref().unwrap().status.dof;
+    app.sk_checkpoint();
     app.sk_mut().constraints.push(c);
     let idx = app.sk().0.constraints.len() - 1;
     app.after_sketch_edit();
+    let st = &app.sketch.as_ref().unwrap().status;
+    if st.error.is_none() && st.dof >= dof {
+        app.flash("Other constraints already set this size, so changing it will conflict", ToastKind::Info);
+    }
     open_dim_edit(app, idx);
 }
 
@@ -2703,10 +2798,16 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
 
 /// Screen rectangles of dimension labels and constraint glyphs (for picking).
 fn label_rects(app: &App, sk: &Sketch, fr: &Frame, rect: egui::Rect) -> Vec<(usize, egui::Rect)> {
+    let (vars, _) = app.doc.var_values();
+    let env = Env { vars: &vars, units: app.doc.units };
     let mut out = vec![];
     for (i, c) in sk.constraints.iter().enumerate() {
         if let Some(p) = label_pos(app, sk, fr, rect, c, i) {
-            let size = if c.dim().is_some() { egui::vec2(48.0, 18.0) } else { egui::vec2(16.0, 16.0) };
+            // roughly the drawn label's size, so the whole label can be grabbed
+            let size = match dim_text(&env, c) {
+                Some(t) => egui::vec2((t.chars().count() as f32 * 7.0 + 10.0).max(28.0), 18.0),
+                None => egui::vec2(16.0, 16.0),
+            };
             out.push((i, egui::Rect::from_center_size(p, size)));
         }
     }
@@ -2736,10 +2837,8 @@ fn label_pos(app: &App, sk: &Sketch, fr: &Frame, rect: egui::Rect, c: &Constrain
 /// Dimension annotations (also drawn on the model when the sketch isn't being edited).
 pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, rect: egui::Rect, sess: Option<&SketchSession>, ui: Option<&Ui>) {
     let glyphs = ui.is_some();
-    let u = app.doc.units;
     let (vars, _) = app.doc.var_values();
-    let env = Env { vars: &vars, units: u };
-    let ts = |p: DVec2| to_screen(app, fr, rect, p);
+    let env = Env { vars: &vars, units: app.doc.units };
     for (i, c) in sk.constraints.iter().enumerate() {
         let sel = sess.map(|s| s.sel.contains(&Sel::Constraint(i))).unwrap_or(false);
         let hov = sess.map(|s| s.hover == Some(Sel::Constraint(i))).unwrap_or(false);
@@ -2753,8 +2852,7 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
         } else {
             vp::dim()
         };
-        let stroke = Stroke::new(1.0, col.gamma_multiply(0.9));
-        let Some(d) = c.dim() else {
+        if c.dim().is_none() {
             if glyphs {
                 if let Some(p) = label_pos(app, sk, fr, rect, c, i) {
                     let r = egui::Rect::from_center_size(p, egui::vec2(15.0, 15.0));
@@ -2772,89 +2870,109 @@ pub fn draw_dims(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, re
                 }
             }
             continue;
-        };
-        let Some(anchor) = dim_anchor(sk, c) else { continue };
-        let lp = ts(anchor + DVec2::from(d.offset));
-        let value = expr::eval(&d.expr, if c.is_angle() { Kind::Angle } else { Kind::Length }, &env);
-        let shown = match value {
-            Ok(v) if c.is_angle() => format!("{}°", expr::trim(v, 2)),
-            Ok(v) => {
-                let s = u.fmt(v);
-                match c {
-                    Constraint::Diameter { .. } => format!("Ø{s}"),
-                    Constraint::Radius { .. } => format!("R{s}"),
-                    _ => s,
-                }
-            }
-            Err(_) => d.expr.clone(),
-        };
-        let text = if d.expr.trim().parse::<f64>().is_ok() || value.is_err() { shown } else { format!("{} = {shown}", d.expr.trim()) };
-        // leader / extension lines
-        use Constraint::*;
-        match c {
-            Length { l, .. } => {
-                if let Some(Geom::Line { a, b }) = sk.curve(*l).map(|c| &c.geom) {
-                    dim_linear(painter, ts(sk.pv(*a)), ts(sk.pv(*b)), lp, stroke);
-                }
-            }
-            Distance { a, b, .. } => dim_linear(painter, ts(sk.pv(*a)), ts(sk.pv(*b)), lp, stroke),
-            AxisDistance { a, b, axis, .. } => {
-                let (pa, pb) = (sk.pv(*a), sk.pv(*b));
-                let lw = anchor + DVec2::from(d.offset);
-                let (qa, qb) = if *axis == 0 { (DVec2::new(pa.x, lw.y), DVec2::new(pb.x, lw.y)) } else { (DVec2::new(lw.x, pa.y), DVec2::new(lw.x, pb.y)) };
-                painter.line_segment([ts(pa), ts(qa)], stroke);
-                painter.line_segment([ts(pb), ts(qb)], stroke);
-                arrow_line(painter, ts(qa), ts(qb), stroke);
-            }
-            PointLineDistance { p, l, .. } => {
-                if let Some(Geom::Line { a, b }) = sk.curve(*l).map(|c| &c.geom) {
-                    let (pa, pb, pp) = (sk.pv(*a), sk.pv(*b), sk.pv(*p));
-                    let dd = (pb - pa).normalize();
-                    let foot = pa + dd * (pp - pa).dot(dd);
-                    arrow_line(painter, ts(pp), ts(foot), stroke);
-                    painter.line_segment([ts(foot), ts(pa)], Stroke::new(0.8, col.gamma_multiply(0.5)));
-                    painter.line_segment([ts((pp + foot) / 2.0), lp], Stroke::new(0.8, col.gamma_multiply(0.6)));
-                }
-            }
-            Radius { c: cid, .. } | Diameter { c: cid, .. } => {
-                let ctr = anchor;
-                let r = match sk.curve(*cid).map(|x| &x.geom) {
-                    Some(Geom::Circle { r, .. }) => *r,
-                    Some(Geom::Arc { c, a, .. }) => (sk.pv(*a) - sk.pv(*c)).length(),
-                    _ => 0.0,
-                };
-                let dir = DVec2::from(d.offset).normalize_or(DVec2::X);
-                let rim = ctr + dir * r;
-                let start = if matches!(c, Diameter { .. }) { ctr - dir * r } else { ctr };
-                arrow_line(painter, ts(start), ts(rim), stroke);
-                painter.line_segment([ts(rim), lp], stroke);
-            }
-            Angle { a, b, .. } => {
-                if let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) {
-                    let u1 = (sk.pv(*q) - sk.pv(*p)).normalize();
-                    let u2 = (sk.pv(*s) - sk.pv(*r)).normalize();
-                    let rad = DVec2::from(d.offset).length().max(app.camera.wpp() as f64 * 30.0);
-                    let (t0, mut t1) = (u1.to_angle(), u2.to_angle());
-                    while t1 < t0 {
-                        t1 += std::f64::consts::TAU;
-                    }
-                    if t1 - t0 > std::f64::consts::PI {
-                        t1 -= std::f64::consts::TAU;
-                    }
-                    let pts: Vec<Pos2> = (0..=24).map(|i| ts(anchor + DVec2::from_angle(t0 + (t1 - t0) * i as f64 / 24.0) * rad)).collect();
-                    painter.add(egui::Shape::line(pts, stroke));
-                }
-            }
-            _ => {}
         }
         let editing = sess.and_then(|s| s.dim_edit.as_ref()).map(|e| e.0 == i).unwrap_or(false);
-        if !editing {
-            let font = egui::FontId::proportional(12.0);
-            let g = painter.layout_no_wrap(text, font, col);
-            let r = egui::Rect::from_center_size(lp, g.size() + egui::vec2(8.0, 2.0));
-            painter.rect_filled(r, 3.0, theme::label_bg());
-            painter.galley(r.min + egui::vec2(4.0, 1.0), g, col);
+        draw_dim(app, sk, fr, painter, rect, &env, c, col, !editing);
+    }
+}
+
+/// The text on a dimension's label.
+fn dim_text(env: &Env, c: &Constraint) -> Option<String> {
+    let d = c.dim()?;
+    let value = expr::eval(&d.expr, if c.is_angle() { Kind::Angle } else { Kind::Length }, env);
+    let shown = match value {
+        Ok(v) if c.is_angle() => format!("{}°", expr::trim(v, 2)),
+        Ok(v) => {
+            let s = env.units.fmt(v);
+            match c {
+                Constraint::Diameter { .. } => format!("Ø{s}"),
+                Constraint::Radius { .. } => format!("R{s}"),
+                _ => s,
+            }
         }
+        Err(_) => d.expr.clone(),
+    };
+    Some(if d.expr.trim().parse::<f64>().is_ok() || value.is_err() { shown } else { format!("{} = {shown}", d.expr.trim()) })
+}
+
+/// One dimension: extension and dimension lines, arrows and (unless it is being edited) its label.
+#[allow(clippy::too_many_arguments)]
+fn draw_dim(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, rect: egui::Rect, env: &Env, c: &Constraint, col: Color32, label: bool) {
+    let ts = |p: DVec2| to_screen(app, fr, rect, p);
+    let stroke = Stroke::new(1.0, col.gamma_multiply(0.9));
+    let (Some(d), Some(anchor)) = (c.dim(), dim_anchor(sk, c)) else { return };
+    let lp = ts(anchor + DVec2::from(d.offset));
+    // leader / extension lines
+    use Constraint::*;
+    match c {
+        Length { l, .. } => {
+            if let Some(Geom::Line { a, b }) = sk.curve(*l).map(|c| &c.geom) {
+                dim_linear(painter, ts(sk.pv(*a)), ts(sk.pv(*b)), lp, stroke);
+            }
+        }
+        Distance { a, b, .. } => dim_linear(painter, ts(sk.pv(*a)), ts(sk.pv(*b)), lp, stroke),
+        AxisDistance { a, b, axis, .. } => {
+            let (pa, pb) = (sk.pv(*a), sk.pv(*b));
+            let lw = anchor + DVec2::from(d.offset);
+            let (qa, qb) = if *axis == 0 { (DVec2::new(pa.x, lw.y), DVec2::new(pb.x, lw.y)) } else { (DVec2::new(lw.x, pa.y), DVec2::new(lw.x, pb.y)) };
+            painter.line_segment([ts(pa), ts(qa)], stroke);
+            painter.line_segment([ts(pb), ts(qb)], stroke);
+            arrow_line(painter, ts(qa), ts(qb), stroke);
+        }
+        PointLineDistance { p, l, .. } => {
+            if let Some(Geom::Line { a, b }) = sk.curve(*l).map(|c| &c.geom) {
+                let (pa, pb, pp) = (sk.pv(*a), sk.pv(*b), sk.pv(*p));
+                let dd = (pb - pa).normalize();
+                let foot = pa + dd * (pp - pa).dot(dd);
+                arrow_line(painter, ts(pp), ts(foot), stroke);
+                // extend the line to the foot when it lies past the line's ends
+                let t = (foot - pa).dot(dd);
+                let len = (pb - pa).length();
+                if t < 0.0 || t > len {
+                    painter.line_segment([ts(foot), ts(if t < 0.0 { pa } else { pb })], Stroke::new(0.8, col.gamma_multiply(0.5)));
+                }
+                painter.line_segment([ts((pp + foot) / 2.0), lp], Stroke::new(0.8, col.gamma_multiply(0.6)));
+            }
+        }
+        Radius { c: cid, .. } | Diameter { c: cid, .. } => {
+            let ctr = anchor;
+            let r = match sk.curve(*cid).map(|x| &x.geom) {
+                Some(Geom::Circle { r, .. }) => *r,
+                Some(Geom::Arc { c, a, .. }) => (sk.pv(*a) - sk.pv(*c)).length(),
+                _ => 0.0,
+            };
+            let dir = DVec2::from(d.offset).normalize_or(DVec2::X);
+            let rim = ctr + dir * r;
+            let start = if matches!(c, Diameter { .. }) { ctr - dir * r } else { ctr };
+            arrow_line(painter, ts(start), ts(rim), stroke);
+            painter.line_segment([ts(rim), lp], stroke);
+        }
+        Angle { a, b, .. } => {
+            if let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) {
+                let u1 = (sk.pv(*q) - sk.pv(*p)).normalize();
+                let u2 = (sk.pv(*s) - sk.pv(*r)).normalize();
+                let w = DVec2::from(d.offset);
+                let rad = w.length().max(app.camera.wpp() as f64 * 30.0);
+                // the arc spans the angle the label sits in
+                let (v1, v2) = angle_wedge(u1, u2, w);
+                let (t0, sweep) = (v1.to_angle(), v1.angle_to(v2));
+                let pts: Vec<Pos2> = (0..=24).map(|i| ts(anchor + DVec2::from_angle(t0 + sweep * i as f64 / 24.0) * rad)).collect();
+                painter.add(egui::Shape::line(pts, stroke));
+                let faint = Stroke::new(0.8, col.gamma_multiply(0.5));
+                for v in [v1, v2] {
+                    painter.line_segment([ts(anchor), ts(anchor + v * rad * 1.08)], faint);
+                }
+            }
+        }
+        _ => {}
+    }
+    if label {
+        let Some(text) = dim_text(env, c) else { return };
+        let font = egui::FontId::proportional(12.0);
+        let g = painter.layout_no_wrap(text, font, col);
+        let r = egui::Rect::from_center_size(lp, g.size() + egui::vec2(8.0, 2.0));
+        painter.rect_filled(r, 3.0, theme::label_bg());
+        painter.galley(r.min + egui::vec2(4.0, 1.0), g, col);
     }
 }
 
@@ -2893,6 +3011,18 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
     let Some((sk, fr)) = sketch_of(&app.doc, sess.feature) else { return };
     let sk = sk.clone();
     draw_dims(app, &sk, &fr, painter, rect, Some(sess), Some(ui));
+
+    // the dimension being placed follows the cursor until the click that puts it down
+    if let (Tool::Dimension, Some(at)) = (sess.tool, sess.cursor) {
+        let picking = matches!(sess.hover, Some(x @ (Sel::Point(_) | Sel::Curve(_))) if sess.dim_pending.len() < 2 && !sess.dim_pending.contains(&x));
+        if !picking && !sess.dim_pending.is_empty() {
+            if let Some(c) = build_dimension(app, &sess.dim_pending, at) {
+                let (vars, _) = app.doc.var_values();
+                let env = Env { vars: &vars, units: app.doc.units };
+                draw_dim(app, &sk, &fr, painter, rect, &env, &c, vp::hover(), true);
+            }
+        }
+    }
 
     if let (Some(Drag::Box { start }), Some(end)) = (&sess.drag, sess.box_end) {
         let r = egui::Rect::from_two_pos(*start, end);
@@ -3026,7 +3156,7 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         let units = app.doc.units;
         let mut done = None;
         egui::Area::new(egui::Id::new("dim-edit")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_CENTER).fixed_pos(pos).show(painter.ctx(), |ui| {
-            egui::Frame::new().fill(theme::bg()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(2).show(ui, |ui| {
+            egui::Frame::new().fill(theme::bg()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(2).show(ui, |ui| ui.horizontal(|ui| {
                 let ok = expr::eval(&text, if angle { Kind::Angle } else { Kind::Length }, &Env { vars: &vars, units }).is_ok();
                 let out = egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { theme::text() } else { theme::error_soft() }).show(ui);
                 let r = out.response;
@@ -3037,28 +3167,72 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                     st.cursor.set_char_range(Some(egui::text::CCursorRange::two(egui::text::CCursor::new(0), egui::text::CCursor::new(text.chars().count()))));
                     st.store(ui.ctx(), r.id);
                 }
-                if ui.input(|i| i.key_pressed(Key::Enter)) && ok {
-                    done = Some(true);
-                } else if ui.input(|i| i.key_pressed(Key::Escape)) || r.lost_focus() && !ui.input(|i| i.key_pressed(Key::Enter)) {
+                if ui.input(|i| i.key_pressed(Key::Escape)) {
                     done = Some(false);
+                } else if ui.input(|i| i.key_pressed(Key::Enter)) && ok {
+                    done = Some(true);
+                } else if r.lost_focus() && !ui.input(|i| i.key_pressed(Key::Enter)) {
+                    // clicking away keeps a valid value, like pressing Enter
+                    done = Some(ok);
                 }
                 ui.label(RichText::new(if angle { "°" } else { units.label() }).color(theme::muted()).size(11.0));
-            });
+            }));
         });
         match done {
             Some(true) => {
-                app.sk_checkpoint();
-                if let Some(d) = app.sk_mut().constraints.get_mut(i).and_then(|c| c.dim_mut()) {
-                    d.expr = text.trim().to_string();
-                }
                 app.sketch.as_mut().unwrap().dim_edit = None;
-                app.after_sketch_edit();
-                if let Some(e) = app.sketch.as_ref().unwrap().status.error.clone() {
-                    app.flash(format!("{e}: that value can't be met"), ToastKind::Error);
+                let old = c.dim().map(|d| d.expr.clone()).unwrap_or_default();
+                let new = text.trim().to_string();
+                if new != old {
+                    let was_ok = app.sketch.as_ref().unwrap().status.error.is_none();
+                    app.sk_checkpoint();
+                    if let Some(d) = app.sk_mut().constraints.get_mut(i).and_then(|c| c.dim_mut()) {
+                        d.expr = new.clone();
+                    }
+                    app.after_sketch_edit();
+                    if was_ok && app.sketch.as_ref().unwrap().status.error.is_some() {
+                        // keep the sketch solvable: put the old value back
+                        if let Some(d) = app.sk_mut().constraints.get_mut(i).and_then(|c| c.dim_mut()) {
+                            d.expr = old;
+                        }
+                        app.sketch.as_mut().unwrap().undo.pop();
+                        app.after_sketch_edit();
+                        app.flash(format!("{new} can't be met with the other constraints"), ToastKind::Error);
+                    }
                 }
             }
             Some(false) => app.sketch.as_mut().unwrap().dim_edit = None,
             None => app.sketch.as_mut().unwrap().dim_edit = Some((i, text)),
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn label_position_picks_the_measured_direction() {
+        let (a, b) = (DVec2::new(0.0, 0.0), DVec2::new(10.0, 40.0));
+        // above the pair: horizontal distance; beside it: vertical; off a corner: aligned
+        assert_eq!(linear_axis(a, b, DVec2::new(5.0, 60.0)), Some(0));
+        assert_eq!(linear_axis(a, b, DVec2::new(30.0, 20.0)), Some(1));
+        assert_eq!(linear_axis(a, b, DVec2::new(30.0, 60.0)), None);
+        // already axis-aligned pairs are always aligned
+        assert_eq!(linear_axis(a, DVec2::new(10.0, 0.0), DVec2::new(5.0, 20.0)), None);
+    }
+
+    #[test]
+    fn angle_quadrant_follows_the_label() {
+        let u1 = DVec2::X;
+        let u2 = DVec2::from_angle(60f64.to_radians());
+        let ang = |w: DVec2| {
+            let (v1, v2) = angle_wedge(u1, u2, w);
+            v1.angle_to(v2).to_degrees().abs().round()
+        };
+        assert_eq!(ang(DVec2::from_angle(30f64.to_radians())), 60.0);
+        assert_eq!(ang(DVec2::from_angle(120f64.to_radians())), 120.0);
+        assert_eq!(ang(DVec2::from_angle(210f64.to_radians())), 60.0);
+        assert_eq!(ang(DVec2::from_angle(-60f64.to_radians())), 120.0);
     }
 }
