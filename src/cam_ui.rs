@@ -1344,6 +1344,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
     }
     let mut open = true;
     let mut add: Vec<Tool> = vec![];
+    let mut imported = None;
     egui::Window::new("Tool library").open(&mut open).default_size([420.0, 480.0]).collapsible(false).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut app.cam.lib_search).hint_text("Search, e.g. 6 flat or M5").desired_width(170.0));
@@ -1353,6 +1354,13 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
                     ui.selectable_value(&mut app.cam.lib_kind, Some(k), k.label());
                 }
             });
+        });
+        ui.horizontal(|ui| {
+            if ui.button("Import library…").on_hover_text("Add the tools of a Fusion 360 tool library (.json or .tools) or another tools.json to My tools").clicked() {
+                if let Some(p) = rfd::FileDialog::new().add_filter("Tool library", &["json", "tools"]).pick_file() {
+                    imported = Some(crate::cam_tool_import::import_file(&p));
+                }
+            }
         });
         ui.separator();
         let mine = cam::load_library();
@@ -1385,12 +1393,27 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
     if !open {
         app.cam.library_open = false;
     }
+    match imported {
+        Some(Ok(r)) => {
+            let new = crate::cam_tool_import::add_to_library(&r.tools);
+            let mut msg = format!("Imported {} tool{} ({new} new) into My tools", r.tools.len(), if r.tools.len() == 1 { "" } else { "s" });
+            if !r.skipped.is_empty() {
+                msg += &format!("; skipped {}", r.skipped.join(", "));
+            }
+            app.flash_info(&msg, Some(std::time::Duration::from_secs(5)));
+        }
+        Some(Err(e)) => app.flash_info(&format!("Couldn't import the library: {e}"), Some(std::time::Duration::from_secs(5))),
+        None => {}
+    }
     if !add.is_empty() {
         let (material, max_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm)).unwrap_or_default();
         let mut last = 0;
         edit(app, |c| {
             for mut t in add {
-                cam::suggest(&mut t, &material, max_rpm);
+                // the user's own tools keep their feeds and speeds when they have them
+                if t.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == t.name) {
+                    cam::suggest(&mut t, &material, max_rpm);
+                }
                 last = c.add_tool(t);
             }
         });
