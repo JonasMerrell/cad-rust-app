@@ -1314,7 +1314,7 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                     pb.cut(DVec3::new(lead.x, lead.y, z), pb.feed);
                     pb.up();
                 }
-            } else {
+            } else if op.lead <= 0.0 || !lead_loop(pb, &l, z, z_prev, &offset(&sh, r * 0.98), op.lead, tabs) {
                 pb.cut_loop(&l, z, z_prev, 0.05, None, tabs);
             }
         }
@@ -1326,6 +1326,50 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             _ => "nothing to follow".into(),
         });
     }
+}
+
+/// Cut a closed loop at `z` with arcs of radius `lead` onto and off it, on the side away from the material
+/// (`keep_out`: where the tool's centre mustn't go), starting mid-way along a side. False when there is no room.
+fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, lead: f64, tabs: Option<(u32, f64, f64)>) -> bool {
+    let n = l.len();
+    if n < 3 {
+        return false;
+    }
+    let here = pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+    // the middles of the sides, nearest first
+    let mut starts: Vec<usize> = (0..n).filter(|i| DVec2::from(l[*i]).distance(DVec2::from(l[(i + 1) % n])) > 1e-3).collect();
+    let mid = |i: usize| (DVec2::from(l[i]) + DVec2::from(l[(i + 1) % n])) / 2.0;
+    starts.sort_by(|a, b| mid(*a).distance_squared(here).total_cmp(&mid(*b).distance_squared(here)));
+    let steps = 12;
+    for &i in starts.iter().take(24) {
+        let s0 = mid(i);
+        let t = (DVec2::from(l[(i + 1) % n]) - DVec2::from(l[i])).normalize();
+        for side in [1.0, -1.0] {
+            // centre beside the start; in along a quarter circle ending tangent to the loop, out along another
+            let u = -t.perp() * side;
+            let c = s0 - u * lead;
+            let quarter = |f: &dyn Fn(f64) -> DVec2| (0..=steps).map(|k| f(k as f64 / steps as f64 * std::f64::consts::FRAC_PI_2)).collect::<Vec<DVec2>>();
+            let lead_in = quarter(&|a: f64| c + (u * a.sin() - t * a.cos()) * lead);
+            let lead_out = quarter(&|a: f64| c + (u * a.cos() + t * a.sin()) * lead);
+            if lead_in.iter().chain(&lead_out).any(|p| inside(keep_out, [p.x, p.y])) {
+                continue;
+            }
+            // the loop from the middle of that side
+            let mut lp: Vec<P2> = vec![[s0.x, s0.y]];
+            lp.extend((1..=n).map(|k| l[(i + k) % n]));
+            pb.approach(lead_in[0].x, lead_in[0].y, z_from);
+            pb.cut(lead_in[0].extend(z), pb.plunge);
+            for p in &lead_in[1..] {
+                pb.cut(p.extend(z), pb.feed);
+            }
+            pb.cut_loop(&lp, z, z, 0.05, None, tabs);
+            for p in &lead_out[1..] {
+                pb.cut(p.extend(z), pb.feed);
+            }
+            return true;
+        }
+    }
+    false
 }
 
 fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
@@ -1616,6 +1660,39 @@ mod tests {
         assert!((shapes_area(&g.shadow(7.0)) - 2000.0).abs() < 1.0);
         assert!(inside(&g.shadow(7.0), [5.0, 5.0]) && !inside(&g.shadow(7.0), [20.0, 20.0]));
         assert_eq!(g.floors(), vec![10.0, 5.0]);
+    }
+
+    #[test]
+    fn contour_leads_on_and_off_with_arcs() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let id = c.add_op(OpKind::Contour, t);
+        c.op_mut(id).unwrap().lead = 3.0;
+        c.op_mut(id).unwrap().side = Side::Inside;
+        let tp = generate(&c, &part).remove(0);
+        assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
+        let pts = feeds(&tp);
+        // every point keeps the tool off the pocket walls (centre at least 3 mm in from them)
+        for p in &pts {
+            let wall = (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
+            assert!(wall > 3.0 - 0.02, "{p}");
+        }
+        // the first cut: plunge, then a quarter circle of radius 3 arriving at the wall offset (3 mm in)
+        let lead: Vec<DVec3> = pts.iter().take(13).copied().collect();
+        let end = lead[12];
+        let wall = (end.x - 10.0).min(30.0 - end.x).min(end.y - 10.0).min(30.0 - end.y);
+        assert!((wall - 3.0).abs() < 0.02, "{end}");
+        let chord = lead[0].truncate().distance(end.truncate());
+        assert!((chord - 3.0 * 2f64.sqrt()).abs() < 0.05, "{chord}");
+        assert!(lead.iter().all(|p| (p.z - lead[0].z).abs() < 1e-9));
+        // and it ends on the way out, off the wall again
+        let last = *pts.last().unwrap();
+        let wall = (last.x - 10.0).min(30.0 - last.x).min(last.y - 10.0).min(30.0 - last.y);
+        assert!(wall > 4.0, "{last}");
+        // no room for the lead: back to ramping
+        c.op_mut(id).unwrap().lead = 20.0;
+        let ramped = generate(&c, &part).remove(0);
+        assert!(feeds(&ramped).windows(2).any(|w| w[1].z < w[0].z - 1e-6 && w[0].truncate().distance(w[1].truncate()) > 1e-6), "ramps along the wall");
     }
 
     #[test]

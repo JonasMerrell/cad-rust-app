@@ -2,7 +2,7 @@
 
 use std::fmt::Write;
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 
 use crate::cam::Cam;
 use crate::cam_paths::{Move, Toolpath};
@@ -27,7 +27,11 @@ fn dialect(post: &str) -> Dialect {
 fn num(v: f64) -> String {
     let s = format!("{:.3}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
-    if s == "-0" { "0".into() } else { s }
+    if s == "-0" {
+        "0".into()
+    } else {
+        s
+    }
 }
 
 fn comment(text: &str) -> String {
@@ -86,6 +90,24 @@ impl Out {
         }
         let t = trimmed.to_string();
         self.line(&t);
+    }
+
+    /// A clockwise (2) or counter-clockwise (3) arc to `p` around the centre `c` (I/J relative to the start).
+    fn arc(&mut self, g: u8, from: DVec3, p: DVec3, c: DVec2, f: f64) {
+        let r3 = |v: f64| (v * 1000.0).round() / 1000.0;
+        let mut l = format!("G{g} X{} Y{}", num(r3(p.x)), num(r3(p.y)));
+        if self.last[2] != Some(r3(p.z)) {
+            let _ = write!(l, " Z{}", num(r3(p.z)));
+        }
+        let _ = write!(l, " I{} J{}", num(r3(c.x - from.x)), num(r3(c.y - from.y)));
+        let f = f.round();
+        if self.feed != Some(f) {
+            let _ = write!(l, " F{}", num(f));
+            self.feed = Some(f);
+        }
+        self.line(&l);
+        self.motion = Some(g);
+        self.last = [Some(r3(p.x)), Some(r3(p.y)), Some(r3(p.z))];
     }
 
     /// Rapid straight up to z (only Z on the line).
@@ -194,7 +216,33 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         }
         let mut pos = DVec3::new(0.0, 0.0, safe);
         let mut first = true;
-        for m in &tp.moves {
+        let mut k = 0;
+        while k < tp.moves.len() {
+            let m = &tp.moves[k];
+            k += 1;
+            // a run of feeds at one rate: replace what lies on circles by arcs
+            if let (Move::Feed(_, f), true, false) = (m, cam.arcs, first) {
+                let mut pts = vec![pos];
+                let mut e = k - 1;
+                while let Some(Move::Feed(p, g)) = tp.moves.get(e) {
+                    if g != f {
+                        break;
+                    }
+                    pts.push(DVec3::from(*p));
+                    e += 1;
+                }
+                if pts.len() >= 4 {
+                    for piece in fit_arcs(&pts) {
+                        match piece {
+                            Piece::Line(p) => o.mv(1, p - origin, Some(*f)),
+                            Piece::Arc { from, to, c, ccw } => o.arc(if ccw { 3 } else { 2 }, from - origin, to - origin, c - origin.truncate(), *f),
+                        }
+                    }
+                    pos = *pts.last().unwrap();
+                    k = e;
+                    continue;
+                }
+            }
             match *m {
                 Move::Rapid(p) => {
                     let w = DVec3::from(p) - origin;
@@ -265,4 +313,133 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         _ => o.line("M30"),
     }
     o.s
+}
+
+/// Largest gap between the toolpath's points and the arcs that replace it, mm.
+const ARC_TOL: f64 = 0.005;
+/// Largest bulge of an arc over a segment it replaces: the segments were themselves cut short of the
+/// curve they stand for (offsets keep within 0.004 mm), so the arc may run a little outside them.
+const CHORD_TOL: f64 = 0.02;
+
+enum Piece {
+    Line(DVec3),
+    /// From `from` to `to` around the centre `c` (XY), Z changing evenly along it (a helix).
+    Arc {
+        from: DVec3,
+        to: DVec3,
+        c: DVec2,
+        ccw: bool,
+    },
+}
+
+/// The circle through three points (XY), if they aren't in a line.
+fn circle(a: DVec2, b: DVec2, c: DVec2) -> Option<(DVec2, f64)> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 {
+        return None;
+    }
+    let (a2, b2, c2) = (a.length_squared(), b.length_squared(), c.length_squared());
+    let ctr = DVec2::new((a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d, (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d);
+    Some((ctr, ctr.distance(a)))
+}
+
+/// Whether `pts` lie on one arc (within ARC_TOL, turning one way, Z even along it); its centre and direction.
+fn arc_of(pts: &[DVec3]) -> Option<(DVec2, bool)> {
+    let n = pts.len();
+    let (a, m, b) = (pts[0].truncate(), pts[n / 2].truncate(), pts[n - 1].truncate());
+    let (c, r) = circle(a, m, b)?;
+    if !(0.05..=5000.0).contains(&r) {
+        return None;
+    }
+    let mut sweep = 0.0;
+    let mut sweeps = vec![0.0];
+    let mut dir = 0.0f64;
+    for w in pts.windows(2) {
+        let (p, q) = (w[0].truncate() - c, w[1].truncate() - c);
+        if (q.length() - r).abs() > ARC_TOL {
+            return None;
+        }
+        let da = p.angle_to(q);
+        if da.abs() < 1e-9 || da.abs() > std::f64::consts::FRAC_PI_2 || (dir != 0.0 && da.signum() != dir) {
+            return None;
+        }
+        dir = da.signum();
+        // the chord's middle must stay near the arc too
+        if r - (r * r - p.distance_squared(q) / 4.0).max(0.0).sqrt() > CHORD_TOL {
+            return None;
+        }
+        sweep += da;
+        sweeps.push(sweep);
+    }
+    if sweep.abs() > std::f64::consts::TAU - 0.05 {
+        return None;
+    }
+    let (z0, z1) = (pts[0].z, pts[n - 1].z);
+    for (p, s) in pts.iter().zip(&sweeps) {
+        if (p.z - (z0 + (z1 - z0) * s / sweep)).abs() > ARC_TOL {
+            return None;
+        }
+    }
+    Some((c, dir > 0.0))
+}
+
+/// Replace runs of points that lie on circles (at least four segments long) by arcs; `pts[0]` is where the tool is.
+fn fit_arcs(pts: &[DVec3]) -> Vec<Piece> {
+    let mut out = vec![];
+    let mut i = 0;
+    while i + 1 < pts.len() {
+        let mut best = None;
+        let mut j = i + 4;
+        while j < pts.len() && j - i <= 400 {
+            match arc_of(&pts[i..=j]) {
+                Some(a) => {
+                    best = Some((j, a));
+                    j += 1;
+                }
+                None => break,
+            }
+        }
+        match best {
+            Some((j, (c, ccw))) => {
+                out.push(Piece::Arc { from: pts[i], to: pts[j], c, ccw });
+                i = j;
+            }
+            None => {
+                out.push(Piece::Line(pts[i + 1]));
+                i += 1;
+            }
+        }
+    }
+    out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn fits_arcs_and_helices() {
+        // a line in, a half circle (r 5 around (10, 0)) counter-clockwise, then a helix quarter going down
+        let mut pts = vec![DVec3::new(0.0, -5.0, 0.0), DVec3::new(5.0, -5.0, 0.0)];
+        // half circle from (10,-5) round to (10,5)
+        pts.push(DVec3::new(10.0, -5.0, 0.0));
+        for k in 1..=24 {
+            let a = -std::f64::consts::FRAC_PI_2 + std::f64::consts::PI * k as f64 / 24.0;
+            pts.push(DVec3::new(10.0 + 5.0 * a.cos(), 5.0 * a.sin(), 0.0));
+        }
+        for k in 1..=12 {
+            let a = std::f64::consts::FRAC_PI_2 + std::f64::consts::FRAC_PI_2 * k as f64 / 12.0;
+            pts.push(DVec3::new(10.0 + 5.0 * a.cos(), 5.0 * a.sin(), -0.1 * k as f64));
+        }
+        let pieces = fit_arcs(&pts);
+        let arcs: Vec<_> = pieces.iter().filter_map(|p| if let Piece::Arc { from, to, c, ccw } = p { Some((*from, *to, *c, *ccw)) } else { None }).collect();
+        assert!(!arcs.is_empty() && arcs.len() <= 2, "{}", arcs.len());
+        for (_, _, c, ccw) in &arcs {
+            assert!(c.distance(DVec2::new(10.0, 0.0)) < 1e-6 && *ccw);
+        }
+        assert!((arcs.last().unwrap().1 - *pts.last().unwrap()).length() < 1e-9);
+        // a wiggly line stays lines
+        let zig: Vec<DVec3> = (0..20).map(|k| DVec3::new(k as f64, if k % 2 == 0 { 0.0 } else { 0.3 }, 0.0)).collect();
+        assert!(fit_arcs(&zig).iter().all(|p| matches!(p, Piece::Line(_))));
+    }
 }

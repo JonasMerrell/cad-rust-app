@@ -794,6 +794,8 @@ pub struct Operation {
     pub sketches: Vec<u64>,
     /// Trace: depth below the surface; V-carve: deepest cut (0 = as deep as the V-bit goes).
     pub depth: f64,
+    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
+    pub lead: f64,
 }
 
 impl Default for Operation {
@@ -839,6 +841,7 @@ impl Default for Operation {
             ref_diameter: 0.0,
             sketches: vec![],
             depth: 0.0,
+            lead: 0.0,
         }
     }
 }
@@ -991,6 +994,8 @@ pub struct Cam {
     /// Name of the setup (Manufacture tab) whose leftover stock this one starts from; empty = fresh stock.
     /// Use it to flip the part and machine the other side.
     pub follows: String,
+    /// Write arcs (G2/G3) where the toolpath runs along circles, instead of many short lines.
+    pub arcs: bool,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -1013,6 +1018,7 @@ impl Default for Cam {
             program: 1000,
             machine: Machine::default(),
             follows: String::new(),
+            arcs: true,
             tools: vec![],
             ops: vec![],
             next_id: 1,

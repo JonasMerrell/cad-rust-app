@@ -389,6 +389,36 @@ mod tests {
     }
 
     #[test]
+    fn circles_come_out_as_arcs() {
+        let circle: Vec<DVec3> = (0..=180).map(|k| DVec3::new(20.0, 15.0, 10.0) + DVec3::from((DVec2::from_angle(k as f64 / 180.0 * std::f64::consts::TAU) * 8.0, 0.0))).collect();
+        let part = block(vec![(circle, true)]);
+        let (mut c, id) = setup(OpKind::Trace, Tool { kind: ToolKind::Engrave, diameter: 6.0, angle: 90.0, stepdown: 0.5, ..Default::default() });
+        c.op_mut(id).unwrap().depth = 1.0;
+        let paths = generate(&c, &part);
+        let origin = crate::cam_paths::work_origin(&c, &part);
+        let g = crate::cam_post::gcode(&c, &paths, origin, 30.0);
+        let words = |l: &str, k: char| l.split_whitespace().find(|w| w.starts_with(k)).and_then(|w| w[1..].parse::<f64>().ok());
+        let mut pos = DVec2::ZERO;
+        let mut arcs = 0;
+        for l in g.lines() {
+            let (x, y) = (words(l, 'X').unwrap_or(pos.x), words(l, 'Y').unwrap_or(pos.y));
+            if matches!(l.split_whitespace().next(), Some("G2" | "G3")) {
+                arcs += 1;
+                let ctr = pos + DVec2::new(words(l, 'I').unwrap(), words(l, 'J').unwrap());
+                // both ends on the arc (what GRBL checks), and on the sketch's circle in work coordinates
+                assert!((ctr.distance(pos) - ctr.distance(DVec2::new(x, y))).abs() < 0.002, "{l}");
+                assert!((ctr.distance(DVec2::new(x, y)) - 8.0).abs() < 0.01, "{l}");
+            }
+            pos = DVec2::new(x, y);
+        }
+        assert!(arcs >= 2, "{g}");
+        assert!(g.lines().count() < 40, "{}", g.lines().count());
+        c.arcs = false;
+        let lines = crate::cam_post::gcode(&c, &paths, origin, 30.0);
+        assert!(!lines.lines().any(|l| matches!(l.split_whitespace().next(), Some("G2" | "G3"))));
+    }
+
+    #[test]
     fn trace_beside_closed_shapes() {
         let sq = (vec![DVec3::new(10.0, 10.0, 10.0), DVec3::new(30.0, 10.0, 10.0), DVec3::new(30.0, 20.0, 10.0), DVec3::new(10.0, 20.0, 10.0)], true);
         let part = block(vec![sq]);
