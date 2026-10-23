@@ -995,6 +995,9 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     }
                     if btn(ui, "printer", "Printability: overhangs in red, walls thinner than the limit in purple (limits in 3D printing settings)", app.print_view).clicked() {
                         app.print_view = !app.print_view;
+                        if app.print_view {
+                            app.measure = None;
+                        }
                         app.scene_dirty = true;
                     }
                     if btn(ui, "sun", "Realistic: studio lighting and reflections (set finishes under a part's Appearance)", app.realistic).clicked() {

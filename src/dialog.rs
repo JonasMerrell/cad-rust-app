@@ -234,6 +234,50 @@ pub fn field_refs(app: &App) -> Vec<Ref> {
     out
 }
 
+/// What a selection field holds, e.g. "3 edges", "2 regions of Sketch 1", "Top plane".
+fn refs_label(doc: &Document, refs: &[Ref]) -> String {
+    let kind = |r: &Ref| -> (&'static str, &'static str) {
+        match r {
+            Ref::Face { .. } => ("face", "faces"),
+            Ref::Edge { .. } => ("edge", "edges"),
+            Ref::Vertex { .. } => ("vertex", "vertices"),
+            Ref::Region { .. } => ("region", "regions"),
+            Ref::SketchCurve { .. } => ("sketch curve", "sketch curves"),
+            Ref::SketchPoint { .. } => ("point", "points"),
+            Ref::Body { .. } => ("part", "parts"),
+            Ref::Feature { .. } => ("feature", "features"),
+            Ref::Curve { .. } => ("curve", "curves"),
+            _ => ("item", "items"),
+        }
+    };
+    let sketch_of = |r: &Ref| match r {
+        Ref::Region { sketch, .. } | Ref::SketchCurve { sketch, .. } | Ref::SketchPoint { sketch, .. } => Some(*sketch),
+        _ => None,
+    };
+    // single planes, axes and features read best by name
+    if refs.len() == 1 {
+        match &refs[0] {
+            Ref::Feature { feature } => return doc.feature(*feature).map(|f| f.name.clone()).unwrap_or_else(|| "Feature".into()),
+            Ref::FeaturePlane { feature } => return doc.feature(*feature).map(|f| f.name.clone()).unwrap_or_else(|| "Plane".into()),
+            Ref::Body { .. } | Ref::OriginPlane { .. } | Ref::Axis { .. } => return refs[0].describe(),
+            _ => {}
+        }
+    }
+    let first = kind(&refs[0]);
+    let same = refs.iter().all(|r| kind(r) == first);
+    let n = refs.len();
+    let mut s = if same { format!("{n} {}", if n == 1 { first.0 } else { first.1 }) } else { format!("{n} items") };
+    // name the sketch when they all come from one
+    if let Some(sk) = sketch_of(&refs[0]) {
+        if refs.iter().all(|r| sketch_of(r) == Some(sk)) {
+            if let Some(f) = doc.feature(sk) {
+                s = format!("{s} of {}", f.name);
+            }
+        }
+    }
+    s
+}
+
 pub fn show(app: &mut App, ui: &mut Ui) {
     let Some(d) = &app.dialog else { return };
     let fid = d.feature;
@@ -311,7 +355,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 if refs.is_empty() {
                                     ui.label(RichText::new(format!("Select {}", acc.hint())).color(theme::muted()).italics().size(12.0));
                                 } else {
-                                    let txt = if refs.len() == 1 { refs[0].describe() } else { format!("{} selected", refs.len()) };
+                                    let txt = refs_label(&app.doc, &refs);
                                     ui.label(RichText::new(txt).size(12.0));
                                 }
                             })

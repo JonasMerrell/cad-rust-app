@@ -137,6 +137,9 @@ pub struct App {
     pub was_narrow: Option<bool>,
     /// Model-check problem being pointed at in the viewport.
     pub issue_focus: Option<[f64; 3]>,
+    /// Sidebar width (shared by all tabs) and the tab it was last drawn for.
+    pub side_w: f32,
+    pub side_tab: Option<crate::workspace::Tab>,
     pub print: crate::printing::PrintSettings,
     /// Printability colouring (overhangs, thin walls) in the viewport.
     pub print_view: bool,
@@ -225,6 +228,8 @@ impl App {
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
+            side_w: 260.0,
+            side_tab: None,
             print: crate::printing::load(),
             print_view: false,
             print_cache: Default::default(),
@@ -965,6 +970,11 @@ impl App {
             self.measure = None;
         } else {
             self.measure = Some(Measure { picks: self.picks.clone(), kept: vec![] });
+            // one mode at a time: measuring ends the printability view
+            if self.print_view {
+                self.print_view = false;
+                self.scene_dirty = true;
+            }
             self.picks.clear();
         }
         self.scene_dirty = true;
@@ -2594,12 +2604,30 @@ impl eframe::App for App {
         }
         if self.sidebar_open && !self.phone {
             let side = Frame::new().fill(theme::panel());
-            egui::Panel::left("sidebar").frame(side).resizable(true).default_size(250.0).min_size(190.0).show(ui, |ui| match self.tab {
-                crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
-                crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
-                crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
-                _ => self.sidebar(ui),
+            // one width for every tab: the panel keeps what the user dragged it to
+            let switched = self.side_tab != Some(self.tab);
+            self.side_tab = Some(self.tab);
+            let _ = switched;
+            let panel = egui::Panel::left("sidebar").frame(side).resizable(false).exact_size(self.side_w);
+            let r = panel.show(ui, |ui| {
+                // content may not widen the panel
+                ui.set_max_width(ui.available_width());
+                match self.tab {
+                    crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
+                    _ => self.sidebar(ui),
+                }
             });
+            // drag the panel's right edge to resize it
+            let edge = egui::Rect::from_min_max(egui::pos2(r.response.rect.right() - 3.0, r.response.rect.top()), egui::pos2(r.response.rect.right() + 3.0, r.response.rect.bottom()));
+            let h = ui.interact(edge, egui::Id::new("sidebar-resize"), Sense::drag());
+            if h.hovered() || h.dragged() {
+                ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeHorizontal);
+            }
+            if h.dragged() {
+                self.side_w = (self.side_w + h.drag_delta().x).clamp(190.0, 520.0);
+            }
         }
         let central = egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),

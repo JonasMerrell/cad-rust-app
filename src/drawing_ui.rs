@@ -288,7 +288,7 @@ pub fn sheet_prims(app: &dyn DocCtx, d: &Drawing, sheet: usize) -> Vec<Prim> {
         for h in &p.hatch {
             out.push(Prim::Line { a: to_sheet(v, Some(p), h[0]), b: to_sheet(v, Some(p), h[1]), w: 0.18, dashed: false, color: [70, 70, 70] });
         }
-        let label = DIRS.iter().find(|x| x.0 == v.dir).map(|x| x.1).unwrap_or("");
+        let label = view_label(d, v);
         let bottom = to_sheet(v, Some(p), [0.0, p.bbox[0][1]])[1];
         out.push(Prim::Text { at: [v.pos[0], bottom - 7.0], size: 3.2, text: format!("{} ({})", label.to_uppercase(), fmt_scale(v.scale)), anchor: 1, color: [80, 80, 80] });
     }
@@ -840,9 +840,37 @@ fn view_extent(app: &App, v: &DrawView) -> Option<([f64; 2], [f64; 2])> {
         let rr = r * v.scale;
         return Some(([v.pos[0] - rr, v.pos[1] - rr - 8.0], [v.pos[0] + rr, v.pos[1] + rr]));
     }
-    let p = app.dwg.proj.get(&(v.studio, v.dir.clone()))?;
+    let Some(p) = app.dwg.proj.get(&(v.studio, v.dir.clone())) else {
+        // not projected yet: assume the part's full size around the view's centre
+        let r = part_size(app, v.studio) * v.scale / 2.0;
+        return Some(([v.pos[0] - r, v.pos[1] - r - 8.0], [v.pos[0] + r, v.pos[1] + r]));
+    };
     let (a, b) = (to_sheet(v, Some(p), p.bbox[0]), to_sheet(v, Some(p), p.bbox[1]));
     Some(([a[0].min(b[0]), a[1].min(b[1]) - 8.0], [a[0].max(b[0]), a[1].max(b[1])]))
+}
+
+/// A view's name: its direction, numbered when the drawing has several of that kind ("Isometric 2").
+pub fn view_label(d: &Drawing, v: &DrawView) -> String {
+    let kind = |x: &DrawView| if x.detail.is_some() { "Detail".to_string() } else { DIRS.iter().find(|k| k.0 == x.dir).map(|k| k.1).unwrap_or("View").to_string() };
+    let base = kind(v);
+    let same: Vec<u64> = d.views.iter().filter(|x| kind(x) == base).map(|x| x.id).collect();
+    if same.len() > 1 {
+        let n = same.iter().position(|i| *i == v.id).unwrap_or(0) + 1;
+        format!("{base} {n}")
+    } else {
+        base
+    }
+}
+
+/// Largest extent of a Part Studio's parts (the diagonal, so any view fits), mm.
+fn part_size(app: &App, studio: usize) -> f64 {
+    let mut lo = glam::DVec3::splat(f64::INFINITY);
+    let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+    for b in app.studio_bodies(studio) {
+        lo = lo.min(b.bbox[0].into());
+        hi = hi.max(b.bbox[1].into());
+    }
+    if lo.x.is_finite() { (hi - lo).length() } else { 40.0 }
 }
 
 /// Centre of an empty area of `size` mm on a sheet, clear of views, the BOM and the title block.
@@ -850,34 +878,53 @@ fn free_spot(app: &App, d: &Drawing, sheet: usize, size: [f64; 2]) -> Option<[f6
     let [w, h] = sheet_size(&d.sheet);
     let mut taken: Vec<([f64; 2], [f64; 2])> = d.views.iter().filter(|v| v.sheet == sheet).filter_map(|v| view_extent(app, v)).collect();
     taken.push(([w - 10.0 - 170.0, 10.0], [w - 10.0, 46.0]));
-    let (hw, hh) = (size[0] / 2.0, size[1] / 2.0);
+    // dimensions, notes and tolerance frames on this sheet
+    for dm in &d.dims {
+        if let Some(v) = d.views.iter().find(|v| v.id == dm.view && v.sheet == sheet) {
+            let pr = app.dwg.proj.get(&(v.studio, v.dir.clone()));
+            let (a, b) = (to_sheet(v, pr, dm.a), to_sheet(v, pr, dm.b));
+            let m = dm.offset.abs() + 6.0;
+            taken.push(([a[0].min(b[0]) - m, a[1].min(b[1]) - m], [a[0].max(b[0]) + m, a[1].max(b[1]) + m]));
+        }
+    }
+    for n in d.notes.iter().filter(|n| n.sheet == sheet) {
+        taken.push(([n.pos[0], n.pos[1] - 2.0], [n.pos[0] + 3.0 * n.text.chars().count() as f64, n.pos[1] + 6.0]));
+    }
+    for g in d.gdts.iter().filter(|g| g.sheet == sheet) {
+        let (lo, hi) = gdt_rect(g);
+        taken.push((lo, hi));
+    }
+    // no fully free area: settle for the spot that covers the least of what is already there
+    let (hw, hh) = (size[0].min(w - 30.0) / 2.0, size[1].min(h - 30.0) / 2.0);
     let step = 5.0;
+    let mut best: Option<(f64, [f64; 2])> = None;
     let mut y = h - 15.0 - hh;
     while y >= 15.0 + hh {
         let mut x = 15.0 + hw;
         while x <= w - 15.0 - hw {
             let (lo, hi) = ([x - hw - 4.0, y - hh - 4.0], [x + hw + 4.0, y + hh + 4.0]);
-            if !taken.iter().any(|(a, b)| lo[0] < b[0] && hi[0] > a[0] && lo[1] < b[1] && hi[1] > a[1]) {
+            let cover: f64 = taken
+                .iter()
+                .map(|(a, b)| (hi[0].min(b[0]) - lo[0].max(a[0])).max(0.0) * (hi[1].min(b[1]) - lo[1].max(a[1])).max(0.0))
+                .sum();
+            if cover == 0.0 {
                 return Some([x, y]);
+            }
+            if best.is_none_or(|(c, _)| cover < c) {
+                best = Some((cover, [x, y]));
             }
             x += step;
         }
         y -= step;
     }
-    None
+    best.map(|b| b.1)
 }
 
 fn insert_view(app: &mut App, studio: usize, dir: &str) {
     checkpoint(app);
     let scale = dwg(app).and_then(|d| d.views.first()).map(|v| v.scale).unwrap_or(1.0);
-    // size from the part's extent
-    let mut lo = glam::DVec3::splat(f64::INFINITY);
-    let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
-    for b in app.studio_bodies(studio) {
-        lo = lo.min(b.bbox[0].into());
-        hi = hi.max(b.bbox[1].into());
-    }
-    let ext = if lo.x.is_finite() { (hi - lo).max_element() * scale } else { 40.0 };
+    // size from the part's extent: iso views are about as wide as the part's diagonal
+    let ext = part_size(app, studio) * scale * if dir == "iso" { 0.9 } else { 0.8 };
     let sheet = app.dwg.cur_sheet;
     let pos = dwg(app).and_then(|d| free_spot(app, d, sheet, [ext, ext])).unwrap_or(app.dwg.center);
     if let Some(d) = dwg_mut(app) {
@@ -1009,7 +1056,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             let cur = app.dwg.cur_sheet;
             let views: Vec<(u64, String, f64, bool, bool)> = app.ws.drawings[di].views.iter().filter(|v| v.sheet == cur).map(|v| (v.id, v.dir.clone(), v.scale, v.hidden_lines, v.detail.is_some())).collect();
             for (id, dir, scale, hidden, detail) in views {
-                let label = if detail { "Detail" } else { DIRS.iter().find(|x| x.0 == dir).map(|x| x.1).unwrap_or("View") };
+                let _ = (&dir, detail);
+                let label = app.ws.drawings[di].views.iter().find(|v| v.id == id).map(|v| view_label(&app.ws.drawings[di], v)).unwrap_or_default();
+                let label = label.as_str();
                 let sel = app.dwg.sel == Some(DSel::View(id));
                 ui.horizontal(|ui| {
                     if ui.selectable_label(sel, label).clicked() {
