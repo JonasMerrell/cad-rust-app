@@ -2313,7 +2313,13 @@ impl App {
                             Tab::Studio(i) => self.ws.studios[i].name = text,
                             Tab::Assembly(i) => self.ws.assemblies[i].name = text,
                             Tab::Drawing(i) => self.ws.drawings[i].name = text,
-                            Tab::Cam(i) => self.ws.cams[i].name = text,
+                            Tab::Cam(i) => {
+                                // setups that carry on from this one follow the new name
+                                let old = std::mem::replace(&mut self.ws.cams[i].name, text.clone());
+                                for c in self.ws.cams.iter_mut().filter(|c| c.follows == old) {
+                                    c.follows = text.clone();
+                                }
+                            }
                         }
                     }
                 }

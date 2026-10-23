@@ -10,6 +10,7 @@ mod cam_3d;
 mod cam_paths;
 mod cam_post;
 mod cam_sim;
+mod cam_stock;
 mod cam_ui;
 mod camera;
 mod dialog;

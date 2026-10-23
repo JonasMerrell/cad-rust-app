@@ -7,6 +7,7 @@ use serde::{Deserialize, Serialize};
 
 use crate::cam::{Cam, OpKind, Tool, ToolKind};
 use crate::cam_paths::{Move, Part, Toolpath};
+use crate::cam_stock::{StockMap, EMPTY};
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
 #[serde(rename_all = "snake_case")]
@@ -51,63 +52,89 @@ struct Cutter {
     /// Shank radius and bottom height above the tip.
     shank_r: f64,
     shank_z: f32,
-    holder: Vec<(i32, i32)>,
-    holder_z: f32,
+    /// Cells under the holder (every other cell) and how far above the tip its underside is there.
+    holder: Vec<(i32, i32, f32)>,
     /// Cuts under an overhang (slot mills, thread mills): not modelled in the height map.
     undercut: bool,
     /// How deep it may cut into the part without it counting (chamfers, taps, threads).
     allowance: f32,
 }
 
-const LUT_STEP: f64 = 0.002;
+pub const LUT_STEP: f64 = 0.002;
 
-fn disk(r: f64, cell: f64) -> Vec<(i32, i32)> {
-    let n = (r / cell).ceil() as i32;
-    let mut v = vec![];
-    for j in -n..=n {
-        for i in -n..=n {
-            let (x, y) = (i as f64 * cell, j as f64 * cell);
-            if x * x + y * y <= r * r {
-                v.push((i, j));
+/// Height of a tool's cutting surface above its tip, every LUT_STEP mm out from the axis
+/// (empty for tools that cut under an overhang).
+pub fn tool_lut(t: &Tool) -> Vec<f32> {
+    if matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill) {
+        return vec![];
+    }
+    let prof = t.profile();
+    let r = t.radius();
+    let height_at = |rho: f64| -> f64 {
+        for w in prof.windows(2) {
+            let (r0, z0) = w[0];
+            let (r1, z1) = w[1];
+            if rho >= r0 - 1e-9 && rho <= r1 + 1e-9 {
+                if (r1 - r0).abs() < 1e-9 {
+                    return z0.min(z1);
+                }
+                return z0 + (z1 - z0) * (rho - r0) / (r1 - r0);
             }
         }
-    }
-    v
+        prof.last().map(|p| p.1).unwrap_or(0.0)
+    };
+    let exact = |rho: f64| crate::cam_3d::tool_height(t, rho).unwrap_or_else(|| height_at(rho));
+    (0..=((r / LUT_STEP).ceil() as usize)).map(|i| exact((i as f64 * LUT_STEP).min(r)) as f32).collect()
 }
 
 impl Cutter {
     fn new(t: &Tool, cell: f64, allowance: f32) -> Cutter {
-        let prof = t.profile();
         let r = t.radius();
         let undercut = matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill);
-        let height_at = |rho: f64| -> f64 {
-            for w in prof.windows(2) {
-                let (r0, z0) = w[0];
-                let (r1, z1) = w[1];
-                if rho >= r0 - 1e-9 && rho <= r1 + 1e-9 {
-                    if (r1 - r0).abs() < 1e-9 {
-                        return z0.min(z1);
-                    }
-                    return z0 + (z1 - z0) * (rho - r0) / (r1 - r0);
+        let lut = tool_lut(t);
+        let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
+        let neck = if undercut {
+            if t.neck_diameter > 0.0 {
+                t.neck_diameter / 2.0
+            } else {
+                r * 0.6
+            }
+        } else {
+            (t.shank_diameter / 2.0).max(0.1)
+        };
+        let stick = t.stickout.max(flutes + 1.0);
+        let outline = t.holder_outline();
+        let reach = outline.iter().map(|p| p.0).fold(neck, f64::max);
+        let n = (reach / (cell * 2.0)).ceil() as i32;
+        let mut holder = vec![];
+        for j in -n..=n {
+            for i in -n..=n {
+                let rho = ((i * i + j * j) as f64).sqrt() * cell * 2.0;
+                if let Some(z) = crate::cam::holder_underside(&outline, rho.max(neck)) {
+                    holder.push((i * 2, j * 2, (stick + z) as f32));
                 }
             }
-            prof.last().map(|p| p.1).unwrap_or(0.0)
-        };
-        let exact = |rho: f64| crate::cam_3d::tool_height(t, rho).unwrap_or_else(|| height_at(rho));
-        let lut = if undercut { vec![] } else { (0..=((r / LUT_STEP).ceil() as usize)).map(|i| exact((i as f64 * LUT_STEP).min(r)) as f32).collect() };
-        let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
-        let neck = if undercut { if t.neck_diameter > 0.0 { t.neck_diameter / 2.0 } else { r * 0.6 } } else { (t.shank_diameter / 2.0).max(0.1) };
-        let stick = t.stickout.max(flutes + 1.0);
-        Cutter {
-            radius: r,
-            lut,
-            shank_r: neck,
-            shank_z: flutes as f32,
-            holder: disk((t.holder_diameter / 2.0).max(neck), cell * 2.0).into_iter().map(|(i, j)| (i * 2, j * 2)).collect(),
-            holder_z: stick as f32,
-            undercut,
-            allowance,
         }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance }
+    }
+}
+
+pub const CLASS_STOCK: u8 = 0;
+pub const CLASS_GOUGE: u8 = 1;
+pub const CLASS_EARLIER: u8 = 2;
+pub const CLASS_PATH: u8 = 3;
+
+/// Colours of the toolpaths' cut surfaces, in order (repeating).
+pub const PATH_COLOURS: [[u8; 3]; 8] =
+    [[0x2f, 0x7d, 0xf6], [0x22, 0xb0, 0x5c], [0xf2, 0x8b, 0x1d], [0x9b, 0x4d, 0xd6], [0x14, 0xb3, 0xc4], [0xe0, 0x4a, 0x98], [0xc4, 0xa8, 0x10], [0x5b, 0x63, 0xe8]];
+
+/// Colour of a mesh class: warm light stock, slate for earlier setups, red gouges, a colour per toolpath.
+pub fn class_rgb(cl: u8) -> [u8; 3] {
+    match cl {
+        CLASS_STOCK => [0xd6, 0xcc, 0xb6],
+        CLASS_GOUGE => [0xe5, 0x2b, 0x2b],
+        CLASS_EARLIER => [0x8c, 0x98, 0xa6],
+        k => PATH_COLOURS[(k - CLASS_PATH) as usize % PATH_COLOURS.len()],
     }
 }
 
@@ -117,9 +144,14 @@ pub struct Sim {
     pub cell: f64,
     pub nx: usize,
     pub ny: usize,
+    /// Top of the material over each cell (EMPTY once cut through) and its bottom.
     pub stock: Vec<f32>,
+    pub lo: Vec<f32>,
     pub part: Vec<f32>,
     pub gouged: Vec<bool>,
+    /// The last few toolpaths that cut each cell, newest first: (index + 1, 0 = none; the height the
+    /// material was at when it started cutting there). Colours the walls by who exposed them.
+    pub cuts: Vec<[(u8, f32); 3]>,
     pub top: f32,
     pub bottom: f32,
     moves: Vec<(usize, u64, Move)>,
@@ -150,8 +182,10 @@ impl Sim {
             nx,
             ny,
             stock: vec![hi.z as f32; nx * ny],
+            lo: vec![lo.z as f32; nx * ny],
             part: vec![f32::NEG_INFINITY; nx * ny],
             gouged: vec![false; nx * ny],
+            cuts: vec![[(0, 0.0); 3]; nx * ny],
             top: hi.z as f32,
             bottom: lo.z as f32,
             moves: vec![],
@@ -195,20 +229,55 @@ impl Sim {
             }
         }
         for tp in paths {
-            let Some(tool) = cam.tool(tp.tool) else { continue };
-            let op = cam.op(tp.op);
-            let allowance = match op.map(|o| o.kind) {
-                Some(OpKind::Chamfer) | Some(OpKind::Deburr) => op.map(|o| o.chamfer * 2.0 + 0.3).unwrap_or(1.0) as f32,
-                Some(OpKind::Tap) | Some(OpKind::Thread) => f32::INFINITY,
-                _ => 0.02,
-            };
-            s.cutters.push(Cutter::new(tool, cell, allowance));
-            let ci = s.cutters.len() - 1;
-            for m in &tp.moves {
-                s.moves.push((ci, tp.op, *m));
-            }
+            s.push(cam, tp);
         }
         s
+    }
+
+    /// Queue another toolpath to run after the ones already given.
+    pub fn push(&mut self, cam: &Cam, tp: &Toolpath) {
+        // every toolpath gets a cutter, so cutter indices match toolpath indices
+        let Some(tool) = cam.tool(tp.tool) else {
+            self.cutters.push(Cutter::new(&Tool::default(), self.cell, 0.0));
+            return;
+        };
+        let op = cam.op(tp.op);
+        let allowance = match op.map(|o| o.kind) {
+            Some(OpKind::Chamfer) | Some(OpKind::Deburr) => op.map(|o| o.chamfer * 2.0 + 0.3).unwrap_or(1.0) as f32,
+            Some(OpKind::Tap) | Some(OpKind::Thread) => f32::INFINITY,
+            _ => 0.02,
+        };
+        self.cutters.push(Cutter::new(tool, self.cell, allowance));
+        let ci = self.cutters.len() - 1;
+        for m in &tp.moves {
+            self.moves.push((ci, tp.op, *m));
+        }
+    }
+
+    /// Start from stock left by an earlier setup instead of the full block.
+    pub fn start_from(&mut self, m: &StockMap) {
+        let mut top = EMPTY;
+        for j in 0..self.ny {
+            let y = self.y0 + j as f64 * self.cell;
+            for i in 0..self.nx {
+                let x = self.x0 + i as f64 * self.cell;
+                let k = j * self.nx + i;
+                match m.column(x, y) {
+                    Some((lo, hi)) => {
+                        self.lo[k] = lo;
+                        self.stock[k] = hi;
+                        top = top.max(hi);
+                    }
+                    None => self.stock[k] = EMPTY,
+                }
+            }
+        }
+        self.max_h = top.max(self.bottom);
+    }
+
+    /// The stock as it is now.
+    pub fn stock_map(&self) -> StockMap {
+        StockMap { x0: self.x0, y0: self.y0, cell: self.cell, nx: self.nx, ny: self.ny, hi: self.stock.clone(), lo: self.lo.clone() }
     }
 
     pub fn total(&self) -> usize {
@@ -277,7 +346,11 @@ impl Sim {
         let side = |a: f32, b: f32| {
             let d = |q: f32| if q.is_finite() { (q - c).abs() } else { f32::INFINITY };
             let m = d(a).min(d(b));
-            if m.is_finite() { m } else { 0.0 }
+            if m.is_finite() {
+                m
+            } else {
+                0.0
+            }
         };
         let cell = self.cell as f32;
         let gx = side(h(i - 1, j), h(i + 1, j)) / cell;
@@ -326,9 +399,18 @@ impl Sim {
                     let k = (j * nx + i) as usize;
                     let s = self.stock[k];
                     if s > z {
-                        removed += (s - z) * area;
-                        deepest = deepest.max(s - z);
-                        self.stock[k] = z;
+                        let floor = self.lo[k];
+                        let cut = s - z.max(floor);
+                        removed += cut * area;
+                        deepest = deepest.max(cut);
+                        // cut right through the column: nothing left over this cell
+                        self.stock[k] = if z <= floor { EMPTY } else { z };
+                        let tag = (ci + 1).min(250) as u8;
+                        let h = &mut self.cuts[k];
+                        if h[0].0 != tag {
+                            h.rotate_right(1);
+                            h[0] = (tag, s);
+                        }
                         if rho <= inner && self.part[k] > z + c.allowance {
                             // depth across the surface, not straight down: on a steep wall a hair's
                             // breadth sideways reads as a deep cut from above
@@ -346,7 +428,6 @@ impl Sim {
         let mut holder_hit = 0.0f32;
         if check_holder {
             let sz = tip + c.shank_z;
-            let hz = tip + c.holder_z;
             // cells clearly inside the shank (it may rub a wall its own flutes cut)
             let rs = c.shank_r - 0.02;
             let n = (rs / self.cell).ceil() as i32;
@@ -363,12 +444,13 @@ impl Sim {
                     }
                 }
             }
-            for &(di, dj) in &c.holder {
+            for &(di, dj, dz) in &c.holder {
                 let (i, j) = (ci0 + di, cj0 + dj);
                 if i < 0 || j < 0 || i >= nx || j >= ny {
                     continue;
                 }
                 let s = self.stock[(j * nx + i) as usize];
+                let hz = tip + dz;
                 if s > hz + 0.01 {
                     holder_hit = holder_hit.max(s - hz);
                 }
@@ -392,72 +474,121 @@ impl Sim {
     }
 
     /// Triangles of the simulated stock (setup coordinates), at most `max_cells` along each side:
-    /// positions and per-triangle colour class (0 = untouched stock, 1 = machined, 2 = gouge).
+    /// positions and per-triangle colour class: CLASS_STOCK (untouched), CLASS_GOUGE, CLASS_EARLIER
+    /// (machined in an earlier setup) or CLASS_PATH + the index of the toolpath that cut it last.
     pub fn mesh(&self, max_cells: usize) -> (Vec<[DVec3; 3]>, Vec<u8>) {
         let k = ((self.nx.max(self.ny) as f64 / max_cells.max(10) as f64).ceil() as usize).max(1);
         let (mx, my) = (self.nx.div_ceil(k), self.ny.div_ceil(k));
-        let mut h = vec![0.0f32; mx * my];
+        let bz = self.bottom as f64;
+        // each block's column of material [lo, hi] (hi <= lo: none) and colour
+        let mut h = vec![0.0f64; mx * my];
+        let mut l = vec![0.0f64; mx * my];
         let mut cls = vec![0u8; mx * my];
+        let mut cuts = vec![[(0u8, 0.0f32); 3]; mx * my];
         for bj in 0..my {
             for bi in 0..mx {
-                let mut lo = f32::INFINITY;
+                let mut top = f32::INFINITY;
+                let mut low = self.bottom;
                 let mut g = false;
+                let mut by = [(0u8, 0.0f32); 3];
                 for j in bj * k..((bj + 1) * k).min(self.ny) {
                     for i in bi * k..((bi + 1) * k).min(self.nx) {
-                        lo = lo.min(self.stock[j * self.nx + i]);
-                        g |= self.gouged[j * self.nx + i];
+                        let q = j * self.nx + i;
+                        if self.stock[q] < top {
+                            top = self.stock[q];
+                            by = self.cuts[q];
+                            low = self.lo[q];
+                        }
+                        g |= self.gouged[q];
                     }
                 }
-                h[bj * mx + bi] = lo.max(self.bottom);
-                cls[bj * mx + bi] = if g {
-                    2
-                } else if lo < self.top - 0.005 {
-                    1
+                let b = bj * mx + bi;
+                l[b] = (low as f64).max(bz);
+                h[b] = if top == EMPTY { l[b] } else { (top as f64).max(l[b]) };
+                cuts[b] = by;
+                cls[b] = if g {
+                    CLASS_GOUGE
+                } else if by[0].0 > 0 {
+                    CLASS_PATH.saturating_add(by[0].0 - 1)
+                } else if top < self.top - 0.005 {
+                    CLASS_EARLIER
                 } else {
-                    0
+                    CLASS_STOCK
                 };
             }
         }
         let c = self.cell * k as f64;
         let mut tris = vec![];
         let mut col = vec![];
-        let bz = self.bottom as f64;
         let x_of = |i: usize| (self.x0 + i as f64 * c - self.cell / 2.0).min(self.x0 + (self.nx as f64 - 0.5) * self.cell);
         let y_of = |j: usize| (self.y0 + j as f64 * c - self.cell / 2.0).min(self.y0 + (self.ny as f64 - 0.5) * self.cell);
-        let quad = |tris: &mut Vec<[DVec3; 3]>, col: &mut Vec<u8>, a: DVec3, b: DVec3, cc: DVec3, d: DVec3, cl: u8| {
+        let mut quad = |a: DVec3, b: DVec3, cc: DVec3, d: DVec3, cl: u8| {
             tris.push([a, b, cc]);
             tris.push([a, cc, d]);
             col.push(cl);
             col.push(cl);
         };
+        let column = |ii: i64, jj: i64| -> Option<(f64, f64, u8)> {
+            if ii < 0 || jj < 0 || ii >= mx as i64 || jj >= my as i64 {
+                return None;
+            }
+            let b = jj as usize * mx + ii as usize;
+            (h[b] > l[b] + 1e-4).then(|| (l[b], h[b], cls[b]))
+        };
         for j in 0..my {
             for i in 0..mx {
-                let z = h[j * mx + i] as f64;
-                if z <= bz + 1e-4 {
-                    continue;
-                }
+                let Some((zl, z, cl)) = column(i as i64, j as i64) else { continue };
                 let (xa, xb, ya, yb) = (x_of(i), x_of(i + 1), y_of(j), y_of(j + 1));
-                let cl = cls[j * mx + i];
-                quad(&mut tris, &mut col, DVec3::new(xa, ya, z), DVec3::new(xb, ya, z), DVec3::new(xb, yb, z), DVec3::new(xa, yb, z), cl);
-                // walls down to the neighbour (or the stock bottom at the edge)
-                let nb = |ii: i64, jj: i64| -> f64 { if ii < 0 || jj < 0 || ii >= mx as i64 || jj >= my as i64 { bz } else { (h[jj as usize * mx + ii as usize] as f64).max(bz) } };
-                // walls exposed by cutting count as machined; the stock's outer sides keep its colour
-                let wall = |edge: bool| if edge { cl } else { cl.max(1) };
-                let e = nb(i as i64 + 1, j as i64);
-                if e < z {
-                    quad(&mut tris, &mut col, DVec3::new(xb, ya, e), DVec3::new(xb, yb, e), DVec3::new(xb, yb, z), DVec3::new(xb, ya, z), wall(i + 1 >= mx));
-                }
-                let w = nb(i as i64 - 1, j as i64);
-                if w < z {
-                    quad(&mut tris, &mut col, DVec3::new(xa, yb, w), DVec3::new(xa, ya, w), DVec3::new(xa, ya, z), DVec3::new(xa, yb, z), wall(i == 0));
-                }
-                let nn = nb(i as i64, j as i64 + 1);
-                if nn < z {
-                    quad(&mut tris, &mut col, DVec3::new(xb, yb, nn), DVec3::new(xa, yb, nn), DVec3::new(xa, yb, z), DVec3::new(xb, yb, z), wall(j + 1 >= my));
-                }
-                let s = nb(i as i64, j as i64 - 1);
-                if s < z {
-                    quad(&mut tris, &mut col, DVec3::new(xa, ya, s), DVec3::new(xb, ya, s), DVec3::new(xb, ya, z), DVec3::new(xa, ya, z), wall(j == 0));
+                quad(DVec3::new(xa, ya, z), DVec3::new(xb, ya, z), DVec3::new(xb, yb, z), DVec3::new(xa, yb, z), cl);
+                // underneath: the stock's bottom, or a surface an earlier setup machined
+                let under = if zl > bz + 1e-3 { CLASS_EARLIER } else { CLASS_STOCK };
+                quad(DVec3::new(xa, ya, zl), DVec3::new(xa, yb, zl), DVec3::new(xb, yb, zl), DVec3::new(xb, ya, zl), under);
+                // sides: the parts of [zl, z] the neighbour doesn't cover. Above it they were exposed by the cuts
+                // that took the neighbour down (newest lowest), below it by an earlier setup; the stock's outer
+                // faces keep the stock's colour.
+                for (di, dj) in [(1i64, 0i64), (-1, 0), (0, 1), (0, -1)] {
+                    let (ni, nj) = (i as i64 + di, j as i64 + dj);
+                    let mut segs = vec![];
+                    if ni < 0 || nj < 0 || ni >= mx as i64 || nj >= my as i64 {
+                        segs.push((zl, z, if cl == CLASS_EARLIER { CLASS_EARLIER } else { CLASS_STOCK }));
+                    } else {
+                        let nb = nj as usize * mx + ni as usize;
+                        let solid = h[nb] > l[nb] + 1e-4;
+                        let (nl, nh) = if solid { (l[nb], h[nb]) } else { (f64::INFINITY, f64::NEG_INFINITY) };
+                        if nh < z {
+                            // a neighbour cut right through still had material only from its bottom up
+                            let mut at = if solid { nh.max(zl) } else { l[nb].max(zl) };
+                            for (tag, from) in cuts[nb] {
+                                if tag == 0 {
+                                    break;
+                                }
+                                let up = (from as f64).min(z);
+                                if up > at {
+                                    let c = if cls[nb] == CLASS_GOUGE && at <= nh.max(zl) { CLASS_GOUGE } else { CLASS_PATH.saturating_add(tag - 1) };
+                                    segs.push((at, up, c));
+                                    at = up;
+                                }
+                            }
+                            if at < z {
+                                segs.push((at, z, CLASS_EARLIER));
+                            }
+                        }
+                        let below = if solid { nl } else { l[nb] };
+                        if below > zl {
+                            segs.push((zl, below.min(z), CLASS_EARLIER));
+                        }
+                    }
+                    for (a, b, c) in segs {
+                        if b <= a + 1e-6 {
+                            continue;
+                        }
+                        match (di, dj) {
+                            (1, 0) => quad(DVec3::new(xb, ya, a), DVec3::new(xb, yb, a), DVec3::new(xb, yb, b), DVec3::new(xb, ya, b), c),
+                            (-1, 0) => quad(DVec3::new(xa, yb, a), DVec3::new(xa, ya, a), DVec3::new(xa, ya, b), DVec3::new(xa, yb, b), c),
+                            (0, 1) => quad(DVec3::new(xb, yb, a), DVec3::new(xa, yb, a), DVec3::new(xa, yb, b), DVec3::new(xb, yb, b), c),
+                            _ => quad(DVec3::new(xa, ya, a), DVec3::new(xb, ya, a), DVec3::new(xb, ya, b), DVec3::new(xa, ya, b), c),
+                        }
+                    }
                 }
             }
         }

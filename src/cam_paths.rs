@@ -17,6 +17,8 @@ use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
 use serde::{Deserialize, Serialize};
 
 use crate::cam::{Cam, METRIC_COARSE, OpKind, Operation, Origin, Side, Tool, ToolKind};
+use crate::cam_sim::Sim;
+use crate::cam_stock::StockMap;
 
 pub type P2 = [f64; 2];
 pub type Contour = Vec<P2>;
@@ -118,6 +120,16 @@ impl Part {
 /// Stock box in setup coordinates.
 pub fn stock_box(cam: &Cam, part: &Part) -> (DVec3, DVec3) {
     let s = &cam.stock;
+    if let Some([a, b]) = s.carried {
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for k in 0..8 {
+            let p = part.rot * DVec3::new([a[0], b[0]][k & 1], [a[1], b[1]][(k >> 1) & 1], [a[2], b[2]][(k >> 2) & 1]);
+            lo = lo.min(p);
+            hi = hi.max(p);
+        }
+        return (lo, hi);
+    }
     match s.size {
         Some(sz) => {
             let c = (part.lo + part.hi) / 2.0;
@@ -634,11 +646,13 @@ pub struct Ctx<'a> {
     pub geo: Geo<'a>,
     pub stock: (DVec3, DVec3),
     pub origin: DVec3,
+    /// The stock as the operation finds it, when it machines only what is left.
+    pub stock_in: Option<StockMap>,
 }
 
 impl<'a> Ctx<'a> {
     pub fn new(cam: &'a Cam, part: &'a Part) -> Ctx<'a> {
-        Ctx { cam, geo: Geo::new(part), stock: stock_box(cam, part), origin: work_origin(cam, part) }
+        Ctx { cam, geo: Geo::new(part), stock: stock_box(cam, part), origin: work_origin(cam, part), stock_in: None }
     }
 
     fn part(&self) -> &Part {
@@ -655,9 +669,156 @@ impl<'a> Ctx<'a> {
 }
 
 /// Make the toolpaths of every operation that isn't suppressed.
+#[cfg(test)]
 pub fn generate(cam: &Cam, part: &Part) -> Vec<Toolpath> {
-    let ctx = Ctx::new(cam, part);
-    cam.ops.iter().filter(|o| !o.suppressed).map(|o| op_path(&ctx, o)).collect()
+    generate_from(cam, part, None)
+}
+
+/// Grid size for tracking the stock between operations: about 0.2 mm cells.
+fn stock_resolution(stock: (DVec3, DVec3)) -> usize {
+    let s = (stock.1 - stock.0).truncate();
+    ((s.x.max(s.y) / 0.2).ceil() as usize).clamp(200, 1500)
+}
+
+/// Make the toolpaths starting from `stock`, the material an earlier setup left (None = the full block).
+/// Operations that machine only what is left see the stock as the operations before them leave it.
+pub fn generate_from(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> Vec<Toolpath> {
+    let mut ctx = Ctx::new(cam, part);
+    let ops: Vec<&Operation> = cam.ops.iter().filter(|o| !o.suppressed).collect();
+    let needs = |o: &Operation| (o.rest || stock.is_some()) && o.kind.uses_stock();
+    let last = ops.iter().rposition(|o| needs(o));
+    let mut sim: Option<Sim> = None;
+    let mut out: Vec<Toolpath> = vec![];
+    for (k, op) in ops.iter().enumerate() {
+        ctx.stock_in = None;
+        if needs(op) {
+            let s = sim.get_or_insert_with(|| {
+                let mut s = Sim::new(cam, part, ctx.stock, &[], stock_resolution(ctx.stock));
+                if let Some(m) = stock {
+                    s.start_from(m);
+                }
+                for tp in &out {
+                    s.push(cam, tp);
+                }
+                s
+            });
+            s.run_to(usize::MAX, usize::MAX);
+            ctx.stock_in = Some(s.stock_map());
+        }
+        let tp = op_path(&ctx, op);
+        if let Some(s) = sim.as_mut() {
+            if last.map(|l| k < l).unwrap_or(false) {
+                s.push(cam, &tp);
+            }
+        }
+        out.push(tp);
+    }
+    machine_checks(cam, &ctx, &mut out);
+    out
+}
+
+/// The stock once every toolpath has run, starting from `stock` (None = the full block).
+pub fn final_stock(cam: &Cam, part: &Part, paths: &[Toolpath], stock: Option<&StockMap>) -> StockMap {
+    let b = stock_box(cam, part);
+    let mut s = Sim::new(cam, part, b, paths, stock_resolution(b));
+    if let Some(m) = stock {
+        s.start_from(m);
+    }
+    s.run_to(usize::MAX, usize::MAX);
+    s.stock_map()
+}
+
+/// Warn where an operation goes beyond the machine: travel, feed and spindle speed.
+fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
+    let m = &cam.machine;
+    for tp in paths.iter_mut() {
+        let Some(tool) = cam.tool(tp.tool) else { continue };
+        if cam.max_rpm > 0.0 && tool.rpm > cam.max_rpm + 0.5 {
+            tp.warnings.push(format!("T{} runs at {} rpm but the spindle tops out at {}", tool.number, tool.rpm.round(), cam.max_rpm.round()));
+        }
+        if m.max_feed > 0.0 {
+            let mut fast = 0.0f64;
+            for mv in tp.moves.iter_mut() {
+                if let Move::Feed(_, f) = mv {
+                    if *f > m.max_feed {
+                        fast = fast.max(*f);
+                        *f = m.max_feed;
+                    }
+                }
+            }
+            if fast > 0.0 {
+                tp.warnings.push(format!("feed {} mm/min is above the machine's {}: slowed down", fast.round(), m.max_feed.round()));
+                stats(tp, tool, cam);
+            }
+        }
+        if m.travel.iter().any(|t| *t > 0.0) {
+            let mut lo = DVec3::splat(f64::INFINITY);
+            let mut hi = DVec3::splat(f64::NEG_INFINITY);
+            let mut p = DVec3::new(0.0, 0.0, ctx.safe());
+            for mv in &tp.moves {
+                p = mv.end(p);
+                lo = lo.min(p);
+                hi = hi.max(p);
+            }
+            if lo.x.is_finite() {
+                let span = hi - lo;
+                for (a, name) in ["X", "Y", "Z"].iter().enumerate() {
+                    let need = span.to_array()[a];
+                    let have = m.travel[a];
+                    if have > 0.0 && need > have + 1e-6 {
+                        tp.warnings.push(format!("needs {} mm of {name} travel; the machine has {}", crate::cam::fmt_mm(need.round()), crate::cam::fmt_mm(have)));
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The setups that run before `ci`, oldest first: each one carries on from the one before it.
+pub fn setup_chain(cams: &[Cam], ci: usize) -> Result<Vec<usize>, String> {
+    let mut chain = vec![];
+    let mut cur = ci;
+    while !cams[cur].follows.trim().is_empty() {
+        let name = cams[cur].follows.trim();
+        let Some(prev) = cams.iter().position(|c| c.name == name) else {
+            return Err(format!("{} carries on from \"{name}\", but there is no Manufacture tab of that name", cams[cur].name));
+        };
+        if prev == ci || chain.contains(&prev) {
+            return Err(format!("setups follow each other in a loop at \"{name}\""));
+        }
+        if cams[prev].studio != cams[ci].studio {
+            return Err(format!("\"{name}\" machines a different Part Studio"));
+        }
+        chain.push(prev);
+        cur = prev;
+    }
+    chain.reverse();
+    Ok(chain)
+}
+
+/// Bring the stock boxes of `ci` and the setups before it up to date (each carries the box of the one it follows),
+/// and return the stock the earlier setups leave for it (None for a first setup).
+pub fn link_setups(cams: &mut [Cam], ci: usize, tris: &[[DVec3; 3]], circles: &[Circle]) -> Result<Option<StockMap>, String> {
+    let chain = setup_chain(cams, ci)?;
+    if chain.is_empty() {
+        cams[ci].stock.carried = None;
+        return Ok(None);
+    }
+    let mut order = chain.clone();
+    order.push(ci);
+    cams[order[0]].stock.carried = None;
+    let mut stock: Option<StockMap> = None;
+    for w in order.windows(2) {
+        let (a, b) = (w[0], w[1]);
+        let pa = Part::new(tris, circles, &cams[a].orient);
+        let (lo, hi) = stock_box(&cams[a], &pa);
+        let (p, q) = (pa.to_part(lo), pa.to_part(hi));
+        cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);
+        let paths = generate_from(&cams[a], &pa, stock.as_ref());
+        let left = final_stock(&cams[a], &pa, &paths, stock.as_ref());
+        stock = Some(left.reorient(pa.rot, orient_matrix(&cams[b].orient)));
+    }
+    Ok(stock)
 }
 
 pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
@@ -703,6 +864,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         OpKind::Waterline => crate::cam_3d::waterline(ctx, op, &mut pb, &mut tp),
         OpKind::Scallop => crate::cam_3d::scallop(ctx, op, &mut pb, &mut tp),
         OpKind::Deburr => crate::cam_3d::deburr(ctx, op, &mut pb, &mut tp),
+        OpKind::Pencil => crate::cam_3d::pencil(ctx, op, &mut pb, &mut tp),
     }
     pb.up();
     // deepest cut below the stock top against the flute length
@@ -714,7 +876,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         }
     }
     tp.moves = pb.moves;
-    stats(&mut tp, tool, ctx.cam.rapid_rate);
+    stats(&mut tp, tool, ctx.cam);
     tp
 }
 
@@ -761,7 +923,7 @@ fn face(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
 fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let (lo, hi) = ctx.stock;
-    let top = ctx.wz(op.top).unwrap_or(hi.z);
+    let top = rest_top(ctx, ctx.wz(op.top).unwrap_or(hi.z));
     let bottom = ctx.wz(op.bottom).unwrap_or(ctx.part().lo.z + op.leave_floor);
     let r = t.radius();
     let bound = offset(&rect(lo, hi), r * 0.5);
@@ -770,7 +932,7 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let mut any = false;
     for z in levels(top, bottom, stepdown(op, t), &floors) {
         let keep = offset(&ctx.geo.shadow(z), r + op.leave);
-        let area = difference(&bound, &keep);
+        let area = rest_area(ctx, difference(&bound, &keep), z, r, op.leave);
         if area.is_empty() {
             z_prev = z;
             continue;
@@ -782,6 +944,20 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     if !any {
         tp.warnings.push("nothing to clear".into());
     }
+}
+
+/// Rest machining: no higher than the material that is left.
+fn rest_top(ctx: &Ctx, top: f64) -> f64 {
+    ctx.stock_in.as_ref().map(|m| top.min(m.max_top())).unwrap_or(top)
+}
+
+/// Rest machining: the part of a tool-centre area at height z from which the tool reaches material that is left.
+fn rest_area(ctx: &Ctx, area: Shapes, z: f64, r: f64, leave: f64) -> Shapes {
+    let Some(m) = &ctx.stock_in else { return area };
+    let near = offset(&crate::cam_3d::leftover(ctx, m, z, leave), r + 0.5);
+    let a = crate::cam_3d::intersect(&area, &near);
+    // drop slivers
+    offset(&offset(&a, -0.05 * r), 0.05 * r)
 }
 
 /// Closed pockets at height z that have a floor at or below z (through holes are left to hole operations).
@@ -797,7 +973,7 @@ fn pocket_area(ctx: &Ctx, op: &Operation, z: f64, grow: f64) -> Shapes {
 
 fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
-    let top = ctx.wz(op.top).unwrap_or(ctx.stock.1.z);
+    let top = rest_top(ctx, ctx.wz(op.top).unwrap_or(ctx.stock.1.z));
     let floors = ctx.geo.floors();
     let bottom = match ctx.wz(op.bottom) {
         Some(b) => b,
@@ -837,6 +1013,12 @@ fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
         }
         if shapes_area(&offset(&area, t.radius() + op.leave)) < shapes_area(&raw) * 0.98 {
             too_small = true;
+        }
+        let area = rest_area(ctx, area, z, t.radius(), op.leave);
+        if area.is_empty() {
+            z_prev = z;
+            any = true;
+            continue;
         }
         any = true;
         pb.clear_area(&area, z, z_prev, stepover(op, t), op.climb);
@@ -1135,7 +1317,9 @@ fn helix(pb: &mut Pb, cx: f64, cy: f64, r: f64, z0: f64, z1: f64, pitch: f64, di
     }
 }
 
-fn stats(tp: &mut Toolpath, tool: &Tool, rapid_rate: f64) {
+fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
+    let rapid_rate = cam.rapid_rate.max(1.0);
+    let rapid_z = if cam.machine.rapid_z > 0.0 { cam.machine.rapid_z } else { rapid_rate };
     let mut p = DVec3::ZERO;
     let mut first = true;
     let (mut cut, mut rapid, mut time) = (0.0, 0.0, 0.0);
@@ -1145,7 +1329,9 @@ fn stats(tp: &mut Toolpath, tool: &Tool, rapid_rate: f64) {
         match *m {
             Move::Rapid(_) => {
                 rapid += d;
-                time += d / rapid_rate.max(1.0) * 60.0;
+                // the axes move together: the slower of them sets the time
+                let (dxy, dz) = if first { (0.0, 0.0) } else { ((q - p).truncate().length(), (q.z - p.z).abs()) };
+                time += (dxy / rapid_rate).max(dz / rapid_z) * 60.0;
             }
             Move::Feed(_, f) => {
                 cut += d;

@@ -13,8 +13,10 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::{Operation, Tool, ToolKind};
+use crate::cam::{OpKind, Operation, Tool, ToolKind};
 use crate::cam_paths::{Contour, Ctx, P2, Part, Pb, Shapes, Toolpath, difference, flat, levels, offset, rect, stepdown, stepover, union_all};
+use crate::cam_sim::{LUT_STEP, tool_lut};
+use crate::cam_stock::StockMap;
 
 // ---------------------------------------------------------------- cutter shapes
 
@@ -651,14 +653,27 @@ struct Fin {
     top: f64,
     lo_slope: f64,
     hi_slope: f64,
+    /// Rest machining: the stock left by earlier operations and the tool's profile; only positions
+    /// that cut into it are kept.
+    stock: Option<(StockMap, Vec<f32>)>,
 }
+
+/// Material thinner than this counts as already cut.
+const REST_TOL: f64 = 0.02;
 
 impl Fin {
     fn new(ctx: &Ctx, op: &Operation, t: &Tool) -> Fin {
         let d = Dropper::new(ctx.geo.part, t, op.leave);
         let floor = ctx.wz(op.bottom).unwrap_or(ctx.geo.part.lo.z);
         let (a, b) = (op.slope_min.clamp(0.0, 90.0), op.slope_max.clamp(0.0, 90.0));
-        Fin { d, floor, top: ctx.stock.1.z, lo_slope: a.min(b).to_radians() - 1e-6, hi_slope: a.max(b).to_radians() + 1e-6 }
+        let stock = ctx.stock_in.clone().map(|m| (m, tool_lut(t))).filter(|(_, l)| !l.is_empty());
+        let top = ctx.stock_in.as_ref().map(|m| m.max_top()).unwrap_or(ctx.stock.1.z).min(ctx.stock.1.z);
+        Fin { d, floor, top, lo_slope: a.min(b).to_radians() - 1e-6, hi_slope: a.max(b).to_radians() + 1e-6, stock }
+    }
+
+    /// Whether a tool position is worth cutting: its slope is in range and (for rest machining) it touches material.
+    fn keep(&self, p: DVec3, slope: f64) -> bool {
+        self.wanted(slope) && self.stock.as_ref().map(|(m, lut)| m.engaged(p, self.d.radius(), lut, LUT_STEP) > REST_TOL).unwrap_or(true)
     }
 
     fn at(&self, p: DVec2, s: &mut Scratch) -> (DVec3, f64) {
@@ -715,7 +730,7 @@ impl Fin {
         let mut out = vec![];
         let mut cur: Vec<DVec3> = vec![];
         for (p, a) in pts {
-            if self.wanted(*a) {
+            if self.keep(*p, *a) {
                 cur.push(*p);
             } else if !cur.is_empty() {
                 out.push(std::mem::take(&mut cur));
@@ -816,12 +831,13 @@ fn order_runs(mut runs: Vec<Vec<DVec3>>, mut here: DVec2) -> Vec<Vec<DVec3>> {
 
 /// Turn a closed loop with a slope flag per point into runs: the whole loop when every point is wanted.
 fn loop_runs(fin: &Fin, pts: Vec<(DVec3, f64)>) -> (Option<Vec<DVec3>>, Vec<Vec<DVec3>>) {
-    if pts.iter().all(|(_, a)| fin.wanted(*a)) {
+    let keep: Vec<bool> = pts.iter().map(|(p, a)| fin.keep(*p, *a)).collect();
+    if keep.iter().all(|k| *k) {
         return (Some(pts.into_iter().map(|p| p.0).collect()), vec![]);
     }
     // start just after an unwanted point so runs don't wrap
     let n = pts.len();
-    let k = pts.iter().position(|(_, a)| !fin.wanted(*a)).unwrap_or(0);
+    let k = keep.iter().position(|k| !*k).unwrap_or(0);
     let rot: Vec<(DVec3, f64)> = (0..n).map(|i| pts[(k + i) % n]).collect();
     (None, fin.runs(&rot))
 }
@@ -1012,36 +1028,50 @@ impl Ord for Node {
     }
 }
 
-pub(crate) fn scallop(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
-    let t = pb.tool;
-    let fin = Fin::new(ctx, op, t);
-    let region = silhouette(ctx);
-    if region.is_empty() {
-        tp.warnings.push("nothing to finish".into());
-        return;
-    }
-    let step = stepover(op, t);
-    let pts: Vec<DVec2> = flat(&region).iter().flat_map(|c| c.iter().map(|p| DVec2::from(*p))).collect();
-    let lo = pts.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
-    let hi = pts.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
-    let want = (step / 3.0).clamp(0.05, 0.5);
-    let cell = grid_cell(lo, hi, want);
-    let (lo, hi) = (lo - DVec2::splat(2.0 * cell), hi + DVec2::splat(2.0 * cell));
-    let g = drop_grid(&fin.d, lo, hi, cell, fin.floor);
-    let (nx, ny) = (g.nx, g.ny);
-    // nodes inside the boundary, row by row
-    let mut mask = vec![false; nx * ny];
-    for j in 0..ny {
-        let y = g.y0 + j as f64 * cell;
-        for (a, b) in scan(&region, DVec2::Y, DVec2::X, y) {
-            let i0 = (((a - g.x0) / cell).ceil() as i64).max(0);
-            let i1 = (((b - g.x0) / cell).floor() as i64).min(nx as i64 - 1);
-            for i in i0..=i1 {
-                mask[j * nx + i as usize] = true;
+/// Cut passes along iso-lines of a distance grid at the given levels, each level nearest-first.
+fn offset_passes(fin: &Fin, op: &Operation, dg: &Grid, levels: &[f64], start: DVec2) -> Vec<Vec<DVec3>> {
+    let mut all = vec![];
+    let mut here = start;
+    for &level in levels {
+        let mut closed = vec![];
+        let mut open = vec![];
+        let loops = iso(dg, level, None);
+        let done = par_map(loops.len(), |k, s| {
+            let mut l = loops[k].clone();
+            if op.climb {
+                l.reverse();
+            }
+            let mut pts: Vec<(DVec3, f64)> = densify(&l, dg.cell * 0.5, true).into_iter().map(|p| fin.at(p, s)).collect();
+            if let Some(f) = pts.first().copied() {
+                pts.push(f);
+                pts = fin.refined(&pts, s);
+                pts.pop();
+            }
+            pts
+        });
+        for pts in done {
+            if pts.len() < 4 {
+                continue;
+            }
+            match loop_runs(fin, pts) {
+                (Some(c), _) => closed.push(c),
+                (None, runs) => open.extend(runs),
             }
         }
+        let mut lv = order_loops(closed, here);
+        lv.extend(order_runs(open, lv.last().map(|l| l.last().unwrap().truncate()).unwrap_or(here)));
+        if let Some(l) = lv.last() {
+            here = l.last().unwrap().truncate();
+        }
+        all.extend(lv);
     }
-    // distance over the surface from the boundary (Dijkstra on a 16-neighbour grid)
+    all
+}
+
+/// Distance over the surface (the grid's heights) from the edge of the masked nodes, by Dijkstra on a
+/// 16-neighbour grid; infinite outside the mask.
+fn surface_distance(g: &Grid, mask: &[bool]) -> Vec<f64> {
+    let (nx, ny, cell) = (g.nx, g.ny, g.cell);
     let mut dist = vec![f64::INFINITY; nx * ny];
     let mut heap = BinaryHeap::new();
     let nb: [(i64, i64); 16] = [(1, 0), (-1, 0), (0, 1), (0, -1), (1, 1), (1, -1), (-1, 1), (-1, -1), (1, 2), (2, 1), (-1, 2), (-2, 1), (1, -2), (2, -1), (-1, -2), (-2, -1)];
@@ -1083,51 +1113,198 @@ pub(crate) fn scallop(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath)
             }
         }
     }
+    dist
+}
+
+pub(crate) fn scallop(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
+    let t = pb.tool;
+    let fin = Fin::new(ctx, op, t);
+    let region = silhouette(ctx);
+    if region.is_empty() {
+        tp.warnings.push("nothing to finish".into());
+        return;
+    }
+    let step = stepover(op, t);
+    let pts: Vec<DVec2> = flat(&region).iter().flat_map(|c| c.iter().map(|p| DVec2::from(*p))).collect();
+    let lo = pts.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p));
+    let hi = pts.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p));
+    let want = (step / 3.0).clamp(0.05, 0.5);
+    let cell = grid_cell(lo, hi, want);
+    let (lo, hi) = (lo - DVec2::splat(2.0 * cell), hi + DVec2::splat(2.0 * cell));
+    let g = drop_grid(&fin.d, lo, hi, cell, fin.floor);
+    let (nx, ny) = (g.nx, g.ny);
+    // nodes inside the boundary, row by row
+    let mut mask = vec![false; nx * ny];
+    for j in 0..ny {
+        let y = g.y0 + j as f64 * cell;
+        for (a, b) in scan(&region, DVec2::Y, DVec2::X, y) {
+            let i0 = (((a - g.x0) / cell).ceil() as i64).max(0);
+            let i1 = (((b - g.x0) / cell).floor() as i64).min(nx as i64 - 1);
+            for i in i0..=i1 {
+                mask[j * nx + i as usize] = true;
+            }
+        }
+    }
+    let dist = surface_distance(&g, &mask);
     let dmax = dist.iter().filter(|d| d.is_finite()).fold(0.0f64, |a, b| a.max(*b));
     let dg = Grid { x0: g.x0, y0: g.y0, cell, nx, ny, v: dist.iter().zip(&mask).map(|(d, m)| if *m && d.is_finite() { *d } else { -1.0 }).collect() };
-    let mut all = vec![];
-    let mut here = lo;
-    let mut k = 0;
-    loop {
-        let level = step * (k as f64 + 0.5);
-        if level > dmax {
-            break;
-        }
-        k += 1;
-        let mut closed = vec![];
-        let mut open = vec![];
-        let loops = iso(&dg, level, None);
-        let done = par_map(loops.len(), |k, s| {
-            let mut l = loops[k].clone();
-            if op.climb {
-                l.reverse();
-            }
-            let mut pts: Vec<(DVec3, f64)> = densify(&l, cell * 0.5, true).into_iter().map(|p| fin.at(p, s)).collect();
-            if let Some(f) = pts.first().copied() {
-                pts.push(f);
-                pts = fin.refined(&pts, s);
-                pts.pop();
-            }
-            pts
-        });
-        for pts in done {
-            if pts.len() < 4 {
-                continue;
-            }
-            match loop_runs(&fin, pts) {
-                (Some(c), _) => closed.push(c),
-                (None, runs) => open.extend(runs),
-            }
-        }
-        let mut lv = order_loops(closed, here);
-        lv.extend(order_runs(open, lv.last().map(|l| l.last().unwrap().truncate()).unwrap_or(here)));
-        if let Some(l) = lv.last() {
-            here = l.last().unwrap().truncate();
-        }
-        all.extend(lv);
-    }
+    let levels: Vec<f64> = (0..).map(|k| step * (k as f64 + 0.5)).take_while(|l| *l <= dmax).collect();
+    let all = offset_passes(&fin, op, &dg, &levels, lo);
     if all.is_empty() {
         tp.warnings.push("no surfaces in the slope range".into());
+        return;
+    }
+    fin.emit(pb, all, step * 3.0 + t.radius());
+}
+
+// ---------------------------------------------------------------- pencil / corner clean-up
+
+/// The bigger tool whose leftovers a pencil pass cleans up: a ball of `ref_diameter`, or the smallest of
+/// the bigger tools that finished (or else cut) before it, or a ball twice its size.
+fn reference_tool(ctx: &Ctx, op: &Operation, t: &Tool) -> Tool {
+    let ball = |d: f64| Tool { kind: ToolKind::Ball, diameter: d, corner_radius: d / 2.0, flute_length: t.flute_length.max(d * 3.0), ..t.clone() };
+    if op.ref_diameter > 0.0 {
+        return ball(op.ref_diameter);
+    }
+    let before = ctx.cam.ops.iter().take_while(|o| o.id != op.id).filter(|o| !o.suppressed);
+    let bigger = |finishing: bool| {
+        before
+            .clone()
+            .filter(|o| !finishing || matches!(o.kind, OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil))
+            .filter_map(|o| ctx.cam.tool(o.tool))
+            .filter(|x| x.diameter > t.diameter + 1e-6 && !x.kind.is_hole_tool())
+            .min_by(|a, b| a.diameter.total_cmp(&b.diameter))
+            .cloned()
+    };
+    bigger(true).or_else(|| bigger(false)).unwrap_or_else(|| ball(t.diameter * 2.0))
+}
+
+pub(crate) fn pencil(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
+    let t = pb.tool;
+    let fin = Fin::new(ctx, op, t);
+    let region = silhouette(ctx);
+    if region.is_empty() {
+        tp.warnings.push("nothing to finish".into());
+        return;
+    }
+    let reft = reference_tool(ctx, op, t);
+    if reft.diameter <= t.diameter + 1e-6 {
+        tp.warnings.push("the reference tool must be bigger than this one".into());
+        return;
+    }
+    let step = stepover(op, t);
+    let rr = reft.radius();
+    let pts: Vec<DVec2> = flat(&region).iter().flat_map(|c| c.iter().map(|p| DVec2::from(*p))).collect();
+    let lo = pts.iter().fold(DVec2::splat(f64::INFINITY), |a, p| a.min(*p)) - DVec2::splat(rr);
+    let hi = pts.iter().fold(DVec2::splat(f64::NEG_INFINITY), |a, p| a.max(*p)) + DVec2::splat(rr);
+    let cell = grid_cell(lo, hi, (step / 2.0).max(rr / 12.0).clamp(0.05, 0.3));
+    let g = drop_grid(&fin.d, lo, hi, cell, fin.floor);
+    let (nx, ny) = (g.nx, g.ny);
+    // the lowest the reference tool's cutting surface reaches over each node
+    let gr = drop_grid(&Dropper::new(ctx.geo.part, &reft, 0.0), lo, hi, cell, fin.floor);
+    let lref = tool_lut(&reft);
+    let n = (rr / cell).ceil() as i64;
+    let disk: Vec<(i64, i64, f64)> = (-n..=n)
+        .flat_map(|j| (-n..=n).map(move |i| (i, j)))
+        .filter_map(|(i, j)| {
+            let d = ((i * i + j * j) as f64).sqrt() * cell;
+            (d <= rr).then(|| (i, j, lref[((d / LUT_STEP) as usize).min(lref.len() - 1)] as f64))
+        })
+        .collect();
+    let env = par_map(ny, |j, _| {
+        (0..nx)
+            .map(|i| {
+                let mut best = f64::INFINITY;
+                for &(di, dj, h) in &disk {
+                    let (a, b) = (i as i64 + di, j as i64 + dj);
+                    if a < 0 || b < 0 || a >= nx as i64 || b >= ny as i64 {
+                        continue;
+                    }
+                    best = best.min(gr.v[b as usize * nx + a as usize] + h);
+                }
+                best as f32
+            })
+            .collect::<Vec<f32>>()
+    })
+    .concat();
+    // what the reference tool leaves, as stock (and no more than what is really left, for rest machining)
+    let mut left = StockMap { x0: g.x0, y0: g.y0, cell, nx, ny, hi: env, lo: vec![(fin.floor - 10.0) as f32; nx * ny] };
+    if op.rest {
+        if let Some(m) = &ctx.stock_in {
+            for j in 0..ny {
+                for i in 0..nx {
+                    let k = j * nx + i;
+                    left.hi[k] = left.hi[k].min(m.top(g.x0 + i as f64 * cell, g.y0 + j as f64 * cell));
+                }
+            }
+        }
+    }
+    // tool positions inside the outline that would still cut something
+    let lut = tool_lut(t);
+    let mut inside = vec![false; nx * ny];
+    for j in 0..ny {
+        let y = g.y0 + j as f64 * cell;
+        for (a, b) in scan(&region, DVec2::Y, DVec2::X, y) {
+            let i0 = (((a - g.x0) / cell).ceil() as i64).max(0);
+            let i1 = (((b - g.x0) / cell).floor() as i64).min(nx as i64 - 1);
+            for i in i0..=i1 {
+                inside[j * nx + i as usize] = true;
+            }
+        }
+    }
+    let rows = par_map(ny, |j, _| {
+        (0..nx)
+            .map(|i| {
+                let k = j * nx + i;
+                inside[k] && g.v[k] > fin.floor + 1e-6 && left.engaged(DVec3::new(g.x0 + i as f64 * cell, g.y0 + j as f64 * cell, g.v[k]), t.radius(), &lut, LUT_STEP) > REST_TOL
+            })
+            .collect::<Vec<bool>>()
+    });
+    let mask: Vec<bool> = rows.concat();
+    if !mask.iter().any(|m| *m) {
+        tp.warnings.push(format!("nothing left by a Ø{} {} to clean up", crate::cam::fmt_mm(reft.diameter), reft.kind.label().to_lowercase()));
+        return;
+    }
+    let dist = surface_distance(&g, &mask);
+    // passes in from the edge of each leftover strip; strips narrower than a stepover get one down the middle
+    let mut comp = vec![usize::MAX; nx * ny];
+    let mut cmax: Vec<f64> = vec![];
+    for k0 in 0..nx * ny {
+        if !mask[k0] || comp[k0] != usize::MAX {
+            continue;
+        }
+        let c = cmax.len();
+        let mut best = 0.0f64;
+        let mut stack = vec![k0];
+        comp[k0] = c;
+        while let Some(k) = stack.pop() {
+            best = best.max(dist[k]);
+            let (i, j) = (k % nx, k / nx);
+            for (a, b) in [(i.wrapping_sub(1), j), (i + 1, j), (i, j.wrapping_sub(1)), (i, j + 1)] {
+                if a < nx && b < ny && mask[b * nx + a] && comp[b * nx + a] == usize::MAX {
+                    comp[b * nx + a] = c;
+                    stack.push(b * nx + a);
+                }
+            }
+        }
+        cmax.push(best);
+    }
+    let dmax = cmax.iter().fold(0.0f64, |a, b| a.max(*b));
+    let wide = Grid { x0: g.x0, y0: g.y0, cell, nx, ny, v: (0..nx * ny).map(|k| if mask[k] && cmax[comp[k]] >= step * 0.5 { dist[k] } else { -1.0 }).collect() };
+    let narrow = Grid {
+        x0: g.x0,
+        y0: g.y0,
+        cell,
+        nx,
+        ny,
+        v: (0..nx * ny).map(|k| if mask[k] && cmax[comp[k]] < step * 0.5 && cmax[comp[k]] > 0.0 { dist[k] / cmax[comp[k]] } else { -1.0 }).collect(),
+    };
+    let levels: Vec<f64> = (0..).map(|k| step * (k as f64 + 0.5)).take_while(|l| *l <= dmax).collect();
+    let mut all = offset_passes(&fin, op, &narrow, &[0.5], lo);
+    let here = all.last().and_then(|r| r.last()).map(|p| p.truncate()).unwrap_or(lo);
+    all.extend(offset_passes(&fin, op, &wide, &levels, here));
+    if all.is_empty() {
+        tp.warnings.push("no corners in the slope range".into());
         return;
     }
     fin.emit(pb, all, step * 3.0 + t.radius());
@@ -1387,12 +1564,13 @@ impl Mat {
         Mat { x0: lo.x, y0: lo.y, cell, nx, ny, m: vec![false; nx * ny] }
     }
 
-    fn fill(&mut self, lo: DVec2, hi: DVec2) {
+    /// Material at height z: the stock box, or what is left of the stock.
+    fn fill(&mut self, lo: DVec2, hi: DVec2, stock: Option<&StockMap>, z: f64) {
         for j in 0..self.ny {
             let y = self.y0 + j as f64 * self.cell;
             for i in 0..self.nx {
                 let x = self.x0 + i as f64 * self.cell;
-                self.m[j * self.nx + i] = x >= lo.x && x <= hi.x && y >= lo.y && y <= hi.y;
+                self.m[j * self.nx + i] = x >= lo.x && x <= hi.x && y >= lo.y && y <= hi.y && stock.map(|m| m.solid(x, y, z, REST_TOL)).unwrap_or(true);
             }
         }
     }
@@ -1676,7 +1854,11 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     let t = pb.tool;
     let r = t.radius();
     let (lo, hi) = ctx.stock;
-    let top = ctx.wz(op.top).unwrap_or(hi.z);
+    let stock = ctx.stock_in.as_ref();
+    let mut top = ctx.wz(op.top).unwrap_or(hi.z);
+    if let Some(m) = stock {
+        top = top.min(m.max_top());
+    }
     let bottom = ctx.wz(op.bottom).unwrap_or(ctx.geo.part.lo.z + op.leave_floor);
     let rt0 = if op.trochoid > 0.0 { op.trochoid } else { 0.4 * t.diameter };
     let adv = stepover(op, t);
@@ -1690,13 +1872,18 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     let mut any = false;
     for z in levels(top, bottom, stepdown(op, t), &floors) {
         let keep = offset(&ctx.geo.shadow(z - op.leave_floor), r + op.leave);
-        let area = difference(&bound, &keep);
+        let mut area = difference(&bound, &keep);
+        if let Some(m) = stock {
+            // only where the tool would reach material that is left
+            area = intersect(&area, &offset(&leftover(ctx, m, z, op.leave), r + rt0));
+            area = offset(&offset(&area, -0.05 * r), 0.05 * r);
+        }
         if area.is_empty() {
             z_prev = z;
             continue;
         }
         any = true;
-        mat.fill(lo.truncate(), hi.truncate());
+        mat.fill(lo.truncate(), hi.truncate(), stock, z);
         let mut slab = Slab { pb: &mut *pb, mat: &mut mat, z, z_from: z_prev, r, adv, dir: if op.climb { 1.0 } else { -1.0 } };
         let mut covered: Shapes = vec![];
         let mut rt = rt0;
@@ -1733,8 +1920,43 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     }
 }
 
-fn intersect(a: &Shapes, b: &Shapes) -> Shapes {
+pub(crate) fn intersect(a: &Shapes, b: &Shapes) -> Shapes {
     difference(a, &difference(a, b))
+}
+
+/// Stock left at height z that isn't part (nor the `leave` on it), without slivers a couple of cells thin.
+pub(crate) fn leftover(ctx: &Ctx, m: &StockMap, z: f64, leave: f64) -> Shapes {
+    let c = m.cell * 1.5;
+    let x = difference(&material(m, z), &offset(&ctx.geo.shadow(z), leave.max(0.0) + c));
+    offset(&offset(&x, -c), c)
+}
+
+/// Outline of the stock that is left at height z (more than REST_TOL above it).
+pub(crate) fn material(m: &StockMap, z: f64) -> Shapes {
+    // a grid one cell bigger all round, so every outline closes
+    let (nx, ny) = (m.nx + 2, m.ny + 2);
+    let mut v = vec![-1.0; nx * ny];
+    for j in 0..m.ny {
+        for i in 0..m.nx {
+            let k = j * m.nx + i;
+            if m.hi[k] > m.lo[k] && (m.lo[k] as f64) < z {
+                v[(j + 1) * nx + i + 1] = m.hi[k] as f64 - z;
+            }
+        }
+    }
+    let g = Grid { x0: m.x0 - m.cell, y0: m.y0 - m.cell, cell: m.cell, nx, ny, v };
+    let loops: Vec<Contour> = iso(&g, REST_TOL, None)
+        .into_iter()
+        .map(|l| {
+            let mut p: Vec<DVec3> = l.iter().map(|q| q.extend(0.0)).collect();
+            p.push(p[0]);
+            let mut s = simplify3(&p, m.cell * 0.25);
+            s.pop();
+            s.into_iter().map(|q| [q.x, q.y]).collect::<Contour>()
+        })
+        .filter(|c: &Contour| c.len() >= 3)
+        .collect();
+    union_all(&loops)
 }
 
 #[cfg(test)]
@@ -1981,6 +2203,109 @@ mod tests {
         let picked = &generate(&c, &part)[0];
         let ys: Vec<f64> = picked.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[1]) } else { None }).collect();
         assert!(!ys.is_empty() && ys.iter().all(|y| *y < 1.0), "{ys:?}");
+    }
+
+    #[test]
+    fn rest_roughing_cuts_only_whats_left() {
+        let part = pocket_block();
+        let mut c = Cam::default();
+        let big = tool(&mut c, ToolKind::Flat, 8.0);
+        let small = tool(&mut c, ToolKind::Flat, 3.0);
+        c.add_op(OpKind::Adaptive, big);
+        let id = c.add_op(OpKind::Adaptive, small);
+        assert!(c.op(id).unwrap().rest, "roughing after roughing defaults to rest");
+        let (s, paths) = sim(&c, &part);
+        let bad: Vec<_> = s.events.iter().filter(|e| matches!(e.kind, EventKind::Gouge | EventKind::Rapid)).take(3).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        let mut full = c.clone();
+        full.op_mut(id).unwrap().rest = false;
+        let all = generate(&full, &part);
+        assert!(paths[1].cut_length > 1.0 && paths[1].cut_length < all[1].cut_length * 0.5, "rest {} vs full {}", paths[1].cut_length, all[1].cut_length);
+    }
+
+    #[test]
+    fn pencil_cleans_the_corners() {
+        let part = pocket_block();
+        let mut c = Cam::default();
+        c.stock.top = 0.0;
+        c.stock.side = 0.0;
+        let ball6 = tool(&mut c, ToolKind::Ball, 6.0);
+        let ball2 = tool(&mut c, ToolKind::Ball, 2.0);
+        c.add_op(OpKind::Parallel, ball6);
+        let id = c.add_op(OpKind::Pencil, ball2);
+        let (s, paths) = sim(&c, &part);
+        let tp = paths.iter().find(|p| p.op == id).unwrap();
+        assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
+        let pts: Vec<DVec3> = tp.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(DVec3::from(*p)) } else { None }).collect();
+        assert!(pts.len() > 20);
+        // every cut lies in the band along the pocket's floor edges, where the Ø6 ball couldn't reach
+        for p in pts.iter().filter(|p| p.z < 9.0) {
+            let wall = (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(20.0 - p.y);
+            assert!(wall > -0.01 && wall < 3.2, "{p}");
+        }
+        assert!(pts.iter().any(|p| p.z < 5.5), "reaches the floor corner");
+        let g: Vec<_> = s.events.iter().filter(|e| e.kind == EventKind::Gouge).take(3).collect();
+        assert!(g.is_empty(), "{g:?}");
+    }
+
+    #[test]
+    fn second_setup_starts_from_the_flipped_stock() {
+        let part_tris = {
+            let p = block();
+            p.tris.clone()
+        };
+        let mut a = Cam { name: "Top".into(), ..Default::default() };
+        a.stock.side = 3.0;
+        a.stock.top = 1.0;
+        a.stock.bottom = 2.0;
+        let t = tool(&mut a, ToolKind::Flat, 6.0);
+        let id = a.add_op(OpKind::Adaptive, t);
+        a.op_mut(id).unwrap().leave = 0.0;
+        a.op_mut(id).unwrap().leave_floor = 0.0;
+        let mut b = Cam { name: "Bottom".into(), follows: "Top".into(), orient: "bottom".into(), tools: a.tools.clone(), next_id: a.next_id, ..Default::default() };
+        let bid = b.add_op(OpKind::Adaptive, t);
+        b.op_mut(bid).unwrap().leave = 0.0;
+        b.op_mut(bid).unwrap().leave_floor = 0.0;
+        let mut cams = vec![a, b];
+        let left = crate::cam_paths::link_setups(&mut cams, 1, &part_tris, &[]).unwrap().expect("carried stock");
+        let pb = Part::new(&part_tris, &[], "bottom");
+        // the same stock box seen upside down
+        let (lo, hi) = stock_box(&cams[1], &pb);
+        assert!((hi.z - lo.z - 13.0).abs() < 1e-6 && (hi.x - lo.x - 46.0).abs() < 1e-6, "{lo} {hi}");
+        // the first setup cleared round the part down to its bottom: only the 2 mm skin is left there
+        let beside = DVec3::new(pb.lo.x - 2.0, (pb.lo.y + pb.hi.y) / 2.0, 0.0);
+        let (l, h) = left.column(beside.x, beside.y).expect("skin");
+        assert!((h as f64 - (pb.hi.z + 2.0)).abs() < 0.3 && (l as f64 - pb.hi.z).abs() < 0.3, "{l} {h}");
+        let paths = crate::cam_paths::generate_from(&cams[1], &pb, Some(&left));
+        let deepest = paths[0].moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
+        assert!(deepest > pb.hi.z - 0.5, "goes down to {deepest} through air (part top {})", pb.hi.z);
+        let mut s = Sim::new(&cams[1], &pb, (lo, hi), &paths, 300);
+        s.start_from(&left);
+        s.run_to(usize::MAX, usize::MAX);
+        assert!(s.events.iter().all(|e| e.kind != EventKind::Gouge), "{:?}", s.events.first());
+    }
+
+    #[test]
+    fn machine_limits_and_holders() {
+        let part = block();
+        let mut c = Cam::default();
+        assert!(crate::cam::set_machine(&mut c, "Desktop router (3018 class)"));
+        c.machine.travel = [30.0, 300.0, 100.0];
+        let t = tool(&mut c, ToolKind::Flat, 6.0);
+        c.tools[0].feed = 5000.0;
+        c.add_op(OpKind::Contour, t);
+        let tp = &generate(&c, &part)[0];
+        assert!(tp.warnings.iter().any(|w| w.contains("X travel")), "{:?}", tp.warnings);
+        assert!(tp.warnings.iter().any(|w| w.contains("slowed down")), "{:?}", tp.warnings);
+        assert!(tp.moves.iter().all(|m| !matches!(m, Move::Feed(_, f) if *f > 1000.0 + 1e-9)));
+        // an ER20 nut: 30 mm across 3 mm up, 34 mm across above that
+        let mut h = c.tools[0].clone();
+        assert!(crate::cam::set_holder(&mut h, "ER20 collet chuck"));
+        let o = h.holder_outline();
+        assert_eq!(crate::cam::holder_underside(&o, 10.0), Some(0.0));
+        assert!((crate::cam::holder_underside(&o, 16.0).unwrap() - 1.5).abs() < 1e-9);
+        assert!((crate::cam::holder_underside(&o, 18.0).unwrap() - 19.5).abs() < 1e-9);
+        assert_eq!(crate::cam::holder_underside(&o, 70.0), None);
     }
 }
 
