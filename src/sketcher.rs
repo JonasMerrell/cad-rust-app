@@ -526,6 +526,15 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if typed_input(app, ctx) {
         return;
     }
+    if crate::app::key_mods(ctx).0 && ctx.input(|i| i.key_pressed(Key::A)) {
+        // select everything in the sketch
+        let (sk, _) = app.sk();
+        let all: Vec<Sel> = sk.curves.iter().map(|c| Sel::Curve(c.id)).chain(sk.points.iter().map(|p| Sel::Point(p.id))).collect();
+        let s = app.sketch.as_mut().unwrap();
+        s.sel = all.into_iter().collect();
+        app.scene_dirty = true;
+        return;
+    }
     if crate::app::key_mods(ctx).1 && ctx.input(|i| i.key_pressed(Key::E)) {
         app.extrude_from_sketch();
         return;
@@ -1730,6 +1739,10 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
         return;
     }
     let mut old_points = Sketch::curve_points(&c.geom);
+    // a trimmed line is a different length: its length and midpoint constraints no longer apply
+    if matches!(c.geom, Geom::Line { .. }) {
+        sk.constraints.retain(|k| !matches!(k, Constraint::Length { l, .. } | Constraint::Midpoint { l, .. } if *l == cid));
+    }
     let set = |sk: &mut Sketch, g: Geom| {
         if let Some(x) = sk.curves.iter_mut().find(|x| x.id == cid) {
             x.geom = g;
@@ -3219,6 +3232,20 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                     app.sk_checkpoint();
                     if let Some(d) = app.sk_mut().constraints.get_mut(i).and_then(|c| c.dim_mut()) {
                         d.expr = new.clone();
+                    }
+                    // grow from the dimension's first point (it stays put), not about the middle
+                    let hold: Vec<Id> = {
+                        let (sk, _) = app.sk();
+                        match sk.constraints.get(i) {
+                            Some(Constraint::Length { l, .. }) => sk.curve(*l).map(|c| Sketch::curve_points(&c.geom)).and_then(|p| p.first().copied()).into_iter().collect(),
+                            Some(Constraint::Distance { a, .. }) | Some(Constraint::AxisDistance { a, .. }) => vec![*a],
+                            Some(Constraint::PointLineDistance { p, .. }) => vec![*p],
+                            _ => vec![],
+                        }
+                    };
+                    let fixed_already = app.sketch.as_ref().map(|s| hold.iter().all(|h| s.status.fixed_points.contains(h))).unwrap_or(false);
+                    if !hold.is_empty() && !fixed_already {
+                        app.solve_sketch(&hold);
                     }
                     app.after_sketch_edit();
                     if was_ok && app.sketch.as_ref().unwrap().status.error.is_some() {

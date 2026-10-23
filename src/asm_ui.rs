@@ -271,6 +271,7 @@ fn start_mate(app: &mut App, kind: MateKind) {
     if app.asm.dialog.is_some() {
         mate_ok(app);
     }
+    app.asm.insert_open = false;
     let Some(i) = asm_index(app) else { return };
     let before = app.ws.assemblies[i].clone();
     checkpoint(app);
@@ -412,7 +413,14 @@ fn insert_panel(app: &mut App, ui: &mut Ui) {
             ui.label(RichText::new("  (no parts yet)").color(theme::muted()).italics().size(12.0));
         }
         for b in bodies {
-            let name = app.studio_doc(si).and_then(|d| d.parts.get(&crate::doc::body_key(b.id))).and_then(|p| p.name.clone()).unwrap_or_else(|| b.name.clone());
+            // unnamed parts are called after their Part Studio when there are several studios
+            let name = app.studio_doc(si).and_then(|d| d.parts.get(&crate::doc::body_key(b.id))).and_then(|p| p.name.clone()).unwrap_or_else(|| {
+                if app.ws.studios.len() > 1 {
+                    if bodies.len() == 1 { s.name.clone() } else { format!("{} {}", s.name, b.name) }
+                } else {
+                    b.name.clone()
+                }
+            });
             if ui
                 .add(egui::Button::image_and_text(icons::image("extrude", 14.0).tint(theme::text()), RichText::new(&name).size(12.5)))
                 .on_hover_text("Insert an instance")
@@ -524,7 +532,9 @@ fn mates(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new("Pick a mate type in the toolbar").color(theme::muted()).size(12.0));
         return;
     }
-    let rows: Vec<(u64, String, MateKind, bool)> = a.mates.iter().map(|m| (m.id, m.name.clone(), m.kind, m.suppressed)).collect();
+    // a mate still being picked says so
+    let rows: Vec<(u64, String, MateKind, bool)> =
+        a.mates.iter().map(|m| (m.id, if m.a.is_none() || m.b.is_none() { format!("{} · picking…", m.name) } else { m.name.clone() }, m.kind, m.suppressed)).collect();
     let mut action = None;
     for (id, name, kind, suppressed) in rows {
         let failed = app.asm.failed.contains(&id);
@@ -928,7 +938,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             }
         } else if let Some(d) = &app.asm.dialog {
             if let Some(h) = h {
-                if let Some(c) = connector_for(app, &h) {
+                // both sides of a mate must be on different parts
+                let other = asm(app).and_then(|a| a.mates.iter().find(|m| m.id == d.mate)).and_then(|m| if d.active == 0 { m.b } else { m.a });
+                if other.map(|o| o.inst == h.inst).unwrap_or(false) {
+                    app.flash("Pick the second side on a different part", ToastKind::Info);
+                } else if let Some(c) = connector_for(app, &h) {
                     let (mid, active) = (d.mate, d.active);
                     let mut solve_now = false;
                     if let Some(a) = asm_mut(app) {

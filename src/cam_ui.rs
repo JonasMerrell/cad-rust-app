@@ -1468,7 +1468,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
     let mut open = true;
     let mut add: Vec<Tool> = vec![];
     let mut imported = None;
-    egui::Window::new("Tool library").open(&mut open).default_size([420.0, 480.0]).collapsible(false).show(ctx, |ui| {
+    egui::Window::new("Tool library").open(&mut open).default_size([420.0, 480.0]).default_pos(ctx.content_rect().center() - egui::vec2(210.0, 240.0)).constrain(true).collapsible(false).show(ctx, |ui| {
         ui.horizontal(|ui| {
             ui.add(egui::TextEdit::singleline(&mut app.cam.lib_search).hint_text("Search, e.g. 6 flat or M5").desired_width(170.0));
             egui::ComboBox::from_id_salt("lib-kind").selected_text(app.cam.lib_kind.map(|k| k.label()).unwrap_or("All types")).show_ui(ui, |ui| {

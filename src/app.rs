@@ -363,7 +363,14 @@ impl App {
         let mut any = false;
         for id in ids {
             if let Some(sk) = self.doc.feature_mut(id) {
-                if matches!(sk.op, Op::Sketch { .. }) && !sk.hidden {
+                // sketches with loose points (hole centres, pattern points) stay visible for later features
+                let loose = if let Op::Sketch { sketch, .. } = &sk.op {
+                    let used: std::collections::HashSet<_> = sketch.curves.iter().flat_map(|c| crate::sketch::Sketch::curve_points(&c.geom)).collect();
+                    sketch.points.iter().any(|p| !used.contains(&p.id))
+                } else {
+                    false
+                };
+                if matches!(sk.op, Op::Sketch { .. }) && !sk.hidden && !loose {
                     sk.hidden = true;
                     any = true;
                 }
@@ -841,7 +848,9 @@ impl App {
             lo = lo.min(b.bbox[0].into());
             hi = hi.max(b.bbox[1].into());
         }
-        for f in &self.doc.features {
+        // visible sketches only (hidden ones are usually inside a part already)
+        let editing = self.sketch.as_ref().map(|s| s.feature);
+        for f in self.doc.features.iter().filter(|f| !f.hidden || Some(f.id) == editing) {
             if let Op::Sketch { sketch, frame, .. } = &f.op {
                 if let Some((a, b)) = sketch.bounds() {
                     for p in [a, b, glam::DVec2::new(a.x, b.y), glam::DVec2::new(b.x, a.y)] {
@@ -2226,9 +2235,13 @@ impl App {
                         if let Some((rt, text)) = &mut self.renaming_tab {
                             if *rt == t {
                                 let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
-                                r.request_focus();
-                                if r.lost_focus() {
+                                // Escape cancels; Enter or clicking elsewhere keeps the new name
+                                if ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+                                    action = Some(("rename-cancel", t));
+                                } else if r.lost_focus() {
                                     action = Some(("rename-done", t));
+                                } else if !r.has_focus() {
+                                    r.request_focus();
                                 }
                                 continue;
                             }
@@ -2322,6 +2335,7 @@ impl App {
         };
         match a {
             "rename" => self.renaming_tab = name_of(&self.ws, t).map(|n| (t, n)),
+            "rename-cancel" => self.renaming_tab = None,
             "rename-done" => {
                 if let Some((_, text)) = self.renaming_tab.take() {
                     let text = text.trim().to_string();
@@ -2607,7 +2621,7 @@ impl eframe::App for App {
             self.drawer(&ctx, central.response.rect);
         }
         self.toast_ui(&ctx);
-        let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Sketcher".into()));
+        let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into()));
         ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
     }
 }
