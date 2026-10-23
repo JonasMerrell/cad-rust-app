@@ -12,7 +12,7 @@ fn table() -> &'static HashMap<&'static str, &'static [u8]> {
             .iter()
             .map(|(name, d)| {
                 let svg = format!(
-                    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#ffffff" stroke-width="1.7" stroke-linecap="round" stroke-linejoin="round"><path d="{d}"/></svg>"##
+                    r##"<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="24" height="24" fill="none" stroke="#ffffff" stroke-width="1.6" stroke-linecap="round" stroke-linejoin="round"><path d="{d}"/></svg>"##
                 );
                 (*name, &*Box::leak(svg.into_bytes().into_boxed_slice()))
             })

@@ -76,61 +76,61 @@ pub struct ViewPalette {
 }
 
 const DARK_PAL: Palette = Palette {
-    bg: hex(0x15181c),
-    panel: hex(0x1f242b),
-    panel_2: hex(0x262c34),
-    border: hex(0x323a44),
-    text: hex(0xdfe3e8),
-    muted: hex(0x8a94a1),
-    accent: hex(0x4ea1ff),
-    ok_green: hex(0x6fcf86),
+    bg: hex(0x131518),
+    panel: hex(0x1b1d21),
+    panel_2: hex(0x26292e),
+    border: hex(0x2c2f35),
+    text: hex(0xe3e6ea),
+    muted: hex(0x8b929c),
+    accent: hex(0x4c9bff),
+    ok_green: hex(0x5cc47a),
     error: hex(0xff7a7a),
     error_soft: hex(0xff8a8a),
-    finish: hex(0x2f7d4a),
-    active_text: hex(0xcfe5ff),
-    toast: hex(0x2a3442),
-    toast_err: hex(0x4a2626),
-    toast_err_border: hex(0x7a3a3a),
-    header: hex(0x181c21),
-    tabbar: hex(0x15181c),
-    window: rgba(0x1f242b, 0xf7),
-    label_bg: rgba(0x15181c, 0xd9),
-    sel_fill: rgba(0x4ea1ff, 0x33),
-    active_fill: rgba(0x4ea1ff, 0x2e),
-    active_stroke: rgba(0x4ea1ff, 0x80),
-    rollbar: hex(0x5a6573),
+    finish: hex(0x2c8a4f),
+    active_text: hex(0xb9d8ff),
+    toast: hex(0x24272c),
+    toast_err: hex(0x3d2324),
+    toast_err_border: hex(0x6e3436),
+    header: hex(0x1b1d21),
+    tabbar: hex(0x161819),
+    window: rgba(0x1e2125, 0xfa),
+    label_bg: rgba(0x1b1d21, 0xe0),
+    sel_fill: rgba(0x4c9bff, 0x2e),
+    active_fill: rgba(0x4c9bff, 0x29),
+    active_stroke: rgba(0x4c9bff, 0x00),
+    rollbar: hex(0x50565f),
 };
 
 const LIGHT_PAL: Palette = Palette {
     bg: hex(0xffffff),
     panel: hex(0xffffff),
-    panel_2: hex(0xebeef2),
-    border: hex(0xd6dadf),
-    text: hex(0x24292f),
-    muted: hex(0x6a737d),
-    accent: hex(0x1a73d9),
-    ok_green: hex(0x23884a),
+    panel_2: hex(0xf0f2f5),
+    border: hex(0xe2e5e9),
+    text: hex(0x1f2329),
+    muted: hex(0x6b7380),
+    accent: hex(0x1a6fd9),
+    ok_green: hex(0x1f8a4c),
     error: hex(0xd03a3a),
     error_soft: hex(0xc8413f),
-    finish: hex(0x2f8a50),
+    finish: hex(0x22894c),
     active_text: hex(0x0f5bb5),
     toast: hex(0xffffff),
-    toast_err: hex(0xfdecec),
-    toast_err_border: hex(0xe9a3a3),
-    header: hex(0xf3f4f6),
-    tabbar: hex(0xe4e6e9),
-    window: rgba(0xffffff, 0xf7),
-    label_bg: rgba(0xffffff, 0xe6),
-    sel_fill: rgba(0x1a73d9, 0x26),
-    active_fill: rgba(0x1a73d9, 0x1f),
-    active_stroke: rgba(0x1a73d9, 0x80),
-    rollbar: hex(0xb4b9bf),
+    toast_err: hex(0xfdeeee),
+    toast_err_border: hex(0xeab1b1),
+    header: hex(0xffffff),
+    tabbar: hex(0xf6f7f9),
+    window: rgba(0xffffff, 0xfc),
+    label_bg: rgba(0xffffff, 0xeb),
+    sel_fill: rgba(0x1a6fd9, 0x21),
+    active_fill: rgba(0x1a6fd9, 0x1c),
+    active_stroke: rgba(0x1a6fd9, 0x00),
+    rollbar: hex(0xc3c8ce),
 };
 
 const DARK_VP: ViewPalette = ViewPalette {
-    background: hex(0x20252c),
-    background_2: hex(0x1a1e24),
-    body: hex(0x9aa9ba),
+    background: hex(0x26292e),
+    background_2: hex(0x1b1d21),
+    body: hex(0xa4b2c1),
     edge: hex(0x1c2026),
     hover: hex(0xffb547),
     // selection stands apart from blue sketch geometry and the amber hover
@@ -144,17 +144,17 @@ const DARK_VP: ViewPalette = ViewPalette {
     snap: hex(0xffe066),
     fixed: hex(0xff7a7a),
     dim: hex(0xffd27f),
-    grid_minor: hex(0x2b313a),
-    grid_major: hex(0x39414d),
+    grid_minor: hex(0x2c3035),
+    grid_major: hex(0x3a3f46),
     axis_x: hex(0xe05555),
     axis_y: hex(0x55c26a),
     axis_z: hex(0x5588ee),
 };
 
 const LIGHT_VP: ViewPalette = ViewPalette {
-    background: hex(0xffffff),
-    background_2: hex(0xf1f4f8),
-    body: hex(0x7a90a3),
+    background: hex(0xfcfcfd),
+    background_2: hex(0xeef1f5),
+    body: hex(0x8a9eb1),
     edge: hex(0x1b2630),
     hover: hex(0xf3a73b),
     picked: hex(0xe8451c),
@@ -209,34 +209,73 @@ pub fn set_dark(ctx: &egui::Context, dark: bool) {
     apply(ctx);
 }
 
+/// Inter for the UI text (Regular for body, Medium as the `medium()` family),
+/// with egui's bundled fonts kept as fallbacks for symbols.
+pub fn install_fonts(ctx: &egui::Context) {
+    use egui::{FontData, FontDefinitions, FontFamily};
+    let mut f = FontDefinitions::default();
+    f.font_data.insert("inter".into(), std::sync::Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Inter-Regular.ttf"))));
+    f.font_data.insert("inter-medium".into(), std::sync::Arc::new(FontData::from_static(include_bytes!("../assets/fonts/Inter-Medium.ttf"))));
+    let fallbacks = f.families.get(&FontFamily::Proportional).cloned().unwrap_or_default();
+    f.families.get_mut(&FontFamily::Proportional).unwrap().insert(0, "inter".into());
+    let mut medium = vec!["inter-medium".to_string()];
+    medium.extend(fallbacks);
+    f.families.insert(FontFamily::Name("medium".into()), medium);
+    ctx.set_fonts(f);
+}
+
+/// The Medium weight of the UI font, for titles and the document name.
+pub fn medium() -> egui::FontFamily {
+    egui::FontFamily::Name("medium".into())
+}
+
+/// Background of text fields and combo boxes.
+pub fn input_fill() -> Color32 {
+    if is_dark() { pal().bg } else { hex(0xf3f4f6) }
+}
+
+/// Make combo boxes in `ui` look like filled input fields rather than flat buttons.
+pub fn field_style(ui: &mut egui::Ui) {
+    let w = &mut ui.visuals_mut().widgets;
+    w.inactive.weak_bg_fill = input_fill();
+    w.hovered.weak_bg_fill = if is_dark() { hex(0x202328) } else { hex(0xeceef1) };
+}
+
 pub fn apply(ctx: &egui::Context) {
     let p = pal();
     let dark = is_dark();
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
     v.override_text_color = Some(p.text);
+    v.weak_text_color = Some(p.muted);
     v.panel_fill = p.panel;
     v.window_fill = p.window;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(8);
-    v.menu_corner_radius = CornerRadius::same(7);
-    v.extreme_bg_color = if dark { p.bg } else { hex(0xffffff) }; // text edits / combo boxes
-    v.text_edit_bg_color = Some(if dark { p.bg } else { hex(0xffffff) });
+    v.window_corner_radius = CornerRadius::same(10);
+    v.menu_corner_radius = CornerRadius::same(8);
+    // inputs are filled, not outlined; focus draws the accent ring
+    let input = input_fill();
+    v.extreme_bg_color = input;
+    v.text_edit_bg_color = Some(input);
     v.faint_bg_color = p.panel_2;
-    v.selection.bg_fill = if dark { rgba(0x4ea1ff, 0x40) } else { rgba(0x1a73d9, 0x40) };
+    v.code_bg_color = p.panel_2;
+    v.selection.bg_fill = if dark { rgba(0x4c9bff, 0x45) } else { rgba(0x1a6fd9, 0x38) };
     v.selection.stroke = Stroke::new(1.0, p.accent);
     v.hyperlink_color = p.accent;
-    if !dark {
-        v.window_shadow = egui::Shadow { offset: [0, 4], blur: 16, spread: 0, color: Color32::from_black_alpha(40) };
-        v.popup_shadow = egui::Shadow { offset: [0, 3], blur: 10, spread: 0, color: Color32::from_black_alpha(36) };
-    }
+    let shadow = if dark { 110 } else { 28 };
+    v.window_shadow = egui::Shadow { offset: [0, 6], blur: 20, spread: 0, color: Color32::from_black_alpha(shadow) };
+    v.popup_shadow = egui::Shadow { offset: [0, 4], blur: 14, spread: 0, color: Color32::from_black_alpha(shadow) };
+    v.striped = false;
+    v.slider_trailing_fill = true;
+    v.handle_shape = egui::style::HandleShape::Circle;
 
-    let r = CornerRadius::same(4);
+    let r = CornerRadius::same(5);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.panel;
     w.noninteractive.weak_bg_fill = p.panel;
     w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
-    w.inactive.bg_fill = if dark { p.bg } else { hex(0xf3f4f6) };
+    w.noninteractive.corner_radius = r;
+    w.inactive.bg_fill = if dark { hex(0x2a2d33) } else { hex(0xe9ecf0) };
     w.inactive.weak_bg_fill = Color32::TRANSPARENT;
     w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
@@ -247,27 +286,34 @@ pub fn apply(ctx: &egui::Context) {
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
     w.hovered.corner_radius = r;
     w.hovered.expansion = 0.0;
-    w.active.bg_fill = p.panel_2;
-    w.active.weak_bg_fill = p.panel_2;
-    w.active.bg_stroke = Stroke::new(1.0, p.accent);
+    w.active.bg_fill = if dark { hex(0x30343a) } else { hex(0xe6e9ed) };
+    w.active.weak_bg_fill = w.active.bg_fill;
+    w.active.bg_stroke = Stroke::NONE;
     w.active.fg_stroke = Stroke::new(1.0, p.text);
     w.active.corner_radius = r;
     w.active.expansion = 0.0;
-    w.open.bg_fill = if dark { p.bg } else { hex(0xffffff) };
-    w.open.weak_bg_fill = w.open.bg_fill;
-    w.open.bg_stroke = Stroke::new(1.0, p.accent);
+    w.open.bg_fill = p.panel_2;
+    w.open.weak_bg_fill = p.panel_2;
+    w.open.bg_stroke = Stroke::NONE;
     w.open.fg_stroke = Stroke::new(1.0, p.text);
-    w.open.corner_radius = CornerRadius::same(4);
+    w.open.corner_radius = r;
     let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
     ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
     ctx.set_visuals_of(theme, v);
 
     ctx.style_mut_of(theme, |s| {
-        s.spacing.item_spacing = egui::vec2(6.0, 4.0);
+        s.spacing.item_spacing = egui::vec2(6.0, 5.0);
         s.spacing.button_padding = egui::vec2(6.0, 4.0);
-        s.spacing.interact_size.y = 24.0;
+        s.spacing.interact_size.y = 26.0;
+        s.spacing.menu_margin = egui::Margin::same(6);
+        s.spacing.window_margin = egui::Margin::same(10);
+        s.spacing.combo_width = 120.0;
+        s.spacing.icon_width = 14.0;
+        s.spacing.icon_width_inner = 8.0;
+        s.spacing.scroll = egui::style::ScrollStyle::floating();
         use egui::{FontId, TextStyle};
-        s.text_styles.insert(TextStyle::Body, FontId::proportional(13.0));
+        s.text_styles.insert(TextStyle::Heading, FontId::new(16.0, medium()));
+        s.text_styles.insert(TextStyle::Body, FontId::proportional(12.5));
         s.text_styles.insert(TextStyle::Button, FontId::proportional(12.5));
         s.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
         s.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.0));

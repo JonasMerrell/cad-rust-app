@@ -162,6 +162,7 @@ pub enum LeftPane {
 impl App {
     pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
         let dark = load_dark_pref();
+        theme::install_fonts(&cc.egui_ctx);
         theme::set_dark(&cc.egui_ctx, dark);
         egui_extras::install_image_loaders(&cc.egui_ctx);
         if let Some(rs) = &cc.wgpu_render_state {
@@ -976,7 +977,7 @@ impl App {
     pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
         ui.add_space(3.0);
         let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 26.0), Sense::hover());
-        ui.painter().vline(rect.center().x, rect.y_range().shrink(2.0), Stroke::new(1.0, theme::border()));
+        ui.painter().vline(rect.center().x, rect.y_range().shrink(5.0), Stroke::new(1.0, theme::border()));
         ui.add_space(3.0);
         ui.spacing_mut().item_spacing.x = 1.0;
         add(ui);
@@ -986,17 +987,22 @@ impl App {
     /// Top strip: logo, document menu and name, theme and phone toggles.
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
-            ui.spacing_mut().item_spacing.x = 6.0;
+            ui.spacing_mut().item_spacing.x = 8.0;
             ui.add(icons::image("logo", 20.0).tint(theme::accent()));
             if !self.phone {
-                ui.label(RichText::new("cad-app").size(16.0).color(theme::muted()));
+                ui.label(RichText::new("cad-app").family(theme::medium()).size(15.0).color(theme::text()));
+                let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
+                ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::border()));
             }
             ui.menu_image_button(icons::image("menu", 18.0).tint(theme::text()), |ui| self.document_menu(ui)).response.on_hover_text("Document menu");
             let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
             let name = if self.phone && name.chars().count() > 18 { format!("{}…", name.chars().take(17).collect::<String>()) } else { name };
-            ui.label(RichText::new(name).size(15.0).strong().color(theme::text()));
+            ui.label(RichText::new(name).family(theme::medium()).size(14.0).color(theme::text()));
             if !self.phone {
-                ui.label(RichText::new("Main").size(12.0).color(theme::muted()));
+                // branch badge
+                Frame::new().fill(theme::panel_2()).corner_radius(4).inner_margin(Margin::symmetric(6, 1)).show(ui, |ui| {
+                    ui.label(RichText::new("Main").size(11.0).color(theme::muted()));
+                });
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (icon, tip) = if self.dark { ("sun", "Switch to light mode") } else { ("moon", "Switch to dark mode") };
@@ -1014,11 +1020,13 @@ impl App {
                     KernelState::Busy => ("Rebuilding", theme::accent()),
                     KernelState::Error => ("Kernel error", theme::error()),
                 };
+                ui.add_space(4.0);
                 if !self.phone {
-                    ui.label(RichText::new(txt).size(12.0).color(theme::muted()));
+                    ui.label(RichText::new(txt).size(11.5).color(theme::muted()));
                 }
                 let (r, _) = ui.allocate_exact_size(egui::vec2(8.0, 8.0), Sense::hover());
-                ui.painter().circle_filled(r.center(), 4.0, col);
+                ui.painter().circle_filled(r.center(), 5.5, col.gamma_multiply(0.25));
+                ui.painter().circle_filled(r.center(), 3.5, col);
             });
         });
     }
@@ -1171,7 +1179,7 @@ impl App {
         let matches: Vec<&str> =
             if q.is_empty() { vec![] } else { FEATURE_GROUPS.iter().flat_map(|g| g.iter().copied()).filter(|k| doc::kind_label(k).to_lowercase().contains(&q)).collect() };
         let resp = ui.add(
-            egui::TextEdit::singleline(&mut self.tool_search).hint_text(RichText::new("Search tools…").color(theme::muted())).desired_width(170.0).margin(egui::vec2(6.0, 4.0)),
+            egui::TextEdit::singleline(&mut self.tool_search).hint_text(RichText::new("Search tools…").color(theme::muted())).desired_width(170.0).margin(egui::vec2(8.0, 5.0)),
         );
         let mut start = None;
         if resp.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter)) {
@@ -1290,7 +1298,7 @@ impl App {
             {
                 let on = self.sidebar_open && self.left_pane == pane;
                 let fg = if on { theme::active_text() } else { theme::text() };
-                let mut b = egui::Button::image(icons::image(icon, 19.0).tint(fg)).min_size(egui::vec2(30.0, 30.0));
+                let mut b = egui::Button::image(icons::image(icon, 18.0).tint(fg)).min_size(egui::vec2(30.0, 30.0));
                 if on {
                     b = b.fill(theme::active_fill());
                 }
@@ -1311,7 +1319,7 @@ impl App {
             LeftPane::Features => {
                 // features on top, parts pinned below, like Onshape
                 let total = ui.available_height();
-                let parts_h = if self.parts_open { (24.0 + 23.0 * self.result.bodies.len().max(1) as f32 + 12.0).min(total * 0.4) } else { 30.0 };
+                let parts_h = if self.parts_open { (28.0 + 26.0 * self.result.bodies.len().max(1) as f32 + 14.0).min(total * 0.4) } else { 30.0 };
                 let props = self.picks.iter().any(|r| matches!(r, Ref::Body { .. }));
                 let props_h = if props { 190.0f32.min(total * 0.35) } else { 0.0 };
                 let issues_h = if self.result.issues.is_empty() { 0.0 } else { (90.0 + 34.0 * self.result.issues.len().min(4) as f32).min(total * 0.35) };
@@ -1319,12 +1327,12 @@ impl App {
                 let top_h = (total - parts_h - props_h - issues_h - decals_h).max(80.0);
                 ui.allocate_ui(egui::vec2(ui.available_width(), top_h), |ui| {
                     egui::ScrollArea::vertical().id_salt("feature-scroll").auto_shrink([false, false]).show(ui, |ui| {
-                        Frame::new().inner_margin(Margin { left: 6, right: 6, top: 6, bottom: 6 }).show(ui, |ui| self.feature_tree(ui));
+                        Frame::new().inner_margin(Margin { left: 8, right: 8, top: 8, bottom: 6 }).show(ui, |ui| self.feature_tree(ui));
                     });
                 });
                 let y = ui.cursor().top();
                 ui.painter().hline(ui.max_rect().x_range(), y, Stroke::new(1.0, theme::border()));
-                Frame::new().inner_margin(Margin { left: 6, right: 6, top: 4, bottom: 2 }).show(ui, |ui| {
+                Frame::new().inner_margin(Margin { left: 8, right: 8, top: 4, bottom: 2 }).show(ui, |ui| {
                     egui::ScrollArea::vertical().id_salt("parts-scroll").max_height(parts_h - 6.0).auto_shrink([false, true]).show(ui, |ui| self.parts_list(ui));
                 });
                 if !self.doc.decals.is_empty() {
@@ -1360,14 +1368,14 @@ impl App {
             ui.add(icons::image("filter", 16.0).tint(theme::muted()));
             ui.add(
                 egui::TextEdit::singleline(&mut self.tree_filter)
-                    .hint_text(RichText::new("Filter by name or type").italics().color(theme::muted()))
+                    .hint_text(RichText::new("Filter by name or type").color(theme::muted()))
                     .desired_width(ui.available_width()),
             );
         });
         ui.add_space(6.0);
         // header
         ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Features ({})", self.doc.features.len())).strong().size(13.0));
+            ui.label(RichText::new(format!("Features ({})", self.doc.features.len())).family(theme::medium()).size(12.5));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 ui.spacing_mut().item_spacing.x = 2.0;
                 let rolled = self.doc.rollback.is_some();
@@ -2107,8 +2115,9 @@ impl App {
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hint")));
         let font = egui::FontId::proportional(12.0);
         let g = painter.layout(msg, font, theme::muted(), area.width() - 260.0);
-        let at = egui::pos2(area.left() + 12.0, area.bottom() - 10.0 - g.size().y);
-        painter.rect_filled(egui::Rect::from_min_size(at, g.size()).expand2(egui::vec2(6.0, 3.0)), 3.0, theme::label_bg());
+        let at = egui::pos2(area.left() + 16.0, area.bottom() - 14.0 - g.size().y);
+        let pill = egui::Rect::from_min_size(at, g.size()).expand2(egui::vec2(10.0, 5.0));
+        painter.rect(pill, 6.0, theme::label_bg(), Stroke::new(1.0, theme::border()), egui::StrokeKind::Inside);
         painter.galley(at, g, theme::muted());
     }
 
@@ -2153,7 +2162,7 @@ impl App {
             .fixed_pos(egui::pos2(r.center().x, r.bottom() - bottom))
             .interactable(false)
             .show(ctx, |ui| {
-                Frame::new().fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(6).inner_margin(Margin::symmetric(12, 6)).show(ui, |ui| {
+                Frame::new().fill(fill).stroke(Stroke::new(1.0, stroke)).corner_radius(8).inner_margin(Margin::symmetric(14, 8)).shadow(ui.visuals().popup_shadow).show(ui, |ui| {
                     ui.set_max_width(r.width() * 0.8);
                     ui.label(RichText::new(text).color(theme::text()));
                 });
@@ -2545,23 +2554,23 @@ impl eframe::App for App {
         self.pump_kernel();
         self.shortcuts(&ctx);
 
-        let header = Frame::new().fill(theme::header()).inner_margin(Margin::symmetric(8, 3));
-        egui::Panel::top("header").frame(header).resizable(false).show(ui, |ui| self.header(ui));
-        let bar = Frame::new().fill(theme::panel()).inner_margin(Margin::symmetric(6, 3)).stroke(Stroke::new(1.0, theme::border()));
+        let header = Frame::new().fill(theme::header()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 3 });
+        egui::Panel::top("header").frame(header).resizable(false).show_separator_line(false).show(ui, |ui| self.header(ui));
+        let bar = Frame::new().fill(theme::panel()).inner_margin(Margin { left: 8, right: 8, top: 2, bottom: 4 });
         egui::Panel::top("toolbar").frame(bar).resizable(false).show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("tabs")
-            .frame(Frame::new().fill(theme::tabbar()).inner_margin(Margin { left: 0, right: 6, top: 0, bottom: 0 }))
+            .frame(Frame::new().fill(theme::tabbar()).inner_margin(Margin { left: 4, right: 8, top: 0, bottom: 0 }))
             .resizable(false)
             .show(ui, |ui| self.tabs_ui(ui));
         if self.phone {
             egui::Panel::bottom("dock").frame(Frame::new().fill(theme::panel()).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
         }
         if !self.phone && matches!(self.tab, crate::workspace::Tab::Studio(_)) {
-            let rail = Frame::new().fill(theme::header()).stroke(Stroke::new(1.0, theme::border()));
-            egui::Panel::left("rail").frame(rail).resizable(false).exact_size(40.0).show(ui, |ui| self.rail(ui));
+            let rail = Frame::new().fill(theme::tabbar());
+            egui::Panel::left("rail").frame(rail).resizable(false).exact_size(42.0).show(ui, |ui| self.rail(ui));
         }
         if self.sidebar_open && !self.phone {
-            let side = Frame::new().fill(theme::panel()).stroke(Stroke::new(1.0, theme::border()));
+            let side = Frame::new().fill(theme::panel());
             egui::Panel::left("sidebar").frame(side).resizable(true).default_size(250.0).min_size(190.0).show(ui, |ui| match self.tab {
                 crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
                 crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
@@ -2610,10 +2619,10 @@ pub fn key_mods(ctx: &egui::Context) -> (bool, bool) {
 }
 
 fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
-    Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
+    Frame::new().inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 12 }).show(ui, |ui| {
         ui.set_width(ui.available_width());
-        ui.label(RichText::new(title.to_uppercase()).color(theme::muted()).size(11.0).strong());
-        ui.add_space(4.0);
+        ui.label(RichText::new(title.to_uppercase()).family(theme::medium()).color(theme::muted()).size(10.5));
+        ui.add_space(6.0);
         add(ui);
     });
     let r = ui.max_rect();
@@ -2636,13 +2645,13 @@ fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl 
 }
 
 fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
-    let h = 24.0;
+    let h = 26.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
     let p = ui.painter();
     if picked {
-        p.rect_filled(rect, CornerRadius::same(3), theme::sel_fill());
+        p.rect_filled(rect, CornerRadius::same(5), theme::sel_fill());
     } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(3), theme::panel_2());
+        p.rect_filled(rect, CornerRadius::same(5), theme::panel_2());
     }
     let alpha = if rolled { 0.4 } else { 1.0 };
     let col = |c: Color32| c.gamma_multiply(alpha);
@@ -2653,14 +2662,14 @@ fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolle
     } else if hidden {
         theme::muted()
     } else {
-        theme::text().gamma_multiply(0.85)
+        theme::lerp(theme::text(), theme::muted(), 0.45)
     };
     icons::image(icon, 16.0).tint(col(icol)).paint_at(ui, icon_rect);
     let mut color = if error.is_some() { theme::error_soft() } else { theme::text() };
     if suppressed || hidden {
         color = color.gamma_multiply(0.6);
     }
-    let font = egui::FontId::proportional(13.0);
+    let font = egui::FontId::proportional(12.5);
     let galley = ui.painter().layout_no_wrap(name.to_string(), font, col(color));
     let tp = egui::pos2(x0 + 22.0, rect.center().y - galley.size().y / 2.0);
     if suppressed {
@@ -2677,18 +2686,19 @@ fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolle
 /// A document tab in the bottom bar: icon and name, the active one raised.
 fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Response {
     let font = egui::FontId::proportional(12.5);
-    let col = if active { theme::text() } else { theme::text().gamma_multiply(0.8) };
+    let col = if active { theme::text() } else { theme::muted() };
+    let font = if active { egui::FontId::new(12.5, theme::medium()) } else { font };
     let g = ui.painter().layout_no_wrap(name.to_string(), font, col);
-    let w = (g.size().x + 44.0).max(120.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 30.0), Sense::click());
+    let w = (g.size().x + 46.0).max(120.0);
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click());
     let p = ui.painter();
+    let body = rect.shrink2(egui::vec2(1.0, 0.0));
     if active {
-        p.rect_filled(rect, 0.0, theme::panel());
-        p.hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
+        p.rect_filled(body, CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 }, theme::panel());
+        p.hline(body.shrink2(egui::vec2(6.0, 0.0)).x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
     } else if resp.hovered() {
-        p.rect_filled(rect, 0.0, theme::panel_2());
+        p.rect_filled(body.shrink2(egui::vec2(0.0, 3.0)), CornerRadius::same(6), theme::panel_2());
     }
-    p.vline(rect.right(), rect.y_range().shrink(6.0), Stroke::new(1.0, theme::border()));
     let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(15.0, 15.0));
     icons::image(icon, 15.0).tint(if active { theme::accent() } else { col }).paint_at(ui, ir);
     ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, col);
@@ -2697,20 +2707,20 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
 
 /// A collapsible group header row with a chevron ("Default geometry", "Parts (n)").
 fn disclosure_row(ui: &mut Ui, label: &str, open: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 24.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(3), theme::panel_2());
+        ui.painter().rect_filled(rect, CornerRadius::same(5), theme::panel_2());
     }
     let ir = egui::Rect::from_center_size(egui::pos2(rect.min.x + 12.0, rect.center().y), egui::vec2(14.0, 14.0));
-    icons::image(if open { "chevronDown" } else { "chevronRight" }, 14.0).tint(theme::text()).paint_at(ui, ir);
-    ui.painter().text(egui::pos2(rect.min.x + 24.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::proportional(13.0), theme::text());
+    icons::image(if open { "chevronDown" } else { "chevronRight" }, 14.0).tint(theme::muted()).paint_at(ui, ir);
+    ui.painter().text(egui::pos2(rect.min.x + 24.0, rect.center().y), egui::Align2::LEFT_CENTER, label, egui::FontId::new(12.5, theme::medium()), theme::text());
     resp
 }
 
 /// Onshape-style rollback bar: a thick grey bar under the last active feature.
 fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 14.0), Sense::click_and_drag());
-    let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 2.0, rect.center().y - 3.0), egui::pos2(rect.right() - 4.0, rect.center().y + 3.0));
+    let bar = egui::Rect::from_min_max(egui::pos2(rect.left() + 4.0, rect.center().y - 2.0), egui::pos2(rect.right() - 4.0, rect.center().y + 2.0));
     let c = if rolled {
         theme::accent()
     } else if resp.hovered() {
@@ -2718,7 +2728,7 @@ fn rollbar(ui: &mut Ui, rolled: bool) -> egui::Response {
     } else {
         theme::rollbar()
     };
-    ui.painter().rect_filled(bar, CornerRadius::same(1), c);
+    ui.painter().rect_filled(bar, CornerRadius::same(2), c);
     resp.on_hover_text(if rolled { "Rollback bar: drag it to roll back or forward, click to roll to the end" } else { "Rollback bar: drag it up to roll the model back; new features go here" })
 }
 
