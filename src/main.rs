@@ -31,6 +31,7 @@ mod render;
 mod script;
 mod script_ui;
 mod sketch;
+mod sketch_import;
 mod sketcher;
 mod text;
 mod theme;

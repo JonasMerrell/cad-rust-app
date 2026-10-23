@@ -367,6 +367,33 @@ impl Session {
                 let page = crate::printing::send_to_orcaweb(&url, &name, &bytes)?;
                 json!({"slice_page": page, "stl_bytes": bytes.len()})
             }
+            "import_file" if crate::sketch_import::is_drawing(std::path::Path::new(&str_arg(a, "path")?)) => {
+                let path = str_arg(a, "path")?;
+                let d = crate::sketch_import::read(std::path::Path::new(&path))?;
+                let scale = a.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
+                let at = match a.get("at") {
+                    Some(v) => pt2(v)?,
+                    None => DVec2::ZERO,
+                };
+                let sid = match a.get("sketch_id") {
+                    Some(_) => id_arg(a, "sketch_id")?,
+                    None => {
+                        let plane = parse_plane(a.get("plane").unwrap_or(&json!("top")))?;
+                        let frame = match &plane {
+                            Ref::OriginPlane { plane } => plane.frame(),
+                            Ref::Face { point, normal } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
+                            Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied().ok_or("that plane has not been built")?,
+                            _ => Frame::TOP,
+                        };
+                        let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Drawing".into()));
+                        self.doc.insert(name, Op::Sketch { plane, sketch: Sketch::default(), frame })
+                    }
+                };
+                let n = crate::sketch_import::add_to_sketch(self.sketch_mut(sid)?, &d, scale, at);
+                self.rebuild()?;
+                let skipped: Vec<Value> = d.skipped.iter().map(|(t, n)| json!({"type": t, "count": n})).collect();
+                json!({"sketch_id": sid, "curves": n, "skipped": skipped, "sketch": self.sketch_summary(sid)?})
+            }
             "import_file" => {
                 let path = str_arg(a, "path")?;
                 let p = std::path::Path::new(&path);
@@ -998,7 +1025,7 @@ fn tools() -> Value {
         {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, curvePattern {kind:'part'|'feature', bodies, path:[curve refs], count, align}, pointPattern {kind, bodies, points:[sketch_point refs], first point = where the original is}, mirror, boolean, split, transform, deleteBody, sheetMetal, heal {bodies, tolerance}, custom. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
-        {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}}), &["path"])},
+        {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
         {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Steel, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass) or hidden.", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}}), &["body"])},

@@ -304,6 +304,7 @@ dependencies = [
  "serde_json",
  "tiny-skia",
  "ttf-parser",
+ "usvg",
  "windows-sys 0.61.2",
 ]
 

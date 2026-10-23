@@ -26,6 +26,7 @@ rhai = "1"
 base64 = "0.22"
 flate2 = "1"
 i_overlay = "9.1"
+usvg = { version = "0.45", default-features = false }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
