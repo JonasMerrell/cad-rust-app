@@ -65,6 +65,7 @@ runs in this folder. Other MCP clients start the same command
 | `cam_tool_library` / `cam_tool` | search the preset tool library; add a preset or a tool by kind with overrides (including a holder preset or outline), edit or delete tools |
 | `import_tool_library` | import a Fusion 360 tool library (.json or .tools) or a tools.json into My tools, optionally adding every tool to a setup |
 | `export_setup_sheet` | save an HTML setup sheet for the operator: stock, work zero, fixtures, a picture, tools and operations |
+| `cam_template` | list, save, apply or delete operation templates (operations and their tools, without part-specific heights and picks) |
 | `cam_op` / `cam_info` | add, edit, reorder or delete operations (2.5D, plus 3D adaptive, parallel, waterline, scallop, pencil and deburr, and trace / vcarve on the Part Studio's `sketches`; `rest` to cut only what is left); toolpath stats, cycle time and warnings |
 | `simulate_cam` / `render_cam` | material removal simulation with crash detection (rapids into stock, shank/holder hits, gouges), optional PNG; toolpath render |
 | `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |

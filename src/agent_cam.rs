@@ -460,6 +460,41 @@ impl Session {
                 }
                 return Ok((json!({"cam": ci, "saved": a.get("path")}), Some(png)));
             }
+            "cam_template" => {
+                use crate::cam_template as tpl;
+                if let Some(n) = a.get("delete").and_then(|v| v.as_str()) {
+                    tpl::delete(n)?;
+                    json!({"deleted": n})
+                } else if let Some(n) = a.get("save").and_then(|v| v.as_str()) {
+                    let ci = self.cam_idx(a)?;
+                    let ids: Vec<u64> = a.get("operations").and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_u64()).collect()).unwrap_or_default();
+                    let t = tpl::from_cam(&self.ws.cams[ci], n, &ids);
+                    if t.ops.is_empty() {
+                        return Err("no operations to save".into());
+                    }
+                    let p = tpl::save(&t)?;
+                    json!({"saved": t.name, "file": p.display().to_string(), "operations": t.ops.iter().map(|o| &o.name).collect::<Vec<_>>(), "tools": t.tools.iter().map(|t| &t.name).collect::<Vec<_>>()})
+                } else if let Some(n) = a.get("apply").and_then(|v| v.as_str()) {
+                    let ci = self.cam_idx(a)?;
+                    let t = tpl::find(n)?;
+                    let studio = self.ws.cams[ci].studio;
+                    let sketch = self.studio_doc(studio).map(crate::cam_ui::sketch_input).unwrap_or_default().into_iter().rev().find(|s| !s.paths.is_empty()).map(|s| s.id);
+                    let ids = tpl::apply(&mut self.ws.cams[ci], &t, sketch);
+                    let (_, paths) = self.cam_build(ci)?;
+                    let c = &self.ws.cams[ci];
+                    let ops: Vec<Value> = ids
+                        .iter()
+                        .filter_map(|id| c.op(*id))
+                        .map(|o| {
+                            let tp = paths.iter().find(|p| p.op == o.id);
+                            json!({"id": o.id, "name": o.name, "kind": o.kind.key(), "tool": o.tool, "time_s": tp.map(|p| p.time.round()), "warnings": tp.map(|p| p.warnings.clone()).unwrap_or_default()})
+                        })
+                        .collect();
+                    json!({"applied": t.name, "operations": ops, "tools": c.tools.len()})
+                } else {
+                    json!({"templates": tpl::list().iter().map(|t| json!({"name": t.name, "operations": t.ops.iter().map(|o| format!("{} ({})", o.name, o.kind.key())).collect::<Vec<_>>(), "tools": t.tools.iter().map(|t| &t.name).collect::<Vec<_>>()})).collect::<Vec<_>>()})
+                }
+            }
             "export_setup_sheet" => {
                 let ci = self.cam_idx(a)?;
                 let path = super::str_arg(a, "path")?;
@@ -552,6 +587,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "cam_info", "description": "A Manufacture tab's setup, stock and part extents (work coordinates), tools, operations with times and warnings, the holes found in the part, and the cycle time.", "inputSchema": obj(json!({"cam": {"type": "integer"}}), &["cam"])}),
         json!({"name": "simulate_cam", "description": "Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
         json!({"name": "render_cam", "description": "PNG of the part with the stock box and the cutting moves (blue) of all operations, or of one (operation: id).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "operation": {"type": "integer"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["cam"])}),
+        json!({"name": "cam_template", "description": "Operation templates, kept for the user across documents. No arguments: list them. save: name (with cam; operations [ids], default every operation that isn't suppressed) saves the operations and their tools, leaving out what belongs to the part (top/bottom heights, at, points, edges, sketches). apply: name (with cam) adds the template's operations to that setup, reusing its tools where one is the same cutter and adding the others; trace/vcarve follow the latest sketch. delete: name.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "save": {"type": "string"}, "apply": {"type": "string"}, "delete": {"type": "string"}, "operations": {"type": "array"}}), &[])}),
         json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, a picture of the part on the machine, the tools (number, size, holder, speeds and feeds) and the operations in order (tool, Z range, stepdown/stepover, time, warnings).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
     ]
