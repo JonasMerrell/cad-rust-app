@@ -14,8 +14,8 @@ use std::f64::consts::{FRAC_PI_2, PI, TAU};
 use glam::{DVec2, DVec3};
 
 use crate::cam::{OpKind, Operation, Tool, ToolKind};
-use crate::cam_paths::{Contour, Ctx, P2, Part, Pb, Shapes, Toolpath, difference, flat, levels, offset, rect, stepdown, stepover, union_all};
-use crate::cam_sim::{LUT_STEP, tool_lut};
+use crate::cam_paths::{difference, flat, levels, offset, rect, stepdown, stepover, union_all, Contour, Ctx, Part, Pb, Shapes, Toolpath, P2};
+use crate::cam_sim::{tool_lut, LUT_STEP};
 use crate::cam_stock::StockMap;
 
 // ---------------------------------------------------------------- cutter shapes
@@ -80,7 +80,11 @@ impl Cutter3 {
             Shape::Cone { tip, tanb } => (rho - tip).max(0.0) / tanb.max(1e-6),
             Shape::Taper { tr, half } => {
                 let rt = tr * half.cos();
-                if rho <= rt { tr - (tr * tr - rho * rho).max(0.0).sqrt() } else { tr * (1.0 - half.sin()) + (rho - rt) / half.tan().max(1e-6) }
+                if rho <= rt {
+                    tr - (tr * tr - rho * rho).max(0.0).sqrt()
+                } else {
+                    tr * (1.0 - half.sin()) + (rho - rt) / half.tan().max(1e-6)
+                }
             }
         }
     }
@@ -576,7 +580,8 @@ fn iso(g: &Grid, level: f64, refine: Option<Refine>) -> Vec<Vec<DVec2>> {
     });
     let at: HashMap<usize, DVec2> = keys.into_iter().zip(pts).collect();
     let mut out = vec![];
-    while let Some(&start) = next.keys().next() {
+    // smallest key first, so the loops come out the same every run
+    while let Some(&start) = next.keys().min() {
         let mut k = start;
         let mut lp = vec![];
         loop {
@@ -678,7 +683,11 @@ impl Fin {
 
     fn at(&self, p: DVec2, s: &mut Scratch) -> (DVec3, f64) {
         let (z, a) = self.d.drop(p, s);
-        if z < self.floor { (DVec3::new(p.x, p.y, self.floor), 0.0) } else { (DVec3::new(p.x, p.y, z), a) }
+        if z < self.floor {
+            (DVec3::new(p.x, p.y, self.floor), 0.0)
+        } else {
+            (DVec3::new(p.x, p.y, z), a)
+        }
     }
 
     fn wanted(&self, slope: f64) -> bool {
@@ -1372,7 +1381,9 @@ pub fn sharp_edges(part: &Part, min_angle: f64) -> Vec<(Vec<DVec3>, Vec<DVec2>, 
     }
     // chain the edges
     let mut adj: HashMap<usize, Vec<usize>> = HashMap::new();
-    for &(a, b) in sharp.keys() {
+    let mut keys: Vec<(usize, usize)> = sharp.keys().copied().collect();
+    keys.sort();
+    for (a, b) in keys {
         adj.entry(a).or_default().push(b);
         adj.entry(b).or_default().push(a);
     }
@@ -1963,7 +1974,7 @@ pub(crate) fn material(m: &StockMap, z: f64) -> Shapes {
 mod tests {
     use super::*;
     use crate::cam::{Cam, OpKind};
-    use crate::cam_paths::{Move, generate, stock_box};
+    use crate::cam_paths::{generate, stock_box, Move};
     use crate::cam_sim::{EventKind, Sim};
 
     /// A 60 × 40 × 10 plate with a dome of radius 15 on top, as a height field on a 0.5 mm grid.
@@ -2221,6 +2232,35 @@ mod tests {
         full.op_mut(id).unwrap().rest = false;
         let all = generate(&full, &part);
         assert!(paths[1].cut_length > 1.0 && paths[1].cut_length < all[1].cut_length * 0.5, "rest {} vs full {}", paths[1].cut_length, all[1].cut_length);
+    }
+
+    #[test]
+    fn edits_regenerate_only_what_they_change() {
+        let part = pocket_block();
+        let mut c = Cam::default();
+        let big = tool(&mut c, ToolKind::Flat, 8.0);
+        let small = tool(&mut c, ToolKind::Flat, 3.0);
+        let ball = tool(&mut c, ToolKind::Ball, 6.0);
+        c.add_op(OpKind::Adaptive, big);
+        c.add_op(OpKind::Adaptive, small);
+        let f = c.add_op(OpKind::Parallel, ball);
+        let json = |t: &[Toolpath]| t.iter().map(|t| serde_json::to_string(&t.moves).unwrap()).collect::<Vec<_>>();
+        let first = json(&generate(&c, &part));
+        // the same again, worked out from scratch and from what is remembered
+        crate::cam_paths::forget_paths();
+        assert_eq!(json(&generate(&c, &part)), first);
+        assert_eq!(json(&generate(&c, &part)), first);
+        // a finishing pass changes on its own
+        c.op_mut(f).unwrap().stepover = Some(0.3);
+        let second = json(&generate(&c, &part));
+        assert_eq!(second[..2], first[..2]);
+        assert_ne!(second[2], first[2]);
+        // the rest roughing follows the roughing before it
+        c.tools.iter_mut().find(|t| t.id == big).unwrap().diameter = 10.0;
+        let third = json(&generate(&c, &part));
+        assert_ne!(third[0], first[0]);
+        assert_ne!(third[1], first[1]);
+        assert_eq!(third[2], second[2]);
     }
 
     #[test]

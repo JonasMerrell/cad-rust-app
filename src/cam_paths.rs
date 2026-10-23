@@ -16,7 +16,7 @@ use i_overlay::mesh::float::outline::offset::OutlineOffset;
 use i_overlay::mesh::float::style::{LineJoin, OutlineStyle};
 use serde::{Deserialize, Serialize};
 
-use crate::cam::{Cam, METRIC_COARSE, OpKind, Operation, Origin, Side, Tool, ToolKind};
+use crate::cam::{Cam, OpKind, Operation, Origin, Side, Tool, ToolKind, METRIC_COARSE};
 use crate::cam_sim::Sim;
 use crate::cam_stock::StockMap;
 
@@ -683,38 +683,213 @@ fn stock_resolution(stock: (DVec3, DVec3)) -> usize {
 /// Make the toolpaths starting from `stock`, the material an earlier setup left (None = the full block).
 /// Operations that machine only what is left see the stock as the operations before them leave it.
 pub fn generate_from(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> Vec<Toolpath> {
-    let mut ctx = Ctx::new(cam, part);
-    let ops: Vec<&Operation> = cam.ops.iter().filter(|o| !o.suppressed).collect();
-    let needs = |o: &Operation| (o.rest || stock.is_some()) && o.kind.uses_stock();
-    let last = ops.iter().rposition(|o| needs(o));
-    let mut sim: Option<Sim> = None;
-    let mut out: Vec<Toolpath> = vec![];
-    for (k, op) in ops.iter().enumerate() {
-        ctx.stock_in = None;
-        if needs(op) {
-            let s = sim.get_or_insert_with(|| {
-                let mut s = Sim::new(cam, part, ctx.stock, &[], stock_resolution(ctx.stock));
-                if let Some(m) = stock {
-                    s.start_from(m);
-                }
-                for tp in &out {
-                    s.push(cam, tp);
-                }
-                s
-            });
-            s.run_to(usize::MAX, usize::MAX);
-            ctx.stock_in = Some(s.stock_map());
-        }
-        let tp = op_path(&ctx, op);
-        if let Some(s) = sim.as_mut() {
-            if last.map(|l| k < l).unwrap_or(false) {
-                s.push(cam, &tp);
+    generate_all(cam, part, stock, false).0
+}
+
+/// The toolpaths and the stock once they have all run.
+pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> (Vec<Toolpath>, StockMap) {
+    let (paths, left) = generate_all(cam, part, stock, true);
+    let left = left.unwrap_or_else(|| final_stock(cam, part, &paths, stock));
+    (paths, left)
+}
+
+/// Toolpaths and stock states worked out before, by the hash of everything they depend on, so an edit
+/// regenerates only the operations it changes and the rest-machining ones after them.
+#[derive(Default)]
+struct Memo {
+    tick: u64,
+    paths: HashMap<u64, (u64, Toolpath)>,
+    stocks: HashMap<u64, (u64, StockMap)>,
+}
+
+static MEMO: std::sync::Mutex<Option<Memo>> = std::sync::Mutex::new(None);
+const MEMO_PATHS: usize = 64;
+const MEMO_STOCKS: usize = 16;
+
+fn memo<R>(f: impl FnOnce(&mut Memo) -> R) -> R {
+    let mut g = MEMO.lock().unwrap_or_else(|e| e.into_inner());
+    let m = g.get_or_insert_with(Memo::default);
+    m.tick += 1;
+    f(m)
+}
+
+#[cfg(test)]
+pub fn forget_paths() {
+    *MEMO.lock().unwrap() = None;
+}
+
+fn memo_path(key: u64) -> Option<Toolpath> {
+    memo(|m| {
+        let t = m.tick;
+        m.paths.get_mut(&key).map(|e| {
+            e.0 = t;
+            e.1.clone()
+        })
+    })
+}
+
+fn memo_stock(key: u64) -> Option<StockMap> {
+    memo(|m| {
+        let t = m.tick;
+        m.stocks.get_mut(&key).map(|e| {
+            e.0 = t;
+            e.1.clone()
+        })
+    })
+}
+
+fn evict<V>(map: &mut HashMap<u64, (u64, V)>, keep: usize) {
+    while map.len() > keep {
+        let Some(k) = map.iter().min_by_key(|e| e.1 .0).map(|e| *e.0) else { break };
+        map.remove(&k);
+    }
+}
+
+fn keep_path(key: u64, tp: &Toolpath) {
+    memo(|m| {
+        m.paths.insert(key, (m.tick, tp.clone()));
+        evict(&mut m.paths, MEMO_PATHS);
+    })
+}
+
+fn keep_stock(key: u64, s: &StockMap) {
+    memo(|m| {
+        m.stocks.insert(key, (m.tick, s.clone()));
+        evict(&mut m.stocks, MEMO_STOCKS);
+    })
+}
+
+fn hash_of(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
+    use std::hash::Hasher;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    f(&mut h);
+    h.finish()
+}
+
+fn part_hash(part: &Part) -> u64 {
+    use std::hash::Hash;
+    hash_of(|h| {
+        for t in &part.tris {
+            for p in t {
+                p.to_array().map(f64::to_bits).hash(h);
             }
         }
-        out.push(tp);
+        for (c, n, r) in &part.circles {
+            (c.to_array().map(f64::to_bits), n.to_array().map(f64::to_bits), r.to_bits()).hash(h);
+        }
+    })
+}
+
+fn stock_hash(s: Option<&StockMap>) -> u64 {
+    use std::hash::Hash;
+    hash_of(|h| {
+        if let Some(s) = s {
+            (s.x0.to_bits(), s.y0.to_bits(), s.cell.to_bits(), s.nx, s.ny).hash(h);
+            for (l, hi) in s.lo.iter().zip(&s.hi) {
+                (l.to_bits(), hi.to_bits()).hash(h);
+            }
+        }
+    })
+}
+
+fn generate_all(cam: &Cam, part: &Part, stock: Option<&StockMap>, want_stock: bool) -> (Vec<Toolpath>, Option<StockMap>) {
+    use std::hash::Hash;
+    let ops: Vec<&Operation> = cam.ops.iter().filter(|o| !o.suppressed).collect();
+    let needs = |o: &Operation| (o.rest || stock.is_some()) && o.kind.uses_stock();
+    // what every operation depends on: the setup's settings, the part, its own tool, and for rest machining the
+    // stock the operations before it leave (`prefix`, chained through their keys)
+    let base = {
+        let mut c = cam.clone();
+        c.ops.clear();
+        c.tools.clear();
+        c.next_id = 0;
+        c.program = 0;
+        c.name.clear();
+        c.follows.clear();
+        c.post.clear();
+        let (cj, ph) = (serde_json::to_string(&c).unwrap_or_default(), part_hash(part));
+        hash_of(|h| (cj, ph).hash(h))
+    };
+    let mut prefix = vec![hash_of(|h| (base, stock_hash(stock)).hash(h))];
+    let mut keys = vec![];
+    for (k, op) in ops.iter().enumerate() {
+        let oj = serde_json::to_string(&(op, cam.tool(op.tool))).unwrap_or_default();
+        // pencil picks its reference tool from the operations before it
+        let before =
+            if op.kind == OpKind::Pencil { serde_json::to_string(&ops[..k].iter().map(|o| (o, cam.tool(o.tool))).collect::<Vec<_>>()).unwrap_or_default() } else { String::new() };
+        let st = if needs(op) { prefix[k] } else { 0 };
+        let key = hash_of(|h| (base, oj, before, st).hash(h));
+        keys.push(key);
+        prefix.push(hash_of(|h| (prefix[k], key).hash(h)));
     }
+    let mut out: Vec<Option<Toolpath>> = keys.iter().map(|k| memo_path(*k)).collect();
+
+    // the operations that don't depend on the stock, side by side
+    let todo: Vec<usize> = (0..ops.len()).filter(|k| out[*k].is_none() && !needs(ops[*k])).collect();
+    if !todo.is_empty() {
+        let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(1).min(todo.len());
+        let next = std::sync::atomic::AtomicUsize::new(0);
+        let done: Vec<(usize, Toolpath)> = std::thread::scope(|sc| {
+            let hs: Vec<_> = (0..threads)
+                .map(|_| {
+                    sc.spawn(|| {
+                        let ctx = Ctx::new(cam, part);
+                        let mut got = vec![];
+                        loop {
+                            let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                            let Some(&k) = todo.get(i) else { break };
+                            got.push((k, op_path(&ctx, ops[k])));
+                        }
+                        got
+                    })
+                })
+                .collect();
+            hs.into_iter().flat_map(|h| h.join().unwrap_or_default()).collect()
+        });
+        for (k, tp) in done {
+            keep_path(keys[k], &tp);
+            out[k] = Some(tp);
+        }
+    }
+    // then the ones that machine what is left, in order; the simulator picks up from the latest stock known
+    let mut ctx = Ctx::new(cam, part);
+    let mut sim: Option<(usize, Sim)> = None;
+    let mut state = |at: usize, out: &[Option<Toolpath>]| -> StockMap {
+        if let Some(m) = memo_stock(prefix[at]) {
+            return m;
+        }
+        if sim.as_ref().map(|s| s.0 > at).unwrap_or(true) {
+            let (from, m) = (1..at).rev().find_map(|j| memo_stock(prefix[j]).map(|m| (j, Some(m)))).unwrap_or((0, stock.cloned()));
+            let b = stock_box(cam, part);
+            let mut s = Sim::new(cam, part, b, &[], stock_resolution(b));
+            if let Some(m) = m {
+                s.start_from(&m);
+            }
+            sim = Some((from, s));
+        }
+        let (from, s) = sim.as_mut().unwrap();
+        for tp in out[*from..at].iter().flatten() {
+            s.push(cam, tp);
+        }
+        *from = at;
+        s.run_to(usize::MAX, usize::MAX);
+        let m = s.stock_map();
+        keep_stock(prefix[at], &m);
+        m
+    };
+    for k in 0..ops.len() {
+        if out[k].is_some() {
+            continue;
+        }
+        ctx.stock_in = Some(state(k, &out));
+        let tp = op_path(&ctx, ops[k]);
+        keep_path(keys[k], &tp);
+        out[k] = Some(tp);
+    }
+    let left = want_stock.then(|| state(ops.len(), &out));
+    let mut out: Vec<Toolpath> = out.into_iter().flatten().collect();
     machine_checks(cam, &ctx, &mut out);
-    out
+    (out, left)
 }
 
 /// The stock once every toolpath has run, starting from `stock` (None = the full block).
@@ -814,8 +989,7 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, tris: &[[DVec3; 3]], circles: &[
         let (lo, hi) = stock_box(&cams[a], &pa);
         let (p, q) = (pa.to_part(lo), pa.to_part(hi));
         cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);
-        let paths = generate_from(&cams[a], &pa, stock.as_ref());
-        let left = final_stock(&cams[a], &pa, &paths, stock.as_ref());
+        let (_, left) = generate_with_stock(&cams[a], &pa, stock.as_ref());
         stock = Some(left.reorient(pa.rot, orient_matrix(&cams[b].orient)));
     }
     Ok(stock)
