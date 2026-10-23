@@ -169,6 +169,11 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
                     }
                 }
                 _ => {
+                    if !cam.machine.tool_changer {
+                        // manual tool change: stop for the operator, then pick up the new length offset
+                        o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
+                        o.line("M0");
+                    }
                     o.line(&format!("T{} M6", tool.number));
                     o.line(&format!("G43 H{}", tool.number));
                 }

@@ -156,4 +156,6 @@ pub const ICONS: &[(&str, &str)] = &[
     ("camWaterline", "M3 20c2-10 6-15 9-15s7 5 9 15M6 15h12M8 10h8M4.5 19h15"),
     ("camScallop", "M3 19c3-8 6-12 9-12s6 4 9 12M7 19c2-5 3-7 5-7s3 2 5 7M10.5 19c.5-2 1-3 1.5-3s1 1 1.5 3"),
     ("camDeburr", "M4 20V9l5-5h11v16zM4 9h5V4M14 2l-2 4 2 4M16 2l-2 4 2 4"),
+    ("camPencil", "M4 3v17h17M8 3v7a6 6 0 0 0 6 6h7M9 13.5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0"),
+    ("camSetup", "M3 15h10v5H3zM11 4h10v5H11zM6 12V9a3 3 0 0 1 3-3h1M18 12v3a3 3 0 0 1-3 3h-1"),
 ];

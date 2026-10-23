@@ -1,0 +1,41 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [70, 50]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 20}}},
+  {"tool": "create_sketch", "args": {"plane": {"kind": "face", "point": [35, 25, 20], "normal": [0, 0, 1]}}},
+  {"tool": "sketch_add", "args": {"sketch_id": 3, "items": [{"type": "rect", "corner1": [15, 13], "corner2": [55, 37]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 3}], "depth": 8, "op": "remove"}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [
+    {"kind": "edge", "point": [15, 13, 16]}, {"kind": "edge", "point": [55, 13, 16]}, {"kind": "edge", "point": [55, 37, 16]}, {"kind": "edge", "point": [15, 37, 16]}], "radius": 4}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [
+    {"kind": "edge", "point": [35, 13, 12]}, {"kind": "edge", "point": [55, 25, 12]}, {"kind": "edge", "point": [35, 37, 12]}, {"kind": "edge", "point": [15, 25, 12]}], "radius": 2}}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 7, "items": [{"type": "rect", "corner1": [20, 15], "corner2": [50, 35]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 7}], "depth": 5, "op": "remove"}}},
+
+  {"tool": "create_cam", "args": {"name": "Top", "stock": {"side": 3, "top": 1, "bottom": 2, "material": "Aluminium"}, "post": "grbl", "machine": "Hobby router, 600 × 400"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø8 flat", "holder": "ER20 collet, router spindle Ø80"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø3 flat", "holder": "ER20 collet, router spindle Ø80", "flute_length": 12, "stickout": 20}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6 ball", "holder": "ER20 collet, router spindle Ø80", "flute_length": 24, "stickout": 30}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø2 ball", "holder": "ER20 collet, router spindle Ø80", "flute_length": 10, "stickout": 20, "shank_diameter": 2}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6 90° chamfer", "holder": "ER20 collet, router spindle Ø80"}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "adaptive", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "adaptive", "tool": 2, "rest": true}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "parallel", "tool": 3, "slope_max": 60}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "waterline", "tool": 3, "slope_min": 50, "stepdown": 0.5}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "pencil", "tool": 4}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "deburr", "tool": 5, "chamfer": 0.3}},
+  {"tool": "simulate_cam", "args": {"cam": 0, "path": "setups-top-sim.png"}},
+
+  {"tool": "create_cam", "args": {"name": "Bottom", "follows": "Top", "orient": "bottom"}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "face", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "adaptive", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "deburr", "tool": 5, "chamfer": 0.3}},
+  {"tool": "cam_info", "args": {"cam": 1}},
+  {"tool": "simulate_cam", "args": {"cam": 1, "path": "setups-bottom-sim.png"}},
+  {"tool": "render_cam", "args": {"cam": 0, "path": "setups-top-paths.png"}},
+  {"tool": "export_gcode", "args": {"cam": 0, "path": "setups-top.nc"}},
+  {"tool": "export_gcode", "args": {"cam": 1, "path": "setups-bottom.nc"}},
+  {"tool": "save_document", "args": {"path": "setups.json"}}
+]

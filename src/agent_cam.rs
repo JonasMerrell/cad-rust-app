@@ -7,6 +7,7 @@ use super::{R, Session, round};
 use crate::cam::{self, Cam, OpKind, Operation, Tool, ToolKind};
 use crate::cam_paths::{self, Move, Part, Toolpath};
 use crate::cam_sim::Sim;
+use crate::cam_stock::StockMap;
 use crate::drawing_ui::DocCtx;
 
 /// Overlay JSON fields onto a serde value of `T`.
@@ -22,7 +23,45 @@ fn overlay<T: serde::Serialize + serde::de::DeserializeOwned>(base: &T, fields: 
 }
 
 fn tool_json(t: &Tool) -> Value {
-    json!({"id": t.id, "number": t.number, "name": t.name, "kind": t.kind.key(), "diameter": t.diameter, "description": t.describe(), "rpm": t.rpm, "feed": t.feed, "plunge_feed": t.plunge_feed, "stepdown": t.stepdown, "stepover": t.stepover, "flute_length": t.flute_length})
+    json!({"id": t.id, "number": t.number, "name": t.name, "kind": t.kind.key(), "diameter": t.diameter, "description": t.describe(), "rpm": t.rpm, "feed": t.feed, "plunge_feed": t.plunge_feed, "stepdown": t.stepdown, "stepover": t.stepover, "flute_length": t.flute_length, "stickout": t.stickout, "holder": if t.holder.len() >= 2 { json!(if t.holder_name.is_empty() { "custom" } else { t.holder_name.as_str() }) } else { json!(format!("Ø{} cylinder", crate::cam::fmt_mm(t.holder_diameter))) }})
+}
+
+/// `machine`: a preset name, or an object of fields (name, travel [x,y,z], max_feed, rapid_z, tool_changer).
+fn set_machine_arg(c: &mut Cam, a: &Value) -> R<()> {
+    match a.get("machine") {
+        None => Ok(()),
+        Some(Value::String(n)) => {
+            if cam::set_machine(c, n) {
+                Ok(())
+            } else {
+                Err(format!("unknown machine '{n}'; presets: {}", cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>().join(", ")))
+            }
+        }
+        Some(Value::Object(m)) => {
+            c.machine = overlay(&c.machine, m, &[])?;
+            Ok(())
+        }
+        Some(_) => Err("machine: a preset name or an object".into()),
+    }
+}
+
+/// `holder`: a preset name, or an outline [[diameter, height], …] from the holder's bottom face up.
+fn set_holder_arg(t: &mut Tool, a: &Value) -> R<()> {
+    match a.get("holder") {
+        None => Ok(()),
+        Some(Value::String(n)) => {
+            if cam::set_holder(t, n) {
+                Ok(())
+            } else {
+                Err(format!("unknown holder '{n}'; presets: {}", cam::holder_presets().iter().map(|h| h.0).collect::<Vec<_>>().join(", ")))
+            }
+        }
+        Some(v) => {
+            t.holder = serde_json::from_value(v.clone()).map_err(|_| "holder: a preset name or [[diameter, height], …]")?;
+            t.holder_name.clear();
+            Ok(())
+        }
+    }
 }
 
 impl Session {
@@ -36,6 +75,11 @@ impl Session {
 
     /// The setup's parts and toolpaths.
     fn cam_build(&mut self, ci: usize) -> R<(Part, Vec<Toolpath>)> {
+        self.cam_build_from(ci).map(|(p, t, _)| (p, t))
+    }
+
+    /// The setup's parts, toolpaths and the stock the setups before it leave.
+    fn cam_build_from(&mut self, ci: usize) -> R<(Part, Vec<Toolpath>, Option<StockMap>)> {
         self.sync();
         let c = self.ws.cams[ci].clone();
         self.ensure_built(c.studio)?;
@@ -43,9 +87,11 @@ impl Session {
         if tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
         }
+        let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &tris, &circles)?;
+        let c = &self.ws.cams[ci];
         let part = Part::new(&tris, &circles, &c.orient);
-        let paths = cam_paths::generate(&c, &part);
-        Ok((part, paths))
+        let paths = cam_paths::generate_from(c, &part, stock.as_ref());
+        Ok((part, paths, stock))
     }
 
     fn cam_info(&mut self, ci: usize) -> R<Value> {
@@ -76,6 +122,7 @@ impl Session {
         let total: f64 = paths.iter().map(|p| p.time).sum();
         Ok(json!({
             "name": c.name, "studio": c.studio, "orient": c.orient, "origin": c.origin.key(), "post": c.post,
+            "follows": c.follows, "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer},
             "stock": {"min": w(lo), "max": w(hi), "material": c.stock.material, "side": c.stock.side, "top": c.stock.top, "bottom": c.stock.bottom, "size": c.stock.size},
             "part": {"min": w(part.lo), "max": w(part.hi)},
             "note": "heights and points are in work coordinates (relative to the work zero)",
@@ -87,10 +134,13 @@ impl Session {
     }
 
     fn cam_sim(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim)> {
-        let (part, paths) = self.cam_build(ci)?;
+        let (part, paths, left) = self.cam_build_from(ci)?;
         let c = &self.ws.cams[ci];
         let stock = cam_paths::stock_box(c, &part);
         let mut sim = Sim::new(c, &part, stock, &paths, resolution);
+        if let Some(m) = &left {
+            sim.start_from(m);
+        }
         sim.run_to(usize::MAX, usize::MAX);
         Ok((part, paths, sim))
     }
@@ -103,7 +153,24 @@ impl Session {
                 self.sync();
                 let n = self.ws.cams.len() + 1;
                 let base = Cam { name: format!("Manufacture {n}"), studio: self.cur, ..Default::default() };
-                let mut c: Cam = overlay(&base, args, &["stock", "origin", "tools", "ops", "next_id"])?;
+                let mut c: Cam = overlay(&base, args, &["stock", "origin", "tools", "ops", "next_id", "machine"])?;
+                set_machine_arg(&mut c, a)?;
+                // a later setup of the same part: start with the tools of the one it follows
+                if c.tools.is_empty() && !c.follows.is_empty() {
+                    if let Some(prev) = self.ws.cams.iter().find(|p| p.name == c.follows) {
+                        c.tools = prev.tools.clone();
+                        c.next_id = prev.next_id;
+                        if a.get("studio").is_none() {
+                            c.studio = prev.studio;
+                        }
+                        if a.get("machine").is_none() {
+                            (c.machine, c.max_rpm, c.rapid_rate, c.post) = (prev.machine.clone(), prev.max_rpm, prev.rapid_rate, prev.post.clone());
+                        }
+                        if a.get("stock").is_none() {
+                            c.stock.material = prev.stock.material.clone();
+                        }
+                    }
+                }
                 if let Some(s) = a.get("stock").and_then(|s| s.as_object()) {
                     c.stock = overlay(&c.stock, s, &[])?;
                 }
@@ -118,13 +185,24 @@ impl Session {
                 }
                 self.ws.cams.push(c);
                 let ci = self.ws.cams.len() - 1;
+                if let Err(e) = cam_paths::setup_chain(&self.ws.cams, ci) {
+                    self.ws.cams.pop();
+                    return Err(e);
+                }
                 let mut v = self.cam_info(ci)?;
                 v["cam"] = json!(ci);
                 v
             }
             "edit_cam" => {
                 let ci = self.cam_idx(a)?;
-                let mut c: Cam = overlay(&self.ws.cams[ci], args, &["cam", "stock", "origin", "tools", "ops", "next_id"])?;
+                let mut c: Cam = overlay(&self.ws.cams[ci], args, &["cam", "stock", "origin", "tools", "ops", "next_id", "machine"])?;
+                set_machine_arg(&mut c, a)?;
+                let old = self.ws.cams[ci].clone();
+                if c.name != old.name {
+                    for x in self.ws.cams.iter_mut().filter(|x| x.follows == old.name) {
+                        x.follows = c.name.clone();
+                    }
+                }
                 if let Some(s) = a.get("stock").and_then(|s| s.as_object()) {
                     c.stock = overlay(&c.stock, s, &[])?;
                 }
@@ -132,6 +210,10 @@ impl Session {
                     c.origin = cam::Origin::parse(o).ok_or("unknown origin")?;
                 }
                 self.ws.cams[ci] = c;
+                if let Err(e) = cam_paths::setup_chain(&self.ws.cams, ci) {
+                    self.ws.cams[ci] = old;
+                    return Err(e);
+                }
                 self.cam_info(ci)?
             }
             "cam_tool_library" => {
@@ -159,10 +241,11 @@ impl Session {
                     } else {
                         let c = &mut self.ws.cams[ci];
                         let i = c.tools.iter().position(|t| t.id == id).ok_or(format!("no tool {id}"))?;
-                        let mut t: Tool = overlay(&c.tools[i], args, &["cam", "id", "kind", "preset"])?;
+                        let mut t: Tool = overlay(&c.tools[i], args, &["cam", "id", "kind", "preset", "holder"])?;
                         if let Some(k) = a.get("kind").and_then(|k| k.as_str()) {
                             t.kind = ToolKind::parse(k).ok_or(format!("unknown tool kind {k}"))?;
                         }
+                        set_holder_arg(&mut t, a)?;
                         c.tools[i] = t.clone();
                         tool_json(&t)
                     }
@@ -187,10 +270,11 @@ impl Session {
                         }
                     };
                     cam::suggest(&mut base, &material, max_rpm);
-                    let mut t: Tool = overlay(&base, args, &["cam", "id", "kind", "preset", "name"])?;
+                    let mut t: Tool = overlay(&base, args, &["cam", "id", "kind", "preset", "name", "holder"])?;
                     if let Some(k) = a.get("kind").and_then(|k| k.as_str()) {
                         t.kind = ToolKind::parse(k).ok_or(format!("unknown tool kind {k}"))?;
                     }
+                    set_holder_arg(&mut t, a)?;
                     t.name = match a.get("name").and_then(|n| n.as_str()) {
                         Some(n) => n.to_string(),
                         None if a.get("preset").is_some() && args.keys().all(|k| ["cam", "preset", "number"].contains(&k.as_str())) => t.name,
@@ -215,7 +299,7 @@ impl Session {
                         id
                     }
                     None => {
-                        let k = a.get("kind").and_then(|k| k.as_str()).ok_or("give kind: face, clear, pocket, contour, chamfer, drill, bore, thread, tap, adaptive, parallel, waterline, scallop or deburr")?;
+                        let k = a.get("kind").and_then(|k| k.as_str()).ok_or("give kind: face, clear, pocket, contour, chamfer, drill, bore, thread, tap, adaptive, parallel, waterline, scallop, pencil or deburr")?;
                         let k = OpKind::parse(k).ok_or(format!("unknown operation {k}"))?;
                         let tool = match a.get("tool") {
                             Some(t) => tool_ref(&self.ws.cams[ci], t)?,
@@ -264,7 +348,7 @@ impl Session {
                     .collect();
                 let mut v = json!({"moves": sim.total(), "removed_mm3": sim.removed.round(), "problems": events, "ok": sim.events.is_empty(), "cell_mm": round(sim.cell)});
                 if a.get("render").and_then(|r| r.as_bool()).unwrap_or(false) || a.get("path").is_some() {
-                    let png = self.render_sim(&part, &sim, a)?;
+                    let png = self.render_sim(&sim, a)?;
                     if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
                         std::fs::write(p, &png).map_err(|e| e.to_string())?;
                         v["saved"] = json!(p);
@@ -353,13 +437,15 @@ impl Session {
         Ok((v, None))
     }
 
-    fn render_sim(&self, part: &Part, sim: &Sim, a: &Value) -> R<Vec<u8>> {
+    fn render_sim(&self, sim: &Sim, a: &Value) -> R<Vec<u8>> {
         let (tris, cls) = sim.mesh(300);
-        let mut meshes: Vec<crate::kernel::BodyMesh> = (0..3).map(|_| crate::kernel::BodyMesh::default()).collect();
+        let n = cls.iter().copied().max().unwrap_or(0) as usize + 1;
+        let mut meshes: Vec<crate::kernel::BodyMesh> = (0..n).map(|_| crate::kernel::BodyMesh::default()).collect();
         for (t, cl) in tris.iter().zip(cls) {
             let m = &mut meshes[cl as usize];
             for p in t {
-                let q = part.to_part(*p);
+                // as the machine sees it: the side being cut faces up
+                let q = *p;
                 let i = m.positions.len() as u32 / 3;
                 m.positions.extend([q.x as f32, q.y as f32, q.z as f32]);
                 m.normals.extend([0.0, 0.0, 1.0]);
@@ -378,9 +464,12 @@ impl Session {
             }
             m.bbox = [lo, hi];
         }
-        let colors = [[0xd2, 0xb4, 0x82], [0x9f, 0xb4, 0xc8], [0xe0, 0x40, 0x40]];
-        let items: Vec<(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])> =
-            meshes.iter().zip(colors).filter(|(m, _)| !m.indices.is_empty()).map(|(m, c)| (m, crate::assembly::Pose::default(), c)).collect();
+        let items: Vec<(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])> = meshes
+            .iter()
+            .enumerate()
+            .filter(|(_, m)| !m.indices.is_empty())
+            .map(|(k, m)| (m, crate::assembly::Pose::default(), crate::cam_sim::class_rgb(k as u8)))
+            .collect();
         let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
         let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(900).clamp(64, 4096) as u32;
         let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(700).clamp(64, 4096) as u32;
@@ -388,7 +477,7 @@ impl Session {
             .events
             .iter()
             .map(|e| {
-                let p = part.to_part(DVec3::from(e.at));
+                let p = DVec3::from(e.at);
                 vec![p - DVec3::X * 2.0, p + DVec3::X * 2.0, p, p - DVec3::Y * 2.0, p + DVec3::Y * 2.0]
             })
             .collect();
@@ -399,11 +488,11 @@ impl Session {
 pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     vec![
-        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab for 2.5D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, rapid_rate. Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}}), &[])}),
-        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}}), &["cam"])}),
+        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 at tool changes), follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine). Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "follows": {"type": "string"}}), &[])}),
+        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "machine": {}, "follows": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_tool_library", "description": "List the tool library (the user's tools and built-in presets): flat, ball, bull, tapered_ball, chamfer, engrave, slot, thread_mill, face_mill, drill, spot_drill, center_drill, tap, reamer. Filter by kind and/or search words (e.g. '6 flat', 'M5').", "inputSchema": obj(json!({"kind": {"type": "string"}, "search": {"type": "string"}}), &[])}),
-        json!({"name": "cam_tool", "description": "Add a tool to a Manufacture tab: preset (a library search such as 'Ø6 flat end mill' or 'M5 × 0.8 tap') and/or kind plus any fields to override: number, name, diameter, corner_radius, tip_diameter, angle (included; per side for tapered_ball), flute_length, stickout, shank_diameter, holder_diameter, flutes, pitch, cutting_width, neck_diameter, material (carbide/hss/cobalt), coolant, rpm, feed, plunge_feed (mm/min), stepdown, stepover (fraction of Ø). Feeds and speeds are suggested for the stock material. With id: edit that tool, or delete:true. Returns the tool with its id.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "preset": {"type": "string"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "delete": {"type": "boolean"}, "diameter": {"type": "number"}}), &["cam"])}),
-        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing with cycloidal loops at constant engagement; stepover = optimal load, fraction of Ø, default 0.1; trochoid = loop radius mm, 0 = 40% of Ø; big stepdown), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
+        json!({"name": "cam_tool", "description": "Add a tool to a Manufacture tab: preset (a library search such as 'Ø6 flat end mill' or 'M5 × 0.8 tap') and/or kind plus any fields to override: number, name, diameter, corner_radius, tip_diameter, angle (included; per side for tapered_ball), flute_length, stickout, shank_diameter, holder_diameter, holder (a preset: \"ER11 collet, router spindle Ø52\", \"ER11 collet chuck\", \"ER16 collet chuck\", \"ER20 collet, router spindle Ø80\", \"ER20 collet chuck\", \"ER25 collet chuck\", \"ER32 collet chuck\", \"Shrink-fit holder Ø6\", \"Shrink-fit holder Ø12\", \"Side-lock (Weldon) holder\"; or an outline [[diameter, height], …] from the holder's bottom face up, for collision checks), flutes, pitch, cutting_width, neck_diameter, material (carbide/hss/cobalt), coolant, rpm, feed, plunge_feed (mm/min), stepdown, stepover (fraction of Ø). Feeds and speeds are suggested for the stock material. With id: edit that tool, or delete:true. Returns the tool with its id.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "preset": {"type": "string"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "delete": {"type": "boolean"}, "diameter": {"type": "number"}}), &["cam"])}),
+        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing with cycloidal loops at constant engagement; stepover = optimal load, fraction of Ø, default 0.1; trochoid = loop radius mm, 0 = 40% of Ø; big stepdown), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), pencil (clean up inside corners and fillets a bigger tool left material in, with a small ball mill; ref_diameter = that bigger tool as a ball, default the smallest bigger tool used before), deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). rest:true makes clear, pocket, adaptive and finishing ops cut only the material the operations before them (and earlier setups) left, skipping air; it is on by default for roughing after roughing, and in a setup that follows another every such op starts from that setup's leftover stock. Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
         json!({"name": "cam_info", "description": "A Manufacture tab's setup, stock and part extents (work coordinates), tools, operations with times and warnings, the holes found in the part, and the cycle time.", "inputSchema": obj(json!({"cam": {"type": "integer"}}), &["cam"])}),
         json!({"name": "simulate_cam", "description": "Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
         json!({"name": "render_cam", "description": "PNG of the part with the stock box and the cutting moves (blue) of all operations, or of one (operation: id).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "operation": {"type": "integer"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["cam"])}),

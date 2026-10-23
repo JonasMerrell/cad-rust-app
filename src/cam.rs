@@ -136,6 +136,11 @@ pub struct Tool {
     pub stickout: f64,
     /// Diameter of the tool holder (collet nut or holder body), for collision checks.
     pub holder_diameter: f64,
+    /// Holder outline from its bottom face up, as (diameter, height) points; empty = a plain
+    /// cylinder of `holder_diameter`. Above the last point it carries on at that diameter (the spindle).
+    pub holder: Vec<[f64; 2]>,
+    /// Name of the holder preset the outline came from.
+    pub holder_name: String,
     pub shank_diameter: f64,
     pub flutes: u32,
     /// Thread pitch of a thread mill or tap.
@@ -170,6 +175,8 @@ impl Default for Tool {
             flute_length: 20.0,
             stickout: 30.0,
             holder_diameter: 30.0,
+            holder: vec![],
+            holder_name: String::new(),
             shank_diameter: 6.0,
             flutes: 2,
             pitch: 0.0,
@@ -203,6 +210,16 @@ impl Tool {
             ToolKind::Tap => format!("M{} × {} tap", fmt_mm(self.diameter), fmt_mm(self.pitch)),
             ToolKind::Drill | ToolKind::SpotDrill | ToolKind::CenterDrill => format!("Ø{d} {}° {}", fmt_mm(self.angle), self.kind.label().to_lowercase()),
             _ => format!("Ø{d} {}, {} flutes", self.kind.label().to_lowercase(), self.flutes),
+        }
+    }
+
+    /// Holder outline as (radius, height above the holder's bottom face) points going up.
+    pub fn holder_outline(&self) -> Vec<(f64, f64)> {
+        if self.holder.len() >= 2 {
+            self.holder.iter().map(|p| (p[0].max(0.0) / 2.0, p[1])).collect()
+        } else {
+            let r = (self.holder_diameter / 2.0).max(self.shank_diameter / 2.0);
+            vec![(r, 0.0), (r, 1.0)]
         }
     }
 
@@ -256,6 +273,56 @@ impl Tool {
             _ => vec![(0.0, 0.0), (r, 0.0), (r, len)],
         }
     }
+}
+
+/// How far above the holder's bottom face its underside is at `rho` from the axis (None = outside it).
+/// The outline carries on straight up from its last point.
+pub fn holder_underside(outline: &[(f64, f64)], rho: f64) -> Option<f64> {
+    let mut best: Option<f64> = None;
+    let mut keep = |z: f64| best = Some(best.map(|b: f64| b.min(z)).unwrap_or(z));
+    for w in outline.windows(2) {
+        let ((r0, z0), (r1, z1)) = (w[0], w[1]);
+        if r0 >= rho {
+            keep(z0);
+        } else if r1 >= rho {
+            keep(z0 + (z1 - z0) * (rho - r0) / (r1 - r0));
+        }
+    }
+    if let Some(&(r, z)) = outline.last() {
+        if r >= rho {
+            keep(z);
+        }
+    }
+    best
+}
+
+/// Tool holder presets: name and outline as (diameter, height) from the bottom face up.
+pub fn holder_presets() -> Vec<(&'static str, Vec<[f64; 2]>)> {
+    // collet chuck nuts (DIN 6499) on a holder body, then the spindle nose
+    let er = |nut: f64, len: f64, body: f64, spindle: f64| {
+        vec![[nut - 4.0, 0.0], [nut, 3.0], [nut, len], [body, len], [body, len + 40.0], [spindle, len + 40.0], [spindle, len + 120.0]]
+    };
+    vec![
+        ("ER11 collet, router spindle Ø52", er(19.0, 11.5, 19.0, 52.0)),
+        ("ER11 collet chuck", er(19.0, 11.5, 25.0, 60.0)),
+        ("ER16 collet chuck", er(28.0, 17.5, 32.0, 63.0)),
+        ("ER20 collet, router spindle Ø80", er(34.0, 19.5, 34.0, 80.0)),
+        ("ER20 collet chuck", er(34.0, 19.5, 40.0, 63.0)),
+        ("ER25 collet chuck", er(42.0, 20.0, 46.0, 63.0)),
+        ("ER32 collet chuck", er(50.0, 22.5, 53.0, 100.0)),
+        ("Shrink-fit holder Ø6", vec![[14.0, 0.0], [24.0, 50.0], [44.0, 50.0], [44.0, 90.0], [63.0, 90.0], [63.0, 160.0]]),
+        ("Shrink-fit holder Ø12", vec![[22.0, 0.0], [32.0, 50.0], [44.0, 50.0], [44.0, 90.0], [63.0, 90.0], [63.0, 160.0]]),
+        ("Side-lock (Weldon) holder", vec![[40.0, 0.0], [40.0, 50.0], [63.0, 50.0], [63.0, 120.0]]),
+    ]
+}
+
+/// Put a holder preset on a tool by name.
+pub fn set_holder(t: &mut Tool, name: &str) -> bool {
+    let Some((n, h)) = holder_presets().into_iter().find(|(n, _)| n.eq_ignore_ascii_case(name.trim())) else { return false };
+    t.holder_diameter = h[1][0];
+    t.holder = h;
+    t.holder_name = n.into();
+    true
 }
 
 pub fn fmt_mm(v: f64) -> String {
@@ -502,10 +569,12 @@ pub enum OpKind {
     Scallop,
     /// Chamfer or break every sharp edge in 3D (or the picked ones).
     Deburr,
+    /// 3D clean-up of the corners and fillets a bigger tool couldn't reach.
+    Pencil,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 14] = [
+    pub const ALL: [OpKind; 15] = [
         OpKind::Face,
         OpKind::Clear,
         OpKind::Pocket,
@@ -520,6 +589,7 @@ impl OpKind {
         OpKind::Waterline,
         OpKind::Scallop,
         OpKind::Deburr,
+        OpKind::Pencil,
     ];
 
     pub fn label(self) -> &'static str {
@@ -538,6 +608,7 @@ impl OpKind {
             OpKind::Waterline => "Waterline",
             OpKind::Scallop => "Scallop",
             OpKind::Deburr => "Deburr",
+            OpKind::Pencil => "Pencil",
         }
     }
 
@@ -557,6 +628,7 @@ impl OpKind {
             OpKind::Waterline => "waterline",
             OpKind::Scallop => "scallop",
             OpKind::Deburr => "deburr",
+            OpKind::Pencil => "pencil",
         }
     }
 
@@ -570,6 +642,7 @@ impl OpKind {
             "z_level" | "zlevel" | "contour_3d" => Some(OpKind::Waterline),
             "constant_stepover" => Some(OpKind::Scallop),
             "chamfer_3d" | "3d_chamfer" | "edge_break" => Some(OpKind::Deburr),
+            "corner" | "corners" | "rest_finish" | "rest_finishing" | "cleanup" | "corner_cleanup" => Some(OpKind::Pencil),
             "profile" | "outline" => Some(OpKind::Contour),
             "spot" | "ream" | "peck" => Some(OpKind::Drill),
             "helix" | "helical" | "circular" => Some(OpKind::Bore),
@@ -595,7 +668,13 @@ impl OpKind {
             OpKind::Waterline => "3D finishing at constant heights; best on steep walls.",
             OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
             OpKind::Deburr => "Chamfers or breaks every sharp convex edge in 3D with a chamfer mill or V-bit (or only the picked edges).",
+            OpKind::Pencil => "3D clean-up with a small tool along the inside corners and fillets that a bigger (reference) tool left material in.",
         }
+    }
+
+    /// Whether it can machine only what earlier operations left (rest machining).
+    pub fn uses_stock(self) -> bool {
+        matches!(self, OpKind::Clear | OpKind::Pocket | OpKind::Adaptive | OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil)
     }
 
     /// Whether a tool kind suits the operation.
@@ -610,7 +689,7 @@ impl OpKind {
             OpKind::Thread => k == ToolKind::ThreadMill,
             OpKind::Tap => k == ToolKind::Tap,
             OpKind::Adaptive => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball),
-            OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall),
+            OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall),
             OpKind::Deburr => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
         }
     }
@@ -690,6 +769,10 @@ pub struct Operation {
     pub edges: Vec<[f64; 3]>,
     /// Deburr: edges sharper than this angle between faces, degrees.
     pub edge_angle: f64,
+    /// Rest machining: only cut where the earlier operations (and setups) left material.
+    pub rest: bool,
+    /// Pencil: diameter of the bigger tool whose leftovers to clean up (0 = the largest tool used before it).
+    pub ref_diameter: f64,
 }
 
 impl Default for Operation {
@@ -731,6 +814,8 @@ impl Default for Operation {
             slope_max: 90.0,
             edges: vec![],
             edge_angle: 30.0,
+            rest: false,
+            ref_diameter: 0.0,
         }
     }
 }
@@ -796,12 +881,60 @@ pub struct Stock {
     pub size: Option<[f64; 3]>,
     /// Stock material, for feeds and speeds.
     pub material: String,
+    /// For a setup that carries on from another: that setup's stock box in part coordinates
+    /// (kept up to date from it; overrides the margins and size).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub carried: Option<[[f64; 3]; 2]>,
 }
 
 impl Default for Stock {
     fn default() -> Self {
-        Stock { side: 2.0, top: 1.0, bottom: 0.0, size: None, material: "Aluminium".into() }
+        Stock { side: 2.0, top: 1.0, bottom: 0.0, size: None, material: "Aluminium".into(), carried: None }
     }
+}
+
+/// A milling machine: work envelope and limits.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Machine {
+    pub name: String,
+    /// Travel along X, Y and Z, mm.
+    pub travel: [f64; 3],
+    /// Highest feed, mm/min.
+    pub max_feed: f64,
+    /// Rapid rate along Z when it differs from X/Y (0 = the same).
+    pub rapid_z: f64,
+    /// Automatic tool changer; without one the program pauses (M0) for each tool change.
+    pub tool_changer: bool,
+}
+
+impl Default for Machine {
+    fn default() -> Self {
+        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: true }
+    }
+}
+
+/// Machine presets: name, travel, max rpm, max feed, rapid XY, rapid Z, tool changer.
+pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
+    ("Desktop router (3018 class)", [300.0, 180.0, 45.0], 10000.0, 1000.0, 1500.0, 600.0, false),
+    ("Hobby router, 600 × 400", [600.0, 400.0, 100.0], 24000.0, 5000.0, 6000.0, 3000.0, false),
+    ("Large router, 1200 × 1200", [1220.0, 1220.0, 150.0], 24000.0, 10000.0, 15000.0, 5000.0, false),
+    ("Shapeoko 4 XXL", [838.0, 838.0, 95.0], 30000.0, 5000.0, 10000.0, 3000.0, false),
+    ("Carbide 3D Nomad 3", [203.0, 203.0, 76.0], 24000.0, 2540.0, 2540.0, 2540.0, false),
+    ("Tormach PCNC 440", [254.0, 159.0, 254.0], 10000.0, 2540.0, 3430.0, 3430.0, true),
+    ("Tormach 770M", [356.0, 191.0, 330.0], 10000.0, 3430.0, 3430.0, 3430.0, true),
+    ("Haas Mini Mill", [406.0, 305.0, 254.0], 6000.0, 12700.0, 15200.0, 15200.0, true),
+    ("Haas VF-2", [762.0, 406.0, 508.0], 8100.0, 16500.0, 25400.0, 25400.0, true),
+    ("Generic VMC", [500.0, 400.0, 400.0], 12000.0, 10000.0, 24000.0, 24000.0, true),
+];
+
+/// Apply a machine preset to a setup by name.
+pub fn set_machine(c: &mut Cam, name: &str) -> bool {
+    let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6 };
+    c.max_rpm = m.2;
+    c.rapid_rate = m.4;
+    true
 }
 
 /// G-code dialects.
@@ -830,6 +963,11 @@ pub struct Cam {
     /// Post processor key from POSTS.
     pub post: String,
     pub program: u32,
+    /// The machine it runs on (travel, feed limit, tool changer).
+    pub machine: Machine,
+    /// Name of the setup (Manufacture tab) whose leftover stock this one starts from; empty = fresh stock.
+    /// Use it to flip the part and machine the other side.
+    pub follows: String,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -850,6 +988,8 @@ impl Default for Cam {
             max_rpm: 24000.0,
             post: "grbl".into(),
             program: 1000,
+            machine: Machine::default(),
+            follows: String::new(),
             tools: vec![],
             ops: vec![],
             next_id: 1,
@@ -893,6 +1033,12 @@ impl Cam {
             op.leave = 0.3;
             op.leave_floor = 0.2;
         }
+        // roughing after other roughing only cuts what is left
+        if matches!(kind, OpKind::Clear | OpKind::Adaptive | OpKind::Pocket)
+            && self.ops.iter().any(|o| matches!(o.kind, OpKind::Clear | OpKind::Adaptive | OpKind::Pocket | OpKind::Face))
+        {
+            op.rest = true;
+        }
         let tl = self.tool(tool).cloned();
         match kind {
             OpKind::Adaptive => {
@@ -907,6 +1053,10 @@ impl Cam {
             OpKind::Parallel | OpKind::Scallop => op.stepover = Some(0.1),
             OpKind::Waterline => op.stepdown = Some(0.3),
             OpKind::Deburr => op.chamfer = 0.3,
+            OpKind::Pencil => {
+                op.stepover = Some(0.1);
+                op.leave = 0.0;
+            }
             _ => {}
         }
         if kind == OpKind::Drill && self.tool(tool).map(|t| t.kind == ToolKind::Drill && t.diameter > 0.0).unwrap_or(false) {

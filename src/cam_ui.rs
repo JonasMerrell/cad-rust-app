@@ -11,6 +11,7 @@ use crate::app::{App, ToastKind};
 use crate::cam::{self, Cam, OpKind, Operation, Origin, Side, Tool, ToolKind};
 use crate::cam_paths::{self, Circle, Move, Part, Toolpath};
 use crate::cam_sim::Sim;
+use crate::cam_stock::StockMap;
 use crate::doc::{BodyId, Document};
 use crate::icons;
 use crate::kernel::BodyMesh;
@@ -18,7 +19,8 @@ use crate::render::{SceneData, ViewportCallback};
 use crate::theme::{self, vp};
 use crate::workspace::Tab;
 
-type Job = (u64, Arc<Part>, Vec<Toolpath>);
+/// Result of a background job: input key, part, toolpaths, the stock the setup starts from and its carried stock box.
+type Job = (u64, Arc<Part>, Vec<Toolpath>, Option<Arc<StockMap>>, Option<[[f64; 3]; 2]>);
 
 #[derive(Default)]
 pub struct CamUi {
@@ -27,6 +29,8 @@ pub struct CamUi {
     pub key: u64,
     pub part: Option<Arc<Part>>,
     pub paths: Vec<Toolpath>,
+    /// Stock left by the setups this one carries on from.
+    pub stock_in: Option<Arc<StockMap>>,
     job: Option<(u64, Receiver<Job>)>,
     pub computing: bool,
     pub sel_op: Option<u64>,
@@ -50,6 +54,8 @@ pub struct CamUi {
     last_ck: Option<Instant>,
     /// Picking edges for this deburr operation.
     pub pick_edges: Option<u64>,
+    /// Show the part (see-through) over the simulated stock.
+    pub show_part: bool,
 }
 
 fn cam_index(app: &App) -> Option<usize> {
@@ -140,10 +146,17 @@ pub fn part_input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -
     (tris, circles)
 }
 
-fn input_key(c: &Cam, tris: &[[DVec3; 3]]) -> u64 {
+fn input_key(cams: &[Cam], ci: usize, tris: &[[DVec3; 3]]) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    serde_json::to_string(c).unwrap_or_default().hash(&mut h);
+    // this setup and the ones it carries on from (their stock boxes are derived, so left out)
+    let mut chain = cam_paths::setup_chain(cams, ci).unwrap_or_default();
+    chain.push(ci);
+    for i in chain {
+        let mut c = cams[i].clone();
+        c.stock.carried = None;
+        serde_json::to_string(&c).unwrap_or_default().hash(&mut h);
+    }
     tris.len().hash(&mut h);
     let mut s = 0.0f64;
     for (k, t) in tris.iter().enumerate().step_by((tris.len() / 512).max(1)) {
@@ -156,11 +169,15 @@ fn input_key(c: &Cam, tris: &[[DVec3; 3]]) -> u64 {
 /// Keep the toolpaths up to date: start a background job when the setup or the parts change.
 fn refresh(app: &mut App, ctx: &egui::Context) {
     if let Some((k, rx)) = &app.cam.job {
-        if let Ok((key, part, paths)) = rx.try_recv() {
+        if let Ok((key, part, paths, stock_in, carried)) = rx.try_recv() {
             if key == *k {
                 app.cam.key = key;
                 app.cam.part = Some(part);
                 app.cam.paths = paths;
+                app.cam.stock_in = stock_in;
+                if let Some(c) = cam_mut(app) {
+                    c.stock.carried = carried;
+                }
                 app.cam.sim = None;
                 app.cam.sim_mesh.clear();
                 app.cam.scene_dirty = true;
@@ -171,9 +188,10 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
             ctx.request_repaint_after(std::time::Duration::from_millis(50));
         }
     }
+    let Some(ci) = cam_index(app) else { return };
     let Some(c) = cam(app).cloned() else { return };
     let (tris, circles) = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &c.bodies);
-    let key = input_key(&c, &tris);
+    let key = input_key(&app.ws.cams, ci, &tris);
     if key == app.cam.key || app.cam.job.as_ref().map(|j| j.0 == key).unwrap_or(false) {
         return;
     }
@@ -181,10 +199,22 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     app.cam.job = Some((key, rx));
     app.cam.computing = true;
     let ctx = ctx.clone();
+    let mut cams = app.ws.cams.clone();
     std::thread::spawn(move || {
+        let linked = cam_paths::link_setups(&mut cams, ci, &tris, &circles);
+        let c = &cams[ci];
         let part = Part::new(&tris, &circles, &c.orient);
-        let paths = cam_paths::generate(&c, &part);
-        let _ = tx.send((key, Arc::new(part), paths));
+        let (stock_in, err) = match linked {
+            Ok(s) => (s, None),
+            Err(e) => (None, Some(e)),
+        };
+        let mut paths = cam_paths::generate_from(c, &part, stock_in.as_ref());
+        if let Some(e) = err {
+            for p in &mut paths {
+                p.warnings.insert(0, e.clone());
+            }
+        }
+        let _ = tx.send((key, Arc::new(part), paths, stock_in.map(Arc::new), c.stock.carried));
         ctx.request_repaint();
     });
 }
@@ -207,7 +237,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
-        for (k, icon) in [(OpKind::Adaptive, "camAdaptive"), (OpKind::Parallel, "camParallel"), (OpKind::Waterline, "camWaterline"), (OpKind::Scallop, "camScallop"), (OpKind::Deburr, "camDeburr")] {
+        for (k, icon) in [(OpKind::Adaptive, "camAdaptive"), (OpKind::Parallel, "camParallel"), (OpKind::Waterline, "camWaterline"), (OpKind::Scallop, "camScallop"), (OpKind::Pencil, "camPencil"), (OpKind::Deburr, "camDeburr")] {
             if app.tool_button(ui, icon, k.label(), k.description(), matches!(k, OpKind::Adaptive | OpKind::Parallel), false, true).clicked() {
                 add_op(app, k);
             }
@@ -232,7 +262,10 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
 }
 
 fn add_op(app: &mut App, k: OpKind) {
-    if cam(app).map(|c| !c.tools.iter().any(|t| k.accepts(t.kind))).unwrap_or(true) {
+    // a pencil pass wants a tool smaller than the ones before it
+    let small = |c: &Cam| c.tools.iter().filter(|t| t.kind == ToolKind::Ball && t.diameter <= 3.0).map(|t| t.id).next();
+    let missing = cam(app).map(|c| if k == OpKind::Pencil { small(c).is_none() } else { !c.tools.iter().any(|t| k.accepts(t.kind)) }).unwrap_or(true);
+    if missing {
         // bring in a suitable tool from the library first
         let material = cam(app).map(|c| c.stock.material.clone()).unwrap_or_default();
         let max_rpm = cam(app).map(|c| c.max_rpm).unwrap_or(24000.0);
@@ -244,6 +277,7 @@ fn add_op(app: &mut App, k: OpKind) {
                     OpKind::Thread | OpKind::Tap => true,
                     OpKind::Chamfer | OpKind::Deburr => t.kind == ToolKind::Chamfer,
                     OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => t.kind == ToolKind::Ball && t.diameter >= 6.0,
+                    OpKind::Pencil => t.kind == ToolKind::Ball && t.diameter <= 3.0,
                     _ => t.kind == ToolKind::Flat && t.diameter >= 6.0,
                 }
         });
@@ -255,7 +289,8 @@ fn add_op(app: &mut App, k: OpKind) {
         }
     }
     let mut id = 0;
-    edit(app, |c| id = c.add_op(k, 0));
+    let tool = if k == OpKind::Pencil { cam(app).and_then(small).unwrap_or(0) } else { 0 };
+    edit(app, |c| id = c.add_op(k, tool));
     app.cam.sel_op = Some(id);
     app.cam.sel_tool = None;
 }
@@ -372,7 +407,13 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let Some(ci) = cam_index(app) else { return };
     let studio = app.ws.cams[ci].studio.min(studios.len().saturating_sub(1));
     let bodies: Vec<(BodyId, String)> = app.studio_bodies(studio).iter().map(|b| (b.id, b.name.clone())).collect();
+    // other setups of the same parts this one can carry on from (not ones that already follow it)
+    let others: Vec<String> = (0..app.ws.cams.len())
+        .filter(|&i| i != ci && app.ws.cams[i].studio == studio && !cam_paths::setup_chain(&app.ws.cams, i).map(|ch| ch.contains(&ci)).unwrap_or(true))
+        .map(|i| app.ws.cams[i].name.clone())
+        .collect();
     let mut need_build = None;
+    let mut new_setup = false;
     {
         let c = &mut app.ws.cams[ci];
         row(ui, "Part Studio", |ui| {
@@ -421,7 +462,22 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        row(ui, "Starts from", |ui| {
+            let label = if c.follows.is_empty() { "fresh stock".to_string() } else { format!("what {} leaves", c.follows) };
+            egui::ComboBox::from_id_salt("cam-follows").width(150.0).selected_text(label).show_ui(ui, |ui| {
+                ui.selectable_value(&mut c.follows, String::new(), "fresh stock");
+                for n in &others {
+                    ui.selectable_value(&mut c.follows, n.clone(), format!("what {n} leaves")).on_hover_text("Carry on from that setup's leftover stock: flip the part and machine the other side");
+                }
+            });
+        });
+        if ui.button("New setup from here").on_hover_text("Add a setup that carries on from this one's leftover stock, with the part flipped over").clicked() {
+            new_setup = true;
+        }
         let mut fixed = c.stock.size.is_some();
+        if !c.follows.is_empty() {
+            ui.label(RichText::new(format!("The stock is what {} leaves.", c.follows)).color(theme::muted()).size(12.0));
+        } else {
         row(ui, "Stock", |ui| {
             if ui.radio(!fixed, "margins").clicked() {
                 fixed = false;
@@ -459,6 +515,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 num(ui, "Bottom", &mut c.stock.bottom, " mm", 0.0..=1000.0, 0.1);
             }
         }
+        }
         row(ui, "Material", |ui| {
             egui::ComboBox::from_id_salt("cam-material").selected_text(c.stock.material.clone()).show_ui(ui, |ui| {
                 for m in cam::MATERIALS {
@@ -468,15 +525,61 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         });
         num(ui, "Clearance", &mut c.clearance, " mm", 1.0..=500.0, 0.5);
         num(ui, "Retract", &mut c.retract, " mm", 0.1..=100.0, 0.1);
+        ui.add_space(4.0);
+        ui.label(RichText::new("MACHINE").color(theme::muted()).size(11.0).strong());
         row(ui, "Machine", |ui| {
+            let label = if c.machine.name.is_empty() { "custom".to_string() } else { c.machine.name.clone() };
+            egui::ComboBox::from_id_salt("cam-machine").width(150.0).selected_text(label).show_ui(ui, |ui| {
+                for m in cam::MACHINES {
+                    if ui.selectable_label(c.machine.name == m.0, m.0).clicked() {
+                        cam::set_machine(c, m.0);
+                    }
+                }
+            });
+        });
+        let before = (c.machine.clone(), c.max_rpm, c.rapid_rate);
+        row(ui, "Controller", |ui| {
             egui::ComboBox::from_id_salt("cam-post").selected_text(cam::POSTS.iter().find(|p| p.0 == c.post).map(|p| p.1).unwrap_or("GRBL")).show_ui(ui, |ui| {
                 for (k, l) in cam::POSTS {
                     ui.selectable_value(&mut c.post, k.to_string(), l);
                 }
             });
         });
+        row(ui, "Travel X/Y/Z", |ui| {
+            for v in c.machine.travel.iter_mut() {
+                ui.add(egui::DragValue::new(v).range(0.0..=10000.0).speed(1.0).max_decimals(1)).on_hover_text("0 = not checked");
+            }
+        });
         num(ui, "Max spindle", &mut c.max_rpm, " rpm", 1000.0..=100000.0, 100.0);
-        num(ui, "Rapid rate", &mut c.rapid_rate, " mm/min", 100.0..=100000.0, 50.0);
+        num(ui, "Max feed", &mut c.machine.max_feed, " mm/min", 0.0..=100000.0, 50.0);
+        num(ui, "Rapid X/Y", &mut c.rapid_rate, " mm/min", 100.0..=100000.0, 50.0);
+        num(ui, "Rapid Z", &mut c.machine.rapid_z, " mm/min", 0.0..=100000.0, 50.0);
+        ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) for you to change tools");
+        // hand edits make it a custom machine
+        if (c.machine.clone(), c.max_rpm, c.rapid_rate) != before {
+            c.machine.name.clear();
+        }
+    }
+    if new_setup {
+        let c = app.ws.cams[ci].clone();
+        let flip = match c.orient.as_str() {
+            "top" => "bottom",
+            "bottom" => "top",
+            "front" => "back",
+            "back" => "front",
+            "left" => "right",
+            _ => "left",
+        };
+        let n = app.ws.cams.len() + 1;
+        let mut name = format!("{} side 2", c.name);
+        while app.ws.cams.iter().any(|x| x.name == name) {
+            name = format!("Manufacture {n}");
+        }
+        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
+        app.ws.cams.push(next);
+        let t = Tab::Cam(app.ws.cams.len() - 1);
+        app.switch_tab(t);
+        return;
     }
     if let Some(i) = need_build {
         ensure_built(app, i);
@@ -512,6 +615,7 @@ fn kind_icon(k: OpKind) -> &'static str {
         OpKind::Waterline => "camWaterline",
         OpKind::Scallop => "camScallop",
         OpKind::Deburr => "camDeburr",
+        OpKind::Pencil => "camPencil",
     }
 }
 
@@ -781,6 +885,9 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                     }
                 });
             }
+            if o.kind.uses_stock() {
+                rest_row(ui, &mut o.rest);
+            }
             if o.kind != OpKind::Face {
                 num(ui, "Ramp angle", &mut o.ramp_angle, "°", 0.5..=90.0, 0.1);
                 row(ui, "Direction", |ui| {
@@ -809,6 +916,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Leave on walls", &mut o.leave, " mm", -5.0..=50.0, 0.05);
             num(ui, "Leave on floors", &mut o.leave_floor, " mm", 0.0..=50.0, 0.05);
             num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
+            rest_row(ui, &mut o.rest);
             row(ui, "Loops", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
                 ui.radio_value(&mut o.climb, false, "conventional");
@@ -832,12 +940,40 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                 ui.add(egui::DragValue::new(&mut o.slope_max).range(0.0..=90.0).speed(0.5).suffix("°")).on_hover_text(tip);
             });
             num(ui, "Leave", &mut o.leave, " mm", -1.0..=10.0, 0.02);
+            rest_row(ui, &mut o.rest);
             if o.kind != OpKind::Parallel {
                 row(ui, "Direction", |ui| {
                     ui.radio_value(&mut o.climb, true, "climb");
                     ui.radio_value(&mut o.climb, false, "conventional");
                 });
             }
+        }
+        OpKind::Pencil => {
+            row(ui, "Bigger tool", |ui| {
+                let mut on = o.ref_diameter > 0.0;
+                let tip = "The tool whose leftovers to clean up: a ball end mill of this diameter, or else the smallest bigger tool used before";
+                if ui.checkbox(&mut on, "").on_hover_text(tip).changed() {
+                    o.ref_diameter = if on { tool.as_ref().map(|t| (t.diameter * 2.0).max(1.0)).unwrap_or(6.0) } else { 0.0 };
+                }
+                if on {
+                    ui.add(egui::DragValue::new(&mut o.ref_diameter).range(0.1..=100.0).speed(0.05).prefix("Ø").suffix(" ball"));
+                } else {
+                    ui.label(RichText::new("the one used before").color(theme::muted()).size(12.0)).on_hover_text(tip);
+                }
+            });
+            stepover_row(ui, "Stepover", &mut o.stepover, so);
+            opt(ui, "Lowest", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
+            row(ui, "Slopes", |ui| {
+                ui.add(egui::DragValue::new(&mut o.slope_min).range(0.0..=90.0).speed(0.5).suffix("°"));
+                ui.label("to");
+                ui.add(egui::DragValue::new(&mut o.slope_max).range(0.0..=90.0).speed(0.5).suffix("°"));
+            });
+            num(ui, "Leave", &mut o.leave, " mm", -1.0..=10.0, 0.02);
+            rest_row(ui, &mut o.rest);
+            row(ui, "Direction", |ui| {
+                ui.radio_value(&mut o.climb, true, "climb");
+                ui.radio_value(&mut o.climb, false, "conventional");
+            });
         }
         OpKind::Deburr => {
             num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=20.0, 0.05);
@@ -932,6 +1068,12 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
     }
 }
 
+fn rest_row(ui: &mut Ui, rest: &mut bool) {
+    row(ui, "Rest", |ui| {
+        ui.checkbox(rest, "only what's left").on_hover_text("Machine only the material the operations before it (and earlier setups) left; skips cutting air");
+    });
+}
+
 fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     let Some(ci) = cam_index(app) else { return };
     let material = app.ws.cams[ci].stock.material.clone();
@@ -979,7 +1121,23 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     num(ui, "Flute length", &mut t.flute_length, " mm", 0.1..=500.0, 0.1);
     num(ui, "Stickout", &mut t.stickout, " mm", 1.0..=500.0, 0.5);
     num(ui, "Shank Ø", &mut t.shank_diameter, " mm", 0.1..=100.0, 0.05);
-    num(ui, "Holder Ø", &mut t.holder_diameter, " mm", 1.0..=300.0, 0.5);
+    row(ui, "Holder", |ui| {
+        let label = if t.holder.len() >= 2 { if t.holder_name.is_empty() { "custom".to_string() } else { t.holder_name.clone() } } else { "plain cylinder".to_string() };
+        egui::ComboBox::from_id_salt("cam-holder").width(170.0).selected_text(label).show_ui(ui, |ui| {
+            if ui.selectable_label(t.holder.is_empty(), "plain cylinder").clicked() {
+                t.holder.clear();
+                t.holder_name.clear();
+            }
+            for (n, _) in cam::holder_presets() {
+                if ui.selectable_label(t.holder_name == n, n).clicked() {
+                    cam::set_holder(t, n);
+                }
+            }
+        });
+    });
+    if t.holder.len() < 2 {
+        num(ui, "Holder Ø", &mut t.holder_diameter, " mm", 1.0..=300.0, 0.5);
+    }
     row(ui, "Flutes", |ui| {
         ui.add(egui::DragValue::new(&mut t.flutes).range(1..=20));
     });
@@ -1129,7 +1287,10 @@ fn export_dialog(app: &mut App) {
 fn start_sim(app: &mut App, run: bool) {
     let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
     let stock = cam_paths::stock_box(&c, &part);
-    let sim = Sim::new(&c, &part, stock, &app.cam.paths, 500);
+    let mut sim = Sim::new(&c, &part, stock, &app.cam.paths, 500);
+    if let Some(m) = &app.cam.stock_in {
+        sim.start_from(m);
+    }
     app.cam.sim_target = if run { sim.total() } else { 0 };
     app.cam.sim = Some(sim);
     app.cam.sim_mesh_done = usize::MAX;
@@ -1176,6 +1337,26 @@ fn sim_ui(app: &mut App, ui: &mut Ui) {
         ui.add(egui::Slider::new(&mut app.cam.speed, 1.0..=2000.0).logarithmic(true).suffix(" moves/s"));
     });
     ui.label(RichText::new(format!("Move {done} of {total} · {:.1} cm³ removed", removed / 1000.0)).color(theme::muted()).size(12.0));
+    if ui.checkbox(&mut app.cam.show_part, "Show the part").on_hover_text("Show the finished part, see-through, over the stock").changed() {
+        app.cam.scene_dirty = true;
+    }
+    // colour key: each operation colours what it cut
+    let swatch = |ui: &mut Ui, rgb: [u8; 3], text: &str| {
+        ui.horizontal(|ui| {
+            let (r, _) = ui.allocate_exact_size(egui::vec2(12.0, 12.0), Sense::hover());
+            ui.painter().rect_filled(r, 2.0, Color32::from_rgb(rgb[0], rgb[1], rgb[2]));
+            ui.label(RichText::new(text).size(12.0));
+        });
+    };
+    let names: Vec<String> = app.cam.paths.iter().map(|p| cam(app).and_then(|c| c.op(p.op)).map(|o| o.name.clone()).unwrap_or_default()).collect();
+    swatch(ui, crate::cam_sim::class_rgb(crate::cam_sim::CLASS_STOCK), "Stock");
+    if app.cam.stock_in.is_some() {
+        swatch(ui, crate::cam_sim::class_rgb(crate::cam_sim::CLASS_EARLIER), "Cut in the earlier setup");
+    }
+    for (k, n) in names.iter().enumerate() {
+        swatch(ui, crate::cam_sim::PATH_COLOURS[k % crate::cam_sim::PATH_COLOURS.len()], n);
+    }
+    swatch(ui, crate::cam_sim::class_rgb(crate::cam_sim::CLASS_GOUGE), "Gouge");
     if events.is_empty() {
         let txt = if done >= total { "No crashes or gouges found" } else { "No problems so far" };
         ui.label(RichText::new(format!("✓ {txt}")).color(theme::ok_green()).size(12.5));
@@ -1253,9 +1434,10 @@ fn build_scene(app: &App) -> SceneData {
     let mut s = SceneData::default();
     let Some(c) = cam(app) else { return s };
     let sim_on = app.cam.sim_on && app.cam.sim.is_some();
-    // parts
+    // parts (hidden while simulating unless asked for, so the stock reads clearly)
     let doc = app.studio_doc(c.studio);
-    for m in app.studio_bodies(c.studio) {
+    let bodies: &[BodyMesh] = if sim_on && !app.cam.show_part { &[] } else { app.studio_bodies(c.studio) };
+    for m in bodies {
         let hidden = doc.and_then(|d| d.parts.get(&crate::doc::body_key(m.id))).map(|p| p.hidden).unwrap_or(false);
         if if c.bodies.is_empty() { hidden } else { !c.bodies.contains(&m.id) } {
             continue;
@@ -1263,7 +1445,7 @@ fn build_scene(app: &App) -> SceneData {
         let col = doc.and_then(|d| d.parts.get(&crate::doc::body_key(m.id))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
         for t in m.indices.chunks(3) {
             let p = |i: u32| Vec3::new(m.positions[3 * i as usize], m.positions[3 * i as usize + 1], m.positions[3 * i as usize + 2]);
-            s.tri(sim_on, [p(t[0]), p(t[1]), p(t[2])], rgba(col, if sim_on { 0.18 } else { 1.0 }));
+            s.tri(sim_on, [p(t[0]), p(t[1]), p(t[2])], rgba(col, if sim_on { 0.25 } else { 1.0 }));
         }
         if !sim_on {
             for e in &m.edges {
@@ -1290,51 +1472,52 @@ fn build_scene(app: &App) -> SceneData {
     s.point(to(o), 7.0, rgba(vp::snap(), 1.0));
     // simulated stock
     if sim_on {
-        let stock_c = Color32::from_rgb(0xd2, 0xb4, 0x82);
-        let cut_c = Color32::from_rgb(0x9f, 0xb4, 0xc8);
-        let bad_c = Color32::from_rgb(0xe0, 0x40, 0x40);
         for (t, cl) in &app.cam.sim_mesh {
-            let col = match cl {
-                0 => stock_c,
-                1 => cut_c,
-                _ => bad_c,
-            };
-            s.tri(false, [to(t[0]), to(t[1]), to(t[2])], rgba(col, 1.0));
+            let [r, g, b] = crate::cam_sim::class_rgb(*cl);
+            s.tri(false, [to(t[0]), to(t[1]), to(t[2])], rgba(Color32::from_rgb(r, g, b), 1.0));
         }
     }
-    // toolpaths
+    // toolpaths: cutting blue, plunges and ramps green, rapids yellow (while simulating, the current
+    // operation's moves so far, in its colour)
     let sel = app.cam.sel_op;
-    let limit = if sim_on { app.cam.sim.as_ref().map(|x| x.done).unwrap_or(0) } else { usize::MAX };
+    let done = if sim_on { app.cam.sim.as_ref().map(|x| x.done).unwrap_or(0) } else { usize::MAX };
     let mut count = 0usize;
-    for tp in &app.cam.paths {
+    for (k, tp) in app.cam.paths.iter().enumerate() {
+        let start = count;
+        count += tp.moves.len();
+        if sim_on && !(start <= done && done < count.max(start + 1)) {
+            continue;
+        }
         let on = sel.map(|id| id == tp.op).unwrap_or(true);
-        let feed_col = if sel == Some(tp.op) {
+        let [r, g, b] = crate::cam_sim::PATH_COLOURS[k % crate::cam_sim::PATH_COLOURS.len()];
+        let feed_col = if sim_on {
+            rgba(Color32::from_rgb(r, g, b), 1.0)
+        } else if sel == Some(tp.op) {
             rgba(theme::accent(), 1.0)
         } else if on {
-            rgba(Color32::from_rgb(0x3a, 0x7b, 0xd5), 0.9)
+            rgba(Color32::from_rgb(0x2f, 0x6f, 0xe0), 0.95)
         } else {
-            rgba(theme::muted(), 0.5)
+            rgba(theme::muted(), 0.45)
         };
-        let rapid_col = rgba(Color32::from_rgb(0xe8, 0x9a, 0x1e), if on { 0.9 } else { 0.35 });
+        let plunge_col = rgba(Color32::from_rgb(0x1f, 0xb3, 0x4a), if on { 0.95 } else { 0.4 });
+        let rapid_col = rgba(Color32::from_rgb(0xf5, 0xc5, 0x18), if on { 0.95 } else { 0.35 });
+        let plunge = c.tool(tp.tool).map(|t| t.plunge_feed).unwrap_or(-1.0);
         let mut prev: Option<DVec3> = None;
-        for m in &tp.moves {
-            if count >= limit {
+        for (i, m) in tp.moves.iter().enumerate() {
+            if start + i >= done {
                 break;
             }
-            count += 1;
             let p0 = prev.unwrap_or_else(|| {
                 let q = m.end(DVec3::ZERO);
                 DVec3::new(q.x, q.y, hi.z.max(part.hi.z) + c.clearance)
             });
             let p1 = m.end(p0);
-            if sim_on && !matches!(m, Move::Rapid(_)) {
-                prev = Some(p1);
-                continue;
-            }
+            let w = if sel == Some(tp.op) || sim_on { 1.8 } else { 1.2 };
             match m {
                 Move::Rapid(_) => s.line(to(p0), to(p1), if on { 1.0 } else { 0.7 }, rapid_col),
-                Move::Feed(..) => s.line(to(p0), to(p1), if sel == Some(tp.op) { 1.8 } else { 1.2 }, feed_col),
-                Move::Tap { z, .. } => s.line(to(p0), to(DVec3::new(p0.x, p0.y, *z)), 1.8, feed_col),
+                Move::Feed(_, f) if (*f - plunge).abs() < 1e-6 && p1.z < p0.z - 1e-6 => s.line(to(p0), to(p1), w, plunge_col),
+                Move::Feed(..) => s.line(to(p0), to(p1), w, feed_col),
+                Move::Tap { z, .. } => s.line(to(p0), to(DVec3::new(p0.x, p0.y, *z)), 1.8, plunge_col),
                 Move::Dwell(_) => {}
             }
             prev = Some(p1);
@@ -1356,10 +1539,7 @@ fn build_scene(app: &App) -> SceneData {
     // the tool where the simulation is
     if sim_on {
         if let Some(sim) = &app.cam.sim {
-            let tp_tool = sim.current_cutter().and_then(|ci| {
-                let ids: Vec<u64> = app.cam.paths.iter().filter(|p| c.tool(p.tool).is_some()).map(|p| p.tool).collect();
-                ids.get(ci).and_then(|id| c.tool(*id)).cloned()
-            });
+            let tp_tool = sim.current_cutter().and_then(|ci| app.cam.paths.get(ci)).and_then(|p| c.tool(p.tool)).cloned();
             if let Some(t) = tp_tool {
                 let p = sim.tool_pos();
                 let bad = sim.events.iter().any(|e| e.step + 1 >= sim.done && e.step < sim.done + 1);
