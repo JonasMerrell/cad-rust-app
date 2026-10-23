@@ -16,6 +16,7 @@ mod cam_post;
 mod cam_sim;
 mod cam_stock;
 mod cam_ui;
+mod palette;
 mod camera;
 mod dialog;
 mod doc;
