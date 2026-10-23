@@ -299,6 +299,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "camGcode", "G-code", "Export G-code for the machine", true, false, !app.cam.paths.is_empty()).clicked() {
             export_dialog(app);
         }
+        if app.tool_button(ui, "camSheet", "Setup sheet", "Save a setup sheet for the operator: stock, work zero, fixtures, tools and operations", true, false, !app.cam.paths.is_empty()).clicked() {
+            sheet_dialog(app);
+        }
     });
 }
 
@@ -1507,6 +1510,21 @@ fn export_dialog(app: &mut App) {
                 app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3)));
             }
         }
+        Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
+    }
+}
+
+fn sheet_dialog(app: &mut App) {
+    let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
+    if app.cam.computing {
+        app.flash("Toolpaths are still being made", ToastKind::Info);
+        return;
+    }
+    let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
+    let Some(p) = rfd::FileDialog::new().add_filter("Web page", &["html", "htm"]).set_file_name(format!("{name} setup sheet.html")).save_file() else { return };
+    let png = crate::cam_sheet::picture(&c, &part, 640, 480);
+    match std::fs::write(&p, crate::cam_sheet::html(&c, &part, &app.cam.paths, png.as_deref())) {
+        Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
         Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
     }
 }
