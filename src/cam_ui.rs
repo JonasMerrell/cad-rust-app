@@ -9,7 +9,7 @@ use glam::{DVec3, Vec2, Vec3};
 
 use crate::app::{App, ToastKind};
 use crate::cam::{self, Cam, OpKind, Operation, Origin, Side, Tool, ToolKind};
-use crate::cam_paths::{self, Circle, Move, Part, Toolpath};
+use crate::cam_paths::{self, Move, Part, PartInput, SketchPaths, Toolpath};
 use crate::cam_sim::Sim;
 use crate::cam_stock::StockMap;
 use crate::doc::{BodyId, Document};
@@ -124,8 +124,8 @@ fn edit(app: &mut App, f: impl FnOnce(&mut Cam)) {
     record(app, c);
 }
 
-/// Triangles and circular edges of the parts a setup machines (part coordinates).
-pub fn part_input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -> (Vec<[DVec3; 3]>, Vec<Circle>) {
+/// Triangles and circular edges of the parts a setup machines, and the Part Studio's sketches (part coordinates).
+pub fn part_input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -> PartInput {
     let mut tris = vec![];
     let mut circles = vec![];
     for b in bodies {
@@ -143,10 +143,35 @@ pub fn part_input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -
             }
         }
     }
-    (tris, circles)
+    PartInput { tris, circles, sketches: doc.map(sketch_input).unwrap_or_default() }
 }
 
-fn input_key(cams: &[Cam], ci: usize, tris: &[[DVec3; 3]]) -> u64 {
+/// The curves of the active sketches, for tracing and carving (part coordinates).
+pub fn sketch_input(doc: &Document) -> Vec<SketchPaths> {
+    use crate::sketch::Geom;
+    let n = doc.rollback.unwrap_or(doc.features.len()).min(doc.features.len());
+    let mut out = vec![];
+    for f in doc.features[..n].iter().filter(|f| !f.suppressed) {
+        let crate::doc::Op::Sketch { sketch, frame, .. } = &f.op else { continue };
+        let mut paths = vec![];
+        for c in sketch.curves.iter().filter(|c| !c.construction) {
+            let closed = match &c.geom {
+                Geom::Circle { .. } | Geom::Ellipse { .. } => true,
+                Geom::Spline { closed, .. } | Geom::Poly { closed, .. } => *closed,
+                _ => false,
+            };
+            let pts: Vec<DVec3> = sketch.tessellate(c, 0.2).into_iter().map(|p| frame.to_world(p)).collect();
+            if pts.len() >= 2 {
+                paths.push((pts, closed));
+            }
+        }
+        out.push(SketchPaths { id: f.id, name: f.name.clone(), paths });
+    }
+    out
+}
+
+fn input_key(cams: &[Cam], ci: usize, input: &PartInput) -> u64 {
+    let tris = &input.tris;
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     // this setup and the ones it carries on from (their stock boxes are derived, so left out)
@@ -163,6 +188,15 @@ fn input_key(cams: &[Cam], ci: usize, tris: &[[DVec3; 3]]) -> u64 {
         s += (t[0].x + t[1].y * 3.0 + t[2].z * 7.0) * (k as f64 + 1.0);
     }
     s.to_bits().hash(&mut h);
+    for sk in &input.sketches {
+        (sk.id, sk.paths.len()).hash(&mut h);
+        for (pts, closed) in &sk.paths {
+            closed.hash(&mut h);
+            for p in pts {
+                p.to_array().map(f64::to_bits).hash(&mut h);
+            }
+        }
+    }
     h.finish()
 }
 
@@ -190,8 +224,8 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     }
     let Some(ci) = cam_index(app) else { return };
     let Some(c) = cam(app).cloned() else { return };
-    let (tris, circles) = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &c.bodies);
-    let key = input_key(&app.ws.cams, ci, &tris);
+    let input = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &c.bodies);
+    let key = input_key(&app.ws.cams, ci, &input);
     if key == app.cam.key || app.cam.job.as_ref().map(|j| j.0 == key).unwrap_or(false) {
         return;
     }
@@ -201,9 +235,9 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     let ctx = ctx.clone();
     let mut cams = app.ws.cams.clone();
     std::thread::spawn(move || {
-        let linked = cam_paths::link_setups(&mut cams, ci, &tris, &circles);
+        let linked = cam_paths::link_setups(&mut cams, ci, &input);
         let c = &cams[ci];
-        let part = Part::new(&tris, &circles, &c.orient);
+        let part = Part::from_input(&input, &c.orient);
         let (stock_in, err) = match linked {
             Ok(s) => (s, None),
             Err(e) => (None, Some(e)),
@@ -244,6 +278,13 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        for (k, icon) in [(OpKind::Trace, "camTrace"), (OpKind::VCarve, "camVCarve")] {
+            if app.tool_button(ui, icon, k.label(), k.description(), true, false, true).clicked() {
+                add_op(app, k);
+            }
+        }
+    });
+    App::group(ui, |ui| {
         if app.tool_button(ui, "camTools", "Tool library", "Pick tools from the library", true, app.cam.library_open, true).clicked() {
             app.cam.library_open = !app.cam.library_open;
         }
@@ -278,6 +319,7 @@ fn add_op(app: &mut App, k: OpKind) {
                     OpKind::Chamfer | OpKind::Deburr => t.kind == ToolKind::Chamfer,
                     OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => t.kind == ToolKind::Ball && t.diameter >= 6.0,
                     OpKind::Pencil => t.kind == ToolKind::Ball && t.diameter <= 3.0,
+                    OpKind::Trace | OpKind::VCarve => t.kind == ToolKind::Engrave && t.angle >= 60.0,
                     _ => t.kind == ToolKind::Flat && t.diameter >= 6.0,
                 }
         });
@@ -290,7 +332,16 @@ fn add_op(app: &mut App, k: OpKind) {
     }
     let mut id = 0;
     let tool = if k == OpKind::Pencil { cam(app).and_then(small).unwrap_or(0) } else { 0 };
-    edit(app, |c| id = c.add_op(k, tool));
+    // tracing and carving start on the latest sketch
+    let sketch = cam(app).and_then(|c| app.studio_doc(c.studio)).and_then(|d| sketch_input(d).into_iter().rev().find(|s| !s.paths.is_empty())).map(|s| s.id);
+    let engrave = cam(app).and_then(|c| c.tools.iter().find(|t| t.kind == ToolKind::Engrave && k.accepts(t.kind)).map(|t| t.id));
+    let tool = if matches!(k, OpKind::Trace | OpKind::VCarve) { engrave.unwrap_or(tool) } else { tool };
+    edit(app, |c| {
+        id = c.add_op(k, tool);
+        if let (Some(s), Some(o)) = (sketch.filter(|_| matches!(k, OpKind::Trace | OpKind::VCarve)), c.op_mut(id)) {
+            o.sketches = vec![s];
+        }
+    });
     app.cam.sel_op = Some(id);
     app.cam.sel_tool = None;
 }
@@ -616,6 +667,8 @@ fn kind_icon(k: OpKind) -> &'static str {
         OpKind::Scallop => "camScallop",
         OpKind::Deburr => "camDeburr",
         OpKind::Pencil => "camPencil",
+        OpKind::Trace => "camTrace",
+        OpKind::VCarve => "camVCarve",
     }
 }
 
@@ -819,6 +872,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
     let Some(ci) = cam_index(app) else { return };
     let snapshot = app.ws.cams[ci].clone();
     let Some(oi) = snapshot.ops.iter().position(|o| o.id == id) else { return };
+    let sketches: Vec<(u64, String)> = app.studio_doc(snapshot.studio).map(sketch_input).unwrap_or_default().into_iter().map(|s| (s.id, s.name)).collect();
     let mut o: Operation = snapshot.ops[oi].clone();
     let tool = snapshot.tool(o.tool).cloned();
     ui.label(RichText::new(o.kind.description()).color(theme::muted()).size(12.0));
@@ -970,6 +1024,55 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             });
             num(ui, "Leave", &mut o.leave, " mm", -1.0..=10.0, 0.02);
             rest_row(ui, &mut o.rest);
+            row(ui, "Direction", |ui| {
+                ui.radio_value(&mut o.climb, true, "climb");
+                ui.radio_value(&mut o.climb, false, "conventional");
+            });
+        }
+        OpKind::Trace | OpKind::VCarve => {
+            row(ui, "Sketches", |ui| {
+                ui.vertical(|ui| {
+                    if sketches.is_empty() {
+                        ui.label(RichText::new("the Part Studio has no sketches").color(theme::muted()).size(12.0));
+                    }
+                    for (sid, name) in &sketches {
+                        let mut on = o.sketches.contains(sid);
+                        if ui.checkbox(&mut on, name).changed() {
+                            if on {
+                                o.sketches.push(*sid);
+                            } else {
+                                o.sketches.retain(|x| x != sid);
+                            }
+                        }
+                    }
+                });
+            });
+            if o.kind == OpKind::Trace {
+                num(ui, "Depth", &mut o.depth, " mm", 0.0..=200.0, 0.05);
+                opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
+                row(ui, "Closed shapes", |ui| {
+                    for (s, l) in [(Side::Both, "on the line"), (Side::Outside, "outside"), (Side::Inside, "inside")] {
+                        ui.radio_value(&mut o.side, s, l);
+                    }
+                });
+                if o.side != Side::Both {
+                    num(ui, "Leave", &mut o.leave, " mm", -5.0..=50.0, 0.05);
+                }
+            } else {
+                row(ui, "Deepest", |ui| {
+                    let mut on = o.depth > 0.0;
+                    let tip = "Stop at this depth: wider parts get a flat (ridged) floor";
+                    if ui.checkbox(&mut on, "").on_hover_text(tip).changed() {
+                        o.depth = if on { 1.0 } else { 0.0 };
+                    }
+                    if on {
+                        ui.add(egui::DragValue::new(&mut o.depth).range(0.01..=100.0).speed(0.05).suffix(" mm"));
+                    } else {
+                        ui.label(RichText::new("as deep as the V-bit goes").color(theme::muted()).size(12.0)).on_hover_text(tip);
+                    }
+                });
+                stepover_row(ui, "Stepover", &mut o.stepover, so);
+            }
             row(ui, "Direction", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
                 ui.radio_value(&mut o.climb, false, "conventional");

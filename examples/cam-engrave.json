@@ -1,0 +1,25 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [100, 60]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 12}}},
+  {"tool": "create_sketch", "args": {"plane": {"kind": "face", "point": [50, 30, 12], "normal": [0, 0, 1]}}},
+  {"tool": "sketch_add", "args": {"sketch_id": 3, "items": [{"type": "text", "at": [12, 22], "text": "CNC", "height": 22}]}},
+  {"tool": "create_sketch", "args": {"plane": {"kind": "face", "point": [50, 30, 12], "normal": [0, 0, 1]}}},
+  {"tool": "sketch_add", "args": {"sketch_id": 4, "items": [
+    {"type": "rect", "corner1": [4, 4], "corner2": [96, 56]},
+    {"type": "line", "from": [8, 12], "to": [30, 12]},
+    {"type": "arc", "center": [30, 16], "start": [30, 12], "end": [34, 16]},
+    {"type": "line", "from": [34, 16], "to": [34, 48]}]}},
+
+  {"tool": "create_cam", "args": {"name": "Sign", "stock": {"side": 0, "top": 0, "bottom": 0, "material": "Hardwood"}, "post": "grbl", "machine": "Hobby router, 600 × 400"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6.35 90° engraving v-bit"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø3 flat"}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "vcarve", "tool": 1, "sketches": [3]}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "trace", "tool": 1, "sketches": [4], "depth": 0.6}},
+  {"tool": "cam_info", "args": {"cam": 0}},
+  {"tool": "simulate_cam", "args": {"cam": 0, "path": "engrave-sim.png", "resolution": 900}},
+  {"tool": "render_cam", "args": {"cam": 0, "path": "engrave-paths.png"}},
+  {"tool": "export_gcode", "args": {"cam": 0, "path": "engrave.nc"}},
+  {"tool": "save_document", "args": {"path": "engrave.json"}}
+]
