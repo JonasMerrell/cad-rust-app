@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::Cam;
+use crate::cam::{Cam, Tool};
 use crate::cam_paths::{Move, Toolpath};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -158,6 +158,9 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         Dialect::Fanuc | Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G94"),
     }
     o.line("G54");
+    for l in fill(&cam.post_text.header, cam, None) {
+        o.line(&l);
+    }
     let mut cur_tool: Option<u64> = None;
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = false;
@@ -181,24 +184,36 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
                     coolant = false;
                 }
             }
-            match d {
-                Dialect::Grbl => {
-                    if cur_tool.is_some() {
-                        o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
-                        o.line("M0");
-                    } else {
-                        o.line(&comment(&format!("load T{}: {}", tool.number, tool.describe())));
+            let probing = cam.probe.mode != "off";
+            if !cam.post_text.tool_change.trim().is_empty() {
+                for l in fill(&cam.post_text.tool_change, cam, Some(tool)) {
+                    o.line(&l);
+                }
+            } else {
+                match d {
+                    Dialect::Grbl => {
+                        if cur_tool.is_some() {
+                            o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
+                            o.line("M0");
+                        } else {
+                            o.line(&comment(&format!("load T{}: {}", tool.number, tool.describe())));
+                        }
+                    }
+                    _ => {
+                        if !cam.machine.tool_changer {
+                            // manual tool change: stop for the operator, then pick up the new length offset
+                            o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
+                            o.line("M0");
+                        }
+                        o.line(&format!("T{} M6", tool.number));
+                        if !probing {
+                            o.line(&format!("G43 H{}", tool.number));
+                        }
                     }
                 }
-                _ => {
-                    if !cam.machine.tool_changer {
-                        // manual tool change: stop for the operator, then pick up the new length offset
-                        o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
-                        o.line("M0");
-                    }
-                    o.line(&format!("T{} M6", tool.number));
-                    o.line(&format!("G43 H{}", tool.number));
-                }
+            }
+            if probing {
+                probe(&mut o, d, cam, tool, cur_tool.is_none(), safe_w);
             }
             o.forget();
             cur_tool = Some(tool.id);
@@ -303,6 +318,9 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
     if coolant {
         o.line("M9");
     }
+    for l in fill(&cam.post_text.footer, cam, None) {
+        o.line(&l);
+    }
     match d {
         Dialect::Fanuc => {
             o.line("G91 G28 Z0");
@@ -313,6 +331,100 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         _ => o.line("M30"),
     }
     o.s
+}
+
+/// The user's G-code with its placeholders filled in, line by line.
+fn fill(text: &str, cam: &Cam, tool: Option<&Tool>) -> Vec<String> {
+    let mut t = text.replace("{program}", &cam.program.to_string()).replace("{setup}", &cam.name);
+    if let Some(tool) = tool {
+        t = t
+            .replace("{tool}", &tool.number.to_string())
+            .replace("{name}", &tool.name)
+            .replace("{desc}", &tool.describe())
+            .replace("{diameter}", &num(tool.diameter))
+            .replace("{rpm}", &num(tool.rpm.round()));
+    }
+    t.lines().map(|l| l.trim_end().to_string()).filter(|l| !l.is_empty()).collect()
+}
+
+/// Measure the tool just loaded: on a touch plate (sets the work Z zero) or on a tool setter (sets its
+/// length offset against the first tool, which must be the one the work Z zero was set with).
+fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f64) {
+    let p = &cam.probe;
+    let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };
+    let touch = |o: &mut Out| {
+        o.line(&format!("G91 {g} Z-{} F{}", num(p.travel.max(1.0)), num(p.fast.max(1.0))));
+        o.line("G0 Z1");
+        o.line(&format!("{g} Z-2 F{}", num(p.slow.max(1.0))));
+        o.line("G90");
+    };
+    match p.mode.as_str() {
+        "plate" => {
+            let [x, y, z] = p.plate_at;
+            let top = z + p.plate_thickness;
+            // one stop for the tool change and the plate
+            if o.s.ends_with("M0\n") {
+                o.s.truncate(o.s.len() - 3);
+            }
+            o.line(&comment(&format!("put the touch plate at X{} Y{} under T{} and attach its clip", num(x), num(y), tool.number)));
+            o.line("M0");
+            if d != Dialect::Grbl {
+                o.line("G49");
+            }
+            // the new tool's length isn't known yet: travel at the top of the machine and probe down from there
+            o.line("G53 G0 Z0");
+            o.line(&format!("G0 X{} Y{}", num(x), num(y)));
+            touch(o);
+            // the plate's top is the work Z there
+            match d {
+                Dialect::Fanuc => o.line(&format!("G10 L2 P1 Z[#5023-{}]", num(top))),
+                _ => o.line(&format!("G10 L20 P1 Z{}", num(top))),
+            }
+            o.forget();
+            o.z_up(safe_w.max(top + 5.0));
+            o.line(&comment("remove the touch plate clip"));
+            o.line("M0");
+        }
+        "setter" => {
+            if d == Dialect::Grbl {
+                o.line(&comment(&format!("set the work Z zero for T{} by hand: GRBL can't keep a tool setter measurement", tool.number)));
+                o.line("M0");
+                return;
+            }
+            let [x, y, z] = p.setter;
+            o.line(&comment(&format!("measure T{} on the tool setter", tool.number)));
+            o.line("G49");
+            o.line("G53 G0 Z0");
+            o.line(&format!("G53 G0 X{} Y{}", num(x), num(y)));
+            o.line(&format!("G53 G0 Z{}", num(z)));
+            touch(o);
+            match d {
+                Dialect::LinuxCnc => {
+                    if first {
+                        o.line("#<_tool_ref> = #5063");
+                    }
+                    o.line("G43.1 Z[#5063 - #<_tool_ref>]");
+                }
+                Dialect::Mach3 => {
+                    if first {
+                        o.line("#500 = #2002");
+                    }
+                    o.line(&format!("G10 L1 P{} Z[#2002 - #500]", tool.number));
+                    o.line(&format!("G43 H{}", tool.number));
+                }
+                _ => {
+                    if first {
+                        o.line("#500 = #5063");
+                    }
+                    o.line(&format!("G10 L10 P{} R[#5063 - #500]", tool.number));
+                    o.line(&format!("G43 H{}", tool.number));
+                }
+            }
+            o.line("G53 G0 Z0");
+            o.forget();
+        }
+        _ => {}
+    }
 }
 
 /// Largest gap between the toolpath's points and the arcs that replace it, mm.

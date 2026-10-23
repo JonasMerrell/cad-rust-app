@@ -965,6 +965,41 @@ pub const FIXTURES: [(&str, [f64; 3]); 5] = [
     ("Bolt and washer", [24.0, 24.0, 15.0]),
 ];
 
+/// How the G-code measures each tool after it is loaded.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Probe {
+    /// "off", "plate" (a touch plate on the work sets the work Z zero) or "setter" (a fixed tool setter
+    /// measures each tool's length against the first one; needs LinuxCNC, Mach3 or Fanuc).
+    pub mode: String,
+    /// Where the touch plate lies (work X, Y) and the work Z of the surface under it.
+    pub plate_at: [f64; 3],
+    pub plate_thickness: f64,
+    /// Tool setter position in machine coordinates (G53): X, Y and the Z to start probing from.
+    pub setter: [f64; 3],
+    /// How far to probe down (for the touch plate from the top of the Z travel; for the setter from
+    /// its start Z), and the fast and slow probing feeds (mm/min).
+    pub travel: f64,
+    pub fast: f64,
+    pub slow: f64,
+}
+
+impl Default for Probe {
+    fn default() -> Self {
+        Probe { mode: "off".into(), plate_at: [0.0, 0.0, 0.0], plate_thickness: 15.0, setter: [0.0, 0.0, -10.0], travel: 100.0, fast: 300.0, slow: 25.0 }
+    }
+}
+
+/// G-code the user adds: at the start (after the units and work offset), in place of the standard
+/// tool change, and at the end (before M30). Placeholders: {tool} {name} {desc} {diameter} {rpm} {program} {setup}.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct PostText {
+    pub header: String,
+    pub tool_change: String,
+    pub footer: String,
+}
+
 /// A fixture preset placed against the stock (`lo`, `hi` in setup coordinates): vise jaws along the
 /// front and back faces, clamps and screws over the edges in turn (left, right, front, back), each
 /// overlapping the stock by a quarter of its size. Returned in work coordinates.
@@ -1048,6 +1083,10 @@ pub struct Cam {
     pub arcs: bool,
     /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
     pub fixtures: Vec<Fixture>,
+    /// Measuring tools after a change: touch plate or tool setter.
+    pub probe: Probe,
+    /// The user's own G-code for the start, tool changes and end of the program.
+    pub post_text: PostText,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -1072,6 +1111,8 @@ impl Default for Cam {
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
+            probe: Probe::default(),
+            post_text: PostText::default(),
             tools: vec![],
             ops: vec![],
             next_id: 1,

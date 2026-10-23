@@ -933,6 +933,8 @@ fn generate_all(cam: &Cam, part: &Part, stock: Option<&StockMap>, want_stock: bo
         c.name.clear();
         c.follows.clear();
         c.post.clear();
+        c.probe = Default::default();
+        c.post_text = Default::default();
         let (cj, ph) = (serde_json::to_string(&c).unwrap_or_default(), part_hash(part));
         hash_of(|h| (cj, ph).hash(h))
     };
@@ -1910,5 +1912,52 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gcode_probing_and_custom_text() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let small = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 3.0).unwrap();
+        let t2 = c.add_tool(small);
+        c.add_op(OpKind::Face, t);
+        c.add_op(OpKind::Pocket, t2);
+        let paths = generate(&c, &part);
+        let ctx = Ctx::new(&c, &part);
+        let (origin, safe) = (ctx.origin, ctx.safe());
+        // touch plate on GRBL: each tool probes down twice and sets the work Z from the plate's top
+        c.probe.mode = "plate".into();
+        c.probe.plate_at = [5.0, 5.0, 0.0];
+        c.probe.plate_thickness = 10.0;
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert_eq!(g.matches("G38.2").count(), 4, "{g}");
+        assert_eq!(g.matches("G10 L20 P1 Z10").count(), 2);
+        assert!(g.find("G53 G0 Z0").unwrap() < g.find("G38.2").unwrap());
+        // tool setter on LinuxCNC: the first tool is the reference, every tool gets a length offset
+        c.post = "linuxcnc".into();
+        c.probe.mode = "setter".into();
+        c.probe.setter = [-5.0, -10.0, -20.0];
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert_eq!(g.matches("#<_tool_ref> = #5063").count(), 1, "{g}");
+        assert_eq!(g.matches("G43.1 Z[#5063 - #<_tool_ref>]").count(), 2);
+        assert!(g.contains("G53 G0 X-5 Y-10") && !g.contains("G43 H"));
+        let reference = g.find("#<_tool_ref>").unwrap();
+        assert!(g[..reference].contains("T1 M6") && !g[..reference].contains("T2 M6"));
+        // Fanuc probes with G31 and keeps the offsets in the tool table
+        c.post = "fanuc".into();
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(g.contains("G31") && !g.contains("G38.2") && g.contains("G10 L10 P2 R[#5063 - #500]") && g.contains("G43 H2"));
+        // the user's own G-code, with placeholders
+        c.probe.mode = "off".into();
+        c.post = "grbl".into();
+        c.post_text.header = "G0 G53 Z0\n(program {program} {setup})".into();
+        c.post_text.tool_change = "M0 (load T{tool}: {desc} at {rpm} rpm)".into();
+        c.post_text.footer = "G53 G0 X0 Y0".into();
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(g.contains(&format!("(program {} {})", c.program, c.name)), "{g}");
+        assert!(g.contains("M0 (load T2: Ø3 flat end mill"), "{g}");
+        assert_eq!(g.matches("(load T").count(), 2);
+        let end = g.find("G53 G0 X0 Y0").unwrap();
+        assert!(end < g.find("M30").unwrap() && end > g.find("M5").unwrap());
     }
 }
