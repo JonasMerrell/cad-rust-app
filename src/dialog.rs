@@ -1,7 +1,7 @@
 //! The feature dialog shown over the viewport's top-left corner while a feature
 //! is created or edited. Selection fields take picks from the viewport.
 
-use egui::{Color32, Margin, RichText, Stroke, Ui};
+use egui::{Margin, RichText, Stroke, Ui};
 
 use crate::app::App;
 use crate::doc::{BoolOp, BooleanKind, Document, EndType, HoleType, Op, Ref, kind_label};
@@ -271,14 +271,14 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         egui::Frame::new()
             .fill(theme::window())
             .stroke(Stroke::new(1.0, theme::border()))
-            .corner_radius(8)
-            .inner_margin(Margin { left: 10, right: 10, top: 8, bottom: 10 })
-            .shadow(egui::Shadow { offset: [0, 8], blur: 24, spread: 0, color: Color32::from_black_alpha(0x59) })
+            .corner_radius(10)
+            .inner_margin(Margin { left: 12, right: 12, top: 10, bottom: 12 })
+            .shadow(ui.visuals().window_shadow)
             .show(ui, |ui| {
                 ui.set_width(if phone { rect.width() - 20.0 } else { 300.0 });
                 ui.horizontal(|ui| {
                     ui.add(icons::image(kind, 18.0).tint(theme::text()));
-                    ui.label(RichText::new(&name).strong());
+                    ui.label(RichText::new(&name).family(theme::medium()).size(13.0));
                     ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                         if ui.add(egui::Button::image(icons::image("close", 16.0).tint(theme::text()))).on_hover_text("Cancel (Esc)").clicked() {
                             cancel = true;
@@ -357,6 +357,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
                         let cur = opts.iter().find(|o| o.0 == *v).map(|o| o.1).unwrap_or("");
+                        theme::field_style(ui);
                         egui::ComboBox::from_id_salt(label).selected_text(cur).width(ui.available_width()).show_ui(ui, |ui| {
                             for (o, l) in opts {
                                 if ui.selectable_label(*v == *o, *l).clicked() {

@@ -457,10 +457,10 @@ fn build_scene(app: &App) -> SceneData {
         let q = |x: f32, y: f32| (fr.to_world(DVec2::new(x as f64, y as f64))).as_vec3();
         let h = size / 2.0;
         let quad = [q(-h, -h), q(h, -h), q(h, h), q(-h, h)];
-        s.quad(true, quad, rgba(col, if picked || hov { 0.22 } else { 0.07 }));
+        s.quad(true, quad, rgba(col, if picked || hov { 0.22 } else { 0.045 }));
         let mut ring = quad.to_vec();
         ring.push(quad[0]);
-        s.polyline(&ring, 1.2, rgba(col, if picked || hov { 0.95 } else { 0.55 }), false);
+        s.polyline(&ring, 1.2, rgba(col, if picked || hov { 0.95 } else { 0.45 }), false);
     }
     if !app.default_hidden("Origin") {
         let al = size * 0.45;
@@ -777,7 +777,7 @@ pub fn label_box(painter: &egui::Painter, at: Pos2, text: &str, color: Color32) 
     let font = egui::FontId::proportional(12.0);
     let g = painter.layout_no_wrap(text.to_string(), font, color);
     let r = egui::Rect::from_center_size(at, g.size() + egui::vec2(12.0, 4.0));
-    painter.rect(r, 4.0, crate::theme::label_bg(), Stroke::new(1.0, crate::theme::border()), egui::StrokeKind::Inside);
+    painter.rect(r, 5.0, crate::theme::label_bg(), Stroke::new(1.0, crate::theme::border()), egui::StrokeKind::Inside);
     painter.galley(r.min + egui::vec2(6.0, 2.0), g, color);
 }
 
@@ -922,13 +922,14 @@ fn point_in_quad(p: Pos2, q: &[Pos2]) -> bool {
 /// like Onshape's: section, X-ray, dimensions, measure, zoom to fit, views.
 pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
     let pal = crate::theme::pal();
-    let pos = egui::pos2(rect.right() - 38.0, rect.center().y - 110.0);
+    let pos = egui::pos2(rect.right() - 46.0, rect.center().y - 120.0);
     egui::Area::new(egui::Id::new("view-tools")).order(egui::Order::Middle).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(pal.panel)
             .stroke(Stroke::new(1.0, pal.border))
-            .corner_radius(egui::CornerRadius { nw: 5, sw: 5, ne: 0, se: 0 })
-            .inner_margin(egui::Margin::same(3))
+            .corner_radius(8)
+            .shadow(ui.visuals().popup_shadow)
+            .inner_margin(egui::Margin::same(4))
             .show(ui, |ui| {
                 ui.spacing_mut().item_spacing.y = 2.0;
                 ui.vertical(|ui| {
