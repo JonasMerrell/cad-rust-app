@@ -112,6 +112,14 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd("Setup sheet…", "Manufacture", "camSheet", None, "print operator html", Action::Run(crate::cam_ui::sheet_dialog)));
             v.push(cmd("Tool library", "Manufacture", "camTools", None, "tools import fusion", Action::Run(|a| a.cam.library_open = true)));
         }
+        Tab::Sim(_) => {
+            v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
+            v.push(cmd("Roller support", "Simulation", "feaRoller", None, "fea constraint slide symmetry", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Roller))));
+            v.push(cmd("Force", "Simulation", "feaForce", None, "fea load", Action::Run(|a| crate::fea_ui::add_load(a, crate::fea::LoadKind::Force))));
+            v.push(cmd("Pressure", "Simulation", "feaPressure", None, "fea load", Action::Run(|a| crate::fea_ui::add_load(a, crate::fea::LoadKind::Pressure))));
+            v.push(cmd("Gravity", "Simulation", "feaGravity", None, "fea load weight acceleration", Action::Run(|a| crate::fea_ui::add_load(a, crate::fea::LoadKind::Gravity))));
+            v.push(cmd("Animate", "Simulation", "camSim", None, "fea play mode vibration", Action::Run(crate::fea_ui::toggle_play)));
+        }
         _ => {}
     }
     if !matches!(app.tab, Tab::Drawing(_)) {
@@ -123,6 +131,7 @@ fn commands(app: &App) -> Vec<Cmd> {
             "zoom all",
             Action::Run(|a| match a.tab {
                 Tab::Cam(_) => crate::cam_ui::fit(a),
+                Tab::Sim(_) => crate::fea_ui::fit(a),
                 _ => a.fit_view(),
             }),
         ));
@@ -157,6 +166,7 @@ fn commands(app: &App) -> Vec<Cmd> {
     let tabs = tabs.chain(app.ws.assemblies.iter().enumerate().map(|(i, s)| (Tab::Assembly(i), s.name.clone(), "assembly")));
     let tabs = tabs.chain(app.ws.drawings.iter().enumerate().map(|(i, s)| (Tab::Drawing(i), s.name.clone(), "drawing")));
     let tabs = tabs.chain(app.ws.cams.iter().enumerate().map(|(i, s)| (Tab::Cam(i), s.name.clone(), "cam")));
+    let tabs = tabs.chain(app.ws.sims.iter().enumerate().map(|(i, s)| (Tab::Sim(i), s.name.clone(), "simulation")));
     for (t, name, icon) in tabs {
         if t != app.tab {
             v.push(cmd(format!("Go to {name}"), "Tab", icon, None, "switch open", Action::Tab(t)));

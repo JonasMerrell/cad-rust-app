@@ -22,6 +22,8 @@ use crate::worker::KernelClient;
 mod cam;
 #[path = "agent_ws.rs"]
 mod ws;
+#[path = "agent_fea.rs"]
+mod fea;
 
 pub struct Session {
     /// The active Part Studio (its copy in `ws` is stale until `sync`).
@@ -1054,6 +1056,7 @@ fn tools() -> Value {
     .cloned()
     .map(|mut v| {
         v.extend(cam::tools());
+        v.extend(fea::tools());
         Value::Array(v)
     })
     .unwrap_or_default()

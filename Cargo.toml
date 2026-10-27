@@ -28,6 +28,7 @@ base64 = "0.22"
 flate2 = "1"
 i_overlay = "9.1"
 usvg = { version = "0.45", default-features = false }
+faer = { version = "0.24", default-features = false, features = ["std", "rayon", "sparse-linalg"] }
 
 [target.'cfg(windows)'.dependencies]
 windows-sys = { version = "0.61", features = ["Win32_System_Console"] }

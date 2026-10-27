@@ -11,6 +11,7 @@ with a wgpu viewport and the OpenCascade (OCCT 7.8) kernel.
 - **Assemblies:** insert parts, fastened/revolute/slider/cylindrical/planar/ball mates with a mate solver, drag to move, fix/hide instances, exploded view, section view, bill of materials (CSV).
 - **Drawings:** hidden-line projected views (standard layout), section views with hatching, detail views, title block, dimensions, notes, BOM table, PDF/DXF/SVG export.
 - **Manufacture (CAM):** 2.5D milling setups (orientation, stock, work zero, material), a tool library with ~80 presets (flat, ball, bull nose, tapered ball, chamfer, slot, V-bits, face mills, drills, spot and centre drills, reamers, thread mills, taps) and your own tools (import Fusion 360 tool libraries, .json or .tools), operations (face, clearing, pocket, contour with tabs, chamfer, drill/peck, bore, thread mill, tap) with suggested feeds and speeds, 3D operations (adaptive clearing with cycloidal loops, parallel, waterline, scallop, pencil clean-up of corners a bigger tool left, and deburr/3D chamfer of picked or all sharp edges), trace and V-carve operations on sketch curves (engraved lines, text and logos carved with a V-bit), rest machining that cuts only what earlier operations left, multiple setups (flip the part and carry on from the leftover stock), tool holder outlines (ER collets, shrink-fit, side-lock), machine presets with travel, feed and tool-changer limits, fixtures (clamps, vise jaws, screws) that toolpaths lift over, a toolpath simulator with crash detection (rapids into stock, shank/holder collisions, fixture hits, gouges) that colours each operation's cuts, and G-code posts for GRBL, LinuxCNC, Fanuc and Mach3 that write arcs (G2/G3, including helices) where the toolpath runs along circles, can probe each tool on a touch plate or tool setter after a change and take your own start, tool-change and end G-code, operation templates you save once and add to any setup, and printable setup sheets for the operator (stock, work zero, fixtures, tools, operations); contours can lead on and off the wall with arcs.
+- **Simulation (FEA):** linear elastic analysis of a Part Studio's parts in a Simulation tab: automatic meshing with 10-node tetrahedra, Fixed and Roller supports and Force, Pressure and Gravity loads picked on faces, static (von Mises stress, deflection, factor of safety, reaction forces), modal (natural frequencies, mode shapes, effective mass) and transient dynamic analysis (step, ramp, impact pulse or shaking loads, with damping), shown as colour maps on the exaggerated deformed shape with a legend, probe values under the cursor and animation.
 - **Command search** like Fusion 360: press S (/ or Ctrl+K while sketching or in a drawing, where S picks a tool), or the search button, to find and run a command by name: features, sketch tools and constraints, CAM operations, views, files and tabs.
 - **Export:** STEP, IGES, STL, OBJ, PNG, G-code.
 
@@ -47,6 +48,10 @@ marked with an error and the rest of the part still rebuilds.
 | `src/cam_stock.rs` | leftover stock between operations and setups (rest machining, flipping) |
 | `src/cam_post.rs` | G-code post processors |
 | `src/cam_ui.rs` | Manufacture tab |
+| `src/fea.rs` | Simulation model (supports, loads, materials) and running a study |
+| `src/fea_mesh.rs` | automatic tetrahedral meshing (isosurface stuffing, 10-node elements) |
+| `src/fea_solve.rs` | linear elastic solver: static, modal (Lanczos) and transient (Newmark) |
+| `src/fea_ui.rs` | Simulation tab |
 | `crates/` | vendored `opencascade`/`opencascade-sys` bindings (internals made public) |
 | `tools/gui/` | headless Xvfb rig for screenshots |
 | `ref/` | material extracted from the original HTML app |

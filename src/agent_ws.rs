@@ -77,6 +77,7 @@ impl Session {
             "assemblies": self.ws.assemblies.iter().enumerate().map(|(i, a)| json!({"index": i, "name": a.name, "instances": a.instances.len(), "mates": a.mates.len()})).collect::<Vec<_>>(),
             "drawings": self.ws.drawings.iter().enumerate().map(|(i, d)| json!({"index": i, "name": d.name, "sheets": d.sheet_count(), "views": d.views.len()})).collect::<Vec<_>>(),
             "manufacture": self.ws.cams.iter().enumerate().map(|(i, c)| json!({"index": i, "name": c.name, "studio": c.studio, "tools": c.tools.len(), "operations": c.ops.len()})).collect::<Vec<_>>(),
+            "simulations": self.ws.sims.iter().enumerate().map(|(i, s)| json!({"index": i, "name": s.name, "studio": s.studio, "analysis": s.analysis.key()})).collect::<Vec<_>>(),
         })
     }
 

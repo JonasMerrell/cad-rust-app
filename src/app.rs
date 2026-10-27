@@ -119,6 +119,7 @@ pub struct App {
     pub asm: crate::asm_ui::AsmUi,
     pub dwg: crate::drawing_ui::DrawUi,
     pub cam: crate::cam_ui::CamUi,
+    pub fea: crate::fea_ui::FeaUi,
     pub renaming_tab: Option<(crate::workspace::Tab, String)>,
     pub version_name: String,
     pub restore_version: Option<usize>,
@@ -212,6 +213,7 @@ impl App {
             asm: Default::default(),
             dwg: Default::default(),
             cam: Default::default(),
+            fea: Default::default(),
             renaming_tab: None,
             version_name: String::new(),
             restore_version: None,
@@ -311,6 +313,9 @@ impl App {
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::undo(self);
         }
+        if let crate::workspace::Tab::Sim(_) = self.tab {
+            return crate::fea_ui::undo(self);
+        }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return crate::asm_ui::undo(self);
         }
@@ -333,6 +338,9 @@ impl App {
     pub fn redo(&mut self) {
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::redo(self);
+        }
+        if let crate::workspace::Tab::Sim(_) = self.tab {
+            return crate::fea_ui::redo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return crate::asm_ui::redo(self);
@@ -357,6 +365,9 @@ impl App {
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::can_undo(self);
         }
+        if let crate::workspace::Tab::Sim(_) = self.tab {
+            return crate::fea_ui::can_undo(self);
+        }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return !self.asm.undo.is_empty();
         }
@@ -366,6 +377,9 @@ impl App {
     pub fn can_redo(&self) -> bool {
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::can_redo(self);
+        }
+        if let crate::workspace::Tab::Sim(_) = self.tab {
+            return crate::fea_ui::can_redo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return !self.asm.redo.is_empty();
@@ -548,6 +562,7 @@ impl App {
         self.asm = Default::default();
         self.dwg = Default::default();
         self.cam = Default::default();
+        self.fea = Default::default();
         self.first_fit = true;
         self.tab = crate::workspace::Tab::Studio(0);
         self.changed();
@@ -580,7 +595,7 @@ impl App {
                 self.dirty_model = true;
             }
         }
-        if matches!(t, Tab::Assembly(_) | Tab::Drawing(_) | Tab::Cam(_)) {
+        if matches!(t, Tab::Assembly(_) | Tab::Drawing(_) | Tab::Cam(_) | Tab::Sim(_)) {
             // every Part Studio needs geometry for the assembly/drawing/manufacture tab
             for i in 0..self.ws.studios.len() {
                 if i != self.cur_studio && !self.studio_results.contains_key(&i) {
@@ -593,6 +608,7 @@ impl App {
             self.asm.scene_dirty = true;
             self.dwg.dirty = true;
             self.cam.scene_dirty = true;
+            self.fea.scene_dirty = true;
         }
         self.picks.clear();
         self.hover = None;
@@ -943,6 +959,7 @@ impl App {
             crate::workspace::Tab::Assembly(_) => return crate::asm_ui::shortcuts(self, ctx),
             crate::workspace::Tab::Drawing(_) => return crate::drawing_ui::shortcuts(self, ctx),
             crate::workspace::Tab::Cam(_) => return crate::cam_ui::shortcuts(self, ctx),
+            crate::workspace::Tab::Sim(_) => return crate::fea_ui::shortcuts(self, ctx),
             _ => {}
         }
         if self.sketch.is_some() {
@@ -1199,6 +1216,7 @@ impl App {
                     crate::workspace::Tab::Assembly(_) => crate::asm_ui::toolbar(self, ui),
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::toolbar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::toolbar(self, ui),
+                    crate::workspace::Tab::Sim(_) => crate::fea_ui::toolbar(self, ui),
                     _ if self.sketch.is_some() => crate::sketcher::toolbar(self, ui),
                     _ => self.model_tools(ui),
                 }
@@ -2155,6 +2173,8 @@ impl App {
             "Insert views, add dimensions and notes, then export".to_string()
         } else if let crate::workspace::Tab::Cam(_) = self.tab {
             "Set up the stock, add tools and operations, simulate, then export G-code · Space plays the simulation".to_string()
+        } else if let crate::workspace::Tab::Sim(_) = self.tab {
+            "Add supports and loads, click their faces, then read the results · Space animates, hover for values".to_string()
         } else if let Some(s) = &self.sketch {
             crate::sketcher::status_text(self, s)
         } else if self.print_view && self.sketch.is_none() && self.dialog.is_none() {
@@ -2247,6 +2267,9 @@ impl App {
         for (i, c) in self.ws.cams.iter().enumerate() {
             tabs.push((Tab::Cam(i), c.name.clone(), "cam"));
         }
+        for (i, c) in self.ws.sims.iter().enumerate() {
+            tabs.push((Tab::Sim(i), c.name.clone(), "simulation"));
+        }
         let mut switch = None;
         let mut action: Option<(&str, Tab)> = None;
         ui.horizontal(|ui| {
@@ -2268,9 +2291,13 @@ impl App {
                     action = Some(("new-cam", Tab::Studio(0)));
                     ui.close();
                 }
+                if ui.add(egui::Button::image_and_text(icons::image("simulation", 15.0).tint(theme::text()), "Simulation")).clicked() {
+                    action = Some(("new-sim", Tab::Studio(0)));
+                    ui.close();
+                }
             })
             .response
-            .on_hover_text("Add a Part Studio, Assembly, Drawing or Manufacture tab");
+            .on_hover_text("Add a Part Studio, Assembly, Drawing, Manufacture or Simulation tab");
             ui.add_space(6.0);
             // tabs scroll sideways when they don't fit (phones)
             let reserve = if self.phone { 115.0 } else { 220.0 };
@@ -2378,6 +2405,7 @@ impl App {
             Tab::Assembly(i) => ws.assemblies.get(i).map(|s| s.name.clone()),
             Tab::Drawing(i) => ws.drawings.get(i).map(|s| s.name.clone()),
             Tab::Cam(i) => ws.cams.get(i).map(|s| s.name.clone()),
+            Tab::Sim(i) => ws.sims.get(i).map(|s| s.name.clone()),
         };
         match a {
             "rename" => self.renaming_tab = name_of(&self.ws, t).map(|n| (t, n)),
@@ -2397,6 +2425,7 @@ impl App {
                                     c.follows = text.clone();
                                 }
                             }
+                            Tab::Sim(i) => self.ws.sims[i].name = text,
                         }
                     }
                 }
@@ -2436,6 +2465,16 @@ impl App {
                 self.cam = Default::default();
                 self.switch_tab(Tab::Cam(n - 1));
             }
+            "new-sim" => {
+                let n = self.ws.sims.len() + 1;
+                let studio = match self.tab {
+                    Tab::Studio(i) => i,
+                    _ => self.cur_studio,
+                };
+                self.ws.sims.push(crate::fea::Study { name: format!("Simulation {n}"), studio, ..Default::default() });
+                self.fea = Default::default();
+                self.switch_tab(Tab::Sim(n - 1));
+            }
             "duplicate" => {
                 self.sync_ws();
                 match t {
@@ -2459,10 +2498,15 @@ impl App {
                         s.name = format!("{} copy", s.name);
                         self.ws.cams.push(s);
                     }
+                    Tab::Sim(i) => {
+                        let mut s = self.ws.sims[i].clone();
+                        s.name = format!("{} copy", s.name);
+                        self.ws.sims.push(s);
+                    }
                 }
             }
             "delete" => {
-                let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len() + self.ws.cams.len();
+                let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len() + self.ws.cams.len() + self.ws.sims.len();
                 if total <= 1 || (matches!(t, Tab::Studio(_)) && self.ws.studios.len() <= 1) {
                     self.flash("A document needs at least one Part Studio", ToastKind::Info);
                     return;
@@ -2500,6 +2544,16 @@ impl App {
                                 c.studio = fix(c.studio);
                             }
                         }
+                        for c in &mut self.ws.sims {
+                            if c.studio == i {
+                                c.studio = 0;
+                                c.bodies.clear();
+                                c.supports.iter_mut().for_each(|x| x.faces.clear());
+                                c.loads.iter_mut().for_each(|x| x.faces.clear());
+                            } else {
+                                c.studio = fix(c.studio);
+                            }
+                        }
                         self.tab = Tab::Studio(self.cur_studio);
                     }
                     Tab::Assembly(i) => {
@@ -2518,6 +2572,10 @@ impl App {
                     Tab::Cam(i) => {
                         self.ws.cams.remove(i);
                         self.cam = Default::default();
+                    }
+                    Tab::Sim(i) => {
+                        self.ws.sims.remove(i);
+                        self.fea = Default::default();
                     }
                 }
             }
@@ -2563,6 +2621,7 @@ impl App {
                     crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Sim(_) => crate::fea_ui::sidebar(self, ui),
                     _ => self.sidebar(ui),
                 }
             });
@@ -2578,6 +2637,8 @@ impl App {
                     crate::drawing_ui::toolbar(self, ui);
                 } else if let crate::workspace::Tab::Cam(_) = self.tab {
                     crate::cam_ui::toolbar(self, ui);
+                } else if let crate::workspace::Tab::Sim(_) = self.tab {
+                    crate::fea_ui::toolbar(self, ui);
                 } else if self.sketch.is_some() {
                     crate::sketcher::toolbar(self, ui);
                 } else {
@@ -2652,6 +2713,7 @@ impl eframe::App for App {
                     crate::workspace::Tab::Assembly(_) => crate::asm_ui::sidebar(self, ui),
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Sim(_) => crate::fea_ui::sidebar(self, ui),
                     _ => self.sidebar(ui),
                 }
             });
@@ -2669,6 +2731,7 @@ impl eframe::App for App {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
             crate::workspace::Tab::Cam(_) => crate::cam_ui::viewport(self, ui),
+            crate::workspace::Tab::Sim(_) => crate::fea_ui::viewport(self, ui),
             _ => {
                 crate::viewport::show(self, ui);
                 if self.dialog.is_some() {

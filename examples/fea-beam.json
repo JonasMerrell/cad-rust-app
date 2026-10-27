@@ -1,0 +1,20 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [100, 10]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 10}}},
+
+  {"tool": "create_simulation", "args": {"name": "Cantilever", "material": "Steel", "mesh_size": 2.5,
+    "supports": [{"kind": "fixed", "faces": [{"point": [0, 5, 5], "normal": [-1, 0, 0]}]}],
+    "loads": [{"kind": "force", "value": 100, "direction": "-z", "faces": [{"point": [100, 5, 5], "normal": [1, 0, 0]}]}]}},
+  {"tool": "solve_simulation", "args": {"simulation": 0}},
+  {"tool": "render_simulation", "args": {"simulation": 0, "path": "fea-beam-static.png"}},
+
+  {"tool": "edit_simulation", "args": {"simulation": 0, "analysis": "modal", "modes": 6}},
+  {"tool": "solve_simulation", "args": {"simulation": 0}},
+  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 1, "field": "displacement", "path": "fea-beam-mode1.png"}},
+
+  {"tool": "edit_simulation", "args": {"simulation": 0, "analysis": "transient", "transient": {"profile": "step", "steps": 200, "damping": 0}}},
+  {"tool": "solve_simulation", "args": {"simulation": 0}},
+  {"tool": "save_document", "args": {"path": "fea-beam-doc.json"}}
+]
