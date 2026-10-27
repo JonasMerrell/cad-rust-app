@@ -59,3 +59,12 @@ for views, M measure, Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+S save. In a sketch:
 L line, R rectangle, C circle, A arc, P point, D dimension, K trim, O offset,
 U project, Q construction, G grid snap, N normal-to; with a selection,
 I/H/V/T/E/M/X apply constraints; Enter finishes, Esc steps back.
+
+## License
+
+This project is licensed under the [MIT License](LICENSE), except for the vendored
+`crates/opencascade` and `crates/opencascade-sys` bindings, which keep their original
+LGPL-2.1 license. The app also links [Open CASCADE Technology](https://dev.opencascade.org/),
+which is LGPL-2.1 with an additional exception; anyone distributing binaries of the app
+must meet the LGPL terms for those parts (for example by pointing to their source and
+allowing them to be replaced).
