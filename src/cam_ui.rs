@@ -394,7 +394,7 @@ pub(crate) fn fit(app: &mut App) {
 
 // ---------------------------------------------------------------- sidebar
 
-fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(title.to_uppercase()).color(theme::muted()).size(11.0).strong());
@@ -406,7 +406,7 @@ fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     ui.painter().hline(r.x_range(), y, Stroke::new(1.0, theme::border()));
 }
 
-fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn row(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.add_sized([96.0, 18.0], egui::Label::new(RichText::new(label).color(theme::muted()).size(12.0)).truncate());
         add(ui);

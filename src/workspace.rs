@@ -20,6 +20,8 @@ pub enum Tab {
     Drawing(usize),
     /// Manufacture (CAM) tab.
     Cam(usize),
+    /// Simulation (FEA) tab.
+    Sim(usize),
 }
 
 impl Default for Tab {
@@ -39,6 +41,9 @@ pub struct Workspace {
     /// Manufacture tabs.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub cams: Vec<crate::cam::Cam>,
+    /// Simulation tabs.
+    #[serde(default, rename = "simulations", skip_serializing_if = "Vec::is_empty")]
+    pub sims: Vec<crate::fea::Study>,
     #[serde(default)]
     pub active: Tab,
     /// Saved snapshots (like Onshape versions), each a workspace JSON without versions.
@@ -80,6 +85,7 @@ impl Default for Workspace {
             assemblies: vec![],
             drawings: vec![],
             cams: vec![],
+            sims: vec![],
             active: Tab::Studio(0),
             versions: vec![],
         }

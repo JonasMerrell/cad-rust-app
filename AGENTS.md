@@ -69,6 +69,8 @@ runs in this folder. Other MCP clients start the same command
 | `cam_op` / `cam_info` | add, edit, reorder or delete operations (2.5D, plus 3D adaptive, parallel, waterline, scallop, pencil and deburr, and trace / vcarve on the Part Studio's `sketches`; `rest` to cut only what is left); toolpath stats, cycle time and warnings |
 | `simulate_cam` / `render_cam` | material removal simulation with crash detection (rapids into stock, shank/holder hits, gouges), optional PNG; toolpath render |
 | `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |
+| `create_simulation` / `edit_simulation` | Simulation tabs: linear elastic static, modal or transient analysis with a material, element size, Fixed/Roller supports and Force/Pressure/Gravity loads on face refs |
+| `solve_simulation` / `render_simulation` | mesh and solve: max stress, deflection, factor of safety, reactions; natural frequencies; peak response over time; colour-map PNG on the deformed shape |
 
 The tool descriptions returned by `tools/list` give the full argument formats.
 

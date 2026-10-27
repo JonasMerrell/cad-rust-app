@@ -522,7 +522,7 @@ impl Session {
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
                 json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": paths.iter().map(|p| p.time).sum::<f64>().round(), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
             }
-            _ => return Err(format!("unknown tool {name}")),
+            _ => return self.fea_call(name, a),
         };
         Ok((v, None))
     }

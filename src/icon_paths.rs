@@ -161,4 +161,12 @@ pub const ICONS: &[(&str, &str)] = &[
     ("camTrace", "M3 18c3-7 5 1 8-5s5-1 7-6M17 3l4 4-3 1z"),
     ("camVCarve", "M2 6h20M5 6l7 12 7-12M9 6l3 5 3-5"),
     ("camSetup", "M3 15h10v5H3zM11 4h10v5H11zM6 12V9a3 3 0 0 1 3-3h1M18 12v3a3 3 0 0 1-3 3h-1"),
+    ("simulation", "M4 4v16M4 9c6 0 11 1 15 4M4 14c5 0 10 0 15-1M19 13v6M17 17l2 2 2-2"),
+    ("feaFixed", "M4 18h16M6 18l-2 3M10 18l-2 3M14 18l-2 3M18 18l-2 3M8 6h8v12H8z"),
+    ("feaRoller", "M3 21h18M7 4h10v10H7zM9 17.5m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0M15 17.5m-2 0a2 2 0 1 0 4 0a2 2 0 1 0-4 0"),
+    ("feaForce", "M12 3v12M8 11l4 4 4-4M4 19h16"),
+    ("feaPressure", "M6 4v9M4 11l2 2 2-2M12 4v9M10 11l2 2 2-2M18 4v9M16 11l2 2 2-2M3 18h18"),
+    ("feaGravity", "M8 9h8l3 11H5zM12 9V5M9.5 5h5"),
+    ("feaResults", "M4 4h4v16H4zM4 8h4M4 12h4M4 16h4M12 7h8M12 12h8M12 17h8"),
+    ("feaMesh", "M3 20L12 4l9 16zM7.5 12h9M12 20L7.5 12M12 20l4.5-8"),
 ];
