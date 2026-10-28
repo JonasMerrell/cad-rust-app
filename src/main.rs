@@ -20,6 +20,8 @@ mod cam_stock;
 mod cam_ui;
 mod palette;
 mod camera;
+mod claude;
+mod claude_ui;
 mod dialog;
 mod doc;
 mod drawing;

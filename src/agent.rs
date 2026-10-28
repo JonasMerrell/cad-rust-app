@@ -55,6 +55,21 @@ impl Session {
         }
     }
 
+    /// Load a whole document with Part Studio `studio` active (the in-app Claude chat
+    /// starts from what is open in the editor).
+    pub fn load_workspace(&mut self, ws: crate::workspace::Workspace, studio: usize) -> R<()> {
+        self.cur = studio.min(ws.studios.len().saturating_sub(1));
+        self.doc = ws.studios.get(self.cur).map(|s| s.doc.clone()).unwrap_or_default();
+        self.ws = ws;
+        self.rebuild()
+    }
+
+    /// The whole document as saved, and the active Part Studio.
+    pub fn workspace_json(&mut self) -> (String, usize) {
+        self.sync();
+        (self.ws.to_json(), self.cur)
+    }
+
     fn rebuild(&mut self) -> R<()> {
         // solve every sketch first, as the editor does
         let (vars, _) = self.doc.var_values();
@@ -1055,7 +1070,7 @@ fn raster_line(px: &mut [u8], depth: &[f32], w: usize, h: usize, a: glam::Vec3, 
 
 // ---------------------------------------------------------------- tool catalogue
 
-fn tools() -> Value {
+pub(crate) fn tools() -> Value {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     json!([
         {"name": "new_document", "description": "Start a new empty Part Studio. Units: mm (default), cm, m, in, ft.", "inputSchema": obj(json!({"units": {"type": "string"}}), &[])},
