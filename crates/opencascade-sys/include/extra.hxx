@@ -1800,6 +1800,17 @@ inline rust::Vec<double> ex_edge_polylines(const TopoDS_Shape &s, double deflect
 #include <XCAFDoc_ShapeTool.hxx>
 #include <Quantity_Color.hxx>
 #include <Interface_Static.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
+
+/// Send OpenCascade's own messages (such as the STEP writer's transfer statistics) to stderr instead of
+/// stdout, warnings and worse only, for command-line modes whose stdout is their result.
+inline void ex_messages_to_stderr() {
+  const Handle(Message_Messenger) &m = Message::DefaultMessenger();
+  m->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+  m->AddPrinter(new Message_PrinterOStream("cerr", Standard_False, Message_Warning));
+}
 
 /// Write an assembly to STEP with names, colours and structure. Nodes in order: `shapes` (a null shape for
 /// an assembly), `parents` (index of the parent node, -1 at the top; parents come before children),

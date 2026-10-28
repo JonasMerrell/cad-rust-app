@@ -102,7 +102,7 @@ impl Session {
         json!({
             "parts": self.result.bodies.iter().map(|b| json!({
                 "body": [b.id.0, b.id.1],
-                "name": b.name,
+                "name": self.doc.parts.get(&crate::doc::body_key(b.id)).and_then(|p| p.name.clone()).unwrap_or_else(|| b.name.clone()),
                 "volume_mm3": round(b.volume),
                 "area_mm2": round(b.area),
                 "bbox_mm": [b.bbox[0].map(round), b.bbox[1].map(round)],

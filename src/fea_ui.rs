@@ -1068,8 +1068,8 @@ fn field_values(app: &mut App, o: &Outcome, disp: &[DVec3]) -> (Vec<f32>, f32, f
         hi = app.fea.stress_hi;
     }
     if field == Field::Safety {
-        lo = lo.min(10.0);
-        hi = 10.0f32.min(hi.max(lo + 1e-6));
+        // a fixed scale: red at 1 or below, blue at 10 or more
+        (lo, hi) = (1.0, 10.0);
     }
     if matches!(field, Field::Stress | Field::Disp) {
         lo = lo.min(0.0).max(0.0);

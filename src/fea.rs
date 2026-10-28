@@ -488,6 +488,8 @@ impl Input {
             None => h,
         };
         let h = h.max(ext.max_element() / 200.0);
+        // keep the solve in memory: about 88 V / h³ unknowns, and 600 000 take some 8 GB
+        let h = h.max((88.0 * vol / 600_000.0).cbrt());
         nice(h)
     }
 }
@@ -588,11 +590,12 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     if input.tris.is_empty() {
         return Err("No parts to analyse".into());
     }
+    let size = study.mesh_size.unwrap_or_else(|| input.auto_size());
     let mesh = match mesh {
         Some(m) => m,
         None => {
             progress("Meshing", 0.0);
-            Arc::new(mesh_input(study, input, study.mesh_size.unwrap_or_else(|| input.auto_size()), cancel)?)
+            Arc::new(mesh_input(study, input, size, cancel)?)
         }
     };
     let (mut material, mat) = material_of(study, input);
@@ -605,8 +608,8 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     }
     let mut warnings = vec![];
     let nn = mesh.nodes.len();
-    // mesh faces of a list of picks
-    let faces_of = |picks: &[FacePick], what: &str, warnings: &mut Vec<String>| -> Vec<usize> {
+    // mesh faces of a list of picks, and the area of the CAD faces they stand for
+    let faces_of = |picks: &[FacePick], what: &str, warnings: &mut Vec<String>| -> (Vec<usize>, f64) {
         let mut ids = vec![];
         for p in picks {
             match input.resolve(p) {
@@ -614,15 +617,30 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 None => warnings.push(format!("{what}: a face is no longer on the parts")),
             }
         }
-        (0..mesh.faces.len()).filter(|i| ids.contains(&mesh.faces[*i].1)).collect::<Vec<usize>>()
+        let cad: f64 = input.tris.iter().zip(&input.face).filter(|(_, f)| ids.contains(f)).map(|(t, _)| (t[1] - t[0]).cross(t[2] - t[0]).length() / 2.0).sum();
+        ((0..mesh.faces.len()).filter(|i| ids.contains(&mesh.faces[*i].1)).collect::<Vec<usize>>(), cad)
+    };
+    // a support or load on faces the mesh barely resolves (small holes) acts on a few nodes: the stress
+    // next to it is an artefact, often orders of magnitude too high
+    let coarse = |what: &str, fs: &[usize], cad: Option<f64>, warnings: &mut Vec<String>| {
+        let area = crate::fea_solve::area_of(&mesh, fs);
+        let share = cad.filter(|c| *c > 0.0).map(|c| area / c);
+        if !fs.is_empty() && (fs.len() < 6 || share.is_some_and(|k| k < 0.5)) {
+            let covered = share.map(|k| format!("{:.0}% of its faces, ", 100.0 * k.min(1.0))).unwrap_or_default();
+            warnings.push(format!(
+                "{what}: the mesh covers {covered}{} triangles, so it acts on a few nodes and the stress next to it is unreliable: use a smaller mesh size (now {size} mm) or bigger faces",
+                fs.len()
+            ));
+        }
     };
     let mut fixes = vec![];
     let mut support_nodes = vec![];
     for s in study.supports.iter().filter(|s| !s.suppressed) {
-        let fs = faces_of(&s.faces, &s.name, &mut warnings);
+        let (fs, cad) = faces_of(&s.faces, &s.name, &mut warnings);
         if fs.is_empty() {
             warnings.push(format!("{} has no faces", s.name));
         }
+        coarse(&s.name, &fs, Some(cad), &mut warnings);
         let mut nodes: Vec<u32> = fs.iter().flat_map(|f| mesh.faces[*f].0).collect();
         nodes.sort_unstable();
         nodes.dedup();
@@ -661,8 +679,10 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 any_load = true;
             }
             LoadKind::Force | LoadKind::Pressure => {
-                let mut fs = faces_of(&l.faces, &l.name, &mut warnings);
+                let (mut fs, cad) = faces_of(&l.faces, &l.name, &mut warnings);
+                let mut cad = Some(cad);
                 if let (Some(at), Some(r)) = (l.at, l.radius) {
+                    cad = None;
                     let at = DVec3::from(at);
                     fs.retain(|f| {
                         let t = &mesh.faces[*f].0;
@@ -672,6 +692,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 if fs.is_empty() {
                     warnings.push(format!("{} has no faces", l.name));
                 } else {
+                    coarse(&l.name, &fs, cad, &mut warnings);
                     let area = crate::fea_solve::area_of(&mesh, &fs);
                     let (v, normal) = (l.value, l.normal || l.kind == LoadKind::Pressure);
                     let per_area = if l.kind == LoadKind::Force { v / area.max(1e-12) } else { v };
@@ -700,6 +721,17 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             let r = crate::fea_solve::static_solve(&problem, cancel)?;
             progress("Stresses", 0.9);
             let stress = crate::fea_solve::nodal_stress(&mesh, &mat, &body_mats, &r.u);
+            // a peak far above every other node is a badly shaped element (often at a small hole the
+            // mesh barely resolves), not a stress concentration
+            let mut vm: Vec<f32> = stress.iter().map(crate::fea_solve::von_mises).collect();
+            vm.sort_unstable_by(|a, b| a.total_cmp(b));
+            if let (Some(&top), Some(&near)) = (vm.last(), vm.get(vm.len() * 999 / 1000)) {
+                if top > 5.0 * near && top as f64 > 0.2 * mat.yield_mpa {
+                    warnings.push(format!(
+                        "The largest stress ({top:.3e} MPa) is a spike at a few nodes, over 5 times the 99.9th percentile ({near:.3} MPa): most likely badly shaped elements, so don't trust the peak or the factor of safety; use a smaller mesh size (now {size} mm)"
+                    ));
+                }
+            }
             let reactions = support_nodes.iter().map(|(id, nodes)| (*id, crate::fea_solve::reaction(&mesh, &mat, &body_mats, &r.u, &problem.force, nodes))).collect();
             Solution::Static { u: r.u, stress, reactions }
         }
