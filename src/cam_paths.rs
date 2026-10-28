@@ -714,20 +714,25 @@ impl<'a> Ctx<'a> {
 
     /// Clear of the stock, the parts and the fixtures.
     pub fn safe(&self) -> f64 {
-        let fix = fixture_boxes(self.cam, self.origin).iter().map(|f| f.2.z).fold(f64::NEG_INFINITY, f64::max);
+        let fix = fixture_boxes(self.cam, self.part(), self.origin).iter().map(|f| f.2.z).fold(f64::NEG_INFINITY, f64::max);
         self.stock.1.z.max(self.part().hi.z).max(fix) + self.cam.clearance
     }
 }
 
-/// The setup's fixtures as boxes in setup coordinates (`origin`: the work zero).
-pub fn fixture_boxes(cam: &Cam, origin: DVec3) -> Vec<(String, DVec3, DVec3)> {
-    cam.fixtures
+/// The setup's fixtures as boxes in setup coordinates (`origin`: the work zero), soft jaws included.
+pub fn fixture_boxes(cam: &Cam, part: &Part, origin: DVec3) -> Vec<(String, DVec3, DVec3)> {
+    let mut v: Vec<_> = cam
+        .fixtures
         .iter()
         .map(|f| {
             let (a, b) = (DVec3::from(f.min) + origin, DVec3::from(f.max) + origin);
             (f.name.clone(), a.min(b), a.max(b))
         })
-        .collect()
+        .collect();
+    if let Some(j) = crate::cam_jaws::jaws(cam, part) {
+        v.extend(crate::cam_jaws::boxes(&j));
+    }
+    v
 }
 
 /// Lift the toolpath over the fixtures: wherever the tool (`r` plus a 1 mm margin) would pass over one lower
@@ -735,9 +740,20 @@ pub fn fixture_boxes(cam: &Cam, origin: DVec3) -> Vec<(String, DVec3, DVec3)> {
 fn avoid_fixtures(moves: Vec<Move>, boxes: &[(String, DVec3, DVec3)], r: f64, retract: f64, start: DVec3) -> (Vec<Move>, usize) {
     let mut moves = moves;
     let mut lifts = 0;
+    // where the moves go, to skip boxes nowhere near them
+    let (mut mlo, mut mhi) = (start, start);
+    for m in &moves {
+        if let Move::Rapid(p) | Move::Feed(p, _) = m {
+            mlo = mlo.min(DVec3::from(*p));
+            mhi = mhi.max(DVec3::from(*p));
+        }
+    }
     for (_, lo, hi) in boxes {
         let (blo, bhi) = (lo.truncate() - DVec2::splat(r + 1.0), hi.truncate() + DVec2::splat(r + 1.0));
         let zc = hi.z + retract;
+        if mlo.z >= zc || mhi.x <= blo.x || mlo.x >= bhi.x || mhi.y <= blo.y || mlo.y >= bhi.y {
+            continue;
+        }
         let blocked = |p: DVec3| p.z < zc - 1e-9 && p.x > blo.x && p.x < bhi.x && p.y > blo.y && p.y < bhi.y;
         // split each straight move where it crosses the box's sides or its clearance height
         let mut out: Vec<Move> = vec![];
@@ -1028,6 +1044,11 @@ fn generate_all(cam: &Cam, part: &Part, stock: Option<&StockMap>, want_stock: bo
     let left = want_stock.then(|| state(ops.len(), &out));
     let mut out: Vec<Toolpath> = out.into_iter().flatten().collect();
     machine_checks(cam, &ctx, &mut out);
+    if let Some(first) = out.first_mut() {
+        for (k, w) in crate::cam_jaws::fit_warnings(cam, part, stock).into_iter().enumerate() {
+            first.warnings.insert(k, w);
+        }
+    }
     (out, left)
 }
 
@@ -1193,7 +1214,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
             tp.warnings.push(format!("cuts {} mm deep but the flutes are only {} mm long", crate::cam::fmt_mm(top - low), crate::cam::fmt_mm(tool.flute_length)));
         }
     }
-    let boxes = fixture_boxes(ctx.cam, ctx.origin);
+    let boxes = fixture_boxes(ctx.cam, ctx.part(), ctx.origin);
     if boxes.is_empty() {
         tp.moves = pb.moves;
     } else {
@@ -1874,7 +1895,7 @@ mod tests {
         c.add_op(OpKind::Clear, t);
         let (stock, o) = (stock_box(&c, &part), work_origin(&c, &part));
         c.fixtures.push(crate::cam::place_fixture("Toe clamp", [20.0, 16.0, 12.0], stock, o, 0));
-        let (_, lo, hi) = fixture_boxes(&c, o).remove(0);
+        let (_, lo, hi) = fixture_boxes(&c, &part, o).remove(0);
         // over the left edge of the stock, on top of it
         assert!(lo.x < stock.0.x && hi.x > stock.0.x && (lo.z - stock.1.z).abs() < 1e-9);
         let paths = generate(&c, &part);

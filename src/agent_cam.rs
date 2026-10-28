@@ -96,6 +96,7 @@ impl Session {
         let c = self.ws.cams[ci].clone();
         self.ensure_built(c.studio)?;
         let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
+        let input = crate::cam_jaws::input_for(&self.ws.cams, ci, input)?;
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
         }
@@ -132,6 +133,15 @@ impl Session {
             })
             .collect();
         let total: f64 = paths.iter().map(|p| p.time).sum();
+        let jaws = crate::cam_jaws::jaws(c, &part).map(|j| {
+            let (plo, phi) = j.rects.iter().fold((DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)), |(l, h), (a, b)| (l.min(a.extend(j.bottom)), h.max(b.extend(j.top))));
+            json!({
+                "settings": c.soft_jaws,
+                "blanks": j.rects.iter().map(|(a, b)| json!({"min": w(a.extend(j.bottom)), "max": w(b.extend(j.top))})).collect::<Vec<_>>(),
+                "pocket_floor_z": round(j.floor - o.z), "jaw_top_z": round(j.top - o.z), "span": {"min": w(plo), "max": w(phi)},
+                "machined_by": self.ws.cams.iter().position(|x| x.jaws_of == c.name),
+            })
+        });
         Ok(json!({
             "name": c.name, "studio": c.studio, "orient": c.orient, "tilt": c.tilt, "origin": c.origin.key(), "post": c.post,
             "follows": c.follows, "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer},
@@ -142,6 +152,7 @@ impl Session {
             "operations": ops,
             "holes": holes,
             "fixtures": c.fixtures, "probe": c.probe, "post_text": c.post_text,
+            "soft_jaws": jaws, "jaws_of": c.jaws_of,
             "sketches": part.sketches.iter().map(|s| json!({"id": s.id, "name": s.name, "curves": s.paths.len(), "closed": s.paths.iter().filter(|p| p.1).count()})).collect::<Vec<_>>(),
             "cycle_time_s": total.round(),
         }))
@@ -217,6 +228,9 @@ impl Session {
                 if c.name != old.name {
                     for x in self.ws.cams.iter_mut().filter(|x| x.follows == old.name) {
                         x.follows = c.name.clone();
+                    }
+                    for x in self.ws.cams.iter_mut().filter(|x| x.jaws_of == old.name) {
+                        x.jaws_of = c.name.clone();
                     }
                 }
                 if let Some(s) = a.get("stock").and_then(|s| s.as_object()) {
@@ -470,6 +484,17 @@ impl Session {
                         )
                     })
                     .collect();
+                // soft jaws: the jaw tab shows the jaws instead of the parts, a holding setup shows them around the part
+                let jaws = if !c.jaws_of.is_empty() {
+                    Some(part.tris.clone())
+                } else {
+                    crate::cam_jaws::jaws(&c, &part).map(|j| crate::cam_jaws::jaw_tris(&j))
+                }
+                .map(|t| crate::cam_jaws::body_mesh("Soft jaws", &t.iter().map(|t| t.map(|p| part.to_part(p))).collect::<Vec<_>>()));
+                let mut items = if c.jaws_of.is_empty() { items } else { vec![] };
+                if let Some(m) = &jaws {
+                    items.push((m, crate::assembly::Pose::default(), [0x6f, 0x9f, 0xd8]));
+                }
                 let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
                 let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(900).clamp(64, 4096) as u32;
                 let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(700).clamp(64, 4096) as u32;
@@ -513,6 +538,45 @@ impl Session {
                 } else {
                     json!({"templates": tpl::list().iter().map(|t| json!({"name": t.name, "operations": t.ops.iter().map(|o| format!("{} ({})", o.name, o.kind.key())).collect::<Vec<_>>(), "tools": t.tools.iter().map(|t| &t.name).collect::<Vec<_>>()})).collect::<Vec<_>>()})
                 }
+            }
+            "cam_soft_jaws" => {
+                let ci = self.cam_idx(a)?;
+                if !self.ws.cams[ci].jaws_of.is_empty() {
+                    return Err("this Manufacture tab machines soft jaws; give the setup that holds the part".into());
+                }
+                if a.get("enabled").and_then(|v| v.as_bool()) == Some(false) {
+                    self.ws.cams[ci].soft_jaws = None;
+                    return Ok((self.cam_info(ci)?, None));
+                }
+                let base = self.ws.cams[ci].soft_jaws.clone().unwrap_or_default();
+                let sj: cam::SoftJaws = overlay(&base, args, &["cam", "enabled", "machine_jaws"])?;
+                self.ws.cams[ci].soft_jaws = Some(sj);
+                let mut v = json!({"cam": ci});
+                if a.get("machine_jaws").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let held = self.ws.cams[ci].clone();
+                    let ji = match self.ws.cams.iter().position(|x| x.jaws_of == held.name) {
+                        Some(j) => j,
+                        None => {
+                            let mut j = crate::cam_jaws::jaw_setup(&held);
+                            let base = j.name.clone();
+                            let mut n = 2;
+                            while self.ws.cams.iter().any(|x| x.name == j.name) {
+                                j.name = format!("{base} {n}");
+                                n += 1;
+                            }
+                            self.ws.cams.push(j);
+                            self.ws.cams.len() - 1
+                        }
+                    };
+                    let (jp, _) = self.cam_build(ji)?;
+                    let (hp, _) = self.cam_build(ci)?;
+                    let off = crate::cam_jaws::zero_offset(&self.ws.cams[ji], &jp, &self.ws.cams[ci], &hp);
+                    v["jaw_cam"] = json!(ji);
+                    v["jaw_setup"] = self.cam_info(ji)?;
+                    v["held_zero_from_jaw_zero"] = json!([round(off.x), round(off.y), round(off.z)]);
+                }
+                v["setup"] = self.cam_info(ci)?;
+                v
             }
             "export_setup_sheet" => {
                 let ci = self.cam_idx(a)?;
@@ -607,6 +671,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "simulate_cam", "description": "Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
         json!({"name": "render_cam", "description": "PNG of the part with the stock box and the cutting moves (blue) of all operations, or of one (operation: id).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "operation": {"type": "integer"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_template", "description": "Operation templates, kept for the user across documents. No arguments: list them. save: name (with cam; operations [ids], default every operation that isn't suppressed) saves the operations and their tools, leaving out what belongs to the part (top/bottom heights, at, points, edges, sketches). apply: name (with cam) adds the template's operations to that setup, reusing its tools where one is the same cutter and adding the others; trace/vcarve follow the latest sketch. delete: name.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "save": {"type": "string"}, "apply": {"type": "string"}, "delete": {"type": "string"}, "operations": {"type": "array"}}), &[])}),
+        json!({"name": "cam_soft_jaws", "description": "Hold a setup's part in soft jaws: vise jaw blanks with a pocket machined to the part's outline below the jaw tops (plus clearance, with reliefs in corners the cutter can't reach), usually for the flipped second setup (follows). The vise closes along Y. The jaws act as fixtures (toolpaths lift over them, the simulation reports hits) and the setup warns when the part is narrower than the gap, the jaws are too thin, or the stock the earlier setup leaves doesn't fit the pocket. Fields (mm, any subset): width, thickness, height (each blank: along the vise, front to back, height; default 150 × 25 × 40), grip (how deep the part sits, default 6), gap (between the jaw faces while the pocket is cut, default 4), clearance (default 0.05), cutter (end mill diameter for the pocket and its reliefs, default 6), material (jaw material). enabled false removes them. machine_jaws true also makes (or finds) the Manufacture tab that machines the jaws: both blanks on a spacer in the vise, work zero top centre, a skim of the tops and a rough and finish of the pocket with a flat end mill no bigger than cutter; returns jaw_cam, its info and held_zero_from_jaw_zero (where the holding setup's work zero is from the jaws').", "inputSchema": obj(json!({"cam": {"type": "integer"}, "enabled": {"type": "boolean"}, "width": {"type": "number"}, "thickness": {"type": "number"}, "height": {"type": "number"}, "grip": {"type": "number"}, "gap": {"type": "number"}, "clearance": {"type": "number"}, "cutter": {"type": "number"}, "material": {"type": "string"}, "machine_jaws": {"type": "boolean"}}), &["cam"])}),
         json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, a picture of the part on the machine, the tools (number, size, holder, speeds and feeds) and the operations in order (tool, Z range, stepdown/stepover, time, warnings).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
     ]
