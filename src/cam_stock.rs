@@ -92,14 +92,16 @@ impl StockMap {
         deepest as f64
     }
 
-    /// The same material seen from another setup: `from` and `to` are the part → setup rotations
-    /// (both from ORIENTS, so the axes map onto each other).
+    /// The same material seen from another setup: `from` and `to` are the part → setup rotations.
+    /// When the axes map onto each other (ORIENTS without tilt) the columns are re-sliced exactly;
+    /// a tilted setup samples along each new column instead.
     pub fn reorient(&self, from: DMat3, to: DMat3) -> StockMap {
         let m = to * from.transpose();
         if (m - DMat3::IDENTITY).abs().to_cols_array().iter().all(|v| *v < 1e-9) {
             return self.clone();
         }
         let mt = m.transpose();
+        let aligned = m.to_cols_array().iter().all(|v| v.abs() < 1e-9 || (v.abs() - 1.0).abs() < 1e-9);
         // bounds in the new setup
         let (zlo, zhi) = self.lo.iter().zip(&self.hi).filter(|(l, h)| h > l).fold((f64::INFINITY, f64::NEG_INFINITY), |a, (l, h)| (a.0.min(*l as f64), a.1.max(*h as f64)));
         if !zlo.is_finite() {
@@ -118,6 +120,10 @@ impl StockMap {
         let nx = ((hi.x - lo.x) / cell).round() as usize + 1;
         let ny = ((hi.y - lo.y) / cell).round() as usize + 1;
         let mut out = StockMap { x0: lo.x, y0: lo.y, cell, nx, ny, hi: vec![EMPTY; nx * ny], lo: vec![0.0; nx * ny] };
+        if !aligned {
+            self.resample(&mut out, mt, lo.z, hi.z);
+            return out;
+        }
         // the new spindle axis in the old setup
         let a = mt * DVec3::Z;
         let axis = if a.z.abs() > 0.5 {
@@ -166,6 +172,36 @@ impl StockMap {
     }
 }
 
+impl StockMap {
+    /// Fill `out` (a grid in the new setup) by walking down each of its columns through this
+    /// material: `mt` takes new setup coordinates to this one's, `z0..z1` spans the material.
+    fn resample(&self, out: &mut StockMap, mt: DMat3, z0: f64, z1: f64) {
+        let step = self.cell * 0.5;
+        let n = ((z1 - z0) / step).ceil() as usize + 1;
+        for j in 0..out.ny {
+            for i in 0..out.nx {
+                let (x, y) = (out.x0 + i as f64 * out.cell, out.y0 + j as f64 * out.cell);
+                let (mut first, mut last) = (f64::INFINITY, f64::NEG_INFINITY);
+                for s in 0..n {
+                    let z = z0 + s as f64 * step;
+                    let b = mt * DVec3::new(x, y, z);
+                    if let Some((l, h)) = self.column(b.x, b.y) {
+                        if b.z >= l as f64 && b.z <= h as f64 {
+                            first = first.min(z);
+                            last = last.max(z);
+                        }
+                    }
+                }
+                if first <= last {
+                    let k = j * out.nx + i;
+                    out.lo[k] = (first - step / 2.0) as f32;
+                    out.hi[k] = (last + step / 2.0) as f32;
+                }
+            }
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -198,5 +234,20 @@ mod tests {
         let deep = r * DVec3::new(0.0, 10.0, 2.0);
         let (_, h2) = s.column(deep.x, deep.y).unwrap();
         assert!((h2 - (r * DVec3::new(10.0, 10.0, 2.0)).z as f32).abs() < 0.6);
+    }
+
+    #[test]
+    fn tilted_setup_keeps_the_material() {
+        // a 20 × 20 × 10 block seen from a setup tilted 20° about X: same volume, top raised on one side
+        let m = StockMap::block(DVec3::ZERO, DVec3::new(20.0, 20.0, 10.0), 0.25);
+        let to = DMat3::from_rotation_x(20f64.to_radians());
+        let t = m.reorient(DMat3::IDENTITY, to);
+        let vol = |s: &StockMap| s.hi.iter().zip(&s.lo).filter(|(h, l)| h > l).map(|(h, l)| (h - l) as f64).sum::<f64>() * s.cell * s.cell;
+        let (v0, v1) = (vol(&m), vol(&t));
+        assert!((v1 - v0).abs() / v0 < 0.03, "{v0} {v1}");
+        // a point in the middle of the old top face is on top of the new column there
+        let p = to * DVec3::new(10.0, 10.0, 10.0);
+        let (_, h) = t.column(p.x, p.y).unwrap();
+        assert!((h as f64 - p.z).abs() < 0.3, "{h} {}", p.z);
     }
 }

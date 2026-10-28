@@ -78,6 +78,12 @@ pub fn orient_matrix(orient: &str) -> DMat3 {
     }
 }
 
+/// Rotation taking part coordinates to a setup's coordinates: its orientation, then its 3+2 tilt.
+pub fn setup_matrix(cam: &Cam) -> DMat3 {
+    let [a, b] = cam.tilt;
+    DMat3::from_rotation_y(b.to_radians()) * DMat3::from_rotation_x(a.to_radians()) * orient_matrix(&cam.orient)
+}
+
 /// A circular edge: centre, axis, radius.
 pub type Circle = ([f64; 3], [f64; 3], f64);
 
@@ -111,7 +117,10 @@ pub struct Part {
 
 impl Part {
     pub fn new(tris: &[[DVec3; 3]], circles: &[Circle], orient: &str) -> Part {
-        let rot = orient_matrix(orient);
+        Part::rotated(tris, circles, orient_matrix(orient))
+    }
+
+    pub fn rotated(tris: &[[DVec3; 3]], circles: &[Circle], rot: DMat3) -> Part {
         let tris: Vec<[DVec3; 3]> = tris.iter().map(|t| t.map(|p| rot * p)).collect();
         let circles = circles.iter().map(|c| (rot * DVec3::from(c.0), rot * DVec3::from(c.1), c.2)).collect();
         let mut lo = DVec3::splat(f64::INFINITY);
@@ -129,8 +138,9 @@ impl Part {
         Part { tris, circles, lo, hi, rot, sketches: vec![] }
     }
 
-    pub fn from_input(input: &PartInput, orient: &str) -> Part {
-        let mut p = Part::new(&input.tris, &input.circles, orient);
+    /// The parts as `cam` sets them up.
+    pub fn from_input(input: &PartInput, cam: &Cam) -> Part {
+        let mut p = Part::rotated(&input.tris, &input.circles, setup_matrix(cam));
         let rot = p.rot;
         p.sketches = input
             .sketches
@@ -1113,12 +1123,12 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Opt
     let mut stock: Option<StockMap> = None;
     for w in order.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let pa = Part::from_input(input, &cams[a].orient);
+        let pa = Part::from_input(input, &cams[a]);
         let (lo, hi) = stock_box(&cams[a], &pa);
         let (p, q) = (pa.to_part(lo), pa.to_part(hi));
         cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);
         let (_, left) = generate_with_stock(&cams[a], &pa, stock.as_ref());
-        stock = Some(left.reorient(pa.rot, orient_matrix(&cams[b].orient)));
+        stock = Some(left.reorient(pa.rot, setup_matrix(&cams[b])));
     }
     Ok(stock)
 }

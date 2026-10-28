@@ -239,7 +239,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     std::thread::spawn(move || {
         let linked = cam_paths::link_setups(&mut cams, ci, &input);
         let c = &cams[ci];
-        let part = Part::from_input(&input, &c.orient);
+        let part = Part::from_input(&input, c);
         let (stock_in, err) = match linked {
             Ok(s) => (s, None),
             Err(e) => (None, Some(e)),
@@ -531,6 +531,12 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        row(ui, "Tilt (3+2)", |ui| {
+            for (k, axis) in ["X", "Y"].iter().enumerate() {
+                ui.add(egui::DragValue::new(&mut c.tilt[k]).speed(0.1).range(-90.0..=90.0).suffix("°").prefix(format!("{axis} ")))
+                    .on_hover_text(format!("Tilt the part about the setup's {axis} axis (angle block, tilting vise, compound-angle bore)"));
+            }
+        });
         row(ui, "Work zero", |ui| {
             egui::ComboBox::from_id_salt("cam-origin").width(150.0).selected_text(c.origin.label()).show_ui(ui, |ui| {
                 for o in Origin::ALL {
@@ -747,7 +753,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         while app.ws.cams.iter().any(|x| x.name == name) {
             name = format!("Manufacture {n}");
         }
-        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
+        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), tilt: [0.0; 2], ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
         app.ws.cams.push(next);
         let t = Tab::Cam(app.ws.cams.len() - 1);
         app.switch_tab(t);
