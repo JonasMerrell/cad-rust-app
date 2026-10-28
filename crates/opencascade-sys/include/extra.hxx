@@ -890,6 +890,7 @@ inline std::unique_ptr<TopoDS_Shape> ex_offset_faces(const TopoDS_Shape &s, cons
 #include <BRepAlgoAPI_BooleanOperation.hxx>
 #include <gp_Circ.hxx>
 #include <thread>
+#include <atomic>
 #include <algorithm>
 #include <functional>
 
@@ -1243,4 +1244,665 @@ inline std::unique_ptr<TopoDS_Shape> ex_face_towards(const TopoDS_Shape &f, doub
     return ex_wrap(f.Reversed());
   return ex_wrap(f);
   EX_CATCH("orient face")
+}
+
+// ---------------------------------------------------------------- scripting from Python
+// Primitives placed on an axis, sub-shape maps, sections, distances and the queries a
+// FreeCAD-style Python API needs.
+#include <BRepPrimAPI_MakeBox.hxx>
+#include <BRepPrimAPI_MakeCylinder.hxx>
+#include <BRepPrimAPI_MakeCone.hxx>
+#include <BRepPrimAPI_MakeSphere.hxx>
+#include <BRepBuilderAPI_MakePolygon.hxx>
+#include <BRepBuilderAPI_Copy.hxx>
+#include <BRepBuilderAPI_GTransform.hxx>
+#include <BRepAlgoAPI_Section.hxx>
+#include <BRepExtrema_DistShapeShape.hxx>
+#include <BRepTopAdaptor_FClass2d.hxx>
+#include <GC_MakeArcOfCircle.hxx>
+#include <GC_MakeSegment.hxx>
+#include <GCPnts_UniformAbscissa.hxx>
+#include <GCPnts_UniformDeflection.hxx>
+#include <ShapeAnalysis_FreeBounds.hxx>
+#include <TopTools_HSequenceOfShape.hxx>
+#include <StlAPI_Writer.hxx>
+#include <TopLoc_Location.hxx>
+#include <gp_GTrsf.hxx>
+#include <Poly.hxx>
+#include <BRepLib_FindSurface.hxx>
+#include <TopoDS_Iterator.hxx>
+#include <Precision.hxx>
+#include <gp_Pnt2d.hxx>
+#include <BRepAdaptor_CompCurve.hxx>
+#include <Adaptor3d_Curve.hxx>
+
+inline gp_Ax2 ex_ax2(double px, double py, double pz, double dx, double dy, double dz) {
+  return gp_Ax2(gp_Pnt(px, py, pz), gp_Dir(dx, dy, dz));
+}
+
+/// Box of l × w × h with its corner at p, on the axis system gp_Ax2(p, d) (FreeCAD's makeBox).
+inline std::unique_ptr<TopoDS_Shape> ex_make_box(double px, double py, double pz, double dx, double dy, double dz, double l,
+                                                 double w, double h) {
+  EX_TRY
+  if (l < 1e-7 || w < 1e-7 || h < 1e-7)
+    return ex_null("box: every side must be longer than zero");
+  return ex_wrap(BRepPrimAPI_MakeBox(ex_ax2(px, py, pz, dx, dy, dz), l, w, h).Shape());
+  EX_CATCH("box")
+}
+
+/// Cylinder of radius r and height h on the axis (p, d), swept through `angle` degrees.
+inline std::unique_ptr<TopoDS_Shape> ex_make_cylinder(double px, double py, double pz, double dx, double dy, double dz,
+                                                      double r, double h, double angle) {
+  EX_TRY
+  if (r < 1e-7 || h < 1e-7)
+    return ex_null("cylinder: radius and height must be larger than zero");
+  return ex_wrap(BRepPrimAPI_MakeCylinder(ex_ax2(px, py, pz, dx, dy, dz), r, h, angle * M_PI / 180.0).Shape());
+  EX_CATCH("cylinder")
+}
+
+inline std::unique_ptr<TopoDS_Shape> ex_make_cone(double px, double py, double pz, double dx, double dy, double dz, double r1,
+                                                  double r2, double h, double angle) {
+  EX_TRY
+  if (h < 1e-7 || (r1 < 1e-7 && r2 < 1e-7))
+    return ex_null("cone: height and one radius must be larger than zero");
+  return ex_wrap(BRepPrimAPI_MakeCone(ex_ax2(px, py, pz, dx, dy, dz), r1, r2, h, angle * M_PI / 180.0).Shape());
+  EX_CATCH("cone")
+}
+
+/// Sphere of radius r about p; a1, a2 the latitudes and a3 the longitude swept (degrees).
+inline std::unique_ptr<TopoDS_Shape> ex_make_sphere(double px, double py, double pz, double dx, double dy, double dz, double r,
+                                                    double a1, double a2, double a3) {
+  EX_TRY
+  if (r < 1e-7)
+    return ex_null("sphere: radius must be larger than zero");
+  double k = M_PI / 180.0;
+  return ex_wrap(BRepPrimAPI_MakeSphere(ex_ax2(px, py, pz, dx, dy, dz), r, a1 * k, a2 * k, a3 * k).Shape());
+  EX_CATCH("sphere")
+}
+
+inline std::unique_ptr<TopoDS_Shape> ex_vertex(double x, double y, double z) {
+  EX_TRY
+  return ex_wrap(BRepBuilderAPI_MakeVertex(gp_Pnt(x, y, z)).Vertex());
+  EX_CATCH("vertex")
+}
+
+/// Polyline wire through the points (xyz…); `close` joins the last point to the first. A last point on the
+/// first closes it too.
+inline std::unique_ptr<TopoDS_Shape> ex_polygon(rust::Slice<const double> pts, bool close) {
+  EX_TRY
+  BRepBuilderAPI_MakePolygon mk;
+  size_t n = pts.size() / 3;
+  // a last point on the first closes the wire (one shared vertex)
+  if (n > 2 && gp_Pnt(pts[0], pts[1], pts[2]).Distance(gp_Pnt(pts[3 * n - 3], pts[3 * n - 2], pts[3 * n - 1])) <= Precision::Confusion()) {
+    n--;
+    close = true;
+  }
+  for (size_t i = 0; i < n; i++)
+    mk.Add(gp_Pnt(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]));
+  if (close)
+    mk.Close();
+  if (!mk.IsDone())
+    return ex_null("polygon: needs at least two distinct points");
+  return ex_wrap(mk.Wire());
+  EX_CATCH("polygon")
+}
+
+inline std::unique_ptr<TopoDS_Shape> ex_segment(double ax, double ay, double az, double bx, double by, double bz) {
+  EX_TRY
+  GC_MakeSegment mk(gp_Pnt(ax, ay, az), gp_Pnt(bx, by, bz));
+  if (!mk.IsDone())
+    return ex_null("line segment: the points coincide");
+  return ex_wrap(BRepBuilderAPI_MakeEdge(mk.Value()).Edge());
+  EX_CATCH("line segment")
+}
+
+/// Circular arc through three points.
+inline std::unique_ptr<TopoDS_Shape> ex_arc3(rust::Slice<const double> p) {
+  EX_TRY
+  GC_MakeArcOfCircle mk(gp_Pnt(p[0], p[1], p[2]), gp_Pnt(p[3], p[4], p[5]), gp_Pnt(p[6], p[7], p[8]));
+  if (!mk.IsDone())
+    return ex_null("arc: the points are in a line");
+  return ex_wrap(BRepBuilderAPI_MakeEdge(mk.Value()).Edge());
+  EX_CATCH("arc")
+}
+
+/// Wire from edges and wires, in order.
+inline std::unique_ptr<TopoDS_Shape> ex_wire_from(const TopTools_ListOfShape &parts) {
+  EX_TRY
+  BRepBuilderAPI_MakeWire mk;
+  for (auto it = parts.begin(); it != parts.end(); ++it) {
+    if (it->ShapeType() == TopAbs_WIRE)
+      mk.Add(TopoDS::Wire(*it));
+    else if (it->ShapeType() == TopAbs_EDGE)
+      mk.Add(TopoDS::Edge(*it));
+    else
+      return ex_null("wire: give edges or wires");
+  }
+  if (!mk.IsDone())
+    return ex_null("wire: the edges do not connect");
+  return ex_wrap(mk.Wire());
+  EX_CATCH("wire")
+}
+
+/// Face bounded by a closed wire (holes: further wires inside it), on the surface the wire lies on.
+inline std::unique_ptr<TopoDS_Shape> ex_face_from_wire(const TopoDS_Shape &outer, const TopTools_ListOfShape &holes) {
+  EX_TRY
+  TopoDS_Shape w = outer;
+  if (w.ShapeType() == TopAbs_EDGE)
+    w = BRepBuilderAPI_MakeWire(TopoDS::Edge(w)).Wire();
+  if (w.ShapeType() != TopAbs_WIRE)
+    return ex_null("face: give a closed wire");
+  BRepBuilderAPI_MakeFace mk(TopoDS::Wire(w));
+  for (auto it = holes.begin(); it != holes.end(); ++it)
+    mk.Add(TopoDS::Wire(*it));
+  if (!mk.IsDone())
+    return ex_null("face: could not make a face from the wire");
+  return ex_wrap(mk.Face());
+  EX_CATCH("face")
+}
+
+/// Every distinct sub-shape of a kind (ex_kind numbering), in TopExp::MapShapes order.
+inline std::unique_ptr<TopTools_IndexedMapOfShape> ex_map(const TopoDS_Shape &s, int kind) {
+  std::unique_ptr<TopTools_IndexedMapOfShape> m(new TopTools_IndexedMapOfShape());
+  try {
+    if (!s.IsNull())
+      TopExp::MapShapes(s, ex_kind(kind), *m);
+  } catch (...) {
+  }
+  return m;
+}
+
+/// The shapes directly inside a compound (or any shape), in order.
+inline std::unique_ptr<TopTools_IndexedMapOfShape> ex_children(const TopoDS_Shape &s) {
+  std::unique_ptr<TopTools_IndexedMapOfShape> m(new TopTools_IndexedMapOfShape());
+  if (!s.IsNull())
+    for (TopoDS_Iterator it(s); it.More(); it.Next())
+      m->Add(it.Value());
+  return m;
+}
+
+/// TopAbs_ShapeEnum of the shape (0 compound … 7 vertex), -1 when null.
+inline int32_t ex_shape_type(const TopoDS_Shape &s) { return s.IsNull() ? -1 : (int32_t)s.ShapeType(); }
+
+inline std::unique_ptr<TopoDS_Shape> ex_copy(const TopoDS_Shape &s) {
+  EX_TRY
+  return ex_wrap(BRepBuilderAPI_Copy(s).Shape());
+  EX_CATCH("copy")
+}
+
+/// The shape moved by a rigid transform (row-major 3 × 4), sharing its geometry (a new location).
+inline std::unique_ptr<TopoDS_Shape> ex_moved(const TopoDS_Shape &s, rust::Slice<const double> m) {
+  EX_TRY
+  gp_Trsf t;
+  t.SetValues(m[0], m[1], m[2], m[3], m[4], m[5], m[6], m[7], m[8], m[9], m[10], m[11]);
+  return ex_wrap(s.Moved(TopLoc_Location(t)));
+  EX_CATCH("move")
+}
+
+/// A general affine transform (row-major 3 × 4), scaling or shearing allowed: the geometry is converted.
+inline std::unique_ptr<TopoDS_Shape> ex_gtransform(const TopoDS_Shape &s, rust::Slice<const double> m) {
+  EX_TRY
+  gp_GTrsf g;
+  for (int i = 0; i < 3; i++) {
+    for (int j = 0; j < 3; j++)
+      g.SetValue(i + 1, j + 1, m[4 * i + j]);
+    g.SetValue(i + 1, 4, m[4 * i + 3]);
+  }
+  BRepBuilderAPI_GTransform mk(s, g, Standard_True);
+  return ex_wrap(mk.Shape());
+  EX_CATCH("transform")
+}
+
+/// Bounding box as FreeCAD gives it (BRepBndLib::Add, no gap): [xmin, ymin, zmin, xmax, ymax, zmax].
+inline rust::Vec<double> ex_bbox_tight(const TopoDS_Shape &s) {
+  rust::Vec<double> out;
+  EX_QTRY
+  Bnd_Box b;
+  BRepBndLib::Add(s, b);
+  b.SetGap(0.0);
+  if (b.IsVoid())
+    return out;
+  double x0, y0, z0, x1, y1, z1;
+  b.Get(x0, y0, z0, x1, y1, z1);
+  for (double v : {x0, y0, z0, x1, y1, z1})
+    out.push_back(v);
+  return out;
+  EX_QCATCH("bounding box", rust::Vec<double>())
+}
+
+inline rust::Vec<double> ex_vertex_point(const TopoDS_Shape &v) {
+  rust::Vec<double> out;
+  EX_QTRY
+  gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(v));
+  out.push_back(p.X()); out.push_back(p.Y()); out.push_back(p.Z());
+  return out;
+  EX_QCATCH("vertex", rust::Vec<double>())
+}
+
+/// Minimum distance between two shapes: [distance, then for each solution the point on a and on b (6 values)].
+inline rust::Vec<double> ex_distance(const TopoDS_Shape &a, const TopoDS_Shape &b) {
+  rust::Vec<double> out;
+  EX_QTRY
+  BRepExtrema_DistShapeShape d(a, b);
+  if (!d.IsDone() || d.NbSolution() < 1) {
+    ex_err_slot() = "distance: no solution";
+    return out;
+  }
+  out.push_back(d.Value());
+  for (int i = 1; i <= d.NbSolution(); i++) {
+    gp_Pnt p = d.PointOnShape1(i), q = d.PointOnShape2(i);
+    for (double v : {p.X(), p.Y(), p.Z(), q.X(), q.Y(), q.Z()})
+      out.push_back(v);
+  }
+  return out;
+  EX_QCATCH("distance", rust::Vec<double>())
+}
+
+/// Section of a shape with the plane n·x = d: the cut edges joined into wires (a compound of wires).
+inline std::unique_ptr<TopoDS_Shape> ex_slice(const TopoDS_Shape &s, double nx, double ny, double nz, double d) {
+  EX_TRY
+  gp_Dir n(nx, ny, nz);
+  gp_Pln pln(n.X(), n.Y(), n.Z(), -d);
+  BRepAlgoAPI_Section sec(s, pln, Standard_False);
+  sec.ComputePCurveOn1(Standard_True);
+  sec.Approximation(Standard_True);
+  sec.Build();
+  if (!sec.IsDone())
+    return ex_null("slice failed");
+  Handle(TopTools_HSequenceOfShape) edges = new TopTools_HSequenceOfShape();
+  for (TopExp_Explorer ex(sec.Shape(), TopAbs_EDGE); ex.More(); ex.Next())
+    edges->Append(ex.Current());
+  Handle(TopTools_HSequenceOfShape) wires = new TopTools_HSequenceOfShape();
+  ShapeAnalysis_FreeBounds::ConnectEdgesToWires(edges, Precision::Confusion(), Standard_False, wires);
+  BRep_Builder bb;
+  TopoDS_Compound comp;
+  bb.MakeCompound(comp);
+  for (int i = 1; i <= wires->Length(); i++)
+    bb.Add(comp, wires->Value(i));
+  return ex_wrap(comp);
+  EX_CATCH("slice")
+}
+
+/// Points along an edge or wire: mode 0 `value` points evenly spaced by length, mode 1 no further than `value` from
+/// the curve (uniform deflection), mode 2 quasi-uniform deflection.
+inline rust::Vec<double> ex_discretize(const TopoDS_Shape &e, int mode, double value) {
+  rust::Vec<double> out;
+  EX_QTRY
+  std::unique_ptr<Adaptor3d_Curve> cp;
+  if (e.ShapeType() == TopAbs_WIRE)
+    cp.reset(new BRepAdaptor_CompCurve(TopoDS::Wire(e)));
+  else
+    cp.reset(new BRepAdaptor_Curve(TopoDS::Edge(e)));
+  Adaptor3d_Curve &c = *cp;
+  auto put = [&](const gp_Pnt &p) { out.push_back(p.X()); out.push_back(p.Y()); out.push_back(p.Z()); };
+  if (mode == 0) {
+    GCPnts_UniformAbscissa d(c, std::max(2, (int)value));
+    if (!d.IsDone())
+      return out;
+    for (int i = 1; i <= d.NbPoints(); i++)
+      put(c.Value(d.Parameter(i)));
+  } else if (mode == 1) {
+    GCPnts_UniformDeflection d(c, std::max(value, 1e-7));
+    if (!d.IsDone())
+      return out;
+    for (int i = 1; i <= d.NbPoints(); i++)
+      put(d.Value(i));
+  } else {
+    GCPnts_QuasiUniformDeflection d(c, std::max(value, 1e-7));
+    if (!d.IsDone())
+      return out;
+    for (int i = 1; i <= d.NbPoints(); i++)
+      put(d.Value(i));
+  }
+  return out;
+  EX_QCATCH("discretize", rust::Vec<double>())
+}
+
+/// (u, v) of the point on the face's surface nearest p.
+inline rust::Vec<double> ex_surface_uv(const TopoDS_Shape &f, double x, double y, double z) {
+  rust::Vec<double> out;
+  EX_QTRY
+  Handle(Geom_Surface) surf = BRep_Tool::Surface(TopoDS::Face(f));
+  GeomAPI_ProjectPointOnSurf pr(gp_Pnt(x, y, z), surf);
+  if (pr.NbPoints() < 1) {
+    ex_err_slot() = "surface parameter: projection failed";
+    return out;
+  }
+  double u, v;
+  pr.LowerDistanceParameters(u, v);
+  out.push_back(u);
+  out.push_back(v);
+  return out;
+  EX_QCATCH("surface parameter", rust::Vec<double>())
+}
+
+/// Whether (u, v) lies inside the face or on its boundary.
+inline bool ex_face_has_uv(const TopoDS_Shape &f, double u, double v, double tol) {
+  try {
+    BRepTopAdaptor_FClass2d cl(TopoDS::Face(f), tol);
+    TopAbs_State st = cl.Perform(gp_Pnt2d(u, v));
+    return st == TopAbs_IN || st == TopAbs_ON;
+  } catch (...) {
+    return false;
+  }
+}
+
+/// Triangulate (linear deflection in mm, angular in radians; `relative` scales the linear one by edge size)
+/// and return [vertex count, triangle count, xyz…, i j k…, face number of each triangle…]; triangles face
+/// outward.
+inline rust::Vec<double> ex_triangulate(const TopoDS_Shape &s, double linear, double angular, bool relative) {
+  rust::Vec<double> out;
+  EX_QTRY
+  BRepMesh_IncrementalMesh mesh(s, linear, relative, angular, Standard_True);
+  std::vector<double> verts;
+  std::vector<double> tris;
+  std::vector<double> faces;
+  TopTools_IndexedMapOfShape fm;
+  TopExp::MapShapes(s, TopAbs_FACE, fm);
+  for (int fi = 1; fi <= fm.Extent(); fi++) {
+    const TopoDS_Face &face = TopoDS::Face(fm(fi));
+    TopLoc_Location loc;
+    Handle(Poly_Triangulation) tri = BRep_Tool::Triangulation(face, loc);
+    if (tri.IsNull())
+      continue;
+    size_t base = verts.size() / 3;
+    gp_Trsf t = loc.Transformation();
+    for (int i = 1; i <= tri->NbNodes(); i++) {
+      gp_Pnt p = tri->Node(i).Transformed(t);
+      verts.push_back(p.X()); verts.push_back(p.Y()); verts.push_back(p.Z());
+    }
+    bool rev = face.Orientation() == TopAbs_REVERSED;
+    for (int i = 1; i <= tri->NbTriangles(); i++) {
+      int a, b, c;
+      tri->Triangle(i).Get(a, b, c);
+      if (rev)
+        std::swap(b, c);
+      tris.push_back(base + a - 1); tris.push_back(base + b - 1); tris.push_back(base + c - 1);
+      faces.push_back(fi - 1);
+    }
+  }
+  out.push_back(verts.size() / 3);
+  out.push_back(tris.size() / 3);
+  for (double v : verts) out.push_back(v);
+  for (double v : tris) out.push_back(v);
+  for (double v : faces) out.push_back(v);
+  return out;
+  EX_QCATCH("triangulate", rust::Vec<double>())
+}
+
+/// Planar loft between wires without reordering them (FreeCAD's makeLoft: compatibility not checked).
+inline std::unique_ptr<TopoDS_Shape> ex_loft2(const TopTools_ListOfShape &wires, bool solid, bool ruled, bool check) {
+  EX_TRY
+  BRepOffsetAPI_ThruSections mk(solid, ruled);
+  for (auto it = wires.begin(); it != wires.end(); ++it) {
+    if (it->ShapeType() == TopAbs_VERTEX)
+      mk.AddVertex(TopoDS::Vertex(*it));
+    else if (it->ShapeType() == TopAbs_EDGE)
+      mk.AddWire(BRepBuilderAPI_MakeWire(TopoDS::Edge(*it)).Wire());
+    else
+      mk.AddWire(TopoDS::Wire(*it));
+  }
+  mk.CheckCompatibility(check);
+  mk.Build();
+  if (!mk.IsDone())
+    return ex_null("loft failed");
+  return ex_wrap(mk.Shape());
+  EX_CATCH("loft")
+}
+
+/// Boolean with options: op 0 fuse, 1 cut, 2 common; arguments and tools as lists; non-destructive (the
+/// inputs are never modified); `parallel` runs OCCT's boolean on several threads.
+inline std::unique_ptr<TopoDS_Shape> ex_boolean_opts(const TopTools_ListOfShape &args, const TopTools_ListOfShape &tools, int op,
+                                                     double fuzzy, bool parallel) {
+  EX_TRY
+  std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
+  if (op == 0)
+    bop.reset(new BRepAlgoAPI_Fuse());
+  else if (op == 1)
+    bop.reset(new BRepAlgoAPI_Cut());
+  else
+    bop.reset(new BRepAlgoAPI_Common());
+  bop->SetArguments(args);
+  bop->SetTools(tools);
+  if (fuzzy > 0.0)
+    bop->SetFuzzyValue(fuzzy);
+  bop->SetNonDestructive(Standard_True);
+  bop->SetRunParallel(parallel);
+  bop->Build();
+  if (!bop->IsDone() || bop->HasErrors())
+    return ex_null(op == 0 ? "fuse failed" : op == 1 ? "cut failed" : "common failed");
+  return ex_wrap(bop->Shape());
+  EX_CATCH("boolean")
+}
+
+/// Chamfer of equal distances on edges, each on its first neighbouring face (FreeCAD's makeChamfer).
+inline std::unique_ptr<TopoDS_Shape> ex_chamfer_faces(const TopoDS_Shape &s, const TopTools_ListOfShape &edges, double d) {
+  EX_TRY
+  BRepFilletAPI_MakeChamfer mk(s);
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  for (auto it = edges.begin(); it != edges.end(); ++it) {
+    const TopoDS_Edge &e = TopoDS::Edge(*it);
+    if (!map.Contains(e) || map.FindFromKey(e).IsEmpty())
+      continue;
+    mk.Add(d, d, e, TopoDS::Face(map.FindFromKey(e).First()));
+  }
+  mk.Build();
+  if (!mk.IsDone())
+    return ex_null("the chamfer could not be built (distance too large?)");
+  return ex_wrap(mk.Shape());
+  EX_CATCH("chamfer")
+}
+
+/// Write a shape's triangulation (made with these deflections) as a binary STL.
+inline bool ex_write_stl(const TopoDS_Shape &s, rust::Str path, double linear, double angular) {
+  try {
+    BRepMesh_IncrementalMesh mesh(s, linear, Standard_False, angular, Standard_True);
+    StlAPI_Writer w;
+    w.ASCIIMode() = Standard_False;
+    return w.Write(s, std::string(path).c_str());
+  } catch (const Standard_Failure &e) {
+    ex_err_slot() = std::string("STL: ") + e.GetMessageString();
+    return false;
+  } catch (...) {
+    ex_err_slot() = "STL export failed";
+    return false;
+  }
+}
+
+/// A null shape (FreeCAD's Part.Shape()).
+inline std::unique_ptr<TopoDS_Shape> ex_null_shape() { return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape()); }
+
+#include <BRepTools_WireExplorer.hxx>
+
+/// The outer wire of a face.
+inline std::unique_ptr<TopoDS_Shape> ex_outer_wire(const TopoDS_Shape &f) {
+  EX_TRY
+  TopoDS_Wire w = BRepTools::OuterWire(TopoDS::Face(f));
+  if (w.IsNull())
+    return ex_null("the face has no outer wire");
+  return ex_wrap(w);
+  EX_CATCH("outer wire")
+}
+
+/// A wire's edges (kind 4) or vertices (kind 5) in the order they connect.
+inline std::unique_ptr<TopTools_IndexedMapOfShape> ex_ordered(const TopoDS_Shape &w, int kind) {
+  std::unique_ptr<TopTools_IndexedMapOfShape> m(new TopTools_IndexedMapOfShape());
+  try {
+    TopoDS_Vertex last;
+    for (BRepTools_WireExplorer ex(TopoDS::Wire(w)); ex.More(); ex.Next()) {
+      if (kind == 4)
+        m->Add(ex.Current());
+      else
+        m->Add(ex.CurrentVertex());
+      TopoDS_Vertex v1, v2;
+      TopExp::Vertices(ex.Current(), v1, v2, Standard_True);
+      last = v2;
+    }
+    if (kind == 5 && !last.IsNull())
+      m->Add(last);
+  } catch (...) {
+  }
+  return m;
+}
+
+/// The shape's edges as polylines for drawing, no further than `deflection` from the curves: [edge count,
+/// then for each edge its point count and xyz…]. Seams (an edge closed on its only face) and degenerate
+/// edges are left out.
+inline rust::Vec<double> ex_edge_polylines(const TopoDS_Shape &s, double deflection) {
+  rust::Vec<double> out;
+  EX_QTRY
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  std::vector<std::vector<gp_Pnt>> lines;
+  for (int i = 1; i <= map.Extent(); i++) {
+    const TopoDS_Edge &e = TopoDS::Edge(map.FindKey(i));
+    if (BRep_Tool::Degenerated(e))
+      continue;
+    const TopTools_ListOfShape &faces = map.FindFromIndex(i);
+    bool seam = false;
+    for (auto it = faces.begin(); it != faces.end(); ++it)
+      if (BRep_Tool::IsClosed(e, TopoDS::Face(*it)))
+        seam = true;
+    if (seam)
+      continue;
+    try {
+      BRepAdaptor_Curve c(e);
+      GCPnts_QuasiUniformDeflection d(c, std::max(deflection, 1e-4));
+      if (!d.IsDone())
+        continue;
+      std::vector<gp_Pnt> pts;
+      for (int k = 1; k <= d.NbPoints(); k++)
+        pts.push_back(d.Value(k));
+      lines.push_back(pts);
+    } catch (...) {
+    }
+  }
+  out.push_back((double)lines.size());
+  for (auto &l : lines) {
+    out.push_back((double)l.size());
+    for (auto &p : l) {
+      out.push_back(p.X()); out.push_back(p.Y()); out.push_back(p.Z());
+    }
+  }
+  return out;
+  EX_QCATCH("edge polylines", rust::Vec<double>())
+}
+
+#include <STEPCAFControl_Writer.hxx>
+#include <STEPControl_StepModelType.hxx>
+#include <TDocStd_Document.hxx>
+#include <TDataStd_Name.hxx>
+#include <TDF_Label.hxx>
+#include <XCAFApp_Application.hxx>
+#include <XCAFDoc_ColorTool.hxx>
+#include <XCAFDoc_DocumentTool.hxx>
+#include <XCAFDoc_ShapeTool.hxx>
+#include <Quantity_Color.hxx>
+#include <Interface_Static.hxx>
+
+/// Write an assembly to STEP with names, colours and structure. Nodes in order: `shapes` (a null shape for
+/// an assembly), `parents` (index of the parent node, -1 at the top; parents come before children),
+/// `names`, `colors` (r g b per node, 0–1; negative: none). Returns false with ex_last_error() on failure.
+inline bool ex_write_step_assembly(const TopTools_ListOfShape &shapes, rust::Slice<const int32_t> parents,
+                                   rust::Slice<const rust::String> names, rust::Slice<const double> colors, rust::Str path) {
+  try {
+    Handle(TDocStd_Document) doc = new TDocStd_Document("XmlXCAF");
+    TDF_Label main = doc->Main();
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(main);
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(main);
+    size_t n = parents.size();
+    std::vector<TopoDS_Shape> list;
+    for (auto it = shapes.begin(); it != shapes.end(); ++it)
+      list.push_back(*it);
+    if (list.size() != n || names.size() != n || colors.size() != 3 * n) {
+      ex_err_slot() = "STEP: shapes, parents, names and colours differ in length";
+      return false;
+    }
+    std::vector<TDF_Label> labels(n);
+    std::vector<bool> is_asm(n, false);
+    for (size_t i = 0; i < n; i++)
+      if (list[i].IsNull())
+        is_asm[i] = true;
+    for (size_t i = 0; i < n; i++) {
+      TDF_Label l = is_asm[i] ? st->NewShape() : st->AddShape(list[i], Standard_False);
+      TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(names[i]).c_str(), Standard_True));
+      if (colors[3 * i] >= 0)
+        ct->SetColor(l, Quantity_Color(colors[3 * i], colors[3 * i + 1], colors[3 * i + 2], Quantity_TOC_RGB), XCAFDoc_ColorGen);
+      labels[i] = l;
+    }
+    for (size_t i = 0; i < n; i++) {
+      int p = parents[i];
+      if (p < 0)
+        continue;
+      if (p >= (int)n || !is_asm[p]) {
+        ex_err_slot() = "STEP: a parent must be an assembly node";
+        return false;
+      }
+      TDF_Label c = st->AddComponent(labels[p], labels[i], TopLoc_Location());
+      TDataStd_Name::Set(c, TCollection_ExtendedString(std::string(names[i]).c_str(), Standard_True));
+    }
+    st->UpdateAssemblies();
+    STEPCAFControl_Writer w;
+    w.SetColorMode(Standard_True);
+    w.SetNameMode(Standard_True);
+    Interface_Static::SetCVal("write.step.unit", "MM");
+    if (!w.Transfer(doc, STEPControl_AsIs)) {
+      ex_err_slot() = "STEP: transfer failed";
+      return false;
+    }
+    if (w.Write(std::string(path).c_str()) != IFSelect_RetDone) {
+      ex_err_slot() = "STEP: could not write the file";
+      return false;
+    }
+    return true;
+  } catch (const Standard_Failure &e) {
+    ex_err_slot() = std::string("STEP: ") + e.GetMessageString();
+    return false;
+  } catch (...) {
+    ex_err_slot() = "STEP export failed";
+    return false;
+  }
+}
+
+/// Volume shared by each pair (a[i], b[i]), the pairs spread over `threads` threads (0: all cores). For
+/// interference checks over many parts; the inputs are never modified.
+inline rust::Vec<double> ex_common_volumes(const TopTools_ListOfShape &a, const TopTools_ListOfShape &b, int threads) {
+  rust::Vec<double> out;
+  std::vector<TopoDS_Shape> va(a.begin(), a.end()), vb(b.begin(), b.end());
+  size_t n = std::min(va.size(), vb.size());
+  std::vector<double> res(n, -1.0);
+  std::atomic<size_t> next(0);
+  auto work = [&]() {
+    for (size_t i = next++; i < n; i = next++) {
+      try {
+        BRepAlgoAPI_Common op;
+        TopTools_ListOfShape la, lb;
+        la.Append(va[i]);
+        lb.Append(vb[i]);
+        op.SetArguments(la);
+        op.SetTools(lb);
+        op.SetNonDestructive(Standard_True);
+        op.SetRunParallel(Standard_False);
+        op.Build();
+        if (!op.IsDone() || op.HasErrors())
+          continue;
+        GProp_GProps g;
+        BRepGProp::VolumeProperties(op.Shape(), g);
+        res[i] = g.Mass();
+      } catch (...) {
+      }
+    }
+  };
+  unsigned hw = std::max(1u, std::thread::hardware_concurrency());
+  unsigned nt = threads > 0 ? (unsigned)threads : hw;
+  nt = (unsigned)std::max<size_t>(1, std::min<size_t>(nt, n));
+  std::vector<std::thread> th;
+  for (unsigned t = 0; t < nt; t++)
+    th.emplace_back(work);
+  for (auto &t : th)
+    t.join();
+  for (double v : res)
+    out.push_back(v);
+  return out;
 }

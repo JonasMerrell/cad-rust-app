@@ -59,6 +59,7 @@ runs in this folder. Other MCP clients start the same command
 | `create_assembly` / `assembly_insert` | assemblies of parts, or of other assemblies as rigid sub-assemblies |
 | `assembly_mate` / `assembly_relation` / `assembly_move` | mates (fastened, revolute, slider, cylindrical, planar, ball) picked by a point on a face or edge; gear/rack/screw relations |
 | `assembly_info` / `render_assembly` / `assembly_explode` | poses, BOM, interference check; shaded and exploded renders |
+| `export_web` | an interactive 3D page (.html, opens in a browser) of an assembly, its slider/cylindrical/revolute mates moving within their limits and gear/rack relations following, or of a Part Studio's parts |
 | `create_drawing` / `drawing_add` / `drawing_info` / `render_drawing` | Drawing tabs: views, auto or explicit dimensions (linear, radius, diameter, angle), notes, GD&T frames and datums, BOM tables, more sheets |
 | `export_drawing` | PDF (all sheets)/SVG/DXF/PNG of a Drawing tab, or a quick four-view sheet of the active Part Studio |
 | `create_cam` / `edit_cam` | Manufacture tabs (setups): Part Studio, bodies, up direction (`orient`, plus a 3+2 `tilt`, or an `axis` to point at the spindle), `min_rpm` for high-speed spindles, stock margins or size, material, work zero, clearance, post, machine preset or limits, `arcs`, `fixtures` (clamp boxes the toolpaths lift over), `probe` (touch plate or tool setter after each tool change), `post_text` (your own start, tool-change and end G-code); `follows` starts a setup from the stock an earlier one leaves (flip the part) |

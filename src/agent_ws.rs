@@ -671,6 +671,27 @@ impl Session {
                 self.sync();
                 self.asm_info(ai, a.get("interference").and_then(|v| v.as_bool()).unwrap_or(false))?
             }
+            "export_web" => {
+                let path = std::path::PathBuf::from(super::str_arg(a, "path")?);
+                let inline = a.get("inline").and_then(|v| v.as_bool()).unwrap_or(true);
+                let (scene, meshes, notes) = match a.get("assembly").and_then(|v| v.as_u64()) {
+                    Some(ai) => {
+                        let ai = ai as usize;
+                        self.build_for_assembly(ai)?;
+                        self.sync();
+                        crate::web_asm::assembly_scene(self, ai)?
+                    }
+                    None => {
+                        let studio = a.get("studio").and_then(|s| s.as_u64()).map(|s| s as usize).unwrap_or(self.cur);
+                        self.ensure_built(studio)?;
+                        let (s, m) = crate::web_asm::studio_scene(self, studio);
+                        (s, m, vec![])
+                    }
+                };
+                let joints = scene.nodes.iter().filter(|n| n.joint.is_some()).count();
+                let w = crate::web_export::write(&scene, &meshes, &path, inline)?;
+                json!({"exported": path, "bytes": w.bytes, "parts": scene.parts.len(), "meshes": w.meshes, "triangles": w.triangles, "joints": joints, "notes": notes})
+            }
             "render_assembly" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();

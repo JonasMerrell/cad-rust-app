@@ -318,6 +318,49 @@ impl Session {
                 self.rebuild()?;
                 self.status()
             }
+            "set_parts" => {
+                let list = a.get("parts").and_then(|p| p.as_array()).ok_or("give parts: [{body, name, color, …}]")?.clone();
+                for a in &list {
+                    let b = a.get("body").and_then(|b| b.as_array()).ok_or("give body [f,i]")?;
+                    let id: crate::doc::BodyId = (b.first().and_then(|v| v.as_u64()).ok_or("body [f,i]")?, b.get(1).and_then(|v| v.as_u64()).ok_or("body [f,i]")? as u32);
+                    if !self.result.bodies.iter().any(|x| x.id == id) {
+                        return Err(format!("no part {id:?}"));
+                    }
+                    let key = crate::doc::body_key(id);
+                    let mut p = self.doc.parts.get(&key).cloned().unwrap_or_default();
+                    if let Some(n) = a.get("name").and_then(|v| v.as_str()) {
+                        p.name = Some(n.to_string());
+                    }
+                    if let Some(c) = a.get("color") {
+                        p.color = match c {
+                            Value::String(h) => {
+                                let h = h.trim_start_matches('#');
+                                let v = u32::from_str_radix(h, 16).map_err(|_| "color: #rrggbb or [r,g,b]")?;
+                                Some([(v >> 16) as u8, (v >> 8) as u8, v as u8])
+                            }
+                            Value::Array(v) if v.len() == 3 => Some([0, 1, 2].map(|k| v[k].as_u64().unwrap_or(0).min(255) as u8)),
+                            _ => None,
+                        };
+                    }
+                    if let Some(m) = a.get("material").and_then(|v| v.as_str()) {
+                        if !crate::doc::MATERIALS.iter().any(|x| x.0 == m) {
+                            return Err(format!("material must be one of {}", crate::doc::MATERIALS.iter().map(|x| x.0).collect::<Vec<_>>().join(", ")));
+                        }
+                        p.material = Some(m.to_string());
+                    }
+                    if let Some(f) = a.get("finish").and_then(|v| v.as_str()) {
+                        p.finish = if f.is_empty() || f == "default" { None } else { Some(f.to_string()) };
+                    }
+                    if let Some(h) = a.get("hidden").and_then(|v| v.as_bool()) {
+                        p.hidden = h;
+                    }
+                    self.doc.parts.insert(key, p);
+                }
+                self.rebuild()?;
+                let mut v = self.status();
+                v["set"] = json!(list.len());
+                v
+            }
             "printability" => {
                 let st = crate::printing::PrintSettings::default();
                 let overhang = a.get("overhang").and_then(|v| v.as_f64()).unwrap_or(st.overhang);
@@ -657,7 +700,7 @@ fn round(v: f64) -> f64 {
     (v * 1e4).round() / 1e4
 }
 
-fn str_arg(a: &Value, k: &str) -> R<String> {
+pub(crate) fn str_arg(a: &Value, k: &str) -> R<String> {
     a.get(k).and_then(|v| v.as_str()).map(String::from).ok_or(format!("give {k}"))
 }
 
@@ -1031,6 +1074,7 @@ fn tools() -> Value {
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
         {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Aluminium 7075, Steel, Stainless steel 303, Tungsten alloy, Urethane foam, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass) or hidden.", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}}), &["body"])},
+        {"name": "set_parts", "description": "set_part for many parts at once, with one rebuild: parts is a list of {body, name, color, material, finish, hidden}.", "inputSchema": obj(json!({"parts": {"type": "array"}}), &["parts"])},
         {"name": "add_decal", "description": "Lay a PNG/JPEG image on a flat face (a label or logo), centred on face.point. width in mm (height keeps the image's proportions), angle turns it about the face normal. Shown in the editor; not exported.", "inputSchema": obj(json!({"image": {"type": "string"}, "face": {"type": "object"}, "width": {"type": "number"}, "angle": {"type": "number"}}), &["image", "face"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
@@ -1046,6 +1090,7 @@ fn tools() -> Value {
         {"name": "assembly_relation", "description": "Couple two mates: gear (two revolute mates, ratio), rack (revolute mate_a drives slider mate_b, ratio = pitch radius mm) or screw (cylindrical mate_a, ratio = pitch mm/turn).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "kind": {"type": "string"}, "mate_a": {"type": "integer"}, "mate_b": {"type": "integer"}, "ratio": {"type": "number"}, "reverse": {"type": "boolean"}}), &["assembly", "kind", "mate_a"])},
         {"name": "assembly_explode", "description": "Set the exploded view steps: [{instances:[ids], direction:[x,y,z], distance: mm}], applied in order.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "steps": {"type": "array"}}), &["assembly", "steps"])},
         {"name": "assembly_info", "description": "Instances (poses, world bounding boxes), mates, bill of materials and explode steps. interference:true also lists overlapping instances with their overlap volume.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "interference": {"type": "boolean"}}), &["assembly"])},
+        {"name": "export_web", "description": "Save an interactive 3D page (.html, opens in a browser): with assembly, its slider, cylindrical and revolute mates move within their limits (sliders, dragging parts, arrow keys), gear and rack relations follow, explode steps drive an explode slider; without, the parts of a Part Studio (studio, default the active one). Also section planes, ghosting by material and part details. inline:false writes a .json and .bin beside the page (serve them over http).", "inputSchema": obj(json!({"path": {"type": "string"}, "assembly": {"type": "integer"}, "studio": {"type": "integer"}, "inline": {"type": "boolean"}}), &["path"])},
         {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["assembly"])},
         {"name": "create_drawing", "description": "Add a Drawing tab (sheet A4/A3/A2/A1/Letter/Tabloid, default A3) with front, top, right and iso views of a Part Studio (standard_views:false for an empty sheet). Returns its index and drawing_info.", "inputSchema": obj(json!({"name": {"type": "string"}, "sheet": {"type": "string"}, "studio": {"type": "integer"}, "standard_views": {"type": "boolean"}}), &[])},
         {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, position:[x,y] sheet mm, scale, hidden_lines, sheet}; detail{view, center:[x,y] view coords, radius, position, scale}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× '}; auto_dimensions{view} (overall size + hole diameters); note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},

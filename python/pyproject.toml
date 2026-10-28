@@ -1,0 +1,14 @@
+[build-system]
+requires = ["maturin>=1.5,<2"]
+build-backend = "maturin"
+
+[project]
+name = "cadrust"
+version = "0.1.0"
+description = "Python scripting for cad-rust-app: OpenCascade shapes with a FreeCAD-style API"
+requires-python = ">=3.10"
+license = { text = "MIT" }
+
+[tool.maturin]
+python-source = "."
+module-name = "cadrust._core"
