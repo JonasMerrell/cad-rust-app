@@ -56,7 +56,7 @@ impl ClaudeUi {
     fn configured(&self) -> bool {
         match self.settings.auth {
             Auth::ApiKey => self.settings.key().is_some(),
-            Auth::Console => true,
+            Auth::Console | Auth::ClaudeCode => true,
         }
     }
 }
@@ -134,6 +134,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
     ui.label(RichText::new("CONNECT").family(theme::medium()).color(theme::muted()).size(10.5));
     ui.add_space(4.0);
     let mut auth = c.settings.auth;
+    ui.radio_value(&mut auth, Auth::ClaudeCode, "Claude Code (your Claude login)");
     ui.radio_value(&mut auth, Auth::ApiKey, "Anthropic API key");
     ui.radio_value(&mut auth, Auth::Console, "Claude Console account (ant CLI sign-in)");
     if auth != c.settings.auth {
@@ -194,6 +195,15 @@ fn settings(app: &mut App, ui: &mut Ui) {
                 }
             });
         }
+        Auth::ClaudeCode => {
+            muted(
+                ui,
+                "Runs the Claude Code CLI on this computer with its own login, so requests use your Claude plan (or whatever Claude Code is signed in with). Install Claude Code and run claude once to sign in.",
+            );
+            if ui.button("Check").clicked() {
+                c.login_status = Some(crate::claude::claude_code_version());
+            }
+        }
     }
     if let Some(rx) = &c.login {
         if let Ok(r) = rx.try_recv() {
@@ -208,16 +218,6 @@ fn settings(app: &mut App, ui: &mut Ui) {
         };
         ui.label(RichText::new(t).size(11.5).color(col));
     }
-    ui.add_space(8.0);
-    Frame::new().fill(theme::panel_2()).corner_radius(6).inner_margin(Margin::same(8)).show(ui, |ui| {
-        ui.set_width(ui.available_width());
-        ui.label(RichText::new("Claude Pro or Max plan?").family(theme::medium()).size(11.5).color(theme::text()));
-        ui.label(
-            RichText::new("Subscriptions can't be signed in to from other apps. To use yours, add cad-app as an MCP server in Claude Desktop or Claude Code (claude mcp add cad -- cad-app mcp) and design from there; see AGENTS.md.")
-                .size(11.5)
-                .color(theme::muted()),
-        );
-    });
 
     ui.add_space(12.0);
     ui.label(RichText::new("MODEL").family(theme::medium()).color(theme::muted()).size(10.5));

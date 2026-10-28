@@ -39,6 +39,8 @@ pub enum Auth {
     ApiKey,
     /// A Claude Console account signed in with `ant auth login`.
     Console,
+    /// The Claude Code CLI on this computer, with its own login (a Claude plan or a key).
+    ClaudeCode,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -129,6 +131,7 @@ fn ant(args: &[&str]) -> Result<std::process::Output, String> {
 fn credentials(s: &Settings) -> Result<Cred, String> {
     match s.auth {
         Auth::ApiKey => s.key().map(Cred::Key).ok_or_else(|| "Add an API key in the Claude settings first".into()),
+        Auth::ClaudeCode => Err("Claude Code signs in by itself".into()),
         Auth::Console => {
             // print-credentials refreshes the token when it has expired
             let out = ant(&["auth", "print-credentials", "--access-token"])?;
@@ -336,7 +339,10 @@ impl Worker {
                 let mut chat = Chat::new();
                 while let Ok(m) = wrx.recv() {
                     match m {
-                        ToWorker::Reset => chat.messages.clear(),
+                        ToWorker::Reset => {
+                            chat.messages.clear();
+                            chat.cc_session = None;
+                        }
                         ToWorker::Turn { text, context, ws, studio, settings } => {
                             st.store(false, Ordering::Relaxed);
                             let error = chat.turn(&text, &context, &ws, studio, &settings, &st, &send).err();
@@ -357,6 +363,9 @@ struct Chat {
     messages: Vec<Value>,
     tools: Value,
     http: ureq::Agent,
+    /// Claude Code: the conversation to resume, and where its MCP server reaches us.
+    cc_session: Option<String>,
+    bridge: Option<Bridge>,
 }
 
 impl Chat {
@@ -369,11 +378,11 @@ impl Chat {
             .map(|t| json!({"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"], "eager_input_streaming": true}))
             .collect();
         let http = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(600)).try_proxy_from_env(true).build();
-        Chat { session: None, seen: String::new(), messages: vec![], tools: Value::Array(tools), http }
+        Chat { session: None, seen: String::new(), messages: vec![], tools: Value::Array(tools), http, cc_session: None, bridge: None }
     }
 
     fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
-        let cred = credentials(settings)?;
+        let cred = if settings.auth == Auth::ClaudeCode { None } else { Some(credentials(settings)?) };
         // start from what is open in the editor
         let session = self.session.get_or_insert_with(crate::agent::Session::new);
         if ws != self.seen {
@@ -381,7 +390,9 @@ impl Chat {
             session.load_workspace(w, studio)?;
             self.seen = session.workspace_json().0;
         }
-        let user = json!({"type": "text", "text": format!("<editor>\n{context}\n</editor>\n\n{text}")});
+        let prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
+        let Some(cred) = cred else { return self.claude_code_turn(&prompt, settings, stop, send) };
+        let user = json!({"type": "text", "text": prompt});
         // after a stopped or failed turn the history already ends with the user's side
         match self.messages.last_mut() {
             Some(m) if m["role"] == "user" => m["content"].as_array_mut().unwrap().push(user),
@@ -457,59 +468,61 @@ impl Chat {
 
     /// Run Claude's tool calls on the session, sending changed documents to the editor.
     fn run_tools(&mut self, calls: &[Value], stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Vec<Value> {
-        let session = self.session.as_mut().unwrap();
         let mut results = vec![];
         for c in calls {
             let id = c["id"].clone();
-            let name = c["name"].as_str().unwrap_or("");
-            let input = &c["input"];
             if stop.load(Ordering::Relaxed) {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": "Stopped by the user before this ran.", "is_error": true}));
                 continue;
             }
-            send(FromWorker::ToolStart { name: name.into(), detail: short(&input.to_string(), 160) });
-            if input.get("__invalid_json").is_some() || !input.is_object() {
-                send(FromWorker::ToolDone { ok: false, summary: "invalid input".into(), image: None });
-                results.push(json!({"type": "tool_result", "tool_use_id": id, "content": "The tool input was not valid JSON; send the call again.", "is_error": true}));
-                continue;
+            let (text, png, failed) = self.run_tool(c["name"].as_str().unwrap_or(""), &c["input"], send);
+            let mut content = vec![json!({"type": "text", "text": text})];
+            if let Some(png) = &png {
+                content.push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}}));
             }
-            if HIDDEN_TOOLS.contains(&name) {
-                send(FromWorker::ToolDone { ok: false, summary: "not available here".into(), image: None });
-                results.push(json!({"type": "tool_result", "tool_use_id": id, "content": format!("{name} is not available in the editor; the user opens and saves documents themselves."), "is_error": true}));
-                continue;
-            }
-            let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.call(name, input))).unwrap_or_else(|_| Err(format!("{name} crashed")));
-            match r {
-                Ok((v, img)) => {
-                    let mut text = v.to_string();
-                    if text.len() > MAX_RESULT {
-                        let mut cut = MAX_RESULT;
-                        while !text.is_char_boundary(cut) {
-                            cut -= 1;
-                        }
-                        text.truncate(cut);
-                        text.push_str(" …(truncated; ask for less, e.g. filter list_geometry)");
-                    }
-                    let mut content = vec![json!({"type": "text", "text": text})];
-                    if let Some(png) = &img {
-                        content
-                            .push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}}));
-                    }
-                    results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content}));
-                    send(FromWorker::ToolDone { ok: true, summary: summarize(&v), image: img });
-                }
-                Err(e) => {
-                    send(FromWorker::ToolDone { ok: false, summary: short(&e, 200), image: None });
-                    results.push(json!({"type": "tool_result", "tool_use_id": id, "content": e, "is_error": true}));
-                }
-            }
-            let (ws, studio) = session.workspace_json();
-            if ws != self.seen {
-                self.seen = ws.clone();
-                send(FromWorker::Workspace { json: ws, studio });
-            }
+            results.push(json!({"type": "tool_result", "tool_use_id": id, "content": content, "is_error": failed}));
         }
         results
+    }
+
+    /// Run one tool on the session: result text, an optional PNG, and whether it failed.
+    fn run_tool(&mut self, name: &str, input: &Value, send: &dyn Fn(FromWorker)) -> (String, Option<Vec<u8>>, bool) {
+        send(FromWorker::ToolStart { name: name.into(), detail: short(&input.to_string(), 160) });
+        if input.get("__invalid_json").is_some() || !input.is_object() {
+            send(FromWorker::ToolDone { ok: false, summary: "invalid input".into(), image: None });
+            return ("The tool input was not valid JSON; send the call again.".into(), None, true);
+        }
+        if HIDDEN_TOOLS.contains(&name) {
+            send(FromWorker::ToolDone { ok: false, summary: "not available here".into(), image: None });
+            return (format!("{name} is not available in the editor; the user opens and saves documents themselves."), None, true);
+        }
+        let session = self.session.as_mut().unwrap();
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.call(name, input))).unwrap_or_else(|_| Err(format!("{name} crashed")));
+        let out = match r {
+            Ok((v, img)) => {
+                let mut text = v.to_string();
+                if text.len() > MAX_RESULT {
+                    let mut cut = MAX_RESULT;
+                    while !text.is_char_boundary(cut) {
+                        cut -= 1;
+                    }
+                    text.truncate(cut);
+                    text.push_str(" …(truncated; ask for less, e.g. filter list_geometry)");
+                }
+                send(FromWorker::ToolDone { ok: true, summary: summarize(&v), image: img.clone() });
+                (text, img, false)
+            }
+            Err(e) => {
+                send(FromWorker::ToolDone { ok: false, summary: short(&e, 200), image: None });
+                (e, None, true)
+            }
+        };
+        let (ws, studio) = session.workspace_json();
+        if ws != self.seen {
+            self.seen = ws.clone();
+            send(FromWorker::Workspace { json: ws, studio });
+        }
+        out
     }
 }
 
@@ -535,7 +548,11 @@ fn summarize(v: &Value) -> String {
 }
 
 fn system_prompt() -> Value {
-    let text = format!(
+    json!([{"type": "text", "text": system_text()}])
+}
+
+fn system_text() -> String {
+    format!(
         "You are the design assistant built into cad-app, a parametric CAD program (OpenCascade kernel, Onshape-style Part Studios, Assemblies, Drawings, Manufacture and Simulation tabs). \
 The user types requests in a chat panel beside the 3D view, and you carry them out with the tools, which edit the document the user has open. Every change shows up in their editor as you make it, and they can undo your whole turn from the chat panel.\n\n\
 How to work:\n\
@@ -547,6 +564,216 @@ How to work:\n\
 - Keep replies short and plain: what you made, the key dimensions, any assumptions. The chat panel shows plain text, so don't use Markdown tables or headings.\n\n\
 cad-app's agent guide, for reference:\n\n{}",
         include_str!("../AGENTS.md")
-    );
-    json!([{"type": "text", "text": text}])
+    )
+}
+
+// ---------------------------------------------------------------- Claude Code
+
+/// A tool call from the `cad-app mcp --bridge` process that Claude Code runs.
+struct BridgeCall {
+    name: String,
+    args: Value,
+    reply: Sender<Value>,
+}
+
+/// A local socket the bridge process sends tool calls to, guarded by a random token.
+struct Bridge {
+    addr: String,
+    token: String,
+    rx: Receiver<BridgeCall>,
+}
+
+impl Bridge {
+    fn start() -> Result<Bridge, String> {
+        use std::hash::{BuildHasher, Hasher};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").map_err(|e| format!("could not open a local port for Claude Code: {e}"))?;
+        let addr = listener.local_addr().map_err(|e| e.to_string())?.to_string();
+        let token: String = (0..2)
+            .map(|i| {
+                let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+                h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_nanos() + i);
+                format!("{:016x}", h.finish())
+            })
+            .collect();
+        let (tx, rx) = channel::<BridgeCall>();
+        let tok = token.clone();
+        std::thread::spawn(move || {
+            for conn in listener.incoming().flatten() {
+                let (tx, tok) = (tx.clone(), tok.clone());
+                std::thread::spawn(move || {
+                    let Ok(mut out) = conn.try_clone() else { return };
+                    for line in BufReader::new(conn).lines() {
+                        let Ok(line) = line else { return };
+                        let Ok(req) = serde_json::from_str::<Value>(&line) else { return };
+                        if req["token"].as_str() != Some(tok.as_str()) {
+                            return;
+                        }
+                        let (rtx, rrx) = channel();
+                        let call = BridgeCall { name: req["name"].as_str().unwrap_or("").into(), args: req["arguments"].clone(), reply: rtx };
+                        if tx.send(call).is_err() {
+                            return;
+                        }
+                        // no reply means no request is running: Claude Code called after a stop
+                        let reply = rrx.recv().unwrap_or_else(|_| json!({"content": [{"type": "text", "text": "The cad-app chat is not running a request."}], "isError": true}));
+                        use std::io::Write;
+                        if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() {
+                            return;
+                        }
+                    }
+                });
+            }
+        });
+        Ok(Bridge { addr, token, rx })
+    }
+}
+
+/// Lines Claude Code prints, read on their own thread.
+enum CcLine {
+    Line(String),
+    End,
+}
+
+fn claude_command() -> std::process::Command {
+    let name = std::env::var("CLAUDE_CODE_PATH").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
+    #[allow(unused_mut)]
+    let mut c = std::process::Command::new(name);
+    #[cfg(windows)]
+    {
+        use std::os::windows::process::CommandExt;
+        c.creation_flags(0x0800_0000); // no console window
+    }
+    c
+}
+
+/// `claude --version`, to check Claude Code is installed.
+pub fn claude_code_version() -> Result<String, String> {
+    let out = claude_command().arg("--version").output().map_err(|e| {
+        if e.kind() == std::io::ErrorKind::NotFound {
+            "Claude Code is not installed or not on PATH (set CLAUDE_CODE_PATH to its full path)".to_string()
+        } else {
+            format!("could not run claude: {e}")
+        }
+    })?;
+    let v = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if out.status.success() { Ok(format!("Found Claude Code {v}")) } else { Err(String::from_utf8_lossy(&out.stderr).trim().to_string()) }
+}
+
+impl Chat {
+    /// One request through the Claude Code CLI (`claude -p`), which reaches the open document
+    /// through `cad-app mcp --bridge` and this worker. Follow-ups resume the same conversation.
+    fn claude_code_turn(&mut self, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+        let bridge = match self.bridge.take() {
+            Some(b) => b,
+            None => Bridge::start()?,
+        };
+        let r = self.claude_code_run(&bridge, prompt, settings, stop, send);
+        self.bridge = Some(bridge);
+        r
+    }
+
+    fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+        let (addr, token) = (&bridge.addr, &bridge.token);
+        let exe = std::env::current_exe().map_err(|e| e.to_string())?;
+        let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge", addr, "--token", token]}}});
+        let mut cmd = claude_command();
+        cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", "", "--allowedTools", "mcp__cad", "--permission-mode", "dontAsk"])
+            .arg("--mcp-config")
+            .arg(mcp.to_string())
+            .arg("--append-system-prompt")
+            .arg(format!("{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on).", system_text()))
+            .args(["--model", &settings.model, "--effort", &settings.effort]);
+        if let Some(id) = &self.cc_session {
+            cmd.args(["--resume", id]);
+        }
+        // a neutral folder, so no project's CLAUDE.md or settings come along
+        let dir = std::env::temp_dir().join("cad-app-claude");
+        let _ = std::fs::create_dir_all(&dir);
+        cmd.current_dir(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let mut child = cmd.spawn().map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                "Claude Code is not installed or not on PATH (set CLAUDE_CODE_PATH to its full path)".to_string()
+            } else {
+                format!("could not start Claude Code: {e}")
+            }
+        })?;
+        let (ltx, lrx) = channel::<CcLine>();
+        let stdout = child.stdout.take().unwrap();
+        std::thread::spawn(move || {
+            for line in BufReader::new(stdout).lines().map_while(Result::ok) {
+                let _ = ltx.send(CcLine::Line(line));
+            }
+            let _ = ltx.send(CcLine::End);
+        });
+        let mut stderr = child.stderr.take().unwrap();
+        let err_text = std::thread::spawn(move || {
+            let mut t = String::new();
+            let _ = std::io::Read::read_to_string(&mut stderr, &mut t);
+            t
+        });
+
+        let mut error = None;
+        let mut finished = false;
+        loop {
+            if stop.load(Ordering::Relaxed) {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err("Stopped".into());
+            }
+            while let Ok(c) = bridge.rx.try_recv() {
+                let (text, png, failed) = self.run_tool(&c.name, &c.args, send);
+                let mut content = vec![json!({"type": "text", "text": text})];
+                if let Some(png) = png {
+                    content.push(json!({"type": "image", "mimeType": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}));
+                }
+                let _ = c.reply.send(json!({"content": content, "isError": failed}));
+            }
+            match lrx.recv_timeout(Duration::from_millis(30)) {
+                Ok(CcLine::Line(l)) => {
+                    let Ok(v) = serde_json::from_str::<Value>(&l) else { continue };
+                    if let Some(id) = v["session_id"].as_str() {
+                        self.cc_session = Some(id.to_string());
+                    }
+                    match v["type"].as_str().unwrap_or("") {
+                        "system" if v["subtype"] == "init" => {
+                            let cad = v["mcp_servers"].as_array().and_then(|a| a.iter().find(|m| m["name"] == "cad").cloned());
+                            if let Some(st) = cad.as_ref().and_then(|m| m["status"].as_str()).filter(|st| *st != "connected" && *st != "pending") {
+                                send(FromWorker::Notice(format!("Claude Code could not start the cad tools ({st})")));
+                            }
+                        }
+                        "assistant" => {
+                            for b in v["message"]["content"].as_array().into_iter().flatten() {
+                                match b["type"].as_str().unwrap_or("") {
+                                    "text" => send(FromWorker::Text(format!("{}\n", b["text"].as_str().unwrap_or("")))),
+                                    "thinking" if !b["thinking"].as_str().unwrap_or("").is_empty() => send(FromWorker::Thinking(b["thinking"].as_str().unwrap_or("").into())),
+                                    _ => {}
+                                }
+                            }
+                        }
+                        "result" => {
+                            finished = true;
+                            if v["is_error"].as_bool().unwrap_or(false) || v["subtype"].as_str().is_some_and(|s| s != "success") {
+                                let why = v["result"].as_str().or(v["subtype"].as_str()).unwrap_or("unknown error");
+                                error = Some(format!("Claude Code: {why}"));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                Ok(CcLine::End) | Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => break,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
+            }
+        }
+        let status = child.wait().map_err(|e| e.to_string())?;
+        let err_text = err_text.join().unwrap_or_default();
+        if let Some(e) = error {
+            return Err(e);
+        }
+        if !finished || !status.success() {
+            let tail: String = err_text.trim().lines().rev().take(4).collect::<Vec<_>>().into_iter().rev().collect::<Vec<_>>().join("\n");
+            // a resumed conversation that is gone: start a fresh one next time
+            self.cc_session = None;
+            return Err(format!("Claude Code stopped ({status}){}", if tail.is_empty() { String::new() } else { format!(": {tail}") }));
+        }
+        Ok(())
+    }
 }

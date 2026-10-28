@@ -1125,7 +1125,31 @@ pub(crate) fn tools() -> Value {
 // ---------------------------------------------------------------- MCP server
 
 pub fn mcp_main() {
-    let mut s = Session::new();
+    // `--bridge ADDR --token T`: the cad-app chat panel started this server through Claude Code,
+    // and tool calls go to the document open in that window
+    let args: Vec<String> = std::env::args().collect();
+    let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
+    let bridge = arg("--bridge").map(|addr| (addr, arg("--token").unwrap_or_default()));
+    let mut link: Option<(std::net::TcpStream, std::io::BufReader<std::net::TcpStream>)> = None;
+    let mut forward = |name: &str, args: &Value| -> R<Value> {
+        let (addr, token) = bridge.as_ref().unwrap();
+        if link.is_none() {
+            let c = std::net::TcpStream::connect(addr).map_err(|e| format!("the cad-app window is not reachable: {e}"))?;
+            let r = std::io::BufReader::new(c.try_clone().map_err(|e| e.to_string())?);
+            link = Some((c, r));
+        }
+        let (c, r) = link.as_mut().unwrap();
+        let sent = writeln!(c, "{}", json!({"token": token, "name": name, "arguments": args})).and_then(|_| c.flush());
+        let mut line = String::new();
+        let got = sent.and_then(|_| r.read_line(&mut line));
+        if got.is_err() || line.is_empty() {
+            link = None;
+            return Err("lost the connection to the cad-app window".into());
+        }
+        serde_json::from_str(&line).map_err(|e| e.to_string())
+    };
+    let bridged = bridge.is_some();
+    let mut s = if bridged { None } else { Some(Session::new()) };
     let stdin = std::io::stdin();
     let mut out = std::io::stdout().lock();
     for line in stdin.lock().lines() {
@@ -1144,11 +1168,21 @@ pub fn mcp_main() {
                 "instructions": "Parametric CAD (OpenCascade). Typical flow: create_sketch → sketch_add (+ sketch_constrain) → add_feature extrude with profiles [{sketch: id}] → list_geometry to get face/edge refs → more features → render to check → export / save_document. Lengths are mm."
             })),
             "ping" => Some(json!({})),
+            "tools/list" if bridged => {
+                // the window's document is opened and saved by the user
+                let hidden = ["new_document", "open_document", "save_document"];
+                Some(json!({"tools": tools().as_array().into_iter().flatten().filter(|t| !hidden.contains(&t["name"].as_str().unwrap_or(""))).collect::<Vec<_>>()}))
+            }
             "tools/list" => Some(json!({"tools": tools()})),
+            "tools/call" if bridged => {
+                let name = msg["params"]["name"].as_str().unwrap_or("");
+                let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
+                Some(forward(name, &args).unwrap_or_else(|e| json!({"content": [{"type": "text", "text": e}], "isError": true})))
+            }
             "tools/call" => {
                 let name = msg["params"]["name"].as_str().unwrap_or("");
                 let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
-                Some(match s.call(name, &args) {
+                Some(match s.as_mut().unwrap().call(name, &args) {
                     Ok((v, img)) => {
                         let mut content = vec![json!({"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()})];
                         if let Some(png) = img {
