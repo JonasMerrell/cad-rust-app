@@ -42,7 +42,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if app.sketch.is_some() {
         crate::sketcher::viewport_input(app, ui, &resp, rect);
     } else if app.nav.is_none() {
-        let hit = pointer.and_then(|p| pick(app, local(p)));
+        let hit = pointer.filter(|_| !crate::home::hide_hover(app)).and_then(|p| pick(app, local(p)));
         if hit != app.hover {
             app.hover = hit.clone();
             app.scene_dirty = true;

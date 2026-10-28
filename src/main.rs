@@ -32,6 +32,7 @@ mod fea;
 mod fea_mesh;
 mod fea_solve;
 mod fea_ui;
+mod home;
 mod icon_paths;
 mod icons;
 mod import;
