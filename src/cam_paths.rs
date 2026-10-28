@@ -1049,6 +1049,9 @@ fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
         if cam.max_rpm > 0.0 && tool.rpm > cam.max_rpm + 0.5 {
             tp.warnings.push(format!("T{} runs at {} rpm but the spindle tops out at {}", tool.number, tool.rpm.round(), cam.max_rpm.round()));
         }
+        if cam.min_rpm > 0.0 && tool.rpm > 0.0 && tool.rpm < cam.min_rpm - 0.5 && tool.kind != crate::cam::ToolKind::Tap {
+            tp.warnings.push(format!("T{} runs at {} rpm, below the spindle's {} rpm minimum (low torque)", tool.number, tool.rpm.round(), cam.min_rpm.round()));
+        }
         if m.max_feed > 0.0 {
             let mut fast = 0.0f64;
             for mv in tp.moves.iter_mut() {
