@@ -49,5 +49,18 @@ mod inner {
         pub fn ex_sew(shapes: &TopTools_ListOfShape, tol: f64, solid: bool) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_fill(edges: &TopTools_ListOfShape) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_offset_shape(s: &TopoDS_Shape, d: f64) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_mass_props(s: &TopoDS_Shape, kind: i32) -> Vec<f64>;
+        pub fn ex_classify(s: &TopoDS_Shape, pts: &[f64], tol: f64) -> Vec<i32>;
+        pub fn ex_count(s: &TopoDS_Shape, kind: i32) -> i32;
+        pub fn ex_sub(s: &TopoDS_Shape, kind: i32, i: i32) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_edge_faces(s: &TopoDS_Shape) -> Vec<i32>;
+        pub fn ex_face_at(f: &TopoDS_Shape, x: f64, y: f64, z: f64) -> Vec<f64>;
+        pub fn ex_edge_info(e: &TopoDS_Shape) -> Vec<f64>;
+        pub fn ex_edge_points(e: &TopoDS_Shape, deflection: f64) -> Vec<f64>;
+        pub fn ex_is_same(a: &TopoDS_Shape, b: &TopoDS_Shape) -> bool;
+        pub fn ex_bbox(s: &TopoDS_Shape, optimal: bool) -> Vec<f64>;
+        pub fn ex_boolean_n(args: &TopTools_ListOfShape, tools: &TopTools_ListOfShape, op: i32, fuzzy: f64, unify: bool) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_offset2d(f: &TopoDS_Shape, d: f64, arc: bool) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_face_towards(f: &TopoDS_Shape, nx: f64, ny: f64, nz: f64) -> UniquePtr<TopoDS_Shape>;
     }
 }

@@ -203,3 +203,127 @@ pub fn unify(s: &Shape) -> R<Shape> {
 pub fn is_valid(s: &Shape) -> bool {
     ex::ex_is_valid(&s.inner)
 }
+
+// ---------------------------------------------------------------- queries for scripts
+
+fn last_err(what: &str) -> String {
+    let e = ex::ex_last_error();
+    if e.is_empty() { format!("{what} failed") } else { e }
+}
+
+/// Mass properties of a shape as a uniform volume (`kind` 0), surface (1) or wire (2):
+/// (measure, centre, inertia about the centre for unit density).
+pub fn mass_props(s: &Shape, kind: i32) -> R<(f64, DVec3, DMat3)> {
+    let v = ex::ex_mass_props(&s.inner, kind);
+    if v.len() < 13 {
+        return Err(last_err("mass properties"));
+    }
+    let m = DMat3::from_cols_array(&[v[4], v[7], v[10], v[5], v[8], v[11], v[6], v[9], v[12]]);
+    Ok((v[0], DVec3::new(v[1], v[2], v[3]), m))
+}
+
+/// Inside (0), outside (1), on (2) or unknown (3) for each point.
+pub fn classify(s: &Shape, pts: &[DVec3], tol: f64) -> R<Vec<i32>> {
+    let flat: Vec<f64> = pts.iter().flat_map(|p| p.to_array()).collect();
+    let v = ex::ex_classify(&s.inner, &flat, tol);
+    if v.len() != pts.len() {
+        return Err(last_err("classify"));
+    }
+    Ok(v.into_iter().collect())
+}
+
+/// Sub-shape kinds for `count` and `sub`.
+pub const SOLID: i32 = 0;
+pub const FACE: i32 = 2;
+pub const WIRE: i32 = 3;
+pub const EDGE: i32 = 4;
+pub const VERTEX: i32 = 5;
+
+pub fn count(s: &Shape, kind: i32) -> usize {
+    ex::ex_count(&s.inner, kind).max(0) as usize
+}
+
+/// For each edge (in `sub_shapes` order) the faces around it (in `sub_shapes` order).
+pub fn edge_faces(s: &Shape) -> Vec<Vec<usize>> {
+    let v = ex::ex_edge_faces(&s.inner);
+    let mut out = vec![];
+    let mut i = 0;
+    while i < v.len() {
+        let n = v[i] as usize;
+        out.push(v[i + 1..(i + 1 + n).min(v.len())].iter().map(|x| *x as usize).collect());
+        i += 1 + n;
+    }
+    out
+}
+
+/// What a face query returns: surface type, outward normal and nearest point, and the axis/plane when there is one.
+pub struct FaceAt {
+    pub kind: i32,
+    pub normal: DVec3,
+    pub point: DVec3,
+    pub axis: Option<(DVec3, DVec3, f64)>,
+}
+
+pub fn face_at(f: &Shape, p: DVec3) -> R<FaceAt> {
+    let v = ex::ex_face_at(&f.inner, p.x, p.y, p.z);
+    if v.len() < 7 {
+        return Err(last_err("face query"));
+    }
+    let axis = (v.len() >= 14).then(|| (DVec3::new(v[7], v[8], v[9]), DVec3::new(v[10], v[11], v[12]), v[13]));
+    Ok(FaceAt { kind: v[0] as i32, normal: DVec3::new(v[1], v[2], v[3]), point: DVec3::new(v[4], v[5], v[6]), axis })
+}
+
+pub struct EdgeInfo {
+    pub kind: i32,
+    pub length: f64,
+    pub start: DVec3,
+    pub mid: DVec3,
+    pub end: DVec3,
+    pub circle: Option<(DVec3, DVec3, f64)>,
+}
+
+pub fn edge_info(e: &Shape) -> R<EdgeInfo> {
+    let v = ex::ex_edge_info(&e.inner);
+    if v.len() < 11 {
+        return Err(last_err("edge query"));
+    }
+    let p = |i: usize| DVec3::new(v[i], v[i + 1], v[i + 2]);
+    let circle = (v.len() >= 18).then(|| (p(11), p(14), v[17]));
+    Ok(EdgeInfo { kind: v[0] as i32, length: v[1], start: p(2), mid: p(5), end: p(8), circle })
+}
+
+pub fn edge_points(e: &Shape, deflection: f64) -> Vec<DVec3> {
+    ex::ex_edge_points(&e.inner, deflection).chunks(3).map(|c| DVec3::new(c[0], c[1], c[2])).collect()
+}
+
+pub fn is_same(a: &Shape, b: &Shape) -> bool {
+    ex::ex_is_same(&a.inner, &b.inner)
+}
+
+pub fn bbox(s: &Shape, optimal: bool) -> Option<(DVec3, DVec3)> {
+    let v = ex::ex_bbox(&s.inner, optimal);
+    (v.len() == 6).then(|| (DVec3::new(v[0], v[1], v[2]), DVec3::new(v[3], v[4], v[5])))
+}
+
+/// op 0 fuse, 1 cut, 2 common of all `args` with all `tools`.
+pub fn boolean_n(args: &[&Shape], tools: &[&Shape], op: i32, fuzzy: f64, unify: bool) -> R<Shape> {
+    let a = list(args.iter().map(|s| &*s.inner));
+    let t = list(tools.iter().map(|s| &*s.inner));
+    take(ex::ex_boolean_n(&a, &t, op, fuzzy, unify), ["fuse", "cut", "common"][op.clamp(0, 2) as usize])
+}
+
+/// 2D offset of a planar face: a compound of faces (empty when it vanishes).
+pub fn offset2d(f: &Shape, d: f64, arc: bool) -> R<Shape> {
+    let p = ex::ex_offset2d(&f.inner, d, arc);
+    if p.is_null() {
+        return Err(last_err("2D offset"));
+    }
+    if p.IsNull() {
+        return Err(last_err("2D offset"));
+    }
+    Ok(Shape::from_shape(&p))
+}
+
+pub fn face_towards(f: &Shape, n: DVec3) -> R<Shape> {
+    take(ex::ex_face_towards(&f.inner, n.x, n.y, n.z), "orient face")
+}

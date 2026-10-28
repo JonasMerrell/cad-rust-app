@@ -119,15 +119,26 @@ fn all_edges(s: &Shape) -> Vec<opencascade::primitives::Edge> {
 }
 
 fn engine(log: Rc<RefCell<Vec<String>>>) -> Engine {
+    engine_with(log, false)
+}
+
+/// The script engine with every shape function; `stdout`: print goes to the terminal instead of `log`.
+pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
     let mut e = Engine::new();
     e.set_max_operations(20_000_000);
     e.set_max_expr_depths(128, 64);
     e.set_max_array_size(100_000);
     e.register_type_with_name::<S>("Shape");
-    let l = log.clone();
-    e.on_print(move |s| l.borrow_mut().push(s.to_string()));
-    let l = log;
-    e.on_debug(move |s, _, _| l.borrow_mut().push(s.to_string()));
+    if stdout {
+        e.on_print(|s| println!("{s}"));
+        e.on_debug(|s, _, _| eprintln!("{s}"));
+    } else {
+        let l = log.clone();
+        e.on_print(move |s| l.borrow_mut().push(s.to_string()));
+        let l = log;
+        e.on_debug(move |s, _, _| l.borrow_mut().push(s.to_string()));
+    }
+    crate::script_api::register(&mut e);
 
     e.register_fn("cube", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> { Ok(wrap(Shape::box_with_dimensions(num(&w)?, num(&d)?, num(&h)?))) });
     e.register_fn("cube_centered", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> { Ok(wrap(Shape::box_centered(num(&w)?, num(&d)?, num(&h)?))) });

@@ -37,6 +37,8 @@ mod regions;
 mod printing;
 mod render;
 mod script;
+mod script_api;
+mod script_num;
 mod script_ui;
 mod sketch;
 mod sketch_import;
@@ -50,7 +52,7 @@ mod workspace;
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
-    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("--help") | Some("-h")) {
+    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h")) {
         // print to the terminal that started us (the MCP server talks over pipes and needs no console)
         unsafe {
             windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
@@ -68,8 +70,26 @@ fn main() -> eframe::Result {
             };
             std::process::exit(agent::run_script(path));
         }
+        Some("script") => {
+            let Some(path) = args.get(2) else {
+                eprintln!("usage: cad-app script file.rhai [args…]");
+                std::process::exit(2);
+            };
+            match script_api::run_file(path, &args[3..]) {
+                Ok(v) => {
+                    if !v.is_null() {
+                        println!("{}", serde_json::to_string(&v).unwrap_or_default());
+                    }
+                    std::process::exit(0);
+                }
+                Err(e) => {
+                    eprintln!("{e}");
+                    std::process::exit(1);
+                }
+            }
+        }
         Some("--help") | Some("-h") => {
-            println!("cad-app [part.json]        open the editor\ncad-app mcp                Model Context Protocol server on stdio (for AI agents)\ncad-app run script.json    run a JSON list of tool calls (see AGENTS.md)");
+            println!("cad-app [part.json]        open the editor\ncad-app mcp                Model Context Protocol server on stdio (for AI agents)\ncad-app run script.json    run a JSON list of tool calls (see AGENTS.md)\ncad-app script file.rhai   run a Rhai script with no window (see SCRIPTING.md)");
             return Ok(());
         }
         _ => {}

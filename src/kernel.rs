@@ -1945,6 +1945,19 @@ fn explore(s: &Shape, kind: ffi::top_abs::TopAbs_ShapeEnum) -> Vec<cxx::UniquePt
     (1..=map.Extent()).map(|i| ffi::topo_ds::TopoDS_Shape_to_owned(map.FindKey(i))).collect()
 }
 
+/// Distinct sub-shapes of a kind (occ::SOLID, FACE, EDGE, …) in a stable order (the one `occ::edge_faces` uses).
+pub fn sub_shapes(s: &Shape, kind: i32) -> Vec<Shape> {
+    use ffi::top_abs::TopAbs_ShapeEnum as K;
+    let k = match kind {
+        occ::SOLID => K::TopAbs_SOLID,
+        occ::FACE => K::TopAbs_FACE,
+        occ::WIRE => K::TopAbs_WIRE,
+        occ::EDGE => K::TopAbs_EDGE,
+        _ => K::TopAbs_VERTEX,
+    };
+    explore(s, k).iter().map(|x| Shape::from_shape(x)).collect()
+}
+
 pub fn solids_of(s: &Shape) -> Vec<Shape> {
     explore(s, ffi::top_abs::TopAbs_ShapeEnum::TopAbs_SOLID).iter().map(|x| Shape::from_shape(x)).collect()
 }

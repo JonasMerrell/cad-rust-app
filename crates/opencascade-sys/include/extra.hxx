@@ -872,3 +872,375 @@ inline std::unique_ptr<TopoDS_Shape> ex_offset_faces(const TopoDS_Shape &s, cons
   return ex_wrap(ex_unify_raw(mo.Shape()));
   EX_CATCH("move face")
 }
+
+// ---------------------------------------------------------------- scripting queries
+// Used by the headless scripting API (src/script_api.rs). Queries return empty vectors
+// on failure (with ex_last_error() set) rather than throwing.
+
+#include <BRepAdaptor_Curve.hxx>
+#include <BRepAdaptor_Surface.hxx>
+#include <BRepClass3d_SolidClassifier.hxx>
+#include <BRepClass_FaceClassifier.hxx>
+#include <BRepOffsetAPI_MakeOffset.hxx>
+#include <GCPnts_QuasiUniformDeflection.hxx>
+#include <GeomAPI_ProjectPointOnSurf.hxx>
+#include <GeomLProp_SLProps.hxx>
+#include <ShapeFix_Face.hxx>
+#include <ShapeAnalysis_Surface.hxx>
+#include <BRepAlgoAPI_BooleanOperation.hxx>
+#include <gp_Circ.hxx>
+#include <thread>
+#include <algorithm>
+#include <functional>
+
+#define EX_QTRY try {
+#define EX_QCATCH(what, empty)                                                                                         \
+  }                                                                                                                    \
+  catch (const Standard_Failure &e) {                                                                                  \
+    ex_err_slot() = std::string(what) + ": " + e.GetMessageString();                                                   \
+    return empty;                                                                                                      \
+  }                                                                                                                    \
+  catch (...) {                                                                                                        \
+    ex_err_slot() = std::string(what) + " failed";                                                                     \
+    return empty;                                                                                                      \
+  }
+
+/// Mass properties: kind 0 volume, 1 area, 2 length. [mass, cx, cy, cz, I (3×3 row-major, about the centre)].
+inline rust::Vec<double> ex_mass_props(const TopoDS_Shape &s, int kind) {
+  rust::Vec<double> out;
+  EX_QTRY
+  GProp_GProps g;
+  if (kind == 0)
+    BRepGProp::VolumeProperties(s, g);
+  else if (kind == 1)
+    BRepGProp::SurfaceProperties(s, g);
+  else
+    BRepGProp::LinearProperties(s, g);
+  out.push_back(g.Mass());
+  gp_Pnt c = g.CentreOfMass();
+  out.push_back(c.X());
+  out.push_back(c.Y());
+  out.push_back(c.Z());
+  gp_Mat m = g.MatrixOfInertia();
+  for (int i = 1; i <= 3; i++)
+    for (int j = 1; j <= 3; j++)
+      out.push_back(m(i, j));
+  return out;
+  EX_QCATCH("mass properties", rust::Vec<double>())
+}
+
+/// Classify points (xyz…) against a solid: 0 inside, 1 outside, 2 on the boundary (within tol), 3 unknown.
+/// Runs on several threads, each with its own classifier.
+inline rust::Vec<int32_t> ex_classify(const TopoDS_Shape &s, rust::Slice<const double> pts, double tol) {
+  rust::Vec<int32_t> out;
+  size_t n = pts.size() / 3;
+  std::vector<int32_t> res(n, 3);
+  EX_QTRY
+  unsigned hw = std::max(1u, std::min(16u, std::thread::hardware_concurrency()));
+  size_t nt = n < 64 ? 1 : std::min<size_t>(hw, n / 32);
+  auto work = [&](size_t a, size_t b) {
+    try {
+      BRepClass3d_SolidClassifier cl(s);
+      for (size_t i = a; i < b; i++) {
+        cl.Perform(gp_Pnt(pts[3 * i], pts[3 * i + 1], pts[3 * i + 2]), tol);
+        TopAbs_State st = cl.State();
+        res[i] = st == TopAbs_IN ? 0 : st == TopAbs_OUT ? 1 : st == TopAbs_ON ? 2 : 3;
+      }
+    } catch (...) {
+    }
+  };
+  if (nt <= 1) {
+    work(0, n);
+  } else {
+    std::vector<std::thread> th;
+    size_t chunk = (n + nt - 1) / nt;
+    for (size_t t = 0; t < nt; t++) {
+      size_t a = t * chunk, b = std::min(n, a + chunk);
+      if (a < b)
+        th.emplace_back(work, a, b);
+    }
+    for (auto &t : th)
+      t.join();
+  }
+  for (auto v : res)
+    out.push_back(v);
+  return out;
+  EX_QCATCH("classify", rust::Vec<int32_t>())
+}
+
+/// Number of distinct sub-shapes of a kind (0 solid, 1 shell, 2 face, 3 wire, 4 edge, 5 vertex).
+inline TopAbs_ShapeEnum ex_kind(int kind) {
+  switch (kind) {
+  case 0: return TopAbs_SOLID;
+  case 1: return TopAbs_SHELL;
+  case 2: return TopAbs_FACE;
+  case 3: return TopAbs_WIRE;
+  case 4: return TopAbs_EDGE;
+  default: return TopAbs_VERTEX;
+  }
+}
+
+inline int32_t ex_count(const TopoDS_Shape &s, int kind) {
+  TopTools_IndexedMapOfShape m;
+  TopExp::MapShapes(s, ex_kind(kind), m);
+  return m.Extent();
+}
+
+/// The i-th (from 0) distinct sub-shape of a kind, in a stable order.
+inline std::unique_ptr<TopoDS_Shape> ex_sub(const TopoDS_Shape &s, int kind, int i) {
+  TopTools_IndexedMapOfShape m;
+  TopExp::MapShapes(s, ex_kind(kind), m);
+  if (i < 0 || i >= m.Extent())
+    return ex_null("no such sub-shape");
+  return ex_wrap(m(i + 1));
+}
+
+/// For each edge (ex_sub order): the number of faces around it, then their indices (ex_sub order).
+inline rust::Vec<int32_t> ex_edge_faces(const TopoDS_Shape &s) {
+  rust::Vec<int32_t> out;
+  EX_QTRY
+  TopTools_IndexedMapOfShape em, fm;
+  TopExp::MapShapes(s, TopAbs_EDGE, em);
+  TopExp::MapShapes(s, TopAbs_FACE, fm);
+  TopTools_IndexedDataMapOfShapeListOfShape map;
+  TopExp::MapShapesAndAncestors(s, TopAbs_EDGE, TopAbs_FACE, map);
+  for (int i = 1; i <= em.Extent(); i++) {
+    std::vector<int32_t> ids;
+    if (map.Contains(em(i))) {
+      for (auto it = map.FindFromKey(em(i)).begin(); it != map.FindFromKey(em(i)).end(); ++it) {
+        int k = fm.FindIndex(*it) - 1;
+        if (k >= 0 && std::find(ids.begin(), ids.end(), k) == ids.end())
+          ids.push_back(k);
+      }
+    }
+    out.push_back((int32_t)ids.size());
+    for (auto k : ids)
+      out.push_back(k);
+  }
+  return out;
+  EX_QCATCH("edge faces", rust::Vec<int32_t>())
+}
+
+/// A face at the point nearest (x, y, z): [surface type (GeomAbs_SurfaceType), normal xyz (outward,
+/// following the face's orientation), nearest point xyz, plus for planes/cylinders/cones/spheres the
+/// axis or plane: location xyz, direction xyz, radius].
+inline rust::Vec<double> ex_face_at(const TopoDS_Shape &f, double x, double y, double z) {
+  rust::Vec<double> out;
+  EX_QTRY
+  const TopoDS_Face &face = TopoDS::Face(f);
+  BRepAdaptor_Surface ad(face);
+  Handle(Geom_Surface) surf = BRep_Tool::Surface(face);
+  ShapeAnalysis_Surface sas(surf);
+  gp_Pnt2d uv = sas.ValueOfUV(gp_Pnt(x, y, z), 1e-7);
+  GeomLProp_SLProps props(surf, uv.X(), uv.Y(), 1, 1e-9);
+  gp_Dir n(0, 0, 1);
+  if (props.IsNormalDefined())
+    n = props.Normal();
+  if (face.Orientation() == TopAbs_REVERSED)
+    n.Reverse();
+  gp_Pnt q = surf->Value(uv.X(), uv.Y());
+  out.push_back((double)ad.GetType());
+  out.push_back(n.X()); out.push_back(n.Y()); out.push_back(n.Z());
+  out.push_back(q.X()); out.push_back(q.Y()); out.push_back(q.Z());
+  gp_Ax1 ax;
+  double r = 0.0;
+  bool has = true;
+  switch (ad.GetType()) {
+  case GeomAbs_Plane: ax = ad.Plane().Axis(); break;
+  case GeomAbs_Cylinder: ax = ad.Cylinder().Axis(); r = ad.Cylinder().Radius(); break;
+  case GeomAbs_Cone: ax = ad.Cone().Axis(); r = ad.Cone().RefRadius(); break;
+  case GeomAbs_Sphere: ax = ad.Sphere().Position().Axis(); r = ad.Sphere().Radius(); break;
+  case GeomAbs_Torus: ax = ad.Torus().Axis(); r = ad.Torus().MajorRadius(); break;
+  default: has = false;
+  }
+  if (has) {
+    out.push_back(ax.Location().X()); out.push_back(ax.Location().Y()); out.push_back(ax.Location().Z());
+    out.push_back(ax.Direction().X()); out.push_back(ax.Direction().Y()); out.push_back(ax.Direction().Z());
+    out.push_back(r);
+  }
+  return out;
+  EX_QCATCH("face query", rust::Vec<double>())
+}
+
+/// An edge: [curve type (GeomAbs_CurveType), length, start xyz, middle xyz, end xyz, plus for circles
+/// centre xyz, axis xyz, radius].
+inline rust::Vec<double> ex_edge_info(const TopoDS_Shape &e) {
+  rust::Vec<double> out;
+  EX_QTRY
+  const TopoDS_Edge &edge = TopoDS::Edge(e);
+  BRepAdaptor_Curve c(edge);
+  GProp_GProps g;
+  BRepGProp::LinearProperties(edge, g);
+  double a = c.FirstParameter(), b = c.LastParameter();
+  out.push_back((double)c.GetType());
+  out.push_back(g.Mass());
+  for (double t : {a, 0.5 * (a + b), b}) {
+    gp_Pnt p = c.Value(t);
+    out.push_back(p.X()); out.push_back(p.Y()); out.push_back(p.Z());
+  }
+  if (c.GetType() == GeomAbs_Circle) {
+    gp_Circ ci = c.Circle();
+    out.push_back(ci.Location().X()); out.push_back(ci.Location().Y()); out.push_back(ci.Location().Z());
+    out.push_back(ci.Axis().Direction().X()); out.push_back(ci.Axis().Direction().Y()); out.push_back(ci.Axis().Direction().Z());
+    out.push_back(ci.Radius());
+  }
+  return out;
+  EX_QCATCH("edge query", rust::Vec<double>())
+}
+
+/// Points along an edge, no further than `deflection` from it.
+inline rust::Vec<double> ex_edge_points(const TopoDS_Shape &e, double deflection) {
+  rust::Vec<double> out;
+  EX_QTRY
+  BRepAdaptor_Curve c(TopoDS::Edge(e));
+  GCPnts_QuasiUniformDeflection d(c, std::max(deflection, 1e-6));
+  if (!d.IsDone())
+    return out;
+  for (int i = 1; i <= d.NbPoints(); i++) {
+    gp_Pnt p = d.Value(i);
+    out.push_back(p.X()); out.push_back(p.Y()); out.push_back(p.Z());
+  }
+  return out;
+  EX_QCATCH("edge points", rust::Vec<double>())
+}
+
+inline bool ex_is_same(const TopoDS_Shape &a, const TopoDS_Shape &b) { return a.IsSame(b); }
+
+/// [xmin, ymin, zmin, xmax, ymax, zmax]; `optimal` uses the exact geometry instead of the tolerant box.
+inline rust::Vec<double> ex_bbox(const TopoDS_Shape &s, bool optimal) {
+  rust::Vec<double> out;
+  EX_QTRY
+  Bnd_Box b;
+  if (optimal)
+    BRepBndLib::AddOptimal(s, b, Standard_False, Standard_False);
+  else
+    BRepBndLib::Add(s, b);
+  if (b.IsVoid())
+    return out;
+  double x0, y0, z0, x1, y1, z1;
+  b.Get(x0, y0, z0, x1, y1, z1);
+  for (double v : {x0, y0, z0, x1, y1, z1})
+    out.push_back(v);
+  return out;
+  EX_QCATCH("bounding box", rust::Vec<double>())
+}
+
+/// Boolean of several arguments with several tools: op 0 fuse, 1 cut, 2 common. `fuzzy` treats gaps
+/// smaller than it as touching; `unify` merges coplanar faces afterwards (remove splitter).
+inline std::unique_ptr<TopoDS_Shape> ex_boolean_n(const TopTools_ListOfShape &args, const TopTools_ListOfShape &tools, int op, double fuzzy, bool unify) {
+  EX_TRY
+  std::unique_ptr<BRepAlgoAPI_BooleanOperation> bop;
+  if (op == 0)
+    bop.reset(new BRepAlgoAPI_Fuse());
+  else if (op == 1)
+    bop.reset(new BRepAlgoAPI_Cut());
+  else
+    bop.reset(new BRepAlgoAPI_Common());
+  bop->SetArguments(args);
+  bop->SetTools(tools);
+  if (fuzzy > 0.0)
+    bop->SetFuzzyValue(fuzzy);
+  bop->SetRunParallel(true);
+  bop->Build();
+  if (!bop->IsDone() || bop->HasErrors())
+    return ex_null(op == 0 ? "fuse failed" : op == 1 ? "cut failed" : "common failed");
+  return ex_wrap(unify ? ex_unify_raw(bop->Shape()) : bop->Shape());
+  EX_CATCH("boolean")
+}
+
+/// Planar faces, each with its holes, from closed wires lying in one plane: a wire inside an odd
+/// number of others is a hole of the smallest one around it.
+inline TopoDS_Shape ex_faces_from_wires(const std::vector<TopoDS_Wire> &wires, const gp_Pln &pln) {
+  size_t n = wires.size();
+  std::vector<TopoDS_Face> plain;
+  std::vector<double> area;
+  // each wire's own face (Inside: turned so that the face is the finite side)
+  for (auto &w : wires) {
+    TopoDS_Face f = BRepBuilderAPI_MakeFace(pln, w, Standard_True).Face();
+    GProp_GProps g;
+    BRepGProp::SurfaceProperties(f, g);
+    plain.push_back(f);
+    area.push_back(std::abs(g.Mass()));
+  }
+  // containment: is wire i inside wire j?
+  auto inside = [&](size_t i, size_t j) {
+    TopExp_Explorer ex(wires[i], TopAbs_VERTEX);
+    if (!ex.More())
+      return false;
+    gp_Pnt p = BRep_Tool::Pnt(TopoDS::Vertex(ex.Current()));
+    BRepClass_FaceClassifier fc(plain[j], p, 1e-7);
+    return area[j] > area[i] && fc.State() == TopAbs_IN;
+  };
+  std::vector<int> depth(n, 0), parent(n, -1);
+  for (size_t i = 0; i < n; i++)
+    for (size_t j = 0; j < n; j++)
+      if (i != j && inside(i, j)) {
+        depth[i]++;
+        if (parent[i] < 0 || area[j] < area[parent[i]])
+          parent[i] = (int)j;
+      }
+  // signed area of a wire's face on the plane: positive when it runs counter-clockwise about the
+  // normal (Inside false, so that the wire is not turned)
+  auto signed_area = [&](const TopoDS_Wire &w) {
+    GProp_GProps g;
+    BRepGProp::SurfaceProperties(BRepBuilderAPI_MakeFace(pln, w, Standard_False).Face(), g);
+    return g.Mass();
+  };
+  BRep_Builder bb;
+  TopoDS_Compound comp;
+  bb.MakeCompound(comp);
+  for (size_t i = 0; i < n; i++) {
+    if (depth[i] % 2)
+      continue;
+    TopoDS_Wire outer = signed_area(wires[i]) < 0 ? TopoDS::Wire(wires[i].Reversed()) : wires[i];
+    BRepBuilderAPI_MakeFace mf(pln, outer, Standard_True);
+    for (size_t k = 0; k < n; k++)
+      if (depth[k] % 2 && parent[k] == (int)i)
+        mf.Add(signed_area(wires[k]) > 0 ? TopoDS::Wire(wires[k].Reversed()) : wires[k]);
+    bb.Add(comp, mf.Face());
+  }
+  return comp;
+}
+
+/// 2D offset of a planar face (with its holes): outward for d > 0, inward for d < 0, corners joined
+/// with arcs (`arc`) or by extending the sides. The result is a compound of faces (empty when it vanishes).
+inline std::unique_ptr<TopoDS_Shape> ex_offset2d(const TopoDS_Shape &f, double d, bool arc) {
+  EX_TRY
+  const TopoDS_Face &face = TopoDS::Face(f);
+  BRepAdaptor_Surface ad(face);
+  if (ad.GetType() != GeomAbs_Plane)
+    return ex_null("2D offset needs a planar face");
+  gp_Pln pln = ad.Plane();
+  BRepOffsetAPI_MakeOffset mk(face, arc ? GeomAbs_Arc : GeomAbs_Intersection);
+  mk.Perform(d);
+  BRep_Builder bb;
+  TopoDS_Compound empty;
+  bb.MakeCompound(empty);
+  if (!mk.IsDone())
+    return ex_wrap(empty);
+  std::vector<TopoDS_Wire> wires;
+  for (TopExp_Explorer ex(mk.Shape(), TopAbs_WIRE); ex.More(); ex.Next())
+    if (BRep_Tool::IsClosed(ex.Current()))
+      wires.push_back(TopoDS::Wire(ex.Current()));
+  if (wires.empty())
+    return ex_wrap(empty);
+  return ex_wrap(ex_faces_from_wires(wires, pln));
+  EX_CATCH("2D offset")
+}
+
+/// The same face turned to face along (nx, ny, nz).
+inline std::unique_ptr<TopoDS_Shape> ex_face_towards(const TopoDS_Shape &f, double nx, double ny, double nz) {
+  EX_TRY
+  BRepAdaptor_Surface ad(TopoDS::Face(f));
+  double u = 0.5 * (ad.FirstUParameter() + ad.LastUParameter()), v = 0.5 * (ad.FirstVParameter() + ad.LastVParameter());
+  GeomLProp_SLProps props(BRep_Tool::Surface(TopoDS::Face(f)), u, v, 1, 1e-9);
+  if (!props.IsNormalDefined())
+    return ex_wrap(f);
+  gp_Dir n = props.Normal();
+  if (f.Orientation() == TopAbs_REVERSED)
+    n.Reverse();
+  if (n.X() * nx + n.Y() * ny + n.Z() * nz < 0)
+    return ex_wrap(f.Reversed());
+  return ex_wrap(f);
+  EX_CATCH("orient face")
+}
