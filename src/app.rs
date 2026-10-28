@@ -135,6 +135,8 @@ pub struct App {
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
     /// The Claude chat panel.
     pub claude: crate::claude_ui::ClaudeUi,
+    /// The start screen with recent documents.
+    pub home: crate::home::HomeUi,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
     pub awaiting_sketch_plane: bool,
     pub was_narrow: Option<bool>,
@@ -230,6 +232,7 @@ impl App {
             dark,
             script_editor: None,
             claude: Default::default(),
+            home: Default::default(),
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
@@ -245,6 +248,8 @@ impl App {
         };
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
+        } else {
+            app.home.open = true;
         }
         app.flash_info("Loading the OpenCascade kernel…", None);
         app
@@ -708,6 +713,7 @@ impl App {
         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| crate::workspace::Workspace::from_json(&s)) {
             Ok(ws) => {
                 self.load_workspace(ws);
+                crate::home::touch(self, &p);
                 self.path = Some(p);
             }
             Err(e) => self.flash(format!("Could not open {}: {e}", p.display()), ToastKind::Error),
@@ -721,6 +727,7 @@ impl App {
             match std::fs::write(&p, self.ws.to_json()) {
                 Ok(()) => {
                     self.flash_info(format!("Saved {}", p.display()), Some(Duration::from_secs(2)));
+                    crate::home::touch(self, &p);
                     self.path = Some(p);
                 }
                 Err(e) => self.flash(format!("Could not save: {e}"), ToastKind::Error),
@@ -1163,7 +1170,9 @@ impl App {
     fn header(&mut self, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
-            ui.add(icons::image("logo", 20.0).tint(theme::accent()));
+            if ui.add(egui::Button::image(icons::image("logo", 20.0).tint(theme::accent())).frame(false)).on_hover_text("Home: recent documents").clicked() {
+                crate::home::show_home(self);
+            }
             if !self.phone {
                 ui.label(RichText::new("cad-app").family(theme::medium()).size(15.0).color(theme::text()));
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
@@ -1223,7 +1232,7 @@ impl App {
     fn document_menu(&mut self, ui: &mut Ui) {
         ui.set_min_width(220.0);
         let mut action = None;
-        for (a, icon, l) in [("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP, IGES, STL, OBJ…")]
+        for (a, icon, l) in [("home", "home", "Home (recent documents)"), ("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP, IGES, STL, OBJ…")]
         {
             if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
                 action = Some(a);
@@ -1251,6 +1260,7 @@ impl App {
             ui.close();
         }
         match action {
+            Some("home") => crate::home::show_home(self),
             Some("new") => self.new_document(),
             Some("open") => self.open_dialog(),
             Some("json") => self.save(false),
@@ -2768,6 +2778,7 @@ impl eframe::App for App {
             self.was_narrow = Some(narrow);
         }
         self.handle_screenshot(&ctx);
+        crate::home::thumbnail(self, &ctx);
         // files dropped on the window: open documents, import models
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for p in dropped {
@@ -2783,6 +2794,15 @@ impl eframe::App for App {
             self.start_sketch();
         }
         self.pump_kernel();
+        if self.home.open {
+            crate::home::ui(self, ui);
+            // not the "loading the kernel" note
+            if self.toast.as_ref().is_some_and(|t| t.until.is_some()) {
+                self.toast_ui(&ctx);
+            }
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title("cad-app".into()));
+            return;
+        }
         crate::palette::shortcut(self, &ctx);
         self.shortcuts(&ctx);
 

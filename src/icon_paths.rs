@@ -1,6 +1,8 @@
 //! Icon paths (24x24 viewBox, stroked) copied from cad-app.html.
 
 pub const ICONS: &[(&str, &str)] = &[
+    ("home", "M5 12H3l9-9 9 9h-2M5 12v7a2 2 0 0 0 2 2h10a2 2 0 0 0 2-2v-7M9 21v-6a2 2 0 0 1 2-2h2a2 2 0 0 1 2 2v6"),
+    ("folder", "M5 4h4l3 3h7a2 2 0 0 1 2 2v8a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2"),
     ("select", "M5 3l12 8-5 1.5L9.5 18z"),
     ("point", "M12 12m-2.5 0a2.5 2.5 0 1 0 5 0a2.5 2.5 0 1 0 -5 0"),
     ("line", "M5 19L19 5M5 19m-1.5 0a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M19 5m-1.5 0a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0"),
