@@ -1,0 +1,24 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "import_file", "args": {"path": "examples/zerotorque/Plug_70_2.step", "name": "Plug"}},
+  {"tool": "set_part", "args": {"body": [1, 0], "name": "Plug 70/2", "material": "Aluminium 7075"}},
+
+  {"tool": "create_simulation", "args": {"name": "Plug, hollow", "analysis": "modal", "modes": 10, "mesh_size": 1.5}},
+  {"tool": "solve_simulation", "args": {"simulation": 0}},
+  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 7, "path": "zt-plug-hollow-mode1.png"}},
+
+  {"tool": "import_file", "args": {"path": "examples/zerotorque/PlugCore_70_2.step", "name": "Core"}},
+  {"tool": "set_part", "args": {"body": [2, 0], "name": "Foam core", "material": "Urethane foam"}},
+  {"tool": "create_simulation", "args": {"name": "Plug with foam core", "analysis": "modal", "modes": 10, "mesh_size": 1.5}},
+  {"tool": "solve_simulation", "args": {"simulation": 1}},
+
+  {"tool": "create_simulation", "args": {"name": "Tap, hollow", "analysis": "transient", "bodies": [[1, 0]], "mesh_size": 1.5,
+    "transient": {"profile": "pulse", "time": 0.00005, "duration": 0.003, "steps": 600, "damping": 0},
+    "loads": [{"kind": "force", "value": 200, "normal": true, "faces": [{"point": [15, 0, 7.5], "normal": [1, 0, 0]}], "at": [15, 0, 7.5], "radius": 3}]}},
+  {"tool": "solve_simulation", "args": {"simulation": 2}},
+  {"tool": "create_simulation", "args": {"name": "Tap, with core", "analysis": "transient", "mesh_size": 1.5,
+    "transient": {"profile": "pulse", "time": 0.00005, "duration": 0.003, "steps": 600, "damping": 0},
+    "loads": [{"kind": "force", "value": 200, "normal": true, "faces": [{"point": [15, 0, 7.5], "normal": [1, 0, 0]}], "at": [15, 0, 7.5], "radius": 3}]}},
+  {"tool": "solve_simulation", "args": {"simulation": 3}},
+  {"tool": "save_document", "args": {"path": "zt-plug-modal.json"}}
+]

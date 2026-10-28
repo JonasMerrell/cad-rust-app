@@ -138,6 +138,12 @@ pub struct Load {
     /// A force pushes into the faces along their normals rather than along `direction`.
     #[serde(default)]
     pub normal: bool,
+    /// Only the part of the faces within `radius` of this point (part coordinates), e.g. an impact at the
+    /// centre of a face.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub at: Option<[f64; 3]>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub radius: Option<f64>,
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub suppressed: bool,
 }
@@ -148,7 +154,7 @@ fn down() -> [f64; 3] {
 
 impl Default for Load {
     fn default() -> Self {
-        Load { id: 0, name: String::new(), kind: LoadKind::Force, faces: vec![], value: 100.0, direction: down(), normal: false, suppressed: false }
+        Load { id: 0, name: String::new(), kind: LoadKind::Force, faces: vec![], value: 100.0, direction: down(), normal: false, at: None, radius: None, suppressed: false }
     }
 }
 
@@ -263,6 +269,9 @@ pub struct Study {
     pub modes: usize,
     #[serde(default)]
     pub transient: Transient,
+    /// Loss factors (η) by material name, replacing the library's values.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub loss_factors: std::collections::BTreeMap<String, f64>,
     #[serde(default)]
     pub next_id: u64,
 }
@@ -284,6 +293,7 @@ impl Default for Study {
             loads: vec![],
             modes: modes(),
             transient: Transient::default(),
+            loss_factors: Default::default(),
             next_id: 1,
         }
     }
@@ -359,7 +369,22 @@ pub const MATERIALS: &[(&str, f64, f64, f64, f64)] = &[
 ];
 
 pub fn elastic(name: &str) -> Option<Elastic> {
-    MATERIALS.iter().find(|m| m.0.eq_ignore_ascii_case(name)).map(|m| Elastic { e: m.1, nu: m.2, rho: m.3 * 1e-9, yield_mpa: m.4 })
+    MATERIALS.iter().find(|m| m.0.eq_ignore_ascii_case(name)).map(|m| Elastic { e: m.1, nu: m.2, rho: m.3 * 1e-9, yield_mpa: m.4, eta: loss_factor(m.0) })
+}
+
+/// Typical loss factor (structural damping η) of a library material at room temperature.
+pub fn loss_factor(name: &str) -> f64 {
+    match name {
+        "Aluminium 6061" | "Aluminium 7075" => 0.0003,
+        "Steel" | "Stainless steel" | "Stainless steel 303" | "Titanium" | "Tungsten alloy" => 0.0005,
+        "Brass" => 0.001,
+        "Copper" => 0.002,
+        "PLA" | "ABS" | "PETG" => 0.02,
+        "Nylon" => 0.03,
+        "Oak" | "Pine" => 0.01,
+        "Urethane foam" => 0.1,
+        _ => 0.0,
+    }
 }
 
 /// Standard gravity in mm/s².
@@ -377,6 +402,8 @@ pub struct Input {
     /// Material of the first part that has one.
     pub part_material: Option<String>,
     pub bodies: Vec<BodyId>,
+    /// Each part's own material (same order as `bodies`).
+    pub materials: Vec<Option<String>>,
     /// Smallest radius of the parts' circular edges (holes, fillets).
     pub min_radius: Option<f64>,
 }
@@ -396,6 +423,7 @@ pub fn input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -> Inp
         }
         let bi = out.bodies.len() as u32;
         out.bodies.push(b.id);
+        out.materials.push(props.and_then(|p| p.material.clone()));
         let p = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
         for (ti, t) in b.indices.chunks(3).enumerate() {
             out.tris.push([p(t[0]), p(t[1]), p(t[2])]);
@@ -493,6 +521,8 @@ pub struct Outcome {
     pub mesh: Arc<Mesh>,
     pub material: String,
     pub mat: Elastic,
+    /// Each part's material when they differ (`mesh.body` numbering); empty: `mat` everywhere.
+    pub body_mats: Vec<Elastic>,
     pub solution: Solution,
     pub warnings: Vec<String>,
     pub mass: f64,
@@ -515,8 +545,42 @@ pub fn max_mag(u: &[f64]) -> f64 {
 
 pub fn material_of(study: &Study, input: &Input) -> (String, Elastic) {
     let name = if !study.material.is_empty() { study.material.clone() } else { input.part_material.clone().filter(|m| elastic(m).is_some()).unwrap_or_else(|| "Steel".into()) };
-    let mat = elastic(&name).unwrap_or_else(|| elastic("Steel").unwrap());
-    (name, mat)
+    (name.clone(), material_named(study, &name))
+}
+
+fn material_named(study: &Study, name: &str) -> Elastic {
+    let mut m = elastic(name).unwrap_or_else(|| elastic("Steel").unwrap());
+    if let Some(eta) = study.loss_factors.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|x| *x.1) {
+        m.eta = eta.max(0.0);
+    }
+    m
+}
+
+/// Each part's material: the study's when it sets one, else the part's own, else the first part's
+/// (steel when none is set).
+pub fn part_materials(study: &Study, input: &Input) -> Vec<(String, Elastic)> {
+    let (fallback, _) = material_of(study, input);
+    input
+        .materials
+        .iter()
+        .map(|m| {
+            let name = if !study.material.is_empty() { study.material.clone() } else { m.clone().filter(|m| elastic(m).is_some()).unwrap_or_else(|| fallback.clone()) };
+            let mat = material_named(study, &name);
+            (name, mat)
+        })
+        .collect()
+}
+
+/// Whether the parts have different materials, so they are meshed one by one and bonded where they touch.
+pub fn mixed(study: &Study, input: &Input) -> bool {
+    let m = part_materials(study, input);
+    m.iter().any(|x| x.0 != m[0].0)
+}
+
+/// Mesh the study's parts: as one when they share a material, part by part (bonded) when they don't.
+pub fn mesh_input(study: &Study, input: &Input, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let surf = Surface::new(input.tris.clone(), input.face.clone(), input.body.clone());
+    if mixed(study, input) { crate::fea_mesh::mesh_parts(&surf, size, cancel) } else { crate::fea_mesh::mesh(&surf, size, cancel) }
 }
 
 /// Mesh the parts (or reuse `mesh`) and solve the study.
@@ -528,11 +592,17 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         Some(m) => m,
         None => {
             progress("Meshing", 0.0);
-            let surf = Surface::new(input.tris.clone(), input.face.clone(), input.body.clone());
-            Arc::new(crate::fea_mesh::mesh(&surf, study.mesh_size.unwrap_or_else(|| input.auto_size()), cancel)?)
+            Arc::new(mesh_input(study, input, study.mesh_size.unwrap_or_else(|| input.auto_size()), cancel)?)
         }
     };
-    let (material, mat) = material_of(study, input);
+    let (mut material, mat) = material_of(study, input);
+    let parts = part_materials(study, input);
+    let body_mats: Vec<Elastic> = if mesh.body.is_empty() { vec![] } else { parts.iter().map(|p| p.1).collect() };
+    if !body_mats.is_empty() {
+        let mut names: Vec<String> = parts.iter().map(|p| p.0.clone()).collect();
+        names.dedup();
+        material = names.join(" + ");
+    }
     let mut warnings = vec![];
     let nn = mesh.nodes.len();
     // mesh faces of a list of picks
@@ -544,7 +614,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 None => warnings.push(format!("{what}: a face is no longer on the parts")),
             }
         }
-        (0..mesh.faces.len()).filter(|i| ids.contains(&mesh.faces[*i].1)).collect()
+        (0..mesh.faces.len()).filter(|i| ids.contains(&mesh.faces[*i].1)).collect::<Vec<usize>>()
     };
     let mut fixes = vec![];
     let mut support_nodes = vec![];
@@ -587,11 +657,18 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         let dir = DVec3::from(l.direction).normalize_or_zero();
         match l.kind {
             LoadKind::Gravity => {
-                crate::fea_solve::body_loads(&mesh, dir * (mat.rho * l.value * G), &mut force);
+                crate::fea_solve::body_loads(&mesh, dir * (l.value * G), |ei| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho, &mut force);
                 any_load = true;
             }
             LoadKind::Force | LoadKind::Pressure => {
-                let fs = faces_of(&l.faces, &l.name, &mut warnings);
+                let mut fs = faces_of(&l.faces, &l.name, &mut warnings);
+                if let (Some(at), Some(r)) = (l.at, l.radius) {
+                    let at = DVec3::from(at);
+                    fs.retain(|f| {
+                        let t = &mesh.faces[*f].0;
+                        ((mesh.nodes[t[0] as usize] + mesh.nodes[t[1] as usize] + mesh.nodes[t[2] as usize]) / 3.0).distance(at) <= r
+                    });
+                }
                 if fs.is_empty() {
                     warnings.push(format!("{} has no faces", l.name));
                 } else {
@@ -605,7 +682,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         }
     }
     let held = study.supports.iter().any(|s| !s.suppressed && !s.faces.is_empty());
-    if study.analysis != Analysis::Modal {
+    if study.analysis == Analysis::Static {
         if !held {
             return Err("Add a support (Fixed or Roller) so the part is held".into());
         }
@@ -613,14 +690,17 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             return Err("Add a load (Force, Pressure or Gravity)".into());
         }
     }
-    let problem = Problem { mesh: &mesh, mat, fixes, force };
+    if study.analysis == Analysis::Transient && !any_load {
+        return Err("Add a load (Force, Pressure or Gravity)".into());
+    }
+    let problem = Problem { mesh: &mesh, mat, body_mats: body_mats.clone(), fixes, force };
     let solution = match study.analysis {
         Analysis::Static => {
             progress("Solving", 0.3);
             let r = crate::fea_solve::static_solve(&problem, cancel)?;
             progress("Stresses", 0.9);
-            let stress = crate::fea_solve::nodal_stress(&mesh, &mat, &r.u);
-            let reactions = support_nodes.iter().map(|(id, nodes)| (*id, crate::fea_solve::reaction(&mesh, &mat, &r.u, &problem.force, nodes))).collect();
+            let stress = crate::fea_solve::nodal_stress(&mesh, &mat, &body_mats, &r.u);
+            let reactions = support_nodes.iter().map(|(id, nodes)| (*id, crate::fea_solve::reaction(&mesh, &mat, &body_mats, &r.u, &problem.force, nodes))).collect();
             Solution::Static { u: r.u, stress, reactions }
         }
         Analysis::Modal => {
@@ -636,24 +716,22 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             let s = TransientSettings { duration: t.duration, steps: t.steps.clamp(10, 20000), damping: t.damping.clamp(0.0, 1.0), profile: t.profile(), frames: 120 };
             progress("Time stepping", 0.1);
             let r = crate::fea_solve::transient(&problem, &s, &|f| progress("Time stepping", 0.1 + 0.9 * f), cancel)?;
+            if r.free {
+                warnings.push("No supports: the part floats freely, so the results show its vibration with the rigid motion taken out".into());
+            }
             if r.dt * r.f1 > 0.1 {
                 warnings.push(format!("The time step ({}) is long for the lowest natural frequency ({:.0} Hz): use more steps", fmt_time(r.dt), r.f1));
             }
             Solution::Transient(r)
         }
     };
-    let vol: f64 = mesh_volume(&mesh);
-    Ok(Outcome { mesh, material, mat, solution, warnings, mass: mat.rho * vol })
+    let mass = mesh.tets.iter().enumerate().map(|(ei, t)| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * tet10_volume(&mesh, t)).sum();
+    Ok(Outcome { mesh, material, mat, body_mats, solution, warnings, mass })
 }
 
-fn mesh_volume(m: &Mesh) -> f64 {
-    m.tets
-        .iter()
-        .map(|t| {
-            let p = |i: usize| m.nodes[t[i] as usize];
-            (p(1) - p(0)).cross(p(2) - p(0)).dot(p(3) - p(0)) / 6.0
-        })
-        .sum()
+fn tet10_volume(m: &Mesh, t: &[u32; 10]) -> f64 {
+    let p = |i: usize| m.nodes[t[i] as usize];
+    (p(1) - p(0)).cross(p(2) - p(0)).dot(p(3) - p(0)) / 6.0
 }
 
 /// A time in s, ms or µs.

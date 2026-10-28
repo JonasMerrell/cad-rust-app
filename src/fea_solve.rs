@@ -10,13 +10,15 @@ use glam::DVec3;
 
 use crate::fea_mesh::Mesh;
 
-/// Elastic material: Young's modulus (MPa), Poisson's ratio, density (t/mm³) and yield strength (MPa).
+/// Elastic material: Young's modulus (MPa), Poisson's ratio, density (t/mm³), yield strength (MPa)
+/// and loss factor (structural damping η: the fraction of strain energy lost per radian of vibration).
 #[derive(Clone, Copy, Debug)]
 pub struct Elastic {
     pub e: f64,
     pub nu: f64,
     pub rho: f64,
     pub yield_mpa: f64,
+    pub eta: f64,
 }
 
 /// What holds the part.
@@ -32,9 +34,23 @@ pub enum Fix {
 pub struct Problem<'a> {
     pub mesh: &'a Mesh,
     pub mat: Elastic,
+    /// Material of each part (`mesh.body` numbering); empty: `mat` everywhere.
+    pub body_mats: Vec<Elastic>,
     pub fixes: Vec<Fix>,
     /// Nodal forces (3 per node).
     pub force: Vec<f64>,
+}
+
+impl Problem<'_> {
+    /// Material of element `ei`.
+    pub fn mat_of(&self, ei: usize) -> &Elastic {
+        mat_at(self.mesh, &self.body_mats, &self.mat, ei)
+    }
+}
+
+/// Material of element `ei`: its part's from `body_mats`, else `mat`.
+pub fn mat_at<'a>(mesh: &Mesh, body_mats: &'a [Elastic], mat: &'a Elastic, ei: usize) -> &'a Elastic {
+    mesh.body.get(ei).and_then(|b| body_mats.get(*b as usize)).unwrap_or(mat)
 }
 
 // ---------------------------------------------------------------- element
@@ -167,8 +183,11 @@ pub struct System {
     row: Vec<usize>,
     pub k: Vec<f64>,
     pub m: Vec<f64>,
+    /// Σ ηₑ Kₑ: the stiffness weighted by each element's loss factor (empty when every η is 0).
+    pub k_eta: Vec<f64>,
     symbolic: Option<SymbolicLlt<usize>>,
     pub volume: f64,
+    pub mass: f64,
 }
 
 impl System {
@@ -202,7 +221,10 @@ impl System {
         }
         let a = SparseColMatRef::new(sym, v);
         Llt::try_new_with_symbolic(self.symbolic.clone().unwrap(), a, Side::Lower)
-            .map_err(|_| "The model is not held well enough: add supports so it cannot move freely".to_string())
+            .map_err(|e| match e {
+                faer::sparse::linalg::LltError::Numeric(_) => "The model is not held well enough: add supports so it cannot move freely".to_string(),
+                _ => format!("Not enough memory to solve {} unknowns: use a bigger mesh size", self.n),
+            })
     }
 }
 
@@ -243,6 +265,18 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
                     }
                 }
             }
+        }
+    }
+    // nodes no element uses (left over by meshing) carry no stiffness or mass: leave them out
+    let mut used = vec![false; nn];
+    for e in &mesh.tets {
+        for &a in e {
+            used[a as usize] = true;
+        }
+    }
+    for (i, u) in used.iter().enumerate() {
+        if !u {
+            fixed[3 * i..3 * i + 3].fill(true);
         }
     }
     let mut free = vec![usize::MAX; ndof];
@@ -292,18 +326,21 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
     }
     drop(adj);
     let nnz = row.len();
-    let mut sys = System { n, free, dof, col_ptr, row, k: vec![0.0; nnz], m: vec![0.0; nnz], symbolic: None, volume: 0.0 };
-    let (lam, mu) = lame(&p.mat);
+    let lossy = (0..mesh.tets.len()).any(|ei| p.mat_of(ei).eta > 0.0);
+    let mut sys = System { n, free, dof, col_ptr, row, k: vec![0.0; nnz], m: vec![0.0; nnz], k_eta: if lossy { vec![0.0; nnz] } else { vec![] }, symbolic: None, volume: 0.0, mass: 0.0 };
     for (ei, e) in mesh.tets.iter().enumerate() {
         if ei % 4096 == 0 && cancel() {
             return Err("cancelled".into());
         }
+        let mat = *p.mat_of(ei);
+        let (lam, mu) = lame(&mat);
         let x = coords(mesh, e);
         let Some((ke, vol)) = stiffness(&x, lam, mu) else {
             return Err("The mesh has an inverted element; try another element size".into());
         };
         sys.volume += vol;
-        let mscale = p.mat.rho * vol / 420.0;
+        sys.mass += mat.rho * vol;
+        let mscale = mat.rho * vol / 420.0;
         for i in 0..10 {
             for a in 0..3 {
                 let ri = sys.free[3 * e[i] as usize + a];
@@ -318,6 +355,9 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
                         }
                         let k = sys.idx(ri, cj);
                         sys.k[k] += ke[3 * i + a][3 * j + b];
+                        if lossy {
+                            sys.k_eta[k] += mat.eta * ke[3 * i + a][3 * j + b];
+                        }
                         if a == b {
                             sys.m[k] += mscale * mass_coef(i, j);
                         }
@@ -362,9 +402,11 @@ pub fn traction_loads(mesh: &Mesh, faces: &[usize], traction: impl Fn(DVec3) -> 
     }
 }
 
-/// Nodal forces of a uniform body force (N/mm³): corners −1/20, mid-edge nodes 1/5 of each element's share.
-pub fn body_loads(mesh: &Mesh, b: DVec3, f: &mut [f64]) {
-    for e in &mesh.tets {
+/// Nodal forces of an acceleration `g` (mm/s²) acting on each element's density `rho(element)`:
+/// corners −1/20, mid-edge nodes 1/5 of each element's share.
+pub fn body_loads(mesh: &Mesh, g: DVec3, rho: impl Fn(usize) -> f64, f: &mut [f64]) {
+    for (ei, e) in mesh.tets.iter().enumerate() {
+        let b = g * rho(ei);
         let x = coords(mesh, e);
         let vol: f64 = GP.iter().filter_map(|l| grads(&x, *l)).map(|(_, d)| d / 24.0).sum();
         for (i, n) in e.iter().enumerate() {
@@ -402,11 +444,12 @@ fn expand(sys: &System, x: &[f64], nn: usize) -> Vec<f64> {
 // ---------------------------------------------------------------- results
 
 /// Stresses averaged at the nodes: [xx, yy, zz, xy, yz, zx] (MPa).
-pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, u: &[f64]) -> Vec<[f32; 6]> {
-    let (lam, mu) = lame(mat);
+/// `mats`: each part's material (`mesh.body`), else `mat`.
+pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> Vec<[f32; 6]> {
     let mut acc = vec![[0.0f64; 6]; mesh.nodes.len()];
     let mut cnt = vec![0u32; mesh.nodes.len()];
-    for e in &mesh.tets {
+    for (ei, e) in mesh.tets.iter().enumerate() {
+        let (lam, mu) = lame(mat_at(mesh, mats, mat, ei));
         let x = coords(mesh, e);
         for (k, l) in NODE_L.iter().enumerate() {
             let Some((g, _)) = grads(&x, *l) else { continue };
@@ -445,14 +488,14 @@ pub fn von_mises(s: &[f32; 6]) -> f32 {
 }
 
 /// Reaction force (N) at the given nodes: internal forces K u minus the applied loads there.
-pub fn reaction(mesh: &Mesh, mat: &Elastic, u: &[f64], force: &[f64], nodes: &[u32]) -> DVec3 {
+pub fn reaction(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], force: &[f64], nodes: &[u32]) -> DVec3 {
     let mut on = vec![false; mesh.nodes.len()];
     for n in nodes {
         on[*n as usize] = true;
     }
-    let (lam, mu) = lame(mat);
     let mut r = DVec3::ZERO;
-    for e in mesh.tets.iter().filter(|e| e.iter().any(|n| on[*n as usize])) {
+    for (ei, e) in mesh.tets.iter().enumerate().filter(|(_, e)| e.iter().any(|n| on[*n as usize])) {
+        let (lam, mu) = lame(mat_at(mesh, mats, mat, ei));
         let Some((ke, _)) = stiffness(&coords(mesh, e), lam, mu) else { continue };
         for i in 0..10 {
             if !on[e[i] as usize] {
@@ -498,6 +541,9 @@ pub struct Mode {
     pub shape: Vec<f64>,
     /// Effective mass fraction along x, y, z.
     pub participation: [f64; 3],
+    /// Modal loss factor: the materials' loss factors weighted by where the mode stores its strain
+    /// energy. Vibration in the mode dies away as e^(−η ω t / 2).
+    pub loss: f64,
 }
 
 /// Lowest `count` natural frequencies by shift-invert Lanczos (shifted just below zero, so parts
@@ -510,17 +556,18 @@ pub fn modal(p: &Problem, count: usize, cancel: &dyn Fn() -> bool) -> Result<Vec
 fn modes_of(sys: &mut System, p: &Problem, count: usize, cancel: &dyn Fn() -> bool) -> Result<Vec<Mode>, String> {
     let n = sys.n;
     let count = count.clamp(1, n);
-    // shift: a small negative value relative to the stiffness/mass scale
+    // shift: a small negative value relative to the stiffness/mass scale; bigger for a free model,
+    // whose stiffness alone is singular, so that rounding cannot break the factorisation
     let kd: f64 = (0..n).map(|c| sys.k[sys.col_ptr[c]]).sum::<f64>() / n as f64;
     let md: f64 = (0..n).map(|c| sys.m[sys.col_ptr[c]]).sum::<f64>() / n as f64;
-    let sigma = -(kd / md.max(1e-300)) * 1e-8;
+    let sigma = -(kd / md.max(1e-300)) * if p.fixes.is_empty() { 1e-5 } else { 1e-8 };
     let shifted: Vec<f64> = sys.k.iter().zip(&sys.m).map(|(k, m)| k - sigma * m).collect();
     let llt = sys.factor(&shifted)?;
     let mut m_steps = (2 * count + 20).min(n);
     loop {
         let (vals, vecs, ok) = lanczos(sys, &llt, m_steps, count, cancel)?;
         if ok || m_steps >= n {
-            let total_mass = p.mat.rho * sys.volume;
+            let total_mass = sys.mass;
             let mut out = vec![];
             for (theta, x) in vals.into_iter().zip(vecs) {
                 let lam = sigma + 1.0 / theta;
@@ -533,7 +580,16 @@ fn modes_of(sys: &mut System, p: &Problem, count: usize, cancel: &dyn Fn() -> bo
                     part[d % 3] += mx[i];
                 }
                 let participation = part.map(|g| g * g / total_mass.max(1e-300));
-                out.push(Mode { freq, shape: expand(sys, &x, p.mesh.nodes.len()), participation });
+                let loss = if sys.k_eta.is_empty() {
+                    0.0
+                } else {
+                    let (mut kx, mut ex) = (vec![0.0; n], vec![0.0; n]);
+                    sys.mul(&sys.k, &x, &mut kx);
+                    sys.mul(&sys.k_eta, &x, &mut ex);
+                    let dot = |a: &[f64]| a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>();
+                    (dot(&ex) / dot(&kx).max(1e-300)).clamp(0.0, 1.0)
+                };
+                out.push(Mode { freq, shape: expand(sys, &x, p.mesh.nodes.len()), participation, loss });
             }
             return Ok(out);
         }
@@ -718,14 +774,68 @@ pub struct TransientResult {
     pub rayleigh: (f64, f64),
     pub duration: f64,
     pub dt: f64,
+    /// The part is not held: displacements are its vibration, with the rigid motion taken out.
+    pub free: bool,
+    /// Time from the largest response until it has died down to a tenth of it (None: not within the run).
+    pub decay: Option<f64>,
+}
+
+/// Time from the peak of `amp` until it stays below a tenth of the peak.
+pub fn decay_time(times: &[f64], amp: &[f64]) -> Option<f64> {
+    let (ip, peak) = amp.iter().copied().enumerate().fold((0, 0.0), |b, (i, a)| if a > b.1 { (i, a) } else { b });
+    if peak <= 0.0 {
+        return None;
+    }
+    let last = amp.iter().rposition(|a| *a >= 0.1 * peak)?;
+    (last + 1 < amp.len()).then(|| times[last] - times[ip])
+}
+
+/// Rigid-body motions (3 translations, 3 rotations about the centroid) over the free DOFs, M-orthonormal.
+fn rigid_modes(sys: &System, mesh: &Mesh) -> Vec<Vec<f64>> {
+    let n = sys.n;
+    let c = mesh.nodes.iter().fold(DVec3::ZERO, |a, p| a + *p) / mesh.nodes.len().max(1) as f64;
+    let mut out: Vec<Vec<f64>> = vec![];
+    for k in 0..6 {
+        let mut r: Vec<f64> = sys
+            .dof
+            .iter()
+            .map(|d| {
+                let (node, comp) = (d / 3, d % 3);
+                if k < 3 {
+                    if comp == k { 1.0 } else { 0.0 }
+                } else {
+                    let axis = DVec3::from_array(std::array::from_fn(|a| if a == k - 3 { 1.0 } else { 0.0 }));
+                    axis.cross(mesh.nodes[node] - c)[comp]
+                }
+            })
+            .collect();
+        for _ in 0..2 {
+            for q in &out {
+                let mut mq = vec![0.0; n];
+                sys.mul(&sys.m, q, &mut mq);
+                let d: f64 = mq.iter().zip(&r).map(|(a, b)| a * b).sum();
+                r.iter_mut().zip(q).for_each(|(x, y)| *x -= d * y);
+            }
+        }
+        let mut mr = vec![0.0; n];
+        sys.mul(&sys.m, &r, &mut mr);
+        let nrm = mr.iter().zip(&r).map(|(a, b)| a * b).sum::<f64>().max(0.0).sqrt();
+        if nrm > 1e-300 {
+            r.iter_mut().for_each(|x| *x /= nrm);
+            out.push(r);
+        }
+    }
+    out
 }
 
 /// Newmark average-acceleration time stepping with Rayleigh damping set to `damping` of critical at the
-/// first natural frequency and five times it.
+/// first natural frequency and five times it, plus the materials' loss factors as stiffness-proportional
+/// damping (ηₑ Kₑ / ω₁). A part with no supports floats freely: its rigid motion is taken out of the results.
 pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), cancel: &dyn Fn() -> bool) -> Result<TransientResult, String> {
     let mut sys = assemble(p, cancel)?;
-    let modes = modes_of(&mut sys, p, 1, cancel)?;
-    let f1 = modes.first().map(|m| m.freq).unwrap_or(0.0).max(1e-6);
+    let free = p.fixes.is_empty();
+    let modes = modes_of(&mut sys, p, if free { 7 } else { 1 }, cancel)?;
+    let f1 = modes.last().map(|m| m.freq).unwrap_or(0.0).max(1e-6);
     let (w1, w2) = (std::f64::consts::TAU * f1, std::f64::consts::TAU * f1 * 5.0);
     let ar = 2.0 * s.damping * w1 * w2 / (w1 + w2);
     let br = 2.0 * s.damping / (w1 + w2);
@@ -739,8 +849,14 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
     let a3 = 1.0 / (2.0 * beta) - 1.0;
     let a4 = gamma / beta - 1.0;
     let a5 = dt / 2.0 * (gamma / beta - 2.0);
-    // K_eff = K + a0 M + a1 (αM + βK)
-    let keff: Vec<f64> = sys.k.iter().zip(&sys.m).map(|(k, m)| (1.0 + a1 * br) * k + (a0 + a1 * ar) * m).collect();
+    // loss factors: C += Σ ηₑ Kₑ / ω₁
+    let ce = 1.0 / w1;
+    // K_eff = K + a0 M + a1 C, C = αM + βK + ce K_η
+    let mut keff: Vec<f64> = sys.k.iter().zip(&sys.m).map(|(k, m)| (1.0 + a1 * br) * k + (a0 + a1 * ar) * m).collect();
+    for (x, e) in keff.iter_mut().zip(&sys.k_eta) {
+        *x += a1 * ce * e;
+    }
+    let rigid = if free { rigid_modes(&sys, p.mesh) } else { vec![] };
     let llt = sys.factor(&keff)?;
     let n = sys.n;
     let nn = p.mesh.nodes.len();
@@ -751,7 +867,8 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
     let mut next_frame = every;
     let mut times = vec![0.0];
     let mut max_disp = vec![0.0];
-    let (mut tm, mut tc, mut ku) = (vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let (mut tm, mut tc, mut ku, mut ke) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
+    let mut mu = vec![0.0; n];
     for step in 1..=steps {
         if step % 16 == 0 {
             if cancel() {
@@ -769,7 +886,11 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
         sys.mul(&sys.m, &mc, &mut tc);
         let kc: Vec<f64> = cvec.iter().map(|x| x * br).collect();
         sys.mul(&sys.k, &kc, &mut ku);
-        let rhs: Vec<f64> = (0..n).map(|i| f0[i] * ft + tm[i] + tc[i] + ku[i]).collect();
+        if !sys.k_eta.is_empty() {
+            let ec: Vec<f64> = cvec.iter().map(|x| x * ce).collect();
+            sys.mul(&sys.k_eta, &ec, &mut ke);
+        }
+        let rhs: Vec<f64> = (0..n).map(|i| f0[i] * ft + tm[i] + tc[i] + ku[i] + ke[i]).collect();
         let un = solve(&llt, &rhs);
         for i in 0..n {
             let an = a0 * (un[i] - u[i]) - a2 * v[i] - a3 * a[i];
@@ -777,7 +898,18 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
             a[i] = an;
             u[i] = un[i];
         }
-        let full = expand(&sys, &u, nn);
+        let full = if rigid.is_empty() {
+            expand(&sys, &u, nn)
+        } else {
+            // the vibration: u less its rigid motion
+            sys.mul(&sys.m, &u, &mut mu);
+            let mut el = u.clone();
+            for r in &rigid {
+                let c: f64 = r.iter().zip(&mu).map(|(a, b)| a * b).sum();
+                el.iter_mut().zip(r).for_each(|(x, y)| *x -= c * y);
+            }
+            expand(&sys, &el, nn)
+        };
         let md = full.chunks(3).map(|c| (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()).fold(0.0, f64::max);
         times.push(t);
         max_disp.push(md);
@@ -786,7 +918,8 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
             next_frame += every;
         }
     }
-    Ok(TransientResult { times, frames, max_disp, f1, rayleigh: (ar, br), duration, dt })
+    let decay = decay_time(&times, &max_disp);
+    Ok(TransientResult { times, frames, max_disp, f1, rayleigh: (ar, br), duration, dt, free, decay })
 }
 
 #[cfg(test)]
@@ -809,7 +942,7 @@ mod tests {
         Surface::new(t, f, vec![0; 12])
     }
 
-    const STEEL: Elastic = Elastic { e: 200000.0, nu: 0.3, rho: 7.85e-9, yield_mpa: 250.0 };
+    const STEEL: Elastic = Elastic { e: 200000.0, nu: 0.3, rho: 7.85e-9, yield_mpa: 250.0, eta: 0.0 };
 
     fn cantilever(m: &Mesh) -> Problem<'_> {
         let fixed: Vec<u32> = m.faces.iter().filter(|f| f.1 == 0).flat_map(|f| f.0).collect();
@@ -817,7 +950,7 @@ mod tests {
         let area = area_of(m, &tip);
         let mut force = vec![0.0; 3 * m.nodes.len()];
         traction_loads(m, &tip, |_| DVec3::new(0.0, 0.0, -100.0 / area), &mut force);
-        Problem { mesh: m, mat: STEEL, fixes: vec![Fix::Fixed(fixed)], force }
+        Problem { mesh: m, mat: STEEL, body_mats: vec![], fixes: vec![Fix::Fixed(fixed)], force }
     }
 
     #[test]
@@ -837,7 +970,7 @@ mod tests {
         assert!((tip + 0.2016).abs() < 0.006, "tip {tip}");
         // the support carries the whole load
         let fixed: Vec<u32> = m.faces.iter().filter(|f| f.1 == 0).flat_map(|f| f.0).collect();
-        let r = reaction(&m, &STEEL, &u, &p.force, &fixed);
+        let r = reaction(&m, &STEEL, &[], &u, &p.force, &fixed);
         assert!((r.z - 100.0).abs() < 1e-6 && r.x.abs() < 1e-6);
         // first bending frequency 1.875² / 2π √(EI / ρAL⁴): 815 Hz, twice (square section)
         let modes = modal(&p, 3, &|| false).unwrap();
@@ -853,7 +986,7 @@ mod tests {
     #[test]
     fn free_part_has_six_rigid_modes() {
         let m = mesh(&beam(), 3.4, &|| false).unwrap();
-        let p = Problem { mesh: &m, mat: STEEL, fixes: vec![], force: vec![0.0; 3 * m.nodes.len()] };
+        let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![], force: vec![0.0; 3 * m.nodes.len()] };
         let modes = modal(&p, 7, &|| false).unwrap();
         assert!(modes[..6].iter().all(|m| m.freq < 5.0));
         // free-free first bending: 4.730² / 2π √(EI / ρAL⁴) = 5185 Hz slender-beam theory, a few percent

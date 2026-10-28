@@ -203,6 +203,7 @@ fn hash_input(input: &Input, h: &mut impl std::hash::Hasher) {
     }
     s.to_bits().hash(h);
     input.part_material.hash(h);
+    input.materials.hash(h);
 }
 
 fn study_key(s: &Study, input: &Input) -> u64 {
@@ -215,10 +216,11 @@ fn study_key(s: &Study, input: &Input) -> u64 {
     h.finish()
 }
 
-fn mesh_key(input: &Input, size: f64) -> u64 {
+fn mesh_key(s: &Study, input: &Input, size: f64) -> u64 {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     hash_input(input, &mut h);
+    fea::mixed(s, input).hash(&mut h);
     size.to_bits().hash(&mut h);
     h.finish()
 }
@@ -291,7 +293,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let size = s.mesh_size.unwrap_or_else(|| input.auto_size());
-    let mk = mesh_key(&input, size);
+    let mk = mesh_key(&s, &input, size);
     let cached = app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk).map(|m| m.1.clone());
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
@@ -311,8 +313,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
             Some(m) => Some(m),
             None => {
                 report("Meshing", 0.0);
-                let surf = crate::fea_mesh::Surface::new(input.tris.clone(), input.face.clone(), input.body.clone());
-                match crate::fea_mesh::mesh(&surf, size, &stop) {
+                match fea::mesh_input(&s, &input, size, &stop) {
                     Ok(m) => {
                         let m = Arc::new(m);
                         let _ = mtx.send(m.clone());
@@ -1027,7 +1028,7 @@ fn current_stress(app: &mut App, o: &Outcome) -> Option<Arc<Vec<[f32; 6]>>> {
                 }
             }
             let u = &t.frames.get(app.fea.frame)?.1;
-            let s = Arc::new(crate::fea_solve::nodal_stress(&o.mesh, &o.mat, u));
+            let s = Arc::new(crate::fea_solve::nodal_stress(&o.mesh, &o.mat, &o.body_mats, u));
             app.fea.stress_cache = Some((k, s.clone()));
             Some(s)
         }

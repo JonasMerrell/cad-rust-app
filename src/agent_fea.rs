@@ -68,6 +68,15 @@ fn apply(s: &mut Study, a: &Value) -> R<()> {
     if let Some(n) = a.get("modes").and_then(|v| v.as_u64()) {
         s.modes = (n as usize).clamp(1, 50);
     }
+    if let Some(m) = a.get("loss_factors") {
+        let m: std::collections::BTreeMap<String, f64> = serde_json::from_value(m.clone()).map_err(|_| "loss_factors: {material: η, …}")?;
+        for k in m.keys() {
+            if fea::elastic(k).is_none() {
+                return Err(format!("loss_factors: no material {k}"));
+            }
+        }
+        s.loss_factors = m;
+    }
     if let Some(t) = a.get("transient") {
         let tr = &mut s.transient;
         if let Some(p) = t.get("profile").and_then(|v| v.as_str()) {
@@ -130,6 +139,10 @@ fn apply(s: &mut Study, a: &Value) -> R<()> {
             if let Some(n) = x.get("normal").and_then(|v| v.as_bool()) {
                 l.normal = n;
             }
+            if let Some(p) = x.get("at") {
+                l.at = Some(serde_json::from_value(p.clone()).map_err(|_| "at: [x, y, z]")?);
+                l.radius = Some(x.get("radius").and_then(|v| v.as_f64()).filter(|r| *r > 0.0).ok_or("give radius (mm) with at")?);
+            }
             if let Some(n) = x.get("name").and_then(|v| v.as_str()) {
                 l.name = n.into();
             }
@@ -155,7 +168,7 @@ fn summary(s: &Study, o: &Outcome) -> Value {
     let mut v = json!({
         "analysis": s.analysis.key(),
         "material": o.material,
-        "material_props": {"E_mpa": o.mat.e, "poisson": o.mat.nu, "density_g_cm3": o.mat.rho * 1e9, "yield_mpa": o.mat.yield_mpa},
+        "material_props": {"E_mpa": o.mat.e, "poisson": o.mat.nu, "density_g_cm3": o.mat.rho * 1e9, "yield_mpa": o.mat.yield_mpa, "loss_factor": o.mat.eta},
         "mass_kg": sig(o.mass * 1e3),
         "mesh": {"nodes": m.nodes.len(), "elements": m.tets.len(), "element": "10-node tetrahedron", "element_size_mm": round(s.mesh_size.unwrap_or(0.0)), "smallest_dihedral_deg": round(m.min_dihedral)},
         "warnings": o.warnings,
@@ -184,7 +197,15 @@ fn summary(s: &Study, o: &Outcome) -> Value {
                 modes
                     .iter()
                     .enumerate()
-                    .map(|(i, m)| json!({"mode": i + 1, "frequency_hz": sig(m.freq), "mass_participation_xyz": m.participation.map(|x| round(x))}))
+                    .map(|(i, m)| {
+                        let mut j = json!({"mode": i + 1, "frequency_hz": sig(m.freq), "mass_participation_xyz": m.participation.map(|x| round(x))});
+                        // with damping: the modal loss factor and the time for the mode to die down to 1/1000 (−60 dB)
+                        if m.loss > 0.0 && m.freq > 1.0 {
+                            j["loss_factor"] = json!(sig(m.loss));
+                            j["decay_60db_s"] = json!(sig(2.0 * 1000f64.ln() / (m.loss * std::f64::consts::TAU * m.freq)));
+                        }
+                        j
+                    })
                     .collect::<Vec<_>>()
             );
         }
@@ -197,6 +218,10 @@ fn summary(s: &Study, o: &Outcome) -> Value {
             v["peak_displacement_mm"] = json!(sig(peak));
             v["peak_at_s"] = json!(sig(t.times[ip]));
             v["final_displacement_mm"] = json!(sig(t.max_disp.last().copied().unwrap_or(0.0)));
+            v["decay_to_10pct_s"] = json!(t.decay.map(sig));
+            if t.free {
+                v["rigid_motion_removed"] = json!(true);
+            }
             // a coarse history: 40 samples of the largest displacement
             let n = t.times.len();
             let step = (n / 40).max(1);
@@ -204,7 +229,7 @@ fn summary(s: &Study, o: &Outcome) -> Value {
             // peak stress over the kept frames
             let mut best = (0.0f32, 0.0);
             for (tt, u) in &t.frames {
-                let vm = crate::fea_solve::nodal_stress(m, &o.mat, u).iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max);
+                let vm = crate::fea_solve::nodal_stress(m, &o.mat, &o.body_mats, u).iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max);
                 if vm > best.0 {
                     best = (vm, *tt);
                 }
@@ -303,7 +328,7 @@ impl Session {
                     // the frame with the largest displacement
                     None => t.frames.iter().max_by(|x, y| fea::max_mag(&x.1).total_cmp(&fea::max_mag(&y.1))).unwrap(),
                 };
-                (fr.1.clone(), Some(crate::fea_solve::nodal_stress(&o.mesh, &o.mat, &fr.1)))
+                (fr.1.clone(), Some(crate::fea_solve::nodal_stress(&o.mesh, &o.mat, &o.body_mats, &fr.1)))
             }
         };
         let m = &o.mesh;
@@ -374,11 +399,11 @@ pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     let fields = json!({
         "simulation": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"},
-        "analysis": {"type": "string"}, "material": {"type": "string"}, "mesh_size": {}, "modes": {"type": "integer"},
+        "analysis": {"type": "string"}, "material": {"type": "string"}, "loss_factors": {"type": "object"}, "mesh_size": {}, "modes": {"type": "integer"},
         "transient": {"type": "object"}, "supports": {"type": "array"}, "loads": {"type": "array"}
     });
     vec![
-        json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Oak, Pine; \"\" = the part's material, steel when unset), mesh_size (element size mm, null = auto), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, name}]. Static and transient need at least one support and one load; modal works with or without supports. Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
+        json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Oak, Pine; \"\" = the part's material, steel when unset), mesh_size (element size mm, null = auto), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
         json!({"name": "edit_simulation", "description": "Change a Simulation tab (same fields as create_simulation; supports and loads replace the whole lists).", "inputSchema": obj(fields, &["simulation"])}),
         json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
         json!({"name": "render_simulation", "description": "PNG of a Simulation tab's result as a colour map (blue low → red high) on the exaggerated deformed shape: field stress (von Mises, default), displacement, or safety (red where the factor of safety is low); mode (modal, 1-based), time (transient s; default the moment of largest displacement), deform (× the automatic exaggeration, 0 = undeformed), view/direction/width/height/path as in render.", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["simulation"])}),
