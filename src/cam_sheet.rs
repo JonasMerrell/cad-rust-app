@@ -118,6 +118,9 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
                 fmt_mm(j.top - o.z)
             ),
         ));
+        if let Some(m) = &sj.mount {
+            kv.push(("Jaw mounting", mount_text(m)));
+        }
     }
     if !cam.jaws_of.is_empty() {
         kv.push(("Machines", format!("the soft jaws of {}: clamp both blanks in the vise on a spacer", cam.jaws_of)));
@@ -262,4 +265,19 @@ mod tests {
         assert!(h.contains("Face 1") && h.contains("Contour 1") && h.contains(">T1<") && h.contains("Clamp"));
         assert!(h.contains("Ø6 flat end mill"));
     }
+}
+
+/// The screw holes the jaw blanks need, for the sheet.
+pub fn mount_text(m: &crate::cam::JawMount) -> String {
+    let xs: Vec<String> = m.holes.iter().map(|x| fmt_mm(*x)).collect();
+    format!(
+        "{}: {} × Ø{} through, Ø{} counterbore leaving {} mm under the head, {} mm from the grip face at X {} from the jaw middle",
+        m.name,
+        m.holes.len(),
+        fmt_mm(m.drill),
+        fmt_mm(m.cbore),
+        fmt_mm(m.seat),
+        fmt_mm(m.inset),
+        xs.join(", ")
+    )
 }

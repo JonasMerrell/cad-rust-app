@@ -691,10 +691,52 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                     ui.add(egui::DragValue::new(&mut sj.thickness).range(3.0..=200.0).speed(0.5).max_decimals(2)).on_hover_text("Front to back, each jaw");
                     ui.add(egui::DragValue::new(&mut sj.height).range(3.0..=200.0).speed(0.5).max_decimals(2)).on_hover_text("Height");
                 });
+                row(ui, "Mounting", |ui| {
+                    let label = sj.mount.as_ref().map(|m| m.name.clone()).unwrap_or_else(|| "plain blanks".into());
+                    egui::ComboBox::from_id_salt("cam-jaw-mount").selected_text(label).show_ui(ui, |ui| {
+                        if ui.selectable_label(sj.mount.is_none(), "plain blanks").clicked() {
+                            sj.mount = None;
+                        }
+                        for m in cam::JAW_MOUNTS {
+                            let on = sj.mount.as_ref().is_some_and(|x| x.name == m.0);
+                            if ui.selectable_label(on, m.0).clicked() && !on {
+                                if let Some((mount, w, t)) = cam::jaw_mount(m.1) {
+                                    sj.mount = Some(mount);
+                                    sj.width = w;
+                                    sj.thickness = t;
+                                }
+                            }
+                        }
+                    });
+                });
+                if let Some(m) = &mut sj.mount {
+                    row(ui, "Holes at X", |ui| {
+                        // the text as typed while editing (a lone "-" doesn't parse yet)
+                        let id = egui::Id::new("cam-jaw-holes");
+                        let mut text = ui.data_mut(|d| d.get_temp::<String>(id)).unwrap_or_else(|| m.holes.iter().map(|x| cam::fmt_mm(*x)).collect::<Vec<_>>().join(", "));
+                        let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(140.0)).on_hover_text("Hole centres along the jaw from its middle, mm, comma separated");
+                        if r.changed() {
+                            m.holes = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
+                        }
+                        ui.data_mut(|d| if r.has_focus() { d.insert_temp(id, text); } else { d.remove::<String>(id); });
+                    });
+                    num(ui, "Holes from grip face", &mut m.inset, " mm", 0.0..=200.0, 0.1);
+                    row(ui, "Drill / c'bore Ø", |ui| {
+                        ui.add(egui::DragValue::new(&mut m.drill).range(0.0..=50.0).speed(0.05).max_decimals(2).suffix(" mm")).on_hover_text("Through hole");
+                        ui.add(egui::DragValue::new(&mut m.cbore).range(0.0..=60.0).speed(0.05).max_decimals(2).suffix(" mm")).on_hover_text("Counterbore for the screw head");
+                    });
+                    num(ui, "Under the head", &mut m.seat, " mm", 0.0..=200.0, 0.1);
+                }
                 num(ui, "Grip depth", &mut sj.grip, " mm", 0.5..=200.0, 0.1);
-                num(ui, "Gap", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
+                if !(sj.printed && sj.one_piece) {
+                    num(ui, "Gap", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
+                }
                 if ui.checkbox(&mut sj.printed, "3D printed").on_hover_text("Print the jaws instead of machining them: no reliefs for a cutter, and they go to a Part Studio to export as STEP").changed() {
                     sj.clearance = if sj.printed { 0.15 } else { 0.05 };
+                }
+                if sj.printed {
+                    ui.checkbox(&mut sj.one_piece, "One block")
+                        .on_hover_text("Print one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and is squeezed round the part");
                 }
                 num(ui, "Clearance", &mut sj.clearance, " mm", 0.0..=2.0, 0.01);
                 if !sj.printed {

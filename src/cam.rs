@@ -1065,11 +1065,101 @@ pub struct SoftJaws {
     /// 3D printed instead of machined: no reliefs for a cutter (the printer makes sharp corners), and the
     /// jaws go to a Part Studio to export (STEP) rather than to a machining setup.
     pub printed: bool,
+    /// 3D printed as one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and
+    /// is squeezed round the part (the gap is filled in).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub one_piece: bool,
+    /// How the jaws bolt into the vise: screw holes, and the vise steel around them (None: plain blanks).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mount: Option<JawMount>,
+}
+
+/// Screw holes that hold soft jaws in the vise, and the vise around them. Holes run down through the
+/// jaw, counterbored from the top, the same on both jaws.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct JawMount {
+    pub name: String,
+    /// Hole centres along the jaw (X), from the middle of the jaw.
+    pub holes: Vec<f64>,
+    /// Hole centres from the jaw's grip face (the face toward the part).
+    pub inset: f64,
+    /// Through hole and counterbore diameters.
+    pub drill: f64,
+    pub cbore: f64,
+    /// Material left under the counterbore for the screw head to seat on, and the head's height.
+    pub seat: f64,
+    pub head: f64,
+    /// Front-to-back size the vise takes (a channel the jaw sits in); 0: any.
+    pub fit: f64,
+    /// The vise steel the jaws sit in: a lip in front of each jaw (toward the part) `lip` deep and
+    /// `lip_height` above the jaw bottom, and the vise jaw behind it, `back` deep and `back_height` high.
+    pub lip: f64,
+    pub lip_height: f64,
+    pub back: f64,
+    pub back_height: f64,
+}
+
+impl Default for JawMount {
+    fn default() -> Self {
+        JawMount::gen3_insert_bar()
+    }
+}
+
+impl JawMount {
+    /// In place of a Gen3 Smooth Insert Bar (95.5 × 12.7 × 8.7, in a 12.7 wide channel 4.57 deep, held by
+    /// four screws on a 25.4 pitch) on an M12 dual-station vise's fixed side and top jaws.
+    pub fn gen3_insert_bar() -> JawMount {
+        JawMount {
+            name: "Gen3 insert bar".into(),
+            holes: vec![-38.1, -12.7, 12.7, 38.1],
+            inset: 6.35,
+            drill: 5.25,
+            cbore: 8.74,
+            seat: 4.13,
+            // #10 socket head
+            head: 4.83,
+            fit: 12.7,
+            lip: 1.9,
+            lip_height: 4.57,
+            back: 33.0,
+            back_height: 6.22,
+        }
+    }
+
+    /// In place of an M12 adjustable base's Top Jaw (95.5 along the vise, 48 deep), held by two M8 socket
+    /// head screws 56.4 apart, 29.6 back from the grip face.
+    pub fn top_jaw() -> JawMount {
+        JawMount {
+            name: "Top jaw".into(),
+            holes: vec![-28.2, 28.2],
+            inset: 29.6,
+            drill: 9.0,
+            cbore: 14.0,
+            seat: 6.0,
+            head: 8.0,
+            fit: 0.0,
+            lip: 0.0,
+            lip_height: 0.0,
+            back: 0.0,
+            back_height: 0.0,
+        }
+    }
+}
+
+/// Jaw mounting presets: name, key for the agent, and the blank (along the vise, front to back) it comes with.
+pub const JAW_MOUNTS: [(&str, &str, f64, f64); 2] = [("Gen3 insert bar", "gen3_insert_bar", 95.5, 12.7), ("Top jaw", "top_jaw", 95.5, 48.0)];
+
+/// A mounting preset by name or key, with its blank length and thickness.
+pub fn jaw_mount(name: &str) -> Option<(JawMount, f64, f64)> {
+    let n = name.trim();
+    let m = JAW_MOUNTS.iter().find(|m| m.0.eq_ignore_ascii_case(n) || m.1.eq_ignore_ascii_case(n))?;
+    Some((if m.1 == "top_jaw" { JawMount::top_jaw() } else { JawMount::gen3_insert_bar() }, m.2, m.3))
 }
 
 impl Default for SoftJaws {
     fn default() -> Self {
-        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false }
+        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false, one_piece: false, mount: None }
     }
 }
 
