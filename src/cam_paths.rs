@@ -116,6 +116,7 @@ pub struct Part {
 }
 
 impl Part {
+    #[cfg(test)]
     pub fn new(tris: &[[DVec3; 3]], circles: &[Circle], orient: &str) -> Part {
         Part::rotated(tris, circles, orient_matrix(orient))
     }

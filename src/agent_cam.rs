@@ -23,7 +23,7 @@ fn overlay<T: serde::Serialize + serde::de::DeserializeOwned>(base: &T, fields: 
 }
 
 /// `axis` [x, y, z]: the part direction to point at the spindle (3+2), as orient top plus a tilt.
-fn apply_axis(c: &mut Cam, a: &Map<String, Value>) -> R<()> {
+fn apply_axis(c: &mut Cam, a: &Value) -> R<()> {
     let Some(v) = a.get("axis") else { return Ok(()) };
     let v: [f64; 3] = serde_json::from_value(v.clone()).map_err(|_| "axis: [x, y, z]")?;
     if v.iter().map(|x| x * x).sum::<f64>() < 1e-12 {
@@ -288,7 +288,7 @@ impl Session {
                     }
                 } else {
                     let (material, max_rpm, min_rpm) = (self.ws.cams[ci].stock.material.clone(), self.ws.cams[ci].max_rpm, self.ws.cams[ci].min_rpm);
-                    let mut base = match a.get("preset").and_then(|p| p.as_str()) {
+                    let base = match a.get("preset").and_then(|p| p.as_str()) {
                         Some(q) => {
                             let q = q.to_lowercase();
                             let mut all = cam::load_library();
@@ -307,12 +307,17 @@ impl Session {
                         }
                     };
                     // the user's own tools keep their feeds and speeds when they have them
-                    if base.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == base.name) {
-                        cam::suggest(&mut base, &material, max_rpm, min_rpm);
-                    }
-                    let mut t: Tool = overlay(&base, args, &["cam", "id", "kind", "preset", "name", "holder"])?;
+                    let skip = ["cam", "id", "kind", "preset", "name", "holder"];
+                    let mut t: Tool = overlay(&base, args, &skip)?;
                     if let Some(k) = a.get("kind").and_then(|k| k.as_str()) {
                         t.kind = ToolKind::parse(k).ok_or(format!("unknown tool kind {k}"))?;
+                    }
+                    // suggest for the tool as given (its diameter, flutes and material), then keep the speeds given
+                    if base.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == base.name) {
+                        cam::suggest(&mut t, &material, max_rpm, min_rpm);
+                        let kind = t.kind;
+                        t = overlay(&t, args, &skip)?;
+                        t.kind = kind;
                     }
                     set_holder_arg(&mut t, a)?;
                     t.name = match a.get("name").and_then(|n| n.as_str()) {
