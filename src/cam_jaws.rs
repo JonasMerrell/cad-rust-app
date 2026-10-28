@@ -93,7 +93,8 @@ fn build(sj: &SoftJaws, cam: &Cam, part: &Part) -> Jaws {
     // filled: posts inside holes of the part would be fragile and hard to load over
     let held = union_all(&held.iter().map(|sh| sh[0].clone()).collect::<Vec<_>>());
     let r = sj.cutter.max(0.1) / 2.0;
-    let (pocket, missed) = relieve(&offset(&held, sj.clearance.max(0.0)), r);
+    let grown = offset(&held, sj.clearance.max(0.0));
+    let (pocket, missed) = if sj.printed { (grown, 0.0) } else { relieve(&grown, r) };
     let (plo, phi) = bounds(&held);
     let c = (plo + phi) / 2.0;
     let (w2, g2, t) = (sj.width.max(1.0) / 2.0, sj.gap.max(0.0) / 2.0, sj.thickness.max(1.0));
@@ -539,6 +540,67 @@ pub fn zero_offset(jaw_cam: &Cam, jaw_part: &Part, held: &Cam, held_part: &Part)
     cam_paths::work_origin(held, held_part) - cam_paths::work_origin(jaw_cam, jaw_part)
 }
 
+/// The jaws as a Part Studio for 3D printing: each blank standing on its base with the pocket up, the two
+/// side by side at least 10 mm apart, built from extrudes (a base up to the pocket floor and the rim around
+/// the pocket on top of it) so they are solids that export to STEP.
+pub fn print_doc(j: &Jaws) -> crate::doc::Document {
+    use crate::doc::{BoolOp, Document, EndType, Op, OriginPlane, Ref};
+    use crate::sketch::{Geom, Sketch};
+    let mut doc = Document::default();
+    let (blo, _) = j.block();
+    let gap = j.rects[1].0.y - j.rects[0].1.y;
+    let h = j.top - j.bottom;
+    let base = j.floor - j.bottom;
+    let extrude = |doc: &mut Document, name: &str, shapes: &Shapes, shift: DVec2, depth: f64, op: BoolOp| {
+        let mut sk = Sketch::default();
+        let mut regions = vec![];
+        for sh in shapes {
+            // straight lines between points (a closed Poly would become a smooth spline)
+            for c in sh {
+                let ids: Vec<_> = c.iter().map(|p| sk.add_point(DVec2::from(*p) + shift)).collect();
+                for i in 0..ids.len() {
+                    sk.add_curve(Geom::Line { a: ids[i], b: ids[(i + 1) % ids.len()] }, false);
+                }
+            }
+            if let Some(p) = interior(sh) {
+                regions.push(p + shift);
+            }
+        }
+        let sid = doc.insert(doc.next_name("sketch"), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: sk, frame: crate::sketch::Frame::TOP });
+        let profiles = regions.iter().map(|p| Ref::Region { sketch: sid, point: [p.x, p.y] }).collect();
+        let s = |v: f64| crate::cam::fmt_mm((v * 1000.0).round() / 1000.0);
+        doc.insert(
+            name.to_string(),
+            Op::Extrude { profiles, end: EndType::Blind, depth: s(depth), opposite: false, second: false, depth2: s(depth), up_to: None, op, draft: "0".into() },
+        );
+    };
+    for (k, (a, b)) in j.rects.iter().enumerate() {
+        let shift = -blo + DVec2::new(0.0, if k == 1 { (10.0 - gap).max(0.0) } else { 0.0 });
+        let r = rect(a.extend(0.0), b.extend(0.0));
+        let side = if k == 0 { "front" } else { "back" };
+        let rim = difference(&r, &j.pocket);
+        if base > 1e-3 {
+            extrude(&mut doc, &format!("Jaw base ({side})"), &r, shift, base, BoolOp::New);
+            extrude(&mut doc, &format!("Jaw rim ({side})"), &rim, shift, h, BoolOp::Add);
+        } else {
+            // the pocket goes right through
+            extrude(&mut doc, &format!("Jaw ({side})"), &rim, shift, h, BoolOp::New);
+        }
+    }
+    doc
+}
+
+/// A point inside a shape (the middle of its biggest triangle).
+fn interior(sh: &[Contour]) -> Option<DVec2> {
+    let mut tris = vec![];
+    fill(&mut tris, &vec![sh.to_vec()], 0.0, true);
+    tris.iter().max_by(|a, b| tri_area(a).total_cmp(&tri_area(b))).map(|t| ((t[0] + t[1] + t[2]) / 3.0).truncate())
+}
+
+fn tri_area(t: &[DVec3; 3]) -> f64 {
+    (t[1] - t[0]).cross(t[2] - t[0]).length()
+}
+
 /// Triangles as a mesh body for the renderers.
 pub fn body_mesh(name: &str, tris: &[[DVec3; 3]]) -> crate::kernel::BodyMesh {
     let mut m = crate::kernel::BodyMesh { name: name.into(), ..Default::default() };
@@ -665,6 +727,25 @@ mod tests {
         c.soft_jaws.as_mut().unwrap().thickness = 20.0;
         let j = jaws(&c, &part).unwrap();
         assert!(j.warnings.iter().any(|w| w.contains("thick")), "{:?}", j.warnings);
+    }
+
+    #[test]
+    fn printed_jaws_have_sharp_corners_and_a_part_studio() {
+        let part = Part::new(&block(DVec3::ZERO, DVec3::new(60.0, 30.0, 10.0)), &[], "top");
+        let mut c = held_cam();
+        c.soft_jaws.as_mut().unwrap().printed = true;
+        c.soft_jaws.as_mut().unwrap().clearance = 0.15;
+        let j = jaws(&c, &part).unwrap();
+        // no relief slots: just past a corner is still jaw
+        assert!(inside(&j.pocket, [60.1, 15.0]) && !inside(&j.pocket, [60.5, 30.5]));
+        let doc = print_doc(&j);
+        // a base and a rim per jaw, each from its own sketch, with region picks inside the sketched shapes
+        let ext: Vec<_> = doc.features.iter().filter(|f| matches!(f.op, crate::doc::Op::Extrude { .. })).collect();
+        assert_eq!(ext.len(), 4);
+        for f in ext {
+            let crate::doc::Op::Extrude { profiles, .. } = &f.op else { unreachable!() };
+            assert!(!profiles.is_empty(), "{}", f.name);
+        }
     }
 
     #[test]

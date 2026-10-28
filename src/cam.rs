@@ -1062,11 +1062,14 @@ pub struct SoftJaws {
     pub cutter: f64,
     /// Jaw material, for feeds and speeds.
     pub material: String,
+    /// 3D printed instead of machined: no reliefs for a cutter (the printer makes sharp corners), and the
+    /// jaws go to a Part Studio to export (STEP) rather than to a machining setup.
+    pub printed: bool,
 }
 
 impl Default for SoftJaws {
     fn default() -> Self {
-        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into() }
+        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false }
     }
 }
 

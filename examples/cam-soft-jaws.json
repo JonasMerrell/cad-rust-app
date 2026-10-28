@@ -28,5 +28,10 @@
   {"tool": "render_cam", "args": {"cam": 2, "path": "soft-jaws-paths.png"}},
   {"tool": "export_gcode", "args": {"cam": 2, "path": "soft-jaws.nc"}},
   {"tool": "export_setup_sheet", "args": {"cam": 1, "path": "soft-jaws-op2-sheet.html"}},
+
+  {"tool": "cam_soft_jaws", "args": {"cam": 1, "printed": true, "clearance": 0.15, "export_step": "soft-jaws-print.step"}},
+  {"tool": "switch_part_studio", "args": {"index": 1}},
+  {"tool": "render", "args": {"view": "iso", "path": "soft-jaws-print.png"}},
+  {"tool": "export", "args": {"format": "stl", "path": "soft-jaws-print.stl"}},
   {"tool": "save_document", "args": {"path": "soft-jaws.json"}}
 ]

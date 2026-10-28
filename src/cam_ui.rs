@@ -496,6 +496,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let mut need_build = None;
     let mut new_setup = false;
     let mut make_jaws = false;
+    let mut print_jaws = false;
     let mut goto: Option<String> = None;
     {
         let c = &mut app.ws.cams[ci];
@@ -692,17 +693,28 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 });
                 num(ui, "Grip depth", &mut sj.grip, " mm", 0.5..=200.0, 0.1);
                 num(ui, "Gap", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
+                if ui.checkbox(&mut sj.printed, "3D printed").on_hover_text("Print the jaws instead of machining them: no reliefs for a cutter, and they go to a Part Studio to export as STEP").changed() {
+                    sj.clearance = if sj.printed { 0.15 } else { 0.05 };
+                }
                 num(ui, "Clearance", &mut sj.clearance, " mm", 0.0..=2.0, 0.01);
-                num(ui, "Cutter Ø", &mut sj.cutter, " mm", 0.5..=40.0, 0.1);
-                row(ui, "Jaw material", |ui| {
-                    egui::ComboBox::from_id_salt("cam-jaw-material").selected_text(sj.material.clone()).show_ui(ui, |ui| {
-                        for m in cam::MATERIALS {
-                            ui.selectable_value(&mut sj.material, m.0.to_string(), m.0);
-                        }
+                if !sj.printed {
+                    num(ui, "Cutter Ø", &mut sj.cutter, " mm", 0.5..=40.0, 0.1);
+                }
+                if !sj.printed {
+                    row(ui, "Jaw material", |ui| {
+                        egui::ComboBox::from_id_salt("cam-jaw-material").selected_text(sj.material.clone()).show_ui(ui, |ui| {
+                            for m in cam::MATERIALS {
+                                ui.selectable_value(&mut sj.material, m.0.to_string(), m.0);
+                            }
+                        });
                     });
-                });
+                }
                 ui.label(
-                    RichText::new("The vise closes along Y. The pocket is the part's outline below the jaw tops plus the clearance, with reliefs in corners the cutter can't reach; the gap is the spacer between the jaws while it is cut.")
+                    RichText::new(if sj.printed {
+                        "The vise closes along Y. The pocket is the part's outline below the jaw tops plus the clearance; the gap is left between the jaws so they can squeeze the part."
+                    } else {
+                        "The vise closes along Y. The pocket is the part's outline below the jaw tops plus the clearance, with reliefs in corners the cutter can't reach; the gap is the spacer between the jaws while it is cut."
+                    })
                         .color(theme::muted())
                         .size(12.0),
                 );
@@ -713,7 +725,11 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                         ui.label(RichText::new(w.trim_start_matches("soft jaws: ")).color(theme::error_soft()).size(12.0));
                     }
                 }
-                if ui.button("Machine the jaws").on_hover_text("Open the Manufacture tab that cuts the pocket in the jaw blanks (made the first time)").clicked() {
+                if c.soft_jaws.as_ref().map(|j| j.printed).unwrap_or(false) {
+                    if ui.button("Make printable jaws").on_hover_text("Put both jaws in a Part Studio, standing on their bases with the pocket up, to export as STEP for the slicer").clicked() {
+                        print_jaws = true;
+                    }
+                } else if ui.button("Machine the jaws").on_hover_text("Open the Manufacture tab that cuts the pocket in the jaw blanks (made the first time)").clicked() {
                     make_jaws = true;
                 }
             }
@@ -810,6 +826,29 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         if (c.machine.clone(), c.max_rpm, c.rapid_rate) != before {
             c.machine.name.clear();
         }
+    }
+    if print_jaws {
+        let c = app.ws.cams[ci].clone();
+        let Some(j) = app.cam.part.as_ref().and_then(|p| crate::cam_jaws::jaws(&c, p)) else { return };
+        let doc = crate::cam_jaws::print_doc(&j);
+        let name = format!("{} jaws (print)", c.name);
+        let i = match app.ws.studios.iter().position(|s| s.name == name) {
+            Some(i) => {
+                app.ws.studios[i].doc = doc.clone();
+                app.studio_results.remove(&i);
+                i
+            }
+            None => {
+                app.ws.studios.push(crate::workspace::Studio { name, doc: doc.clone() });
+                app.ws.studios.len() - 1
+            }
+        };
+        if i == app.cur_studio {
+            app.doc = doc;
+            app.dirty_model = true;
+        }
+        app.switch_tab(Tab::Studio(i));
+        return;
     }
     if make_jaws || goto.is_some() {
         let c = app.ws.cams[ci].clone();
