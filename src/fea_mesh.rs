@@ -98,8 +98,9 @@ impl Surface {
         [0, 1, 2].map(|a| (((p[a] - self.lo[a]) / self.cell3).floor()).clamp(0.0, self.n3[a] as f64 - 1.0) as usize)
     }
 
-    /// Whether a point is inside any part (crossings of a slightly nudged vertical ray, per part).
-    pub fn inside(&self, p: DVec3) -> bool {
+    /// Whether a point is inside part `only` (or any part): crossings of a slightly nudged vertical
+    /// ray, per part.
+    pub fn inside_of(&self, p: DVec3, only: Option<u32>) -> bool {
         let q = p + self.eps;
         if q.x < self.lo.x || q.y < self.lo.y || q.z < self.lo.z || q.x > self.hi.x || q.y > self.hi.y || q.z > self.hi.z {
             return false;
@@ -111,6 +112,9 @@ impl Surface {
             odd_many = vec![false; self.bodies];
         }
         for &ti in &self.bin2[bx + by * self.nb[0]] {
+            if only.is_some_and(|b| self.body[ti as usize] != b) {
+                continue;
+            }
             let t = &self.tris[ti as usize];
             // 2D barycentric of (q.x, q.y)
             let (a, b, c) = (t[0], t[1], t[2]);
@@ -217,6 +221,9 @@ pub struct Mesh {
     /// Boundary triangles (6 nodes: corners 0-2, mid-edge 01, 12, 20; outward), with their CAD face.
     pub faces: Vec<([u32; 6], u32)>,
     pub min_dihedral: f64,
+    /// Part of each element (Surface body numbering) when the parts were meshed separately; empty when
+    /// they were meshed as one.
+    pub body: Vec<u32>,
 }
 
 pub const TET_EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
@@ -243,6 +250,87 @@ pub fn min_dihedral(p: [DVec3; 4]) -> f64 {
 
 /// Mesh the inside of `surf` with elements about `size` across.
 pub fn mesh(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let lat = lattice(surf, size)?;
+    stuff(surf, &lat, None, cancel)
+}
+
+/// Mesh each part on its own, on one shared lattice, and join the meshes where the parts touch:
+/// the nodes on a shared face coincide, so the parts are bonded there and each element keeps its part.
+pub fn mesh_parts(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let lat = lattice(surf, size)?;
+    let mut parts = vec![];
+    for b in 0..surf.bodies as u32 {
+        match stuff(surf, &lat, Some(b), cancel) {
+            Ok(m) => parts.push((b, m)),
+            Err(e) if e.starts_with("The mesh is empty") => {}
+            Err(e) => return Err(e),
+        }
+    }
+    if parts.is_empty() {
+        return Err("The mesh is empty: the element size is larger than the parts".into());
+    }
+    Ok(weld(parts, lat.hs.min_element() * 1e-6))
+}
+
+/// Join part meshes: merge nodes closer than `tol` and drop the faces two parts share.
+fn weld(parts: Vec<(u32, Mesh)>, tol: f64) -> Mesh {
+    let mut nodes: Vec<DVec3> = vec![];
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    let cell = tol * 4.0;
+    let key = |p: DVec3| [(p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64];
+    let mut out = Mesh { nodes: vec![], tets: vec![], faces: vec![], min_dihedral: 180.0, body: vec![] };
+    let mut faces: Vec<([u32; 6], u32)> = vec![];
+    for (b, m) in parts {
+        let map: Vec<u32> = m
+            .nodes
+            .iter()
+            .map(|p| {
+                let k = key(*p);
+                for dz in -1..=1 {
+                    for dy in -1..=1 {
+                        for dx in -1..=1 {
+                            if let Some(ids) = grid.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                                if let Some(id) = ids.iter().find(|i| nodes[**i as usize].distance(*p) <= tol) {
+                                    return *id;
+                                }
+                            }
+                        }
+                    }
+                }
+                let id = nodes.len() as u32;
+                nodes.push(*p);
+                grid.entry(k).or_default().push(id);
+                id
+            })
+            .collect();
+        out.min_dihedral = out.min_dihedral.min(m.min_dihedral);
+        out.tets.extend(m.tets.iter().map(|t| t.map(|v| map[v as usize])));
+        out.body.extend(std::iter::repeat_n(b, m.tets.len()));
+        faces.extend(m.faces.iter().map(|(f, cad)| (f.map(|v| map[v as usize]), *cad)));
+    }
+    // faces where two parts meet are inside the joined mesh
+    let mut count: HashMap<[u32; 3], u32> = HashMap::new();
+    let sorted = |f: &[u32; 6]| {
+        let mut k = [f[0], f[1], f[2]];
+        k.sort_unstable();
+        k
+    };
+    for (f, _) in &faces {
+        *count.entry(sorted(f)).or_default() += 1;
+    }
+    out.faces = faces.into_iter().filter(|(f, _)| count[&sorted(f)] == 1).collect();
+    out.nodes = nodes;
+    out
+}
+
+/// The background lattice: cells about `size` across fitted to the parts' bounding box.
+struct Lattice {
+    origin: DVec3,
+    hs: DVec3,
+    nc: [usize; 3],
+}
+
+fn lattice(surf: &Surface, size: f64) -> Result<Lattice, String> {
     if surf.tris.is_empty() {
         return Err("Nothing to mesh: no parts".into());
     }
@@ -254,11 +342,16 @@ pub fn mesh(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh
     let hs = DVec3::new(ext.x / cnt[0] as f64, ext.y / cnt[1] as f64, ext.z / cnt[2] as f64);
     let hs = hs.max(DVec3::splat(size * 1e-3));
     let nc = [cnt[0] + 2, cnt[1] + 2, cnt[2] + 2];
-    let total_cells = nc[0] * nc[1] * nc[2];
-    if total_cells > 3_000_000 {
+    if nc[0] * nc[1] * nc[2] > 3_000_000 {
         return Err(format!("Element size {size:.3} mm is too small for these parts; try a larger size"));
     }
-    let origin = blo - hs;
+    Ok(Lattice { origin: blo - hs, hs, nc })
+}
+
+/// Isosurface stuffing of the inside of part `only` (or of all the parts) on the lattice.
+fn stuff(surf: &Surface, lat: &Lattice, only: Option<u32>, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let (origin, hs, nc) = (lat.origin, lat.hs, lat.nc);
+    let total_cells = nc[0] * nc[1] * nc[2];
     let nbk = [nc[0] + 1, nc[1] + 1, nc[2] + 1];
     let nblack = nbk[0] * nbk[1] * nbk[2];
     let black = |i: usize, j: usize, k: usize| i + nbk[0] * (j + nbk[1] * k);
@@ -280,7 +373,7 @@ pub fn mesh(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh
         }
     }
     // sign of every lattice vertex: 1 inside, -1 outside, 0 on the surface (after warping)
-    let mut sign: Vec<i8> = pos.iter().map(|p| if surf.inside(*p) { 1 } else { -1 }).collect();
+    let mut sign: Vec<i8> = pos.iter().map(|p| if surf.inside_of(*p, only) { 1 } else { -1 }).collect();
     if cancel() {
         return Err("cancelled".into());
     }
@@ -330,7 +423,7 @@ pub fn mesh(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh
                 let (mut a, mut b) = if sa > 0 { (pos[x as usize], pos[y as usize]) } else { (pos[y as usize], pos[x as usize]) };
                 for _ in 0..42 {
                     let m = (a + b) * 0.5;
-                    if surf.inside(m) { a = m } else { b = m }
+                    if surf.inside_of(m, only) { a = m } else { b = m }
                 }
                 cuts.insert(k, (a + b) * 0.5);
             }
@@ -549,5 +642,5 @@ fn quadratic(surf: &Surface, mut nodes: Vec<DVec3>, tets: Vec<[u32; 4]>, min_dih
             ([f[0], f[1], f[2], m(f[0], f[1]), m(f[1], f[2]), m(f[2], f[0])], face)
         })
         .collect();
-    Mesh { nodes, tets: out, faces, min_dihedral }
+    Mesh { nodes, tets: out, faces, min_dihedral, body: vec![] }
 }
