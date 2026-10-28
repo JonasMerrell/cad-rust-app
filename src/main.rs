@@ -8,6 +8,7 @@ mod assembly;
 mod cam;
 mod cam_3d;
 mod cam_engrave;
+mod cam_jaws;
 mod cam_sheet;
 mod cam_template;
 mod cam_tool_import;

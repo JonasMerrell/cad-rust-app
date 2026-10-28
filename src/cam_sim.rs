@@ -191,6 +191,8 @@ pub struct Sim {
     max_h: f32,
     /// Fixtures (setup coordinates).
     fixtures: Vec<(DVec3, DVec3)>,
+    /// The highest fixture top: the tool's tip above it can't touch them.
+    fixture_top: f64,
 }
 
 impl Sim {
@@ -224,7 +226,8 @@ impl Sim {
             events: vec![],
             removed: 0.0,
             max_h: hi.z as f32,
-            fixtures: crate::cam_paths::fixture_boxes(cam, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
+            fixture_top: f64::INFINITY,
+            fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
         for t in &part.tris {
@@ -258,6 +261,7 @@ impl Sim {
                 }
             }
         }
+        s.fixture_top = s.fixtures.iter().map(|f| f.1.z).fold(f64::NEG_INFINITY, f64::max);
         for tp in paths {
             s.push(cam, tp);
         }
@@ -378,6 +382,9 @@ impl Sim {
     fn hit_fixtures(&mut self, ci: usize, op: u64, step: usize, p: DVec3) {
         let mut worst = 0.0f64;
         let body = &self.cutters[ci].body;
+        if p.z >= self.fixture_top {
+            return;
+        }
         for (lo, hi) in &self.fixtures {
             let dx = (lo.x - p.x).max(p.x - hi.x).max(0.0);
             let dy = (lo.y - p.y).max(p.y - hi.y).max(0.0);

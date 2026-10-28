@@ -50,8 +50,13 @@ pub fn picture(cam: &Cam, part: &Part, w: u32, h: u32) -> Option<Vec<u8>> {
     let (lo, hi) = cam_paths::stock_box(cam, part);
     boxes(lo, hi, &mut lines);
     let o = cam_paths::work_origin(cam, part);
-    for (_, a, b) in cam_paths::fixture_boxes(cam, o) {
-        boxes(a, b, &mut lines);
+    for (_, a, b) in &cam.fixtures.iter().map(|f| (0, DVec3::from(f.min) + o, DVec3::from(f.max) + o)).collect::<Vec<_>>() {
+        boxes(a.min(*b), a.max(*b), &mut lines);
+    }
+    if let Some(j) = crate::cam_jaws::jaws(cam, part) {
+        for (a, b) in j.rects {
+            boxes(a.extend(j.bottom), b.extend(j.top), &mut lines);
+        }
     }
     let s = (hi - lo).max_element() * 0.15;
     for d in [DVec3::X, DVec3::Y, DVec3::Z] {
@@ -100,6 +105,23 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
         ("Cycle time", time(total)),
         ("Tools / operations", format!("{} / {}", used.len(), paths.iter().filter(|p| !p.moves.is_empty()).count())),
     ];
+    if let (Some(sj), Some(j)) = (&cam.soft_jaws, crate::cam_jaws::jaws(cam, part)) {
+        kv.push((
+            "Soft jaws",
+            format!(
+                "{} × {} × {} mm blanks, {} apart; part sits {} mm deep, jaw tops at Z{}",
+                fmt_mm(sj.width),
+                fmt_mm(sj.thickness),
+                fmt_mm(sj.height),
+                fmt_mm(sj.gap),
+                fmt_mm(sj.grip),
+                fmt_mm(j.top - o.z)
+            ),
+        ));
+    }
+    if !cam.jaws_of.is_empty() {
+        kv.push(("Machines", format!("the soft jaws of {}: clamp both blanks in the vise on a spacer", cam.jaws_of)));
+    }
     if !cam.follows.is_empty() {
         kv.insert(0, ("Starts from", format!("what {} leaves (flip the part)", cam.follows)));
     }

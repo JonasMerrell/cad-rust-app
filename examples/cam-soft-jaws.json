@@ -1,0 +1,32 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [70, 40]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 16}}},
+  {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [70, 0, 8]}, {"kind": "edge", "point": [70, 40, 8]}], "radius": 12}}},
+  {"tool": "create_sketch", "args": {"plane": {"kind": "face", "point": [10, 20, 16], "normal": [0, 0, 1]}}},
+  {"tool": "sketch_add", "args": {"sketch_id": 4, "items": [{"type": "rect", "corner1": [15, 12], "corner2": [45, 28]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 4}], "depth": 5, "op": "remove"}}},
+
+  {"tool": "create_cam", "args": {"name": "OP1", "stock": {"side": 3, "top": 1, "bottom": 3, "material": "Aluminium"}, "post": "mach3"}},
+  {"tool": "cam_tool", "args": {"cam": 0, "preset": "Ø6 flat"}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "face", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "pocket", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "clear", "tool": 1, "bottom": -13}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "contour", "tool": 1, "bottom": -13}},
+
+  {"tool": "create_cam", "args": {"name": "OP2", "follows": "OP1", "orient": "bottom"}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "face", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "clear", "tool": 1, "bottom": -9}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "contour", "tool": 1, "bottom": -9}},
+  {"tool": "cam_soft_jaws", "args": {"cam": 1, "grip": 6, "width": 120, "machine_jaws": true}},
+  {"tool": "simulate_cam", "args": {"cam": 1, "path": "soft-jaws-op2-sim.png"}},
+  {"tool": "render_cam", "args": {"cam": 1, "view": "iso_back_right_below", "path": "soft-jaws-op2.png"}},
+
+  {"tool": "cam_info", "args": {"cam": 2}},
+  {"tool": "simulate_cam", "args": {"cam": 2, "path": "soft-jaws-sim.png"}},
+  {"tool": "render_cam", "args": {"cam": 2, "path": "soft-jaws-paths.png"}},
+  {"tool": "export_gcode", "args": {"cam": 2, "path": "soft-jaws.nc"}},
+  {"tool": "export_setup_sheet", "args": {"cam": 1, "path": "soft-jaws-op2-sheet.html"}},
+  {"tool": "save_document", "args": {"path": "soft-jaws.json"}}
+]

@@ -1043,6 +1043,33 @@ pub fn place_fixture(name: &str, size: [f64; 3], (lo, hi): (glam::DVec3, glam::D
     Fixture { name: name.into(), min: r(a - origin), max: r(b - origin) }
 }
 
+/// Soft jaws: vise jaw blanks with a pocket machined to the shape of what the setup holds (see cam_jaws).
+/// The vise closes along Y: one jaw in front of the part, one behind.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct SoftJaws {
+    /// Jaw blank size: along the vise (X), front to back (Y) and height (Z).
+    pub width: f64,
+    pub thickness: f64,
+    pub height: f64,
+    /// How deep the part sits in the jaws.
+    pub grip: f64,
+    /// Opening between the jaw faces while the pocket is cut (the spacer between them).
+    pub gap: f64,
+    /// Room around the part in the pocket.
+    pub clearance: f64,
+    /// Diameter of the end mill that cuts the pocket: corners it can't reach get reliefs for it.
+    pub cutter: f64,
+    /// Jaw material, for feeds and speeds.
+    pub material: String,
+}
+
+impl Default for SoftJaws {
+    fn default() -> Self {
+        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into() }
+    }
+}
+
 /// Machine presets: name, travel, max rpm, max feed, rapid XY, rapid Z, tool changer.
 pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
     ("Desktop router (3018 class)", [300.0, 180.0, 45.0], 10000.0, 1000.0, 1500.0, 600.0, false),
@@ -1109,6 +1136,12 @@ pub struct Cam {
     pub arcs: bool,
     /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
     pub fixtures: Vec<Fixture>,
+    /// Hold the part in soft jaws shaped to it (they act as fixtures).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub soft_jaws: Option<SoftJaws>,
+    /// Name of the setup whose soft jaws this one machines (instead of the Part Studio's parts).
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub jaws_of: String,
     /// Measuring tools after a change: touch plate or tool setter.
     pub probe: Probe,
     /// The user's own G-code for the start, tool changes and end of the program.
@@ -1139,6 +1172,8 @@ impl Default for Cam {
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
+            soft_jaws: None,
+            jaws_of: String::new(),
             probe: Probe::default(),
             post_text: PostText::default(),
             tools: vec![],

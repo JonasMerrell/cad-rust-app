@@ -227,7 +227,12 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     let Some(ci) = cam_index(app) else { return };
     let Some(c) = cam(app).cloned() else { return };
     let input = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &c.bodies);
-    let key = input_key(&app.ws.cams, ci, &input);
+    // a tab that machines soft jaws works on those jaws (a broken link shows as a warning)
+    let (input, jaws_err) = match crate::cam_jaws::input_for(&app.ws.cams, ci, input) {
+        Ok(i) => (i, None),
+        Err(e) => (PartInput::default(), Some(e)),
+    };
+    let key = input_key(&app.ws.cams, ci, &input) ^ jaws_err.is_some() as u64;
     if key == app.cam.key || app.cam.job.as_ref().map(|j| j.0 == key).unwrap_or(false) {
         return;
     }
@@ -241,7 +246,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
         let c = &cams[ci];
         let part = Part::from_input(&input, c);
         let (stock_in, err) = match linked {
-            Ok(s) => (s, None),
+            Ok(s) => (s, jaws_err),
             Err(e) => (None, Some(e)),
         };
         let mut paths = cam_paths::generate_from(c, &part, stock_in.as_ref());
@@ -490,8 +495,23 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         .collect();
     let mut need_build = None;
     let mut new_setup = false;
+    let mut make_jaws = false;
+    let mut goto: Option<String> = None;
     {
         let c = &mut app.ws.cams[ci];
+        let jaw_tab = !c.jaws_of.is_empty();
+        if jaw_tab {
+            ui.label(RichText::new(format!("Machines the soft jaws of {}.", c.jaws_of)).strong());
+            ui.label(
+                RichText::new("Clamp both jaw blanks in the vise on a spacer as wide as the jaws' gap, tops level. The work zero is on top of the blanks, in the middle of the gap.")
+                    .color(theme::muted())
+                    .size(12.0),
+            );
+            if ui.button(format!("Go to {}", c.jaws_of)).clicked() {
+                goto = Some(c.jaws_of.clone());
+            }
+        }
+        if !jaw_tab {
         row(ui, "Part Studio", |ui| {
             egui::ComboBox::from_id_salt("cam-studio").selected_text(studios.get(c.studio).cloned().unwrap_or_default()).show_ui(ui, |ui| {
                 for (i, s) in studios.iter().enumerate() {
@@ -537,6 +557,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                     .on_hover_text(format!("Tilt the part about the setup's {axis} axis (angle block, tilting vise, compound-angle bore)"));
             }
         });
+        }
         row(ui, "Work zero", |ui| {
             egui::ComboBox::from_id_salt("cam-origin").width(150.0).selected_text(c.origin.label()).show_ui(ui, |ui| {
                 for o in Origin::ALL {
@@ -544,6 +565,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        if !jaw_tab {
         row(ui, "Starts from", |ui| {
             let label = if c.follows.is_empty() { "fresh stock".to_string() } else { format!("what {} leaves", c.follows) };
             egui::ComboBox::from_id_salt("cam-follows").width(150.0).selected_text(label).show_ui(ui, |ui| {
@@ -555,6 +577,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         });
         if ui.button("New setup from here").on_hover_text("Add a setup that carries on from this one's leftover stock, with the part flipped over").clicked() {
             new_setup = true;
+        }
         }
         let mut fixed = c.stock.size.is_some();
         if !c.follows.is_empty() {
@@ -645,6 +668,55 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 Some(p) => cam::place_fixture(n, size, cam_paths::stock_box(c, p), cam_paths::work_origin(c, p), c.fixtures.len()),
                 None => cam::Fixture { name: n.into(), min: [0.0; 3], max: size },
             });
+        }
+        if !jaw_tab {
+            ui.add_space(4.0);
+            ui.label(RichText::new("SOFT JAWS").color(theme::muted()).size(11.0).strong())
+                .on_hover_text("Vise jaws with a pocket machined to the part's shape, for holding it by a side that is already machined (usually after flipping it)");
+            let mut on = c.soft_jaws.is_some();
+            if ui.checkbox(&mut on, "Hold the part in soft jaws").changed() {
+                c.soft_jaws = on.then(|| {
+                    let mut sj = cam::SoftJaws::default();
+                    // a third of the part's height, at most 8 mm
+                    if let Some(p) = &app.cam.part {
+                        sj.grip = ((p.hi.z - p.lo.z) / 3.0).clamp(1.0, 8.0).round();
+                    }
+                    sj
+                });
+            }
+            if let Some(sj) = &mut c.soft_jaws {
+                row(ui, "Blank X/Y/Z", |ui| {
+                    ui.add(egui::DragValue::new(&mut sj.width).range(5.0..=1000.0).speed(0.5).max_decimals(2)).on_hover_text("Along the vise");
+                    ui.add(egui::DragValue::new(&mut sj.thickness).range(3.0..=200.0).speed(0.5).max_decimals(2)).on_hover_text("Front to back, each jaw");
+                    ui.add(egui::DragValue::new(&mut sj.height).range(3.0..=200.0).speed(0.5).max_decimals(2)).on_hover_text("Height");
+                });
+                num(ui, "Grip depth", &mut sj.grip, " mm", 0.5..=200.0, 0.1);
+                num(ui, "Gap", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
+                num(ui, "Clearance", &mut sj.clearance, " mm", 0.0..=2.0, 0.01);
+                num(ui, "Cutter Ø", &mut sj.cutter, " mm", 0.5..=40.0, 0.1);
+                row(ui, "Jaw material", |ui| {
+                    egui::ComboBox::from_id_salt("cam-jaw-material").selected_text(sj.material.clone()).show_ui(ui, |ui| {
+                        for m in cam::MATERIALS {
+                            ui.selectable_value(&mut sj.material, m.0.to_string(), m.0);
+                        }
+                    });
+                });
+                ui.label(
+                    RichText::new("The vise closes along Y. The pocket is the part's outline below the jaw tops plus the clearance, with reliefs in corners the cutter can't reach; the gap is the spacer between the jaws while it is cut.")
+                        .color(theme::muted())
+                        .size(12.0),
+                );
+            }
+            if c.soft_jaws.is_some() {
+                if let Some(j) = app.cam.part.as_ref().and_then(|p| crate::cam_jaws::jaws(c, p)) {
+                    for w in &j.warnings {
+                        ui.label(RichText::new(w.trim_start_matches("soft jaws: ")).color(theme::error_soft()).size(12.0));
+                    }
+                }
+                if ui.button("Machine the jaws").on_hover_text("Open the Manufacture tab that cuts the pocket in the jaw blanks (made the first time)").clicked() {
+                    make_jaws = true;
+                }
+            }
         }
         ui.add_space(4.0);
         ui.label(RichText::new("MACHINE").color(theme::muted()).size(11.0).strong());
@@ -739,6 +811,30 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
             c.machine.name.clear();
         }
     }
+    if make_jaws || goto.is_some() {
+        let c = app.ws.cams[ci].clone();
+        let found = match &goto {
+            Some(n) => app.ws.cams.iter().position(|x| &x.name == n),
+            None => app.ws.cams.iter().position(|x| x.jaws_of == c.name),
+        };
+        let i = match found {
+            Some(i) => i,
+            None if make_jaws => {
+                let mut j = crate::cam_jaws::jaw_setup(&c);
+                let base = j.name.clone();
+                let mut n = 2;
+                while app.ws.cams.iter().any(|x| x.name == j.name) {
+                    j.name = format!("{base} {n}");
+                    n += 1;
+                }
+                app.ws.cams.push(j);
+                app.ws.cams.len() - 1
+            }
+            None => return,
+        };
+        app.switch_tab(Tab::Cam(i));
+        return;
+    }
     if new_setup {
         let c = app.ws.cams[ci].clone();
         let flip = match c.orient.as_str() {
@@ -754,7 +850,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         while app.ws.cams.iter().any(|x| x.name == name) {
             name = format!("Manufacture {n}");
         }
-        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), tilt: [0.0; 2], ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
+        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), tilt: [0.0; 2], ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, soft_jaws: None, jaws_of: String::new(), ..c };
         app.ws.cams.push(next);
         let t = Tab::Cam(app.ws.cams.len() - 1);
         app.switch_tab(t);
@@ -1775,7 +1871,9 @@ fn build_scene(app: &App) -> SceneData {
     let sim_on = app.cam.sim_on && app.cam.sim.is_some();
     // parts (hidden while simulating unless asked for, so the stock reads clearly)
     let doc = app.studio_doc(c.studio);
-    let bodies: &[BodyMesh] = if sim_on && !app.cam.show_part { &[] } else { app.studio_bodies(c.studio) };
+    // (a tab that machines soft jaws shows the jaws instead)
+    let jaw_tab = !c.jaws_of.is_empty();
+    let bodies: &[BodyMesh] = if (sim_on && !app.cam.show_part) || jaw_tab { &[] } else { app.studio_bodies(c.studio) };
     for m in bodies {
         let hidden = doc.and_then(|d| d.parts.get(&crate::doc::body_key(m.id))).map(|p| p.hidden).unwrap_or(false);
         if if c.bodies.is_empty() { hidden } else { !c.bodies.contains(&m.id) } {
@@ -1795,6 +1893,12 @@ fn build_scene(app: &App) -> SceneData {
     }
     let Some(part) = &app.cam.part else { return s };
     let to = |p: DVec3| part.to_part(p).as_vec3();
+    if jaw_tab && (!sim_on || app.cam.show_part) {
+        let col = rgba(Color32::from_rgb(0x9f, 0xb8, 0xd8), if sim_on { 0.25 } else { 1.0 });
+        for t in &part.tris {
+            s.tri(sim_on, [to(t[0]), to(t[1]), to(t[2])], col);
+        }
+    }
     // stock box
     let (lo, hi) = cam_paths::stock_box(c, part);
     let corner = |k: usize| to(DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z, hi.z][(k >> 2) & 1]));
@@ -1806,13 +1910,35 @@ fn build_scene(app: &App) -> SceneData {
     let o = cam_paths::work_origin(c, part);
     // fixtures
     let fix_col = rgba(Color32::from_rgb(0xe0, 0x5a, 0x2a), 0.95);
-    for (_, lo, hi) in cam_paths::fixture_boxes(c, o) {
+    for (_, lo, hi) in cam_paths::fixture_boxes(c, part, o).into_iter().filter(|f| !f.0.starts_with("Soft jaw")) {
         let corner = |k: usize| to(DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z, hi.z][(k >> 2) & 1]));
         for (a, b) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
             s.line(corner(a), corner(b), 1.6, fix_col);
         }
         for f in [[0, 1, 3], [0, 3, 2], [4, 5, 7], [4, 7, 6], [0, 1, 5], [0, 5, 4], [2, 3, 7], [2, 7, 6], [0, 2, 6], [0, 6, 4], [1, 3, 7], [1, 7, 5]] {
             s.tri(true, [corner(f[0]), corner(f[1]), corner(f[2])], rgba(Color32::from_rgb(0xe0, 0x5a, 0x2a), 0.25));
+        }
+    }
+    // soft jaws, shaded with their edges
+    if let Some(j) = crate::cam_jaws::jaws(c, part) {
+        let col = rgba(Color32::from_rgb(0x6f, 0x9f, 0xd8), 0.55);
+        for t in crate::cam_jaws::jaw_tris(&j) {
+            s.tri(true, [to(t[0]), to(t[1]), to(t[2])], col);
+        }
+        let edge = rgba(Color32::from_rgb(0x3a, 0x6c, 0xb0), 0.95);
+        for (a, b) in j.rects {
+            let corner = |k: usize| to(DVec3::new([a.x, b.x][k & 1], [a.y, b.y][(k >> 1) & 1], [j.bottom, j.top][(k >> 2) & 1]));
+            for (p, q) in [(0, 1), (2, 3), (4, 5), (6, 7), (0, 2), (1, 3), (4, 6), (5, 7), (0, 4), (1, 5), (2, 6), (3, 7)] {
+                s.line(corner(p), corner(q), 1.2, edge);
+            }
+        }
+        for sh in &j.pocket {
+            for cn in sh {
+                for i in 0..cn.len() {
+                    let (p, q) = (cn[i], cn[(i + 1) % cn.len()]);
+                    s.line(to(DVec3::new(p[0], p[1], j.top)), to(DVec3::new(q[0], q[1], j.top)), 1.2, edge);
+                }
+            }
         }
     }
     let size = (app.camera.wpp() * 40.0) as f64;
