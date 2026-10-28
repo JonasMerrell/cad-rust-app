@@ -1,0 +1,26 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "import_file", "args": {"path": "examples/zerotorque/Plug_70_2.step", "name": "Plug"}},
+  {"tool": "set_part", "args": {"body": [1, 0], "name": "Plug 70/2", "material": "Aluminium 7075"}},
+
+  {"tool": "create_cam", "args": {"name": "Plug top", "orient": "top", "origin": "stock_top_center",
+    "stock": {"side": 3, "top": 2, "bottom": 3, "material": "Aluminium"},
+    "post": "mach3", "max_rpm": 24000, "min_rpm": 12000}},
+  {"tool": "cam_tool", "args": {"cam": 0, "kind": "flat", "name": "Ø6 flat, 3 flutes (aluminium)", "diameter": 6, "flutes": 3, "material": "carbide", "flute_length": 30, "stickout": 40, "coolant": true}},
+  {"tool": "cam_tool", "args": {"cam": 0, "kind": "ball", "name": "Ø6 ball", "diameter": 6, "flutes": 2, "material": "carbide", "flute_length": 30, "stickout": 40, "coolant": true}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "adaptive", "tool": 1, "leave": 0.2}},
+  {"tool": "cam_op", "args": {"cam": 0, "kind": "scallop", "tool": 2, "stepover": 0.06}},
+
+  {"tool": "create_cam", "args": {"name": "Plug underside", "follows": "Plug top", "orient": "bottom", "origin": "stock_top_center"}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "face", "tool": 1}},
+  {"tool": "cam_op", "args": {"cam": 1, "kind": "adaptive", "tool": 1}},
+
+  {"tool": "create_cam", "args": {"name": "Shaft bore 3+2", "follows": "Plug underside", "axis": [-0.3420, -0.0328, 0.9391], "origin": "stock_top_center"}},
+  {"tool": "cam_op", "args": {"cam": 2, "kind": "bore", "tool": 1, "hole_min": 9.5, "hole_max": 9.6}},
+  {"tool": "cam_info", "args": {"cam": 2}},
+  {"tool": "simulate_cam", "args": {"cam": 2, "path": "zt-plug-bore-sim.png"}},
+  {"tool": "export_gcode", "args": {"cam": 0, "path": "zt-plug-top.tap"}},
+  {"tool": "export_gcode", "args": {"cam": 1, "path": "zt-plug-under.tap"}},
+  {"tool": "export_gcode", "args": {"cam": 2, "path": "zt-plug-bore.tap"}},
+  {"tool": "export_setup_sheet", "args": {"cam": 2, "path": "zt-plug-bore-sheet.html"}}
+]

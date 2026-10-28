@@ -85,7 +85,11 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
     // setup summary and picture
     let w = |v: DVec3| v - o;
     let mut kv: Vec<(&str, String)> = vec![
-        ("Up direction", format!("part {} faces the spindle", cam.orient)),
+        ("Up direction", if cam.tilt == [0.0; 2] {
+            format!("part {} faces the spindle", cam.orient)
+        } else {
+            format!("part {} faces the spindle, tilted {}° about X then {}° about Y", cam.orient, fmt_mm(cam.tilt[0]), fmt_mm(cam.tilt[1]))
+        }),
         ("Work zero (G54)", cam.origin.label().to_string()),
         ("Stock", format!("{} × {} × {} mm, {}", fmt_mm(hi.x - lo.x), fmt_mm(hi.y - lo.y), fmt_mm(hi.z - lo.z), cam.stock.material)),
         ("Stock from / to (work)", format!("{} / {}", xyz(w(lo)), xyz(w(hi)))),

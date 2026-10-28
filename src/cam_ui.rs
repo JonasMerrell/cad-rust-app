@@ -239,7 +239,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     std::thread::spawn(move || {
         let linked = cam_paths::link_setups(&mut cams, ci, &input);
         let c = &cams[ci];
-        let part = Part::from_input(&input, &c.orient);
+        let part = Part::from_input(&input, c);
         let (stock_in, err) = match linked {
             Ok(s) => (s, None),
             Err(e) => (None, Some(e)),
@@ -321,7 +321,7 @@ pub(crate) fn add_op(app: &mut App, k: OpKind) {
     if missing {
         // bring in a suitable tool from the library first
         let material = cam(app).map(|c| c.stock.material.clone()).unwrap_or_default();
-        let max_rpm = cam(app).map(|c| c.max_rpm).unwrap_or(24000.0);
+        let (max_rpm, min_rpm) = cam(app).map(|c| (c.max_rpm, c.min_rpm)).unwrap_or((24000.0, 0.0));
         let pick = cam::presets().into_iter().find(|t| {
             k.accepts(t.kind)
                 && match k {
@@ -336,7 +336,7 @@ pub(crate) fn add_op(app: &mut App, k: OpKind) {
                 }
         });
         if let Some(mut t) = pick {
-            cam::suggest(&mut t, &material, max_rpm);
+            cam::suggest(&mut t, &material, max_rpm, min_rpm);
             edit(app, |c| {
                 c.add_tool(t);
             });
@@ -531,6 +531,12 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        row(ui, "Tilt (3+2)", |ui| {
+            for (k, axis) in ["X", "Y"].iter().enumerate() {
+                ui.add(egui::DragValue::new(&mut c.tilt[k]).speed(0.1).range(-90.0..=90.0).suffix("°").prefix(format!("{axis} ")))
+                    .on_hover_text(format!("Tilt the part about the setup's {axis} axis (angle block, tilting vise, compound-angle bore)"));
+            }
+        });
         row(ui, "Work zero", |ui| {
             egui::ComboBox::from_id_salt("cam-origin").width(150.0).selected_text(c.origin.label()).show_ui(ui, |ui| {
                 for o in Origin::ALL {
@@ -666,6 +672,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
             }
         });
         num(ui, "Max spindle", &mut c.max_rpm, " rpm", 1000.0..=100000.0, 100.0);
+        num(ui, "Min spindle", &mut c.min_rpm, " rpm", 0.0..=100000.0, 100.0);
         row(ui, "Max feed", |ui| {
             ui.add(limit_value(&mut c.machine.max_feed, " mm/min")).on_hover_text("Feeds above this are capped; not set: no cap");
         });
@@ -747,7 +754,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         while app.ws.cams.iter().any(|x| x.name == name) {
             name = format!("Manufacture {n}");
         }
-        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
+        let next = Cam { name, follows: c.name.clone(), orient: flip.into(), tilt: [0.0; 2], ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, ..c };
         app.ws.cams.push(next);
         let t = Tab::Cam(app.ws.cams.len() - 1);
         app.switch_tab(t);
@@ -844,9 +851,9 @@ fn tools_ui(app: &mut App, ui: &mut Ui) {
         ui.menu_button("New tool", |ui| {
             for k in ToolKind::ALL {
                 if ui.button(k.label()).clicked() {
-                    let (material, max_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm)).unwrap_or_default();
+                    let (material, max_rpm, min_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm, c.min_rpm)).unwrap_or_default();
                     let mut t = cam::presets().into_iter().find(|t| t.kind == k).unwrap_or(Tool { kind: k, ..Default::default() });
-                    cam::suggest(&mut t, &material, max_rpm);
+                    cam::suggest(&mut t, &material, max_rpm, min_rpm);
                     let mut id = 0;
                     edit(app, |c| id = c.add_tool(t));
                     app.cam.sel_tool = Some(id);
@@ -1372,7 +1379,7 @@ fn rest_row(ui: &mut Ui, rest: &mut bool) {
 fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     let Some(ci) = cam_index(app) else { return };
     let material = app.ws.cams[ci].stock.material.clone();
-    let max_rpm = app.ws.cams[ci].max_rpm;
+    let (max_rpm, min_rpm) = (app.ws.cams[ci].max_rpm, app.ws.cams[ci].min_rpm);
     let Some(t) = app.ws.cams[ci].tools.iter_mut().find(|t| t.id == id) else { return };
     ui.label(RichText::new(t.describe()).color(theme::muted()).size(12.0));
     tool_preview(ui, t);
@@ -1445,7 +1452,7 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     ui.horizontal(|ui| {
         ui.label(RichText::new("CUTTING DATA").color(theme::muted()).size(11.0).strong());
         if ui.small_button("Suggest").on_hover_text(format!("Feeds and speeds for {material}")).clicked() {
-            cam::suggest(t, &material, max_rpm);
+            cam::suggest(t, &material, max_rpm, min_rpm);
         }
     });
     num(ui, "Spindle", &mut t.rpm, " rpm", 10.0..=100000.0, 50.0);
@@ -1546,13 +1553,13 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
         None => {}
     }
     if !add.is_empty() {
-        let (material, max_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm)).unwrap_or_default();
+        let (material, max_rpm, min_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm, c.min_rpm)).unwrap_or_default();
         let mut last = 0;
         edit(app, |c| {
             for mut t in add {
                 // the user's own tools keep their feeds and speeds when they have them
                 if t.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == t.name) {
-                    cam::suggest(&mut t, &material, max_rpm);
+                    cam::suggest(&mut t, &material, max_rpm, min_rpm);
                 }
                 last = c.add_tool(t);
             }

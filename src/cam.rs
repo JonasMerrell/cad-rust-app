@@ -334,9 +334,10 @@ pub fn fmt_mm(v: f64) -> String {
 // ---------------------------------------------------------------- feeds and speeds
 
 /// Stock materials with a cutting speed (m/min, carbide) and a chip load factor.
-pub const MATERIALS: [(&str, f64, f64); 8] = [
+pub const MATERIALS: [(&str, f64, f64); 9] = [
     ("Aluminium", 300.0, 1.0),
     ("Brass", 200.0, 0.9),
+    ("Copper", 150.0, 0.7),
     ("Mild steel", 120.0, 0.6),
     ("Stainless steel", 80.0, 0.45),
     ("Plastic", 250.0, 1.3),
@@ -350,13 +351,13 @@ fn material(name: &str) -> (f64, f64) {
 }
 
 /// Suggested spindle speed, feed, plunge feed, stepdown and stepover for a tool in a stock material.
-/// `max_rpm` is the spindle's limit.
-pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64) {
+/// `max_rpm` is the spindle's limit, `min_rpm` the slowest it keeps its torque at (0: no limit).
+pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64, min_rpm: f64) {
     let (vc, k) = material(stock);
     let d = tool.diameter.max(0.1);
     let hss = tool.material != "carbide";
     let vc = if hss { vc * 0.35 } else { vc };
-    let rpm = (vc * 1000.0 / (std::f64::consts::PI * d)).min(max_rpm.max(1000.0)).max(1000.0);
+    let rpm = (vc * 1000.0 / (std::f64::consts::PI * d)).min(max_rpm.max(1000.0)).max(1000.0).max(min_rpm.min(max_rpm));
     // chip load per tooth grows roughly with diameter
     let fz = (0.008 * d.powf(0.8)).clamp(0.005, 0.12) * k;
     let flutes = tool.flutes.max(1) as f64;
@@ -368,7 +369,7 @@ pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64) {
             tool.plunge_feed = tool.feed;
         }
         ToolKind::Drill | ToolKind::Reamer | ToolKind::SpotDrill | ToolKind::CenterDrill => {
-            tool.rpm = (tool.rpm * 0.5 / 100.0).round().max(5.0) * 100.0;
+            tool.rpm = ((tool.rpm * 0.5 / 100.0).round().max(5.0) * 100.0).max(min_rpm.min(max_rpm));
             let f = tool.rpm * (0.02 * d).clamp(0.02, 0.3) * k.min(1.5);
             tool.feed = f.round();
             tool.plunge_feed = tool.feed;
@@ -511,7 +512,7 @@ pub fn presets() -> Vec<Tool> {
         });
     }
     for t in v.iter_mut() {
-        suggest(t, "Aluminium", 24000.0);
+        suggest(t, "Aluminium", 24000.0, 0.0);
     }
     v
 }
@@ -893,6 +894,23 @@ impl Origin {
     }
 }
 
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_zero2(t: &[f64; 2]) -> bool {
+    t[0] == 0.0 && t[1] == 0.0
+}
+
+/// The `tilt` (about X, then Y, degrees) that turns part direction `axis` up onto the spindle from the "top" orientation.
+pub fn tilt_for_axis(axis: [f64; 3]) -> [f64; 2] {
+    let (x, y, z) = (axis[0], axis[1], axis[2]);
+    let a = y.atan2(z);
+    let z1 = (y * y + z * z).sqrt();
+    let b = (-x).atan2(z1);
+    [a.to_degrees(), b.to_degrees()]
+}
+
 /// Which way the part faces the spindle: the part direction that points up (+Z) on the machine.
 pub const ORIENTS: [&str; 6] = ["top", "bottom", "front", "back", "left", "right"];
 
@@ -1062,6 +1080,10 @@ pub struct Cam {
     pub bodies: Vec<BodyId>,
     /// One of ORIENTS.
     pub orient: String,
+    /// 3+2 tilt after `orient`, degrees: about the setup's X axis, then its Y axis (angle blocks,
+    /// tilting vises, a bore at a compound angle). Zero for a plain setup.
+    #[serde(skip_serializing_if = "is_zero2")]
+    pub tilt: [f64; 2],
     pub stock: Stock,
     pub origin: Origin,
     /// Rapid height above the stock top.
@@ -1071,6 +1093,10 @@ pub struct Cam {
     /// Machine rapid rate (mm/min), for the cycle time.
     pub rapid_rate: f64,
     pub max_rpm: f64,
+    /// Slowest useful spindle speed (a high-speed spindle loses torque below it); 0 = no limit.
+    /// Suggested speeds stay above it.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub min_rpm: f64,
     /// Post processor key from POSTS.
     pub post: String,
     pub program: u32,
@@ -1099,12 +1125,14 @@ impl Default for Cam {
             studio: 0,
             bodies: vec![],
             orient: "top".into(),
+            tilt: [0.0; 2],
             stock: Stock::default(),
             origin: Origin::default(),
             clearance: 10.0,
             retract: 2.0,
             rapid_rate: 3000.0,
             max_rpm: 24000.0,
+            min_rpm: 0.0,
             post: "grbl".into(),
             program: 1000,
             machine: Machine::default(),

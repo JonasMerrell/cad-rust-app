@@ -22,6 +22,18 @@ fn overlay<T: serde::Serialize + serde::de::DeserializeOwned>(base: &T, fields: 
     serde_json::from_value(v).map_err(|e| format!("bad value: {e}"))
 }
 
+/// `axis` [x, y, z]: the part direction to point at the spindle (3+2), as orient top plus a tilt.
+fn apply_axis(c: &mut Cam, a: &Value) -> R<()> {
+    let Some(v) = a.get("axis") else { return Ok(()) };
+    let v: [f64; 3] = serde_json::from_value(v.clone()).map_err(|_| "axis: [x, y, z]")?;
+    if v.iter().map(|x| x * x).sum::<f64>() < 1e-12 {
+        return Err("axis: [x, y, z], not zero".into());
+    }
+    c.orient = "top".into();
+    c.tilt = cam::tilt_for_axis(v);
+    Ok(())
+}
+
 fn tool_json(t: &Tool) -> Value {
     json!({"id": t.id, "number": t.number, "name": t.name, "kind": t.kind.key(), "diameter": t.diameter, "description": t.describe(), "rpm": t.rpm, "feed": t.feed, "plunge_feed": t.plunge_feed, "stepdown": t.stepdown, "stepover": t.stepover, "flute_length": t.flute_length, "stickout": t.stickout, "holder": if t.holder.len() >= 2 { json!(if t.holder_name.is_empty() { "custom" } else { t.holder_name.as_str() }) } else { json!(format!("Ø{} cylinder", crate::cam::fmt_mm(t.holder_diameter))) }})
 }
@@ -89,7 +101,7 @@ impl Session {
         }
         let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &input)?;
         let c = &self.ws.cams[ci];
-        let part = Part::from_input(&input, &c.orient);
+        let part = Part::from_input(&input, c);
         let paths = cam_paths::generate_from(c, &part, stock.as_ref());
         Ok((part, paths, stock))
     }
@@ -121,8 +133,8 @@ impl Session {
             .collect();
         let total: f64 = paths.iter().map(|p| p.time).sum();
         Ok(json!({
-            "name": c.name, "studio": c.studio, "orient": c.orient, "origin": c.origin.key(), "post": c.post,
-            "follows": c.follows, "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer},
+            "name": c.name, "studio": c.studio, "orient": c.orient, "tilt": c.tilt, "origin": c.origin.key(), "post": c.post,
+            "follows": c.follows, "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer},
             "stock": {"min": w(lo), "max": w(hi), "material": c.stock.material, "side": c.stock.side, "top": c.stock.top, "bottom": c.stock.bottom, "size": c.stock.size},
             "part": {"min": w(part.lo), "max": w(part.hi)},
             "note": "heights and points are in work coordinates (relative to the work zero)",
@@ -179,6 +191,7 @@ impl Session {
                 if let Some(o) = a.get("origin").and_then(|o| o.as_str()) {
                     c.origin = cam::Origin::parse(o).ok_or("origin: stock_top_corner, stock_top_center, stock_bottom_corner, part_top_corner or model")?;
                 }
+                apply_axis(&mut c, a)?;
                 if !cam::ORIENTS.contains(&c.orient.as_str()) {
                     return Err("orient: top, bottom, front, back, left or right".into());
                 }
@@ -199,6 +212,7 @@ impl Session {
                 let ci = self.cam_idx(a)?;
                 let mut c: Cam = overlay(&self.ws.cams[ci], args, &["cam", "stock", "origin", "tools", "ops", "next_id", "machine"])?;
                 set_machine_arg(&mut c, a)?;
+                apply_axis(&mut c, a)?;
                 let old = self.ws.cams[ci].clone();
                 if c.name != old.name {
                     for x in self.ws.cams.iter_mut().filter(|x| x.follows == old.name) {
@@ -225,11 +239,11 @@ impl Session {
                 let mut added = vec![];
                 if a.get("cam").is_some() {
                     let ci = self.cam_idx(a)?;
-                    let (material, max_rpm) = (self.ws.cams[ci].stock.material.clone(), self.ws.cams[ci].max_rpm);
+                    let (material, max_rpm, min_rpm) = (self.ws.cams[ci].stock.material.clone(), self.ws.cams[ci].max_rpm, self.ws.cams[ci].min_rpm);
                     for t in &r.tools {
                         let mut t = t.clone();
                         if t.rpm <= 0.0 {
-                            cam::suggest(&mut t, &material, max_rpm);
+                            cam::suggest(&mut t, &material, max_rpm, min_rpm);
                         }
                         added.push(self.ws.cams[ci].add_tool(t));
                     }
@@ -273,8 +287,8 @@ impl Session {
                         tool_json(&t)
                     }
                 } else {
-                    let (material, max_rpm) = (self.ws.cams[ci].stock.material.clone(), self.ws.cams[ci].max_rpm);
-                    let mut base = match a.get("preset").and_then(|p| p.as_str()) {
+                    let (material, max_rpm, min_rpm) = (self.ws.cams[ci].stock.material.clone(), self.ws.cams[ci].max_rpm, self.ws.cams[ci].min_rpm);
+                    let base = match a.get("preset").and_then(|p| p.as_str()) {
                         Some(q) => {
                             let q = q.to_lowercase();
                             let mut all = cam::load_library();
@@ -293,12 +307,17 @@ impl Session {
                         }
                     };
                     // the user's own tools keep their feeds and speeds when they have them
-                    if base.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == base.name) {
-                        cam::suggest(&mut base, &material, max_rpm);
-                    }
-                    let mut t: Tool = overlay(&base, args, &["cam", "id", "kind", "preset", "name", "holder"])?;
+                    let skip = ["cam", "id", "kind", "preset", "name", "holder"];
+                    let mut t: Tool = overlay(&base, args, &skip)?;
                     if let Some(k) = a.get("kind").and_then(|k| k.as_str()) {
                         t.kind = ToolKind::parse(k).ok_or(format!("unknown tool kind {k}"))?;
+                    }
+                    // suggest for the tool as given (its diameter, flutes and material), then keep the speeds given
+                    if base.rpm <= 0.0 || cam::presets().iter().any(|p| p.name == base.name) {
+                        cam::suggest(&mut t, &material, max_rpm, min_rpm);
+                        let kind = t.kind;
+                        t = overlay(&t, args, &skip)?;
+                        t.kind = kind;
                     }
                     set_holder_arg(&mut t, a)?;
                     t.name = match a.get("name").and_then(|n| n.as_str()) {
@@ -578,8 +597,8 @@ impl Session {
 pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     vec![
-        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 at tool changes), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine). Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}}), &[])}),
-        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "machine": {}, "follows": {"type": "string"}}), &["cam"])}),
+        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), tilt [about X, about Y] (degrees, 3+2 positioning after orient: an angle block, a tilting vise or a compound-angle bore), axis [x, y, z] (instead of orient and tilt: the part direction that points up at the spindle, e.g. a bore's axis), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, min_rpm (slowest useful spindle speed, e.g. 12000 for a high-speed spindle that loses torque below it: suggested speeds stay above it and slower tools get a warning), rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 at tool changes), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine). Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}}), &[])}),
+        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "machine": {}, "follows": {"type": "string"}}), &["cam"])}),
         json!({"name": "import_tool_library", "description": "Import a tool library file into the user's library (My tools): a Fusion 360 tool library (.json export or .tools) or a tools.json from this app. Tools keep their geometry, holder, tool number and the first feeds-and-speeds preset; entries of the same name are replaced; holders, probes and unsupported types are skipped. With cam, also add every imported tool to that Manufacture tab. Returns the imported tools.", "inputSchema": obj(json!({"path": {"type": "string"}, "cam": {"type": "integer"}}), &["path"])}),
         json!({"name": "cam_tool_library", "description": "List the tool library (the user's tools and built-in presets): flat, ball, bull, tapered_ball, chamfer, engrave, slot, thread_mill, face_mill, drill, spot_drill, center_drill, tap, reamer. Filter by kind and/or search words (e.g. '6 flat', 'M5').", "inputSchema": obj(json!({"kind": {"type": "string"}, "search": {"type": "string"}}), &[])}),
         json!({"name": "cam_tool", "description": "Add a tool to a Manufacture tab: preset (a library search such as 'Ø6 flat end mill' or 'M5 × 0.8 tap') and/or kind plus any fields to override: number, name, diameter, corner_radius, tip_diameter, angle (included; per side for tapered_ball), flute_length, stickout, shank_diameter, holder_diameter, holder (a preset: \"ER11 collet, router spindle Ø52\", \"ER11 collet chuck\", \"ER16 collet chuck\", \"ER20 collet, router spindle Ø80\", \"ER20 collet chuck\", \"ER25 collet chuck\", \"ER32 collet chuck\", \"Shrink-fit holder Ø6\", \"Shrink-fit holder Ø12\", \"Side-lock (Weldon) holder\"; or an outline [[diameter, height], …] from the holder's bottom face up, for collision checks), flutes, pitch, cutting_width, neck_diameter, material (carbide/hss/cobalt), coolant, rpm, feed, plunge_feed (mm/min), stepdown, stepover (fraction of Ø). Feeds and speeds are suggested for the stock material. With id: edit that tool, or delete:true. Returns the tool with its id.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "preset": {"type": "string"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "delete": {"type": "boolean"}, "diameter": {"type": "number"}}), &["cam"])}),
