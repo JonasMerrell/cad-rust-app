@@ -136,6 +136,7 @@ fn commands(app: &App) -> Vec<Cmd> {
             }),
         ));
     }
+    v.push(cmd("Design with Claude", "Claude", "chat", Some("Ctrl+L"), "ai chat natural language assistant agent", Action::Run(crate::claude_ui::toggle)));
     v.push(cmd("Undo", "Edit", "undo", Some("Ctrl+Z"), "", Action::Run(|a| a.undo())));
     v.push(cmd("Redo", "Edit", "redo", Some("Ctrl+Y"), "", Action::Run(|a| a.redo())));
     v.push(cmd("Save", "File", "download", Some("Ctrl+S"), "", Action::Run(|a| a.save(false))));

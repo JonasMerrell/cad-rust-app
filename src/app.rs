@@ -133,6 +133,8 @@ pub struct App {
     pub palette: crate::palette::Palette,
     pub dark: bool,
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
+    /// The Claude chat panel.
+    pub claude: crate::claude_ui::ClaudeUi,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
     pub awaiting_sketch_plane: bool,
     pub was_narrow: Option<bool>,
@@ -227,6 +229,7 @@ impl App {
             palette: Default::default(),
             dark,
             script_editor: None,
+            claude: Default::default(),
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
@@ -568,6 +571,69 @@ impl App {
         self.changed();
         let active = self.ws.active;
         self.switch_tab(active);
+    }
+
+    /// Take the document Claude edited (`studio` is the Part Studio it worked in). The live Part
+    /// Studio gets one undo step; new tabs are opened so the user sees them.
+    pub fn apply_agent_workspace(&mut self, mut ws: crate::workspace::Workspace, studio: usize) {
+        use crate::workspace::Tab;
+        if self.sketch.is_some() {
+            crate::sketcher::finish(self);
+        }
+        if self.dialog.is_some() {
+            self.dialog_ok();
+        }
+        if ws.studios.is_empty() {
+            return;
+        }
+        self.sync_ws();
+        let counts = |w: &crate::workspace::Workspace| [w.studios.len(), w.assemblies.len(), w.drawings.len(), w.cams.len(), w.sims.len()];
+        let (old, new) = (counts(&self.ws), counts(&ws));
+        let cur = self.cur_studio;
+        if cur < ws.studios.len() && serde_json::to_string(&ws.studios[cur].doc).ok() != serde_json::to_string(&self.doc).ok() {
+            self.checkpoint();
+        }
+        ws.active = self.tab;
+        self.ws = ws;
+        if cur >= self.ws.studios.len() {
+            self.cur_studio = 0;
+            self.undo.clear();
+            self.redo.clear();
+        }
+        self.doc = self.ws.studios[self.cur_studio].doc.clone();
+        self.studio_results.clear();
+        if old != new {
+            self.asm = Default::default();
+            self.dwg = Default::default();
+            self.cam = Default::default();
+            self.fea = Default::default();
+        }
+        self.picks.clear();
+        if self.result.bodies.is_empty() {
+            // frame the first parts Claude makes
+            self.first_fit = true;
+        }
+        self.changed();
+        // show a tab Claude just made, or the Part Studio it moved to
+        let made = (1..5).rev().find(|&k| new[k] > old[k]);
+        let t = match made {
+            Some(1) => Tab::Assembly(new[1] - 1),
+            Some(2) => Tab::Drawing(new[2] - 1),
+            Some(3) => Tab::Cam(new[3] - 1),
+            Some(4) => Tab::Sim(new[4] - 1),
+            _ if studio != self.cur_studio && studio < new[0] => Tab::Studio(studio),
+            _ => match self.tab {
+                Tab::Studio(_) => Tab::Studio(self.cur_studio),
+                Tab::Assembly(i) if i < new[1] => self.tab,
+                Tab::Drawing(i) if i < new[2] => self.tab,
+                Tab::Cam(i) if i < new[3] => self.tab,
+                Tab::Sim(i) if i < new[4] => self.tab,
+                _ => Tab::Studio(self.cur_studio),
+            },
+        };
+        // switch_tab rebuilds what other tabs need only when it changes tab
+        self.tab = Tab::Studio(self.cur_studio);
+        self.switch_tab(t);
     }
 
     /// Make `t` the visible tab; the Part Studio whose tab is shown becomes the live `doc`.
@@ -960,6 +1026,10 @@ impl App {
         }
         let (ctrl, shift) = key_mods(ctx);
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+        if ctrl && pressed(Key::L) {
+            crate::claude_ui::toggle(self);
+            return;
+        }
         if ctrl && pressed(Key::Z) {
             if shift {
                 self.redo()
@@ -1118,6 +1188,9 @@ impl App {
                 if ui.add(egui::Button::image(icons::image(mode.0, 17.0).tint(theme::text()))).on_hover_text(mode.1).clicked() {
                     self.phone = !self.phone;
                     self.sidebar_open = !self.phone;
+                }
+                if !self.phone && ui.add(egui::Button::image(icons::image("chat", 17.0).tint(theme::text())).selected(self.claude.open)).on_hover_text("Design with Claude (Ctrl+L)").clicked() {
+                    crate::claude_ui::toggle(self);
                 }
                 if ui.add(egui::Button::image(icons::image("search", 17.0).tint(theme::text()))).on_hover_text("Search commands (S, / or Ctrl+K)").clicked() {
                     crate::palette::open(self);
@@ -2756,6 +2829,7 @@ impl eframe::App for App {
                 self.side_w = (self.side_w + h.drag_delta().x).clamp(190.0, 520.0);
             }
         }
+        crate::claude_ui::panel(self, ui);
         let central = egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
