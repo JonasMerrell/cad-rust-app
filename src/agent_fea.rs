@@ -339,7 +339,9 @@ impl Session {
             _ => disp.iter().map(|d| d.length()).collect(),
         };
         let (lo, hi) = vals.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(*v), b.max(*v)));
-        let lo = if field == "safety" { lo } else { lo.min(0.0) };
+        // safety on a fixed scale (red at 1 or below, blue at 10 or more), so a part that is safe everywhere
+        // doesn't come out red
+        let (lo, hi) = if field == "safety" { (1.0, 10.0) } else { (lo.min(0.0), hi) };
         let (blo, bhi) = m.nodes.iter().fold((DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
         let peak = fea::max_mag(&u).max(1e-300);
         let k = deform * (bhi - blo).length() * 0.05 / peak;
