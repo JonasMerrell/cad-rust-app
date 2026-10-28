@@ -1,5 +1,6 @@
 // No console window behind the editor on Windows; the CLI modes attach to the parent console.
 #![cfg_attr(windows, windows_subsystem = "windows")]
+#![recursion_limit = "256"]
 
 mod agent;
 mod app;
@@ -47,6 +48,8 @@ mod sketcher;
 mod text;
 mod theme;
 mod viewport;
+mod web_asm;
+mod web_export;
 mod worker;
 mod workspace;
 

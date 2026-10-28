@@ -88,6 +88,28 @@ impl Surface {
         (self.lo, self.hi)
     }
 
+    #[allow(dead_code)] // the Python bindings use these (python/src/fea.rs)
+    /// Number of parts.
+    pub fn body_count(&self) -> usize {
+        self.bodies
+    }
+
+    #[allow(dead_code)]
+    /// Bounding box of one part's triangles.
+    pub fn body_bounds(&self, b: u32) -> Option<(DVec3, DVec3)> {
+        let mut lo = DVec3::splat(f64::INFINITY);
+        let mut hi = DVec3::splat(f64::NEG_INFINITY);
+        for (t, bi) in self.tris.iter().zip(&self.body) {
+            if *bi == b {
+                for p in t {
+                    lo = lo.min(*p);
+                    hi = hi.max(*p);
+                }
+            }
+        }
+        lo.x.is_finite().then_some((lo, hi))
+    }
+
     fn bin_xy(&self, x: f64, y: f64) -> (usize, usize) {
         let fx = ((x - self.lo.x) / (self.hi.x - self.lo.x).max(1e-12) * self.nb[0] as f64).floor();
         let fy = ((y - self.lo.y) / (self.hi.y - self.lo.y).max(1e-12) * self.nb[1] as f64).floor();
@@ -228,6 +250,36 @@ pub struct Mesh {
 
 pub const TET_EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
 
+/// Whether a 10-node tetrahedron's Jacobian is positive at its corners, centre and Gauss points.
+pub fn tet10_valid(x: &[DVec3; 10]) -> bool {
+    let a = 0.585_410_196_624_968_5;
+    let b = 0.138_196_601_125_010_5;
+    let pts = [[1.0, 0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0], [0.0, 0.0, 1.0, 0.0], [0.0, 0.0, 0.0, 1.0], [0.25; 4], [a, b, b, b], [b, a, b, b], [b, b, a, b], [b, b, b, a]];
+    let v0 = (x[1] - x[0]).cross(x[2] - x[0]).dot(x[3] - x[0]);
+    if v0 <= 0.0 {
+        return false;
+    }
+    pts.iter().all(|l| {
+        // dN/dL for corners (4L - 1) and mid-edge nodes (4 L_j, 4 L_i); derivatives along L1-L0, L2-L0, L3-L0
+        let mut d = [DVec3::ZERO; 3];
+        for c in 0..4 {
+            let g = 4.0 * l[c] - 1.0;
+            for (k, dk) in d.iter_mut().enumerate() {
+                let s = if c == k + 1 { 1.0 } else if c == 0 { -1.0 } else { 0.0 };
+                *dk += x[c] * (g * s);
+            }
+        }
+        for (m, (i, j)) in TET_EDGES.iter().enumerate() {
+            for (k, dk) in d.iter_mut().enumerate() {
+                let si = if *i == k + 1 { 1.0 } else if *i == 0 { -1.0 } else { 0.0 };
+                let sj = if *j == k + 1 { 1.0 } else if *j == 0 { -1.0 } else { 0.0 };
+                *dk += x[4 + m] * (4.0 * (l[*j] * si + l[*i] * sj));
+            }
+        }
+        d[0].cross(d[1]).dot(d[2]) > 1e-9 * v0
+    })
+}
+
 fn tet_volume(a: DVec3, b: DVec3, c: DVec3, d: DVec3) -> f64 {
     (b - a).cross(c - a).dot(d - a) / 6.0
 }
@@ -270,6 +322,113 @@ pub fn mesh_parts(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Resul
         return Err("The mesh is empty: the element size is larger than the parts".into());
     }
     Ok(weld(parts, lat.hs.min_element() * 1e-6))
+}
+
+/// Mesh each part on its own lattice with its own element size (`sizes[b]` for part b). The parts' meshes
+/// are not joined, so a thin steel wall can be meshed finely inside a coarsely meshed casting; tie them
+/// where they touch with `ties`.
+#[allow(dead_code)] // used by the Python bindings (python/src/fea.rs)
+pub fn mesh_sized(surf: &Surface, sizes: &[f64], cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let mut out = Mesh { min_dihedral: 180.0, ..Default::default() };
+    for b in 0..surf.bodies as u32 {
+        let Some((lo, hi)) = surf.body_bounds(b) else { continue };
+        let size = sizes.get(b as usize).copied().or(sizes.last().copied()).unwrap_or(10.0);
+        let lat = lattice_box(lo, hi, size).map_err(|e| format!("part {b}: {e}"))?;
+        let m = match stuff(surf, &lat, Some(b), cancel) {
+            Ok(m) => m,
+            Err(e) if e.starts_with("The mesh is empty") => return Err(format!("part {b}: element size {size} mm is larger than the part")),
+            Err(e) => return Err(e),
+        };
+        let off = out.nodes.len() as u32;
+        out.min_dihedral = out.min_dihedral.min(m.min_dihedral);
+        out.nodes.extend(m.nodes);
+        out.tets.extend(m.tets.iter().map(|t| t.map(|v| v + off)));
+        out.body.extend(std::iter::repeat_n(b, m.tets.len()));
+        out.faces.extend(m.faces.iter().map(|(f, c)| (f.map(|v| v + off), *c)));
+    }
+    if out.tets.is_empty() {
+        return Err("The mesh is empty: no parts".into());
+    }
+    Ok(out)
+}
+
+/// Tie the parts of a `mesh_sized` mesh where they touch. Each boundary node of the finer part (the
+/// smaller element size; the higher part number when equal) lying within `tol` of another part's
+/// boundary follows the point it lies on, interpolated over that 6-node face, by a stiff spring of
+/// `beta` × E × the finer element size (E the larger of the two parts' moduli). `bond(a, b)` says
+/// whether parts a and b are joined at all.
+#[allow(dead_code)] // used by the Python bindings (python/src/fea.rs)
+pub fn ties(mesh: &Mesh, sizes: &[f64], moduli: &[f64], tol: f64, beta: f64, bond: &dyn Fn(u32, u32) -> bool) -> Vec<crate::fea_solve::Coupling> {
+    let nn = mesh.nodes.len();
+    let mut node_body = vec![u32::MAX; nn];
+    for (t, b) in mesh.tets.iter().zip(&mesh.body) {
+        for v in t {
+            node_body[*v as usize] = *b;
+        }
+    }
+    let size = |b: u32| sizes.get(b as usize).copied().or(sizes.last().copied()).unwrap_or(10.0);
+    let modulus = |b: u32| moduli.get(b as usize).copied().unwrap_or(0.0);
+    // the faces in a grid of cells about the largest element size
+    let cell = sizes.iter().copied().fold(tol * 4.0, f64::max).max(1e-6);
+    let key = |p: DVec3| [(p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64];
+    let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
+    for (fi, (f, _)) in mesh.faces.iter().enumerate() {
+        let p = [0, 1, 2].map(|i| mesh.nodes[f[i] as usize]);
+        let lo = key(p[0].min(p[1]).min(p[2]) - DVec3::splat(tol));
+        let hi = key(p[0].max(p[1]).max(p[2]) + DVec3::splat(tol));
+        for x in lo[0]..=hi[0] {
+            for y in lo[1]..=hi[1] {
+                for z in lo[2]..=hi[2] {
+                    grid.entry([x, y, z]).or_default().push(fi as u32);
+                }
+            }
+        }
+    }
+    let mut seen = vec![false; nn];
+    let mut out = vec![];
+    for (f, _) in &mesh.faces {
+        for &v in f {
+            if seen[v as usize] {
+                continue;
+            }
+            seen[v as usize] = true;
+            let s = node_body[v as usize];
+            let p = mesh.nodes[v as usize];
+            let mut best: Option<(f64, u32, DVec3)> = None;
+            for &fi in grid.get(&key(p)).map(|x| x.as_slice()).unwrap_or(&[]) {
+                let g = &mesh.faces[fi as usize].0;
+                let m = node_body[g[0] as usize];
+                if m == s || m == u32::MAX {
+                    continue;
+                }
+                // the finer part follows; equal sizes: the higher number follows
+                let (hs, hm) = (size(s), size(m));
+                if hs > hm || (hs == hm && s < m) || !bond(s, m) {
+                    continue;
+                }
+                let (a, b, c) = (mesh.nodes[g[0] as usize], mesh.nodes[g[1] as usize], mesh.nodes[g[2] as usize]);
+                let q = closest_on_tri(p, a, b, c);
+                let d = q.distance(p);
+                if d <= tol && best.is_none_or(|x| d < x.0) {
+                    best = Some((d, fi, q));
+                }
+            }
+            let Some((_, fi, q)) = best else { continue };
+            let g = mesh.faces[fi as usize].0;
+            let (a, b, c) = (mesh.nodes[g[0] as usize], mesh.nodes[g[1] as usize], mesh.nodes[g[2] as usize]);
+            // barycentric coordinates of q
+            let n = (b - a).cross(c - a);
+            let n2 = n.length_squared().max(1e-300);
+            let l1 = (q - a).cross(c - a).dot(n) / n2;
+            let l2 = (b - a).cross(q - a).dot(n) / n2;
+            let l0 = 1.0 - l1 - l2;
+            let w = [l0 * (2.0 * l0 - 1.0), l1 * (2.0 * l1 - 1.0), l2 * (2.0 * l2 - 1.0), 4.0 * l0 * l1, 4.0 * l1 * l2, 4.0 * l2 * l0];
+            let m = node_body[g[0] as usize];
+            let k = beta * modulus(s).max(modulus(m)) * size(s);
+            out.push(crate::fea_solve::Coupling { a: vec![(v, 1.0)], b: (0..6).map(|i| (g[i], w[i])).collect(), k: [k; 3] });
+        }
+    }
+    out
 }
 
 /// Join part meshes: merge nodes closer than `tol` and drop the faces two parts share.
@@ -335,6 +494,10 @@ fn lattice(surf: &Surface, size: f64) -> Result<Lattice, String> {
         return Err("Nothing to mesh: no parts".into());
     }
     let (blo, bhi) = surf.bounds();
+    lattice_box(blo, bhi, size)
+}
+
+fn lattice_box(blo: DVec3, bhi: DVec3, size: f64) -> Result<Lattice, String> {
     let ext = bhi - blo;
     let size = size.max(ext.max_element() / 400.0).max(1e-6);
     // cells fitted to the bounding box, one padding layer all round
@@ -632,6 +795,24 @@ fn quadratic(surf: &Surface, mut nodes: Vec<DVec3>, tets: Vec<[u32; 4]>, min_dih
             e[4 + k] = id;
         }
         out.push(e);
+    }
+    // a mid-edge node moved onto a curved face can turn a thin element inside out: put the mid-edge nodes
+    // of any such element back on its straight edges
+    for _ in 0..3 {
+        let mut bad = false;
+        for e in &out {
+            let x: [DVec3; 10] = std::array::from_fn(|i| nodes[e[i] as usize]);
+            if tet10_valid(&x) {
+                continue;
+            }
+            bad = true;
+            for (k, (i, j)) in TET_EDGES.iter().enumerate() {
+                nodes[e[4 + k] as usize] = (x[*i] + x[*j]) * 0.5;
+            }
+        }
+        if !bad {
+            break;
+        }
     }
     let faces = bfaces
         .iter()

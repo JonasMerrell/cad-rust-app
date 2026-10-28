@@ -1,3 +1,6 @@
+[workspace]
+members = [".", "python"]
+
 [package]
 name = "cad-rust-app"
 version = "0.3.3"

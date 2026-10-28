@@ -258,10 +258,10 @@ impl Assembly {
     }
 }
 
-type Frame3 = (DVec3, DVec3, DVec3);
+pub(crate) type Frame3 = (DVec3, DVec3, DVec3);
 
 /// The first connector's frame after the mate's offsets and rotation.
-fn target_frame(m: &Mate, a: Frame3) -> Frame3 {
+pub(crate) fn target_frame(m: &Mate, a: Frame3) -> Frame3 {
     let (oa, za, xa) = a;
     let rot = DMat3::from_axis_angle(za, m.rotation.to_radians());
     let x = rot * xa;

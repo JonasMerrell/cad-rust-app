@@ -693,7 +693,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     if study.analysis == Analysis::Transient && !any_load {
         return Err("Add a load (Force, Pressure or Gravity)".into());
     }
-    let problem = Problem { mesh: &mesh, mat, body_mats: body_mats.clone(), fixes, force };
+    let problem = Problem { mesh: &mesh, mat, body_mats: body_mats.clone(), fixes, force, couplings: vec![], masses: vec![] };
     let solution = match study.analysis {
         Analysis::Static => {
             progress("Solving", 0.3);

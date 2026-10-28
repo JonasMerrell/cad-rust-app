@@ -713,6 +713,34 @@ impl App {
         }
     }
 
+    /// The open assembly (with its mates moving) or Part Studio as an interactive page for a web browser.
+    pub fn export_web(&mut self) {
+        let asm = match self.tab {
+            crate::workspace::Tab::Assembly(i) => Some(i),
+            _ => None,
+        };
+        let stem = match asm {
+            Some(i) => self.ws.assemblies.get(i).map(|a| a.name.clone()),
+            None => self.ws.studios.get(self.cur_studio).map(|s| s.name.clone()),
+        }
+        .unwrap_or_else(|| "model".into());
+        let Some(p) = self.save_file_dialog("Web page", &["html"], format!("{stem}.html")) else { return };
+        let built = match asm {
+            Some(i) => crate::web_asm::assembly_scene(self, i),
+            None => {
+                let (s, m) = crate::web_asm::studio_scene(self, self.cur_studio);
+                Ok((s, m, vec![]))
+            }
+        };
+        match built.and_then(|(s, m, notes)| crate::web_export::write(&s, &m, &p, true).map(|w| (w, notes))) {
+            Ok((w, notes)) => {
+                let extra = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
+                self.flash_info(format!("Exported {} ({:.1} MB){extra}", p.display(), w.bytes as f64 / 1e6), Some(Duration::from_secs(5)))
+            }
+            Err(e) => self.flash(format!("Could not export: {e}"), ToastKind::Error),
+        }
+    }
+
     pub fn export(&mut self, format: &str) {
         let ext = match format {
             "step" => "step",
@@ -1130,7 +1158,7 @@ impl App {
             }
         }
         ui.menu_image_text_button(icons::image("download", 15.0).tint(theme::text()), "Export", |ui| {
-            for (a, l) in [("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("png", "Screenshot PNG")] {
+            for (a, l) in [("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("web", "Web viewer (HTML)"), ("png", "Screenshot PNG")] {
                 if ui.button(l).clicked() {
                     action = Some(a);
                     ui.close();
@@ -1156,6 +1184,7 @@ impl App {
             Some("import") => self.import_step(),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
             Some("obj") => self.export_obj(),
+            Some("web") => self.export_web(),
             Some("send") => self.send_to_slicer(),
             Some("png") => self.screenshot(ui.ctx()),
             _ => {}

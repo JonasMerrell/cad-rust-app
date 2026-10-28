@@ -30,6 +30,16 @@ pub enum Fix {
     Roller(Vec<(u32, DVec3)>),
 }
 
+/// A spring between two weighted groups of nodes, per direction: energy ½ k_c (Σ wa u_c − Σ wb u_c)².
+/// With `b` empty it holds group a to the ground. Ties between parts meshed apart, springs between
+/// patches (a rail block, a ballscrew) and elastic supports are all couplings.
+#[derive(Clone, Debug, Default)]
+pub struct Coupling {
+    pub a: Vec<(u32, f64)>,
+    pub b: Vec<(u32, f64)>,
+    pub k: [f64; 3],
+}
+
 /// Loads, already turned into nodal forces (N) for a unit time factor.
 pub struct Problem<'a> {
     pub mesh: &'a Mesh,
@@ -39,6 +49,9 @@ pub struct Problem<'a> {
     pub fixes: Vec<Fix>,
     /// Nodal forces (3 per node).
     pub force: Vec<f64>,
+    pub couplings: Vec<Coupling>,
+    /// Lumped masses (tonnes), each spread over its nodes by weight (the weights sum to 1).
+    pub masses: Vec<(Vec<(u32, f64)>, f64)>,
 }
 
 impl Problem<'_> {
@@ -115,7 +128,7 @@ fn grads(x: &[DVec3; 10], l: [f64; 4]) -> Option<([DVec3; 10], f64)> {
     Some((g, det))
 }
 
-fn coords(mesh: &Mesh, e: &[u32; 10]) -> [DVec3; 10] {
+pub fn coords(mesh: &Mesh, e: &[u32; 10]) -> [DVec3; 10] {
     e.map(|n| mesh.nodes[n as usize])
 }
 
@@ -146,7 +159,7 @@ fn stiffness(x: &[DVec3; 10], lam: f64, mu: f64) -> Option<([[f64; 30]; 30], f64
 }
 
 /// Consistent mass coefficients of a straight-sided 10-node tetrahedron, times ρV/420.
-fn mass_coef(i: usize, j: usize) -> f64 {
+pub fn mass_coef(i: usize, j: usize) -> f64 {
     match (i < 4, j < 4) {
         (true, true) => {
             if i == j {
@@ -302,6 +315,16 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
             }
         }
     }
+    for cp in &p.couplings {
+        let nodes: Vec<u32> = cp.a.iter().chain(&cp.b).map(|x| x.0).collect();
+        for &a in &nodes {
+            for &b in &nodes {
+                if b >= a {
+                    adj[a as usize].push(b);
+                }
+            }
+        }
+    }
     for a in &mut adj {
         a.sort_unstable();
         a.dedup();
@@ -336,7 +359,8 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
         let (lam, mu) = lame(&mat);
         let x = coords(mesh, e);
         let Some((ke, vol)) = stiffness(&x, lam, mu) else {
-            return Err("The mesh has an inverted element; try another element size".into());
+            let part = mesh.body.get(ei).map(|b| format!(" (part {b})")).unwrap_or_default();
+            return Err(format!("The mesh has an inverted element{part}; try another element size"));
         };
         sys.volume += vol;
         sys.mass += mat.rho * vol;
@@ -362,6 +386,41 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
                             sys.m[k] += mscale * mass_coef(i, j);
                         }
                     }
+                }
+            }
+        }
+    }
+    // couplings: k (g·u)² with g the weights of group a minus those of group b
+    for cp in &p.couplings {
+        let g: Vec<(u32, f64)> = cp.a.iter().copied().chain(cp.b.iter().map(|(n, w)| (*n, -w))).collect();
+        for c in 0..3 {
+            if cp.k[c] == 0.0 {
+                continue;
+            }
+            for &(ni, wi) in &g {
+                let r = sys.free[3 * ni as usize + c];
+                if r == usize::MAX {
+                    continue;
+                }
+                for &(nj, wj) in &g {
+                    let q = sys.free[3 * nj as usize + c];
+                    if q == usize::MAX || r < q {
+                        continue;
+                    }
+                    let k = sys.idx(r, q);
+                    sys.k[k] += cp.k[c] * wi * wj;
+                }
+            }
+        }
+    }
+    for (nodes, mass) in &p.masses {
+        sys.mass += mass;
+        for &(n, w) in nodes {
+            for c in 0..3 {
+                let r = sys.free[3 * n as usize + c];
+                if r != usize::MAX {
+                    let k = sys.idx(r, r);
+                    sys.m[k] += mass * w;
                 }
             }
         }
@@ -533,6 +592,26 @@ pub fn static_solve(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<StaticResu
         return Err("The solve failed: the model may not be held".into());
     }
     Ok(StaticResult { u: expand(&sys, &x, p.mesh.nodes.len()) })
+}
+
+/// Several load cases on one factorisation: the displacements (3 per node) for each force vector.
+#[allow(dead_code)] // used by the Python bindings (python/src/fea.rs)
+pub fn static_cases(p: &Problem, forces: &[Vec<f64>], cancel: &dyn Fn() -> bool) -> Result<Vec<Vec<f64>>, String> {
+    let mut sys = assemble(p, cancel)?;
+    let kv = sys.k.clone();
+    let llt = sys.factor(&kv)?;
+    let rhs: Vec<Vec<f64>> = forces.iter().map(|f| reduce(&sys, f)).collect();
+    let b = Mat::<f64>::from_fn(sys.n, rhs.len(), |i, j| rhs[j][i]);
+    let x = llt.solve(&b);
+    let mut out = vec![];
+    for j in 0..rhs.len() {
+        let xj: Vec<f64> = (0..sys.n).map(|i| x[(i, j)]).collect();
+        if xj.iter().any(|v| !v.is_finite()) {
+            return Err("The solve failed: the model may not be held".into());
+        }
+        out.push(expand(&sys, &xj, p.mesh.nodes.len()));
+    }
+    Ok(out)
 }
 
 pub struct Mode {
@@ -950,7 +1029,7 @@ mod tests {
         let area = area_of(m, &tip);
         let mut force = vec![0.0; 3 * m.nodes.len()];
         traction_loads(m, &tip, |_| DVec3::new(0.0, 0.0, -100.0 / area), &mut force);
-        Problem { mesh: m, mat: STEEL, body_mats: vec![], fixes: vec![Fix::Fixed(fixed)], force }
+        Problem { mesh: m, mat: STEEL, body_mats: vec![], fixes: vec![Fix::Fixed(fixed)], force, couplings: vec![], masses: vec![] }
     }
 
     #[test]
@@ -986,7 +1065,7 @@ mod tests {
     #[test]
     fn free_part_has_six_rigid_modes() {
         let m = mesh(&beam(), 3.4, &|| false).unwrap();
-        let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![], force: vec![0.0; 3 * m.nodes.len()] };
+        let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![], force: vec![0.0; 3 * m.nodes.len()], couplings: vec![], masses: vec![] };
         let modes = modal(&p, 7, &|| false).unwrap();
         assert!(modes[..6].iter().all(|m| m.freq < 5.0));
         // free-free first bending: 4.730² / 2π √(EI / ρAL⁴) = 5185 Hz slender-beam theory, a few percent
