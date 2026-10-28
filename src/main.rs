@@ -81,6 +81,8 @@ fn main() -> eframe::Result {
                 eprintln!("usage: cad-app script file.rhai [args…]");
                 std::process::exit(2);
             };
+            // stdout carries the script's prints and result: keep OpenCascade's chatter off it
+            opencascade_sys::extra::ex_messages_to_stderr();
             match script_api::run_file(path, &args[3..]) {
                 Ok(v) => {
                     if !v.is_null() {

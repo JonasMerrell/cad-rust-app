@@ -188,8 +188,23 @@ impl Session {
                         if a.get("studio").is_none() {
                             c.studio = prev.studio;
                         }
-                        if a.get("machine").is_none() {
-                            (c.machine, c.max_rpm, c.rapid_rate, c.post) = (prev.machine.clone(), prev.max_rpm, prev.rapid_rate, prev.post.clone());
+                        // the machine, spindle and controller carry over too, except what this call sets
+                        let set = |k: &str| a.get(k).is_some();
+                        let machine = set("machine");
+                        if !machine {
+                            c.machine = prev.machine.clone();
+                        }
+                        if !machine && !set("max_rpm") {
+                            c.max_rpm = prev.max_rpm;
+                        }
+                        if !machine && !set("rapid_rate") {
+                            c.rapid_rate = prev.rapid_rate;
+                        }
+                        if !set("min_rpm") {
+                            c.min_rpm = prev.min_rpm;
+                        }
+                        if !set("post") {
+                            c.post = prev.post.clone();
                         }
                         if a.get("stock").is_none() {
                             c.stock.material = prev.stock.material.clone();

@@ -98,6 +98,7 @@ mod inner {
         pub fn ex_chamfer_faces(s: &TopoDS_Shape, edges: &TopTools_ListOfShape, d: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_null_shape() -> UniquePtr<TopoDS_Shape>;
         pub fn ex_common_volumes(a: &TopTools_ListOfShape, b: &TopTools_ListOfShape, threads: i32) -> Vec<f64>;
+        pub fn ex_messages_to_stderr();
         pub fn ex_write_step_assembly(shapes: &TopTools_ListOfShape, parents: &[i32], names: &[String], colors: &[f64], path: &str) -> bool;
         pub fn ex_edge_polylines(s: &TopoDS_Shape, deflection: f64) -> Vec<f64>;
         pub fn ex_outer_wire(f: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
