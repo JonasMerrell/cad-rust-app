@@ -85,7 +85,14 @@ I/H/V/T/E/M/X apply constraints; Enter finishes, Esc steps back.
 
 ## License
 
-This project is licensed under the [MIT License](LICENSE), except for the vendored
+Copyright (C) 2026 Jonas Merrell.
+
+This project is licensed under the [GNU Affero General Public License v3.0 only](LICENSE)
+(`AGPL-3.0-only`). You may use, modify and redistribute it, but if you distribute it, or
+let people use a modified version over a network, you must make the complete corresponding
+source available under the same license.
+
+The exceptions are the vendored
 `crates/opencascade` and `crates/opencascade-sys` bindings, which keep their original
 LGPL-2.1 license. The app also links [Open CASCADE Technology](https://dev.opencascade.org/),
 which is LGPL-2.1 with an additional exception; anyone distributing binaries of the app
