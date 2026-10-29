@@ -455,7 +455,7 @@ impl Session {
                             Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied().ok_or("that plane has not been built")?,
                             _ => Frame::TOP,
                         };
-                        let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Drawing".into()));
+                        let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| self.doc.unique_name(&std::path::Path::new(&path).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Drawing".into())));
                         self.doc.insert(name, Op::Sketch { plane, sketch: Sketch::default(), frame })
                     }
                 };
@@ -780,7 +780,7 @@ fn parse_constraint(c: &Value) -> R<Constraint> {
         }
     }
     let k: Constraint = serde_json::from_value(c.clone()).map_err(|e| format!("bad constraint {c}: {e}"))?;
-    let _ = Dim { expr: String::new(), offset: [0.0; 2] };
+    let _ = Dim::new("", [0.0; 2]);
     Ok(k)
 }
 
