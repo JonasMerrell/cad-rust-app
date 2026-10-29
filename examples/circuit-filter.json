@@ -1,0 +1,33 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_pcb", "args": {"name": "Filter", "width": 30, "height": 25}},
+  {"tool": "pcb_add_parts", "args": {"pcb": 0, "parts": [
+    {"symbol": "U", "value": "TL072", "footprint": "SOIC-8", "pin_names": ["OUTA", "-INA", "+INA", "V-", "+INB", "-INB", "OUTB", "V+"]},
+    {"symbol": "R", "value": "10k"},
+    {"symbol": "R", "value": "10k"},
+    {"symbol": "C", "value": "22n"},
+    {"symbol": "C", "value": "10n"},
+    {"symbol": "C", "value": "100n"},
+    {"symbol": "C", "value": "100n"},
+    {"symbol": "J", "value": "In/Out", "footprint": "PinHeader_1x05", "pin_names": ["IN", "OUT", "GND", "+12V", "-12V"]}
+  ]}},
+  {"tool": "pcb_connect", "args": {"pcb": 0, "nets": {
+    "IN": ["J1.1", "R1.1"],
+    "MID": ["R1.2", "R2.1", "C1.1"],
+    "NONINV": ["R2.2", "C2.1", "U1.+INA"],
+    "OUT": ["U1.OUTA", "U1.-INA", "C1.2", "J1.2"],
+    "GND": ["C2.2", "C3.2", "C4.2", "J1.3", "U1.+INB"],
+    "+12V": ["U1.V+", "C3.1", "J1.4"],
+    "-12V": ["U1.V-", "C4.1", "J1.5"],
+    "BUF": ["U1.-INB", "U1.OUTB"]
+  }}},
+  {"tool": "pcb_sim_setup", "args": {"pcb": 0, "sources": [
+    {"name": "VP", "plus": "+12V", "wave": 12},
+    {"name": "VN", "plus": "-12V", "wave": -12},
+    {"name": "VIN", "plus": "IN", "wave": "SIN(0 1 2k)", "ac": 1}
+  ], "probes": ["IN", "OUT"]}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "ac", "f_start": 10, "f_stop": "100k", "at": [100, 1000, 10000], "path": "filter-ac.png"}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "tran", "stop": "3m", "path": "filter-tran.png"}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "op"}},
+  {"tool": "save_document", "args": {"path": "filter-doc.json"}}
+]

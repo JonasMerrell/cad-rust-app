@@ -24,6 +24,7 @@
   {"tool": "pcb_edit", "args": {"pcb": 0, "auto_place": "unplaced", "holes": [{"at": [3.5, 3.5], "d": 3.2}, {"at": [36.5, 26.5], "d": 3.2}], "zones": [{"net": "GND", "layer": "bottom"}]}},
   {"tool": "pcb_route", "args": {"pcb": 0}},
   {"tool": "check_pcb", "args": {"pcb": 0}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "tran", "stop": 0.6, "probes": ["OUT", "TIMING", "I(D1)"], "path": "pcb-555-sim.png"}},
   {"tool": "render_pcb", "args": {"pcb": 0, "view": "schematic", "path": "pcb-555-schematic.png"}},
   {"tool": "render_pcb", "args": {"pcb": 0, "path": "pcb-555-board.png"}},
   {"tool": "export_pcb", "args": {"pcb": 0, "path": "pcb-555/Blinker.zip"}},

@@ -25,6 +25,9 @@ pub struct Pcb {
     pub labels: Vec<Label>,
     #[serde(default)]
     pub board: Board,
+    /// Circuit simulation: sources, ground, analysis.
+    #[serde(default, skip_serializing_if = "crate::circuit::SimSetup::is_empty")]
+    pub sim: crate::circuit::SimSetup,
     #[serde(default)]
     pub next_id: u64,
 }
