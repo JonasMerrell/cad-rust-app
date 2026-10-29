@@ -252,6 +252,9 @@ pub enum Dev {
     V(Wave, f64),
     /// [a, b] inductance and series resistance, with its current unknown.
     L(f64, f64),
+    /// [pin, supply, ground]: a microcontroller pin, conductances to its supply and ground set
+    /// by the `Ext` driving it (the index is into its pins).
+    Pin(usize),
 }
 
 impl Dev {
@@ -508,8 +511,31 @@ struct Mem {
     b: f64,
 }
 
+/// A pin's conductance to its supply and to ground.
+fn pin_lin(g: (f64, f64), v: &[f64]) -> Lin {
+    let (hi, lo) = g;
+    let mut l = Lin::new(v.to_vec());
+    let (a, b) = (hi * (v[0] - v[1]), lo * (v[0] - v[2]));
+    l.i = vec![a + b, -a, -b];
+    l.j = vec![hi + lo, -hi, -lo, -hi, hi, 0.0, -lo, 0.0, lo];
+    l
+}
+
+/// Something outside the circuit that drives its `Dev::Pin`s and watches its nodes: a
+/// microcontroller running firmware.
+pub trait Ext {
+    /// Run on from `t` (where the circuit's solution is `x`) to at most `until`; the time reached.
+    /// The pins keep their drive until then and may change there.
+    fn advance(&mut self, t: f64, x: &[f64], until: f64) -> f64;
+    /// Each pin's (conductance to supply, conductance to ground) as of the time reached.
+    fn pins(&self) -> Vec<(f64, f64)>;
+    /// The longest the circuit may run ahead of what the driver has seen.
+    fn horizon(&self) -> f64;
+}
+
 fn eval(dev: &Dev, v: &[f64], mem: &mut Mem, on: bool, limit: bool) -> Lin {
     match dev {
+        Dev::Pin(_) => pin_lin((0.0, 0.0), v),
         Dev::D(m) => {
             let raw = v[0] - v[1];
             let mut vd = raw;
@@ -795,6 +821,8 @@ pub struct Sim<'a> {
     hist: Vec<Hist>,
     mem: Vec<Mem>,
     on: Vec<bool>,
+    /// The `Dev::Pin` conductances.
+    pub pins: Vec<(f64, f64)>,
     gmin: f64,
     scale: f64,
     pub notes: Vec<String>,
@@ -817,6 +845,7 @@ impl<'a> Sim<'a> {
             hist: vec![Hist::default(); c.elems.len()],
             mem: vec![Mem::default(); c.elems.len()],
             on: vec![true; c.elems.len()],
+            pins: vec![(0.0, 0.0); c.elems.iter().filter_map(|e| if let Dev::Pin(k) = e.dev { Some(k + 1) } else { None }).max().unwrap_or(0)],
             gmin: 1e-12,
             scale: 1.0,
             notes: vec![],
@@ -896,7 +925,7 @@ impl<'a> Sim<'a> {
                 }
                 dev => {
                     let v = self.terms(e, x);
-                    let lin = eval(dev, &v, &mut self.mem[ei], self.on[ei], limit);
+                    let lin = if let Dev::Pin(k) = dev { pin_lin(self.pins[*k], &v) } else { eval(dev, &v, &mut self.mem[ei], self.on[ei], limit) };
                     limited |= lin.limited;
                     let k = e.n.len();
                     for r in 0..k {
@@ -1046,6 +1075,7 @@ impl<'a> Sim<'a> {
                     let j = x[nn + e.br];
                     out.extend([j, -j]);
                 }
+                Dev::Pin(k) => out.extend(pin_lin(self.pins[*k], &v).i),
                 dev => {
                     let mut m = self.mem[ei];
                     let lin = eval(dev, &v, &mut m, self.on[ei], false);
@@ -1103,6 +1133,13 @@ impl<'a> Sim<'a> {
     /// A transient from 0 to `stop` with steps no longer than `hmax`. From rest (every capacitor
     /// discharged, supplies switched on at 0) unless `from_op`.
     pub fn tran(&mut self, stop: f64, hmax: f64, from_op: bool) -> Result<Tran, String> {
+        self.tran_ext(stop, hmax, from_op, None)
+    }
+
+    /// A transient with `ext` driving the pins: it runs ahead of the circuit by up to its horizon
+    /// (seeing the circuit as it was when it set off) and every change it makes to a pin is a
+    /// breakpoint.
+    pub fn tran_ext(&mut self, stop: f64, hmax: f64, from_op: bool, mut ext: Option<&mut dyn Ext>) -> Result<Tran, String> {
         if !(stop > 0.0) {
             return Err("the stop time must be positive".into());
         }
@@ -1111,6 +1148,10 @@ impl<'a> Sim<'a> {
             if let Dev::V(w, _) | Dev::I(w, _) = &e.dev {
                 hmax = hmax.min(w.max_step());
             }
+        }
+        if let Some(e) = ext.as_deref() {
+            hmax = hmax.min(e.horizon());
+            self.pins = e.pins();
         }
         let hmin = (stop * 1e-13).max(1e-18);
         let ev_tol = (stop * 1e-8).max(1e-12);
@@ -1136,10 +1177,23 @@ impl<'a> Sim<'a> {
         let mut be = true;
         let mut hp = 0.0;
         let mut steps = 0usize;
+        // how far the pin driver has run
+        let mut ext_t = 0.0;
         while t < stop * (1.0 - 1e-12) {
             steps += 1;
             if steps > 2_000_000 {
                 return Err(format!("the transient took too many steps (stopped at t = {})", crate::circuit::si(t, "s")));
+            }
+            if let Some(e) = ext.as_deref_mut() {
+                if t >= ext_t - 1e-15 {
+                    ext_t = e.advance(t, &x, (t + hmax).min(stop)).max(t + hmin);
+                    let p = e.pins();
+                    if p != self.pins {
+                        self.pins = p;
+                        be = true;
+                        dt = dt.min((hmax / 100.0).max(hmin * 10.0));
+                    }
+                }
             }
             let bp = self.c.elems.iter().filter_map(|e| if let Dev::V(w, _) | Dev::I(w, _) = &e.dev { Some(w.next_break(t)) } else { None }).fold(f64::INFINITY, f64::min);
             let mut h = dt.min(hmax).min(stop - t);
@@ -1147,6 +1201,9 @@ impl<'a> Sim<'a> {
             if bp - t <= h * (1.0 + 1e-9) {
                 h = bp - t;
                 at_bp = true;
+            }
+            if ext.is_some() && ext_t - t < h * (1.0 + 1e-9) {
+                h = ext_t - t;
             }
             let mode = Mode::Tran { t: t + h, dt: h, hp: if be { 0.0 } else { hp } };
             let mut xn = x.clone();
@@ -1239,6 +1296,7 @@ impl<'a> Sim<'a> {
             .enumerate()
             .map(|(ei, e)| match &e.dev {
                 Dev::R(_) | Dev::C(_) | Dev::I(..) | Dev::V(..) | Dev::L(..) => None,
+                Dev::Pin(k) => Some(pin_lin(self.pins[*k], &self.terms(e, op))),
                 dev => {
                     let mut m = self.mem[ei];
                     Some(eval(dev, &self.terms(e, op), &mut m, self.on[ei], false))

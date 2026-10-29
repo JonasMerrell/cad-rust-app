@@ -87,6 +87,31 @@ impl Session {
                 if let Some(c) = a.get("probes").and_then(|v| v.as_array()) {
                     p.sim.probes = c.iter().filter_map(|x| x.as_str().map(String::from)).collect();
                 }
+                if let Some(ms) = a.get("mcus").and_then(|v| v.as_array()) {
+                    for (k, m) in ms.iter().enumerate() {
+                        let part = m.get("part").and_then(|v| v.as_str()).ok_or_else(|| format!("mcus[{k}]: give part (the Pico's reference)"))?;
+                        if !p.parts.iter().any(|x| x.reference.eq_ignore_ascii_case(part)) {
+                            return Err(format!("mcus[{k}]: no part {part}"));
+                        }
+                        if !p.sim.mcus.iter().any(|x| x.part.eq_ignore_ascii_case(part)) {
+                            p.sim.mcus.push(crate::circuit_mcu::McuSetup { part: part.to_string(), ..Default::default() });
+                        }
+                        let e = p.sim.mcus.iter_mut().find(|x| x.part.eq_ignore_ascii_case(part)).unwrap();
+                        if let Some(f) = m.get("firmware").and_then(|v| v.as_str()) {
+                            if !f.is_empty() {
+                                let b = std::fs::read(f).map_err(|err| format!("mcus[{k}]: can't read {f}: {err}"))?;
+                                crate::mcu_rp2040::load_firmware(&b).map_err(|err| format!("mcus[{k}]: {err}"))?;
+                            }
+                            e.firmware = f.to_string();
+                        }
+                        if let Some(u) = m.get("usb").and_then(|v| v.as_bool()) {
+                            e.usb = u;
+                        }
+                        if let Some(u) = m.get("uart_in").and_then(|v| v.as_str()) {
+                            e.uart_in = u.to_string();
+                        }
+                    }
+                }
                 apply_analysis(&mut p.sim.analysis, a)?;
                 let b = circuit::build(&p)?;
                 self.ws.pcbs[pi] = p;
@@ -101,6 +126,7 @@ impl Session {
                     "parts": b.parts.iter().map(|x| json!({"reference": x.reference, "model": x.desc, "simulated": x.modelled})).collect::<Vec<_>>(),
                     "signals": b.sigs.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
                     "probes": p.sim.probes,
+                    "mcus": p.sim.mcus.iter().map(|m| json!({"part": m.part, "firmware": m.firmware, "usb": m.usb, "uart_in": m.uart_in})).collect::<Vec<_>>(),
                     "notes": b.notes,
                 });
                 Ok((v, None))
@@ -150,6 +176,20 @@ impl Session {
                             m.insert(s.name.clone(), o);
                         }
                         v["probes"] = Value::Object(m);
+                        if !out.mcus.is_empty() {
+                            v["mcus"] = json!(out.mcus.iter().map(|m| {
+                                let skip = m.uart.len().saturating_sub(200);
+                                json!({
+                                    "part": m.reference,
+                                    "firmware": m.firmware,
+                                    "instructions": m.instructions,
+                                    "notes": m.notes,
+                                    "serial": m.uart[skip..].iter().map(|(t, u, l)| json!({"t": sig4(*t), "uart": u, "text": l})).collect::<Vec<_>>(),
+                                    "serial_lines_dropped": skip,
+                                    "pins_at_end": m.pins.iter().map(|(l, s)| (l.clone(), json!(s))).collect::<serde_json::Map<_, _>>(),
+                                })
+                            }).collect::<Vec<_>>());
+                        }
                     }
                     Kind::Ac => {
                         let at: Vec<f64> = a.get("at").and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
@@ -272,7 +312,13 @@ pub fn tools() -> Vec<Value> {
     setup["sources"] = json!({"type": "array", "items": source, "description": "replace the sources (an empty list goes back to a DC supply on every power net, by name: VCC 5 V, +3V3 3.3 V, +12V 12 V)"});
     setup["ground"] = json!({"type": "string", "description": "ground net (default the ground ports or GND)"});
     setup["closed"] = strs("switches that are pressed (SW1 …); the others are open");
-    setup["probes"] = strs("signals to plot and report: net names or V(NET), V(A,B), I(R1), I(U1.OUT), I(source)");
+    setup["probes"] = strs("signals to plot and report: net names or V(NET), V(A,B), I(R1), I(U1.OUT), I(source); a Pico's GPIOs are also V(U1.GP0) … V(U1.GP29)");
+    setup["mcus"] = json!({"type": "array", "description": "firmware for Raspberry Pi Pico parts (symbol PICO): it runs during transients, reading the circuit's voltages on its GPIOs and ADC pins and driving its pins", "items": {"type": "object", "properties": {
+        "part": {"type": "string", "description": "the Pico's reference (U1)"},
+        "firmware": {"type": "string", "description": "path of a .uf2, .elf, .hex or .bin built for the RP2040 (Pico SDK, Arduino-Pico); empty for none"},
+        "usb": {"type": "boolean", "description": "powered from USB: 5 V on VBUS (default true)"},
+        "uart_in": {"type": "string", "description": "text arriving on UART0 RX (GP1) at the start"},
+    }, "required": ["part"], "additionalProperties": false}});
     let mut sim = analysis;
     sim["pcb"] = pcb;
     sim["analysis"] = json!({"type": "string", "enum": ["op", "tran", "ac"], "description": "op: DC operating point; tran: transient; ac: small-signal sweep about the operating point (default the last one run, else tran)"});
@@ -284,7 +330,7 @@ pub fn tools() -> Vec<Value> {
     sim["width"] = json!({"type": "integer", "description": "plot width px (default 1000)"});
     sim["csv"] = json!({"type": "string", "description": "write the probed waveforms as CSV here"});
     vec![
-        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators; connectors, crystals and other ICs are left open), the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
-        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, trapezoidal transient with adaptive steps, AC about the operating point). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
+        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators, Raspberry Pi Pico boards running firmware; connectors, crystals and other ICs are left open), the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
+        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, variable-step BDF2 transient, AC about the operating point; Pico boards run their firmware during transients, so transients default to at least 1 s with them). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. Picos report their serial (UART) output with times, notes and pin states. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
     ]
 }

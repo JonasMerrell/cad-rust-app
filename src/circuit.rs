@@ -78,6 +78,9 @@ pub struct SimSetup {
     /// Signals to plot: net names or V(NET), V(A,B), I(R1), I(U1.OUT), I(VCC).
     pub probes: Vec<String>,
     pub analysis: Analysis,
+    /// Firmware for the microcontroller boards (Raspberry Pi Pico).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub mcus: Vec<crate::circuit_mcu::McuSetup>,
 }
 
 impl SimSetup {
@@ -274,6 +277,8 @@ pub enum Model {
     OpAmp(OpAmp, Vec<[String; 3]>, [String; 2], String),
     Reg(Reg, [String; 3], String),
     Switch(bool),
+    /// A Raspberry Pi Pico board.
+    Pico,
     /// Left out of the circuit, with the reason.
     Open(String),
 }
@@ -283,7 +288,7 @@ fn has(v: &str, keys: &[&str]) -> bool {
 }
 
 /// A diode: model, series resistance, junction capacitance and the model name.
-fn diode_model(value: &str) -> (Diode, f64, f64, String) {
+pub(crate) fn diode_model(value: &str) -> (Diode, f64, f64, String) {
     let u = value.to_ascii_uppercase();
     let d = |is: f64, n: f64, bv: f64| Diode { is, n, bv, ibv: 1e-3 };
     // zeners: BZX84C5V1, 1N4733A, "5V1 zener"
@@ -313,7 +318,7 @@ fn diode_model(value: &str) -> (Diode, f64, f64, String) {
 }
 
 /// An LED from its colour, or a forward voltage in its value (Red, Blue, "2.1V").
-fn led_model(value: &str) -> (Diode, f64, f64, String) {
+pub(crate) fn led_model(value: &str) -> (Diode, f64, f64, String) {
     let u = value.to_ascii_uppercase();
     let (vf, name) = if let Some(v) = volts_in(&u) {
         (v, "LED")
@@ -561,6 +566,7 @@ pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
         "SW" => Model::Switch(setup.closed.iter().any(|s| s.eq_ignore_ascii_case(&part.reference))),
         "J" => Model::Open("connector (power comes from the simulation sources)".into()),
         "Y" => Model::Open("crystal (not simulated)".into()),
+        _ if crate::circuit_mcu::is_pico(&part.symbol, &part.value, pins.len()) => Model::Pico,
         _ => {
             let u = part.value.to_ascii_uppercase();
             if u.contains("555") {
@@ -605,6 +611,7 @@ pub fn describe(m: &Model) -> String {
         Model::Timer(t, _) => format!("555 timer ({})", if t.cmos { "CMOS" } else { "bipolar" }),
         Model::OpAmp(_, _, _, d) | Model::Reg(_, _, d) => d.clone(),
         Model::Switch(c) => format!("switch, {}", if *c { "pressed" } else { "open" }),
+        Model::Pico => "Raspberry Pi Pico (RP2040)".into(),
         Model::Open(why) => why.clone(),
     }
 }
@@ -659,6 +666,7 @@ pub struct Built {
     /// Named nets and their nodes.
     pub nets: Vec<(String, usize)>,
     pub notes: Vec<String>,
+    pub mcus: Vec<crate::circuit_mcu::PicoSim>,
 }
 
 /// A supply voltage guessed from a power net's name: +5V 5, 3V3 3.3, -12V -12, VCC/VDD 5.
@@ -728,6 +736,7 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
         }
     }
     let mut parts = vec![];
+    let mut mcus = vec![];
     for (pi, part) in p.parts.iter().enumerate() {
         let sym = part.symbol();
         let nums = part.footprint().pin_numbers();
@@ -861,6 +870,10 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
                     add(&mut c, &mut pins, Dev::Reg(rm.clone()), &[T::P(i), T::P(g), T::P(o)]);
                 }
             }
+            Model::Pico => {
+                let ms = setup.mcus.iter().find(|m| m.part.eq_ignore_ascii_case(&part.reference)).cloned().unwrap_or_else(|| crate::circuit_mcu::McuSetup { part: part.reference.clone(), ..Default::default() });
+                mcus.push(crate::circuit_mcu::build_pico(&mut c, &mut pins, &part.reference, ms, &mut notes));
+            }
             Model::Open(_) => {}
         }
         parts.push(PartSim { reference: part.reference.clone(), desc, modelled, pins, main });
@@ -900,17 +913,24 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
             sigs.push(SigDef { name: format!("I({})", ps.reference), unit: "A", of: SigOf::Terms(ps.pins[m].terms.clone(), 1.0) });
         } else {
             for pin in &ps.pins {
-                if !pin.terms.is_empty() {
-                    sigs.push(SigDef { name: format!("I({}.{})", ps.reference, pin.label), unit: "A", of: SigOf::Terms(pin.terms.clone(), 1.0) });
+                let name = format!("I({}.{})", ps.reference, pin.label);
+                // pins sharing a name (a board's GND pins) report once
+                if !pin.terms.is_empty() && !sigs.iter().any(|s| s.name == name) {
+                    sigs.push(SigDef { name, unit: "A", of: SigOf::Terms(pin.terms.clone(), 1.0) });
                 }
             }
+        }
+    }
+    for m in &mcus {
+        for (k, n) in m.gp.iter().enumerate() {
+            sigs.push(SigDef { name: format!("V({}.GP{k})", m.reference), unit: "V", of: SigOf::Node(*n) });
         }
     }
     let open: Vec<String> = parts.iter().filter(|x| !x.modelled && !x.desc.starts_with("connector")).map(|x| format!("{} ({})", x.reference, x.desc)).collect();
     if !open.is_empty() {
         notes.push(format!("not simulated: {}", open.join(", ")));
     }
-    Ok(Built { c, parts, sources, sigs, ground, nets, notes })
+    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus })
 }
 
 /// A transient stop time from the circuit: five of its longest RC time constants, or periods.
@@ -986,6 +1006,8 @@ pub struct SimOut {
     pub notes: Vec<String>,
     /// The transient's stop time when it was worked out.
     pub stop: f64,
+    /// What each microcontroller did (transients).
+    pub mcus: Vec<crate::circuit_mcu::McuOut>,
 }
 
 impl SimOut {
@@ -1082,6 +1104,9 @@ fn op_tables(b: &Built, x: &[f64], i: &[f64], off: &[usize], out: &mut SimOut) {
         .collect();
 }
 
+/// How far a microcontroller runs ahead of the circuit it reads (its inputs are this stale at most).
+const MCU_HORIZON: f64 = 50e-6;
+
 /// Run the setup's analysis on a PCB's schematic.
 pub fn run(p: &Pcb, a: &Analysis) -> Result<SimOut, String> {
     let b = build(p)?;
@@ -1099,9 +1124,17 @@ pub fn run(p: &Pcb, a: &Analysis) -> Result<SimOut, String> {
             op_tables(&b, &x, &i, &sim.offsets, &mut out);
         }
         Kind::Tran => {
-            let stop = if a.stop > 0.0 { a.stop } else { auto_stop(&b) };
+            let stop = if a.stop > 0.0 {
+                a.stop
+            } else if b.mcus.is_empty() {
+                auto_stop(&b)
+            } else {
+                auto_stop(&b).max(1.0)
+            };
             out.stop = stop;
-            let tr = sim.tran(stop, a.step, a.from_op)?;
+            let mut ext = crate::circuit_mcu::McuExt::new(&b.mcus, MCU_HORIZON, &mut out.notes);
+            let tr = if ext.active() { sim.tran_ext(stop, a.step, a.from_op, Some(&mut ext))? } else { sim.tran(stop, a.step, a.from_op)? };
+            out.mcus = ext.finish();
             out.sigs = b
                 .sigs
                 .iter()

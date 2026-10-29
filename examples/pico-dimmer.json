@@ -1,0 +1,25 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_pcb", "args": {"name": "Pico dimmer", "width": 70, "height": 60, "corner_radius": 2}},
+  {"tool": "pcb_add_parts", "args": {"pcb": 0, "parts": [
+    {"symbol": "PICO"},
+    {"symbol": "R", "value": "4k7"},
+    {"symbol": "R", "value": "10k"},
+    {"symbol": "R", "value": "330"},
+    {"symbol": "LED", "value": "Red"},
+    {"symbol": "R", "value": "10k"},
+    {"symbol": "C", "value": "1u"}
+  ]}},
+  {"tool": "pcb_connect", "args": {"pcb": 0, "nets": {
+    "GND": ["U1.3", "U1.AGND", "R2.2", "D1.1", "C1.2"],
+    "+3V3": ["U1.3V3", "R1.1"],
+    "KNOB": ["R1.2", "R2.1", "U1.GP26"],
+    "PWM": ["U1.GP16", "R3.1", "R4.1"],
+    "LED_A": ["R3.2", "D1.2"],
+    "AVG": ["R4.2", "C1.1"]
+  }}},
+  {"tool": "pcb_sim_setup", "args": {"pcb": 0, "mcus": [{"part": "U1", "firmware": "examples/firmware/adc.uf2"}], "probes": ["KNOB", "PWM", "AVG", "I(D1)"]}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "tran", "stop": 0.06, "probes": ["KNOB", "AVG", "I(D1)"], "path": "pico-dimmer-sim.png"}},
+  {"tool": "render_pcb", "args": {"pcb": 0, "view": "schematic", "path": "pico-dimmer-schematic.png"}},
+  {"tool": "save_document", "args": {"path": "pico-dimmer-doc.json"}}
+]

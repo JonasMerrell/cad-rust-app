@@ -60,8 +60,18 @@ fn strip(s: &circuit::SimSetup) -> circuit::SimSetup {
 pub fn run(app: &mut App) {
     let Some(i) = index(app) else { return };
     let p = app.ws.pcbs[i].clone();
+    // firmware paths are relative to the document
+    let mut q = p.clone();
+    if let Some(dir) = app.path.as_ref().and_then(|d| d.parent()) {
+        for m in &mut q.sim.mcus {
+            let f = std::path::Path::new(m.firmware.trim());
+            if !m.firmware.trim().is_empty() && f.is_relative() {
+                m.firmware = dir.join(f).to_string_lossy().into_owned();
+            }
+        }
+    }
     let t0 = Instant::now();
-    let r = circuit::run(&p, &p.sim.analysis);
+    let r = circuit::run(&q, &q.sim.analysis);
     app.pcb.sim.ms = t0.elapsed().as_secs_f64() * 1e3;
     app.pcb.sim.xr = None;
     app.pcb.sim.cursor = None;
@@ -187,6 +197,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     section(ui, "Analysis", |ui| analysis_ui(app, ui, pi));
     section(ui, "Sources", |ui| sources_ui(app, ui, pi, &nets));
     section(ui, "Probes", |ui| probes_ui(app, ui, pi));
+    if app.ws.pcbs[pi].parts.iter().any(|x| crate::circuit_mcu::is_pico(&x.symbol, &x.value, x.footprint().pin_numbers().len())) {
+        section(ui, "Microcontrollers", |ui| mcu_ui(app, ui, pi));
+    }
     if let Some(out) = results(app).cloned() {
         section(ui, "Results", |ui| results_ui(app, ui, &out));
     } else if let Some(e) = app.pcb.sim.err.clone() {
@@ -214,6 +227,70 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             RichText::new("Models come from each part's value: change the value (e.g. 2N3904, TL072, Blue, AMS1117-3.3) to change the model.").size(11.0).color(theme::muted()),
         );
     });
+}
+
+/// Each Pico's firmware and power, and what it did in the last run.
+fn mcu_ui(app: &mut App, ui: &mut Ui, pi: usize) {
+    let refs: Vec<String> = app.ws.pcbs[pi].parts.iter().filter(|x| crate::circuit_mcu::is_pico(&x.symbol, &x.value, x.footprint().pin_numbers().len())).map(|x| x.reference.clone()).collect();
+    let out = results(app).cloned();
+    for r in refs {
+        let p = &mut app.ws.pcbs[pi];
+        if !p.sim.mcus.iter().any(|m| m.part.eq_ignore_ascii_case(&r)) {
+            p.sim.mcus.push(crate::circuit_mcu::McuSetup { part: r.clone(), ..Default::default() });
+        }
+        let k = p.sim.mcus.iter().position(|m| m.part.eq_ignore_ascii_case(&r)).unwrap();
+        ui.label(RichText::new(format!("{r}  Raspberry Pi Pico")).size(12.5).strong());
+        let mut browse = false;
+        row(ui, "Firmware", |ui| {
+            let m = &mut app.ws.pcbs[pi].sim.mcus[k];
+            ui.add(egui::TextEdit::singleline(&mut m.firmware).desired_width(ui.available_width() - 34.0).hint_text("a .uf2, .elf, .hex or .bin file"));
+            browse = ui.button("…").on_hover_text("Choose the firmware file: a UF2 or ELF from the Pico SDK or Arduino").clicked();
+        });
+        if browse {
+            if let Some(f) = app.open_file_dialog("Firmware", &["uf2", "elf", "hex", "bin"]) {
+                let rel = app.path.as_ref().and_then(|d| d.parent()).and_then(|d| f.strip_prefix(d).ok()).map(|x| x.to_path_buf());
+                app.ws.pcbs[pi].sim.mcus[k].firmware = rel.unwrap_or(f).to_string_lossy().into_owned();
+            }
+        }
+        let m = &mut app.ws.pcbs[pi].sim.mcus[k];
+        ui.checkbox(&mut m.usb, "Powered from USB (5 V on VBUS)");
+        row(ui, "UART0 input", |ui| {
+            ui.add(egui::TextEdit::singleline(&mut m.uart_in).desired_width(ui.available_width()).hint_text("text sent to GP1 at the start (\\n for Enter)"));
+        });
+        if let Some(mo) = out.as_ref().and_then(|o| o.mcus.iter().find(|x| x.reference.eq_ignore_ascii_case(&r))) {
+            if mo.instructions > 0 {
+                ui.label(RichText::new(format!("Ran {:.1} M instructions", mo.instructions as f64 / 1e6)).size(11.5).color(theme::muted()));
+            }
+            for n in &mo.notes {
+                ui.label(RichText::new(format!("⚠ {n}")).size(11.5).color(theme::muted()));
+            }
+            if !mo.uart.is_empty() {
+                ui.label(RichText::new("Serial output").size(11.5).color(theme::muted()));
+                egui::Frame::new().fill(theme::input_fill()).corner_radius(4.0).inner_margin(6.0).show(ui, |ui| {
+                    egui::ScrollArea::vertical().id_salt(("uart", &r)).max_height(180.0).stick_to_bottom(true).show(ui, |ui| {
+                        ui.set_width(ui.available_width());
+                        for (t, u, line) in &mo.uart {
+                            let tag = if *u == 1 { " UART1" } else { "" };
+                            ui.label(RichText::new(format!("{:>9}{tag}  {line}", si(*t, "s"))).size(11.0).monospace());
+                        }
+                    });
+                });
+            }
+            if !mo.pins.is_empty() {
+                egui::CollapsingHeader::new(RichText::new("Pins at the end").size(11.5)).id_salt(("pins", &r)).show(ui, |ui| {
+                    egui::Grid::new(("mcu_pins", &r)).striped(true).show(ui, |ui| {
+                        for (l, st) in &mo.pins {
+                            ui.label(RichText::new(l).size(11.5));
+                            ui.label(RichText::new(st).size(11.5).monospace());
+                            ui.end_row();
+                        }
+                    });
+                });
+            }
+        }
+        ui.add_space(4.0);
+    }
+    ui.label(RichText::new("The RP2040 runs its firmware during a transient, reading the circuit's voltages and driving its pins. GPIO, PWM, ADC, UART, timers, interrupts and both cores are simulated; PIO, DMA, USB, I2C and SPI devices are not.").size(11.0).color(theme::muted()));
 }
 
 fn analysis_ui(app: &mut App, ui: &mut Ui, pi: usize) {

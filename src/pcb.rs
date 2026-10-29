@@ -559,6 +559,7 @@ impl Pcb {
             value: value.unwrap_or(k.value).to_string(),
             symbol: k.key.to_string(),
             footprint: fp.to_string(),
+            pin_names: pcb_lib::default_pin_names(k.key),
             sch: snap(sch, pcb_lib::GRID),
             ..Default::default()
         };
