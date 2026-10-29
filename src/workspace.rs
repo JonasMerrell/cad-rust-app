@@ -49,6 +49,9 @@ pub struct Workspace {
     /// Saved snapshots (like Onshape versions), each a workspace JSON without versions.
     #[serde(default)]
     pub versions: Vec<Version>,
+    /// The order of the tab bar, as the user arranged it; tabs not listed follow, by type.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub tab_order: Vec<Tab>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -88,6 +91,7 @@ impl Default for Workspace {
             sims: vec![],
             active: Tab::Studio(0),
             versions: vec![],
+            tab_order: vec![],
         }
     }
 }
@@ -107,6 +111,52 @@ impl Workspace {
         w.versions = std::mem::take(&mut self.versions);
         *self = w;
         Ok(())
+    }
+
+    /// Every tab in tab-bar order.
+    pub fn tabs(&self) -> Vec<Tab> {
+        let all = (0..self.studios.len())
+            .map(Tab::Studio)
+            .chain((0..self.assemblies.len()).map(Tab::Assembly))
+            .chain((0..self.drawings.len()).map(Tab::Drawing))
+            .chain((0..self.cams.len()).map(Tab::Cam))
+            .chain((0..self.sims.len()).map(Tab::Sim));
+        let all: Vec<Tab> = all.collect();
+        let mut out: Vec<Tab> = self.tab_order.iter().copied().filter(|t| all.contains(t)).collect();
+        out.dedup();
+        out.extend(all.into_iter().filter(|t| !self.tab_order.contains(t)));
+        out
+    }
+
+    /// Move a tab `by` places along the tab bar (negative is left).
+    pub fn move_tab(&mut self, t: Tab, by: isize) {
+        let mut v = self.tabs();
+        let Some(i) = v.iter().position(|x| *x == t) else { return };
+        let j = (i as isize + by).clamp(0, v.len() as isize - 1) as usize;
+        let x = v.remove(i);
+        v.insert(j, x);
+        self.tab_order = v;
+    }
+
+    /// Keep the tab order right after tab `t` is removed (later tabs of its kind move down one).
+    pub fn forget_tab(&mut self, t: Tab) {
+        let same = |a: Tab, b: Tab| std::mem::discriminant(&a) == std::mem::discriminant(&b);
+        let idx = |t: Tab| match t {
+            Tab::Studio(i) | Tab::Assembly(i) | Tab::Drawing(i) | Tab::Cam(i) | Tab::Sim(i) => i,
+        };
+        let with = |t: Tab, i: usize| match t {
+            Tab::Studio(_) => Tab::Studio(i),
+            Tab::Assembly(_) => Tab::Assembly(i),
+            Tab::Drawing(_) => Tab::Drawing(i),
+            Tab::Cam(_) => Tab::Cam(i),
+            Tab::Sim(_) => Tab::Sim(i),
+        };
+        self.tab_order.retain(|x| *x != t);
+        for x in &mut self.tab_order {
+            if same(*x, t) && idx(*x) > idx(t) {
+                *x = with(*x, idx(*x) - 1);
+            }
+        }
     }
 
     /// Load a workspace, or a single Part Studio document saved by older versions.
@@ -143,6 +193,25 @@ mod tests {
         let w2 = Workspace::from_json(&old).unwrap();
         assert_eq!(w2.studios.len(), 1);
         assert!(now_string().len() >= 16);
+    }
+
+    #[test]
+    fn tab_order() {
+        let mut w = Workspace::default();
+        w.studios.push(Studio { name: "B".into(), doc: Document::default() });
+        w.assemblies.push(Default::default());
+        assert_eq!(w.tabs(), vec![Tab::Studio(0), Tab::Studio(1), Tab::Assembly(0)]);
+        w.move_tab(Tab::Assembly(0), -2);
+        assert_eq!(w.tabs(), vec![Tab::Assembly(0), Tab::Studio(0), Tab::Studio(1)]);
+        // a new tab goes at the end
+        w.drawings.push(Default::default());
+        assert_eq!(w.tabs().last(), Some(&Tab::Drawing(0)));
+        // removing a studio renumbers the later one
+        w.studios.remove(0);
+        w.forget_tab(Tab::Studio(0));
+        assert_eq!(w.tabs(), vec![Tab::Assembly(0), Tab::Studio(0), Tab::Drawing(0)]);
+        let back = Workspace::from_json(&w.to_json()).unwrap();
+        assert_eq!(back.tabs(), w.tabs());
     }
 
     #[test]

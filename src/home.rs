@@ -331,27 +331,13 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     app.viewport_rect = body.response.rect;
 
     match action {
-        Some(Action::New) => {
-            app.new_document();
-            app.home.open = false;
-        }
-        Some(Action::Open) => {
-            if let Some(p) = app.open_file_dialog("Part", &["json"]) {
-                open(app, p);
-            }
-        }
-        Some(Action::OpenPath(p)) => open(app, p),
+        // ask about unsaved changes first; the start screen closes once the document is replaced
+        Some(Action::New) => app.guard(crate::session::Pending::New),
+        Some(Action::Open) => app.guard(crate::session::Pending::Open),
+        Some(Action::OpenPath(p)) => app.guard(crate::session::Pending::OpenPath(p)),
         Some(Action::Forget(p)) => forget(app, &p),
         Some(Action::Back) => app.home.open = false,
         None => {}
-    }
-}
-
-fn open(app: &mut App, p: PathBuf) {
-    app.open_path(p.clone());
-    // stay on the start screen when the file could not be read
-    if app.path.as_deref() == Some(p.as_path()) {
-        app.home.open = false;
     }
 }
 

@@ -373,11 +373,21 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                     ui.horizontal(|ui| {
                         ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
                         let ok = crate::doc::eval(s, kind, &vars, units).is_ok();
-                        let mut te = egui::TextEdit::singleline(s).desired_width(ui.available_width());
+                        // the unit plain numbers are read in, at the right of the field
+                        let unit = match kind {
+                            Kind::Length => units.label(),
+                            Kind::Angle => "°",
+                            Kind::Count => "",
+                        };
+                        let unit_w = if unit.is_empty() { 0.0 } else { 26.0 };
+                        let mut te = egui::TextEdit::singleline(s).desired_width(ui.available_width() - unit_w);
                         if !ok {
                             te = te.text_color(theme::error_soft());
                         }
                         let r = ui.add(te);
+                        if !unit.is_empty() {
+                            ui.label(RichText::new(unit).color(theme::muted()).size(12.0));
+                        }
                         if r.changed() {
                             *changed = true;
                         }

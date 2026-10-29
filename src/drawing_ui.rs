@@ -952,7 +952,8 @@ fn delete_sel(app: &mut App) {
 }
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
-    if ctx.egui_wants_keyboard_input() {
+    // no Ctrl combinations here yet; Ctrl+letter is not the letter's tool
+    if ctx.egui_wants_keyboard_input() || crate::app::key_mods(ctx).0 {
         return;
     }
     let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
