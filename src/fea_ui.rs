@@ -30,13 +30,19 @@ pub enum Field {
     DispY,
     DispZ,
     Safety,
+    /// Largest principal stress (tension).
+    Principal1,
+    /// Smallest principal stress (compression).
+    Principal3,
 }
 
 impl Field {
-    const ALL: [Field; 6] = [Field::Stress, Field::Disp, Field::DispX, Field::DispY, Field::DispZ, Field::Safety];
+    const ALL: [Field; 8] = [Field::Stress, Field::Principal1, Field::Principal3, Field::Disp, Field::DispX, Field::DispY, Field::DispZ, Field::Safety];
     fn label(self) -> &'static str {
         match self {
             Field::Stress => "Von Mises stress",
+            Field::Principal1 => "Max principal stress",
+            Field::Principal3 => "Min principal stress",
             Field::Disp => "Displacement",
             Field::DispX => "Displacement X",
             Field::DispY => "Displacement Y",
@@ -86,6 +92,13 @@ pub struct FeaUi {
     /// Resolved faces of every support and load, for the current study and parts.
     picks_key: u64,
     picks: Vec<(u64, Vec<u32>)>,
+    /// Probes pinned on the result (nodes of the shown mesh).
+    pub pins: Vec<u32>,
+    /// Mark where the shown field is largest (smallest for the factor of safety).
+    pub show_max: bool,
+    /// A mesh too big to make without asking: (mesh key, estimated unknowns), and the key the user allowed.
+    big: Option<(u64, f64)>,
+    allowed_big: Option<u64>,
 }
 
 impl Default for FeaUi {
@@ -121,6 +134,10 @@ impl Default for FeaUi {
             fitted: Default::default(),
             picks_key: Default::default(),
             picks: Default::default(),
+            pins: Default::default(),
+            show_max: Default::default(),
+            big: Default::default(),
+            allowed_big: Default::default(),
         }
     }
 }
@@ -237,6 +254,9 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                         if let Solution::Transient(t) = &o.solution {
                             app.fea.frame = t.frames.iter().enumerate().max_by(|a, b| fea::max_mag(&a.1.1).total_cmp(&fea::max_mag(&b.1.1))).map(|x| x.0).unwrap_or(0);
                         }
+                        if app.fea.outcome.as_ref().is_none_or(|p| !Arc::ptr_eq(&p.mesh, &o.mesh)) {
+                            app.fea.pins.clear();
+                        }
                         app.fea.outcome = Some(Arc::new(o));
                         app.fea.stress_hi = 0.0;
                         if app.fea.sel.is_none() {
@@ -292,9 +312,29 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
         app.fea.scene_dirty = true;
         return;
     }
+    // a study that is not held and loaded yet has nothing to solve: don't mesh it
+    if !ready(&s) {
+        app.fea.key = key;
+        app.fea.outcome = None;
+        app.fea.error = None;
+        app.fea.big = None;
+        app.fea.scene_dirty = true;
+        return;
+    }
     let size = s.mesh_size.unwrap_or_else(|| input.auto_size());
     let mk = mesh_key(&s, &input, size);
     let cached = app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk).map(|m| m.1.clone());
+    // a mesh big enough to run out of memory waits until the user says to go ahead
+    let unknowns = 3.0 * input.estimate_nodes(size);
+    if cached.is_none() && unknowns > BIG_MESH && app.fea.allowed_big != Some(mk) {
+        app.fea.key = key;
+        app.fea.outcome = None;
+        app.fea.error = None;
+        app.fea.big = Some((mk, unknowns));
+        app.fea.scene_dirty = true;
+        return;
+    }
+    app.fea.big = None;
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     app.fea.job = Some((key, rx, cancel.clone()));
@@ -335,6 +375,32 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     });
     // the new mesh, once made, is kept for the next solve
     app.fea.mesh_rx = Some((mk, mrx));
+}
+
+/// Unknowns (3 per node) above which the user is asked before meshing.
+const BIG_MESH: f64 = 500_000.0;
+
+/// Whether a study has what its analysis needs before it is worth meshing: static needs a support and a
+/// load, transient a load; modal works on its own (free-free).
+fn ready(s: &Study) -> bool {
+    let held = s.supports.iter().any(|x| !x.suppressed && !x.faces.is_empty());
+    let loaded = s.loads.iter().any(|x| !x.suppressed && (x.kind == LoadKind::Gravity || !x.faces.is_empty()));
+    match s.analysis {
+        Analysis::Static => held && loaded,
+        Analysis::Transient => loaded,
+        Analysis::Modal => true,
+    }
+}
+
+/// A count like 12 300 or 1.2 million.
+fn fmt_count(n: f64) -> String {
+    if n >= 1e6 {
+        format!("{} million", sig(n / 1e6))
+    } else if n >= 1e4 {
+        format!("{:.0} 000", (n / 1e3).round())
+    } else {
+        format!("{:.0}", n.round())
+    }
 }
 
 fn take_mesh(app: &mut App) {
@@ -502,7 +568,14 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
     let Some(si) = index(app) else { return };
     let studio = app.ws.sims[si].studio.min(studios.len().saturating_sub(1));
     let bodies: Vec<(BodyId, String)> = app.studio_bodies(studio).iter().filter(|b| !b.surface).map(|b| (b.id, b.name.clone())).collect();
-    let part_material = study_input(app, &app.ws.sims[si]).part_material.filter(|m| fea::elastic(m).is_some());
+    let input = study_input(app, &app.ws.sims[si]);
+    let part_material = input.part_material.clone().filter(|m| fea::elastic(m).is_some());
+    let mut used: Vec<String> = fea::part_materials(&app.ws.sims[si], &input).into_iter().map(|m| m.0).collect();
+    if used.is_empty() {
+        used.push(fea::material_of(&app.ws.sims[si], &input).0);
+    }
+    used.sort();
+    used.dedup();
     let mut need_build = None;
     let s = &mut app.ws.sims[si];
     row(ui, "Part Studio", |ui| {
@@ -561,6 +634,24 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+    // the structural loss factor of each material: it damps transient runs and sets each mode's decay
+    for name in &used {
+        let lib = fea::loss_factor(name);
+        let cur = s.loss_factors.iter().find(|(k, _)| k.eq_ignore_ascii_case(name)).map(|x| *x.1).unwrap_or(lib);
+        let mut v = cur;
+        let label = if used.len() > 1 { format!("η {name}") } else { "Loss factor η".to_string() };
+        row(ui, &label, |ui| {
+            ui.add(egui::DragValue::new(&mut v).range(0.0..=1.0).speed(0.0001).max_decimals(5)).on_hover_text(format!(
+                "Structural damping: the share of strain energy lost per radian of vibration (library value for {name}: {lib}). It damps transient runs and gives each mode its ring-down time"
+            ));
+        });
+        if v != cur {
+            s.loss_factors.retain(|k, _| !k.eq_ignore_ascii_case(name));
+            if (v - lib).abs() > 1e-12 {
+                s.loss_factors.insert(name.clone(), v);
+            }
+        }
+    }
     if let Some(i) = need_build {
         crate::cam_ui::ensure_built(app, i);
     }
@@ -736,7 +827,12 @@ fn modal_settings(app: &mut App, ui: &mut Ui) {
         ui.add(egui::DragValue::new(&mut s.modes).range(1..=50).speed(0.1));
     });
     if s.supports.iter().all(|x| x.suppressed || x.faces.is_empty()) {
-        ui.label(RichText::new("No supports: the part vibrates freely, and the first six modes (about 0 Hz) are it moving as a whole.").color(theme::muted()).size(12.0));
+        ui.label(
+            RichText::new("No supports: the part vibrates freely. Six modes at 0 Hz (it moving as a whole) come first, then the modes asked for.").color(theme::muted()).size(12.0),
+        );
+    }
+    if s.loads.iter().any(|l| !l.suppressed) {
+        ui.label(RichText::new("Loads are ignored here: natural frequencies depend only on the supports, the shape and the material.").color(theme::muted()).size(12.0));
     }
 }
 
@@ -832,12 +928,27 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
             m.mesh_size = size;
         }
     }
-    if let Some(o) = &app.fea.outcome {
-        let m = &o.mesh;
-        ui.label(RichText::new(format!("{} nodes · {} elements (10-node)", m.nodes.len(), m.tets.len())).color(theme::muted()).size(12.0));
-        if m.min_dihedral < 8.0 {
-            ui.label(RichText::new(format!("Some elements are flat (smallest angle {:.0}°); try another element size", m.min_dihedral)).color(theme::error_soft()).size(12.0));
+    let input = study_input(app, &s);
+    let want = size.unwrap_or(auto);
+    match app.fea.outcome.as_ref().filter(|o| (o.mesh.size - input.used_size(want)).abs() <= 1e-9 * want.max(1.0)) {
+        Some(o) => {
+            let m = &o.mesh;
+            ui.label(RichText::new(format!("{} nodes · {} elements (10-node)", m.nodes.len(), m.tets.len())).color(theme::muted()).size(12.0));
+            if m.min_dihedral < 8.0 {
+                ui.label(RichText::new(format!("Some elements are flat (smallest angle {:.0}°); try another element size", m.min_dihedral)).color(theme::error_soft()).size(12.0));
+            }
         }
+        None if !input.tris.is_empty() => {
+            // before meshing: how big the mesh will be
+            let nodes = input.estimate_nodes(want);
+            let col = if 3.0 * nodes > BIG_MESH { theme::error_soft() } else { theme::muted() };
+            ui.label(RichText::new(format!("About {} nodes · {} unknowns", fmt_count(nodes), fmt_count(3.0 * nodes))).color(col).size(12.0));
+        }
+        None => {}
+    }
+    let used = input.used_size(want);
+    if !input.tris.is_empty() && used > want * 1.001 {
+        ui.label(RichText::new(format!("{} mm is too small for parts this big: {} mm is used", trim(want), trim(used))).color(theme::error_soft()).size(12.0));
     }
     ui.label(RichText::new("Smaller elements are more accurate but slower. Thin walls want at least two elements across.").color(theme::muted()).size(11.5));
 }
@@ -853,16 +964,43 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
             ui.add(egui::ProgressBar::new(f).desired_height(6.0));
         }
     }
+    if let Some((mk, n)) = app.fea.big.filter(|_| !app.fea.computing) {
+        ui.horizontal_wrapped(|ui| {
+            ui.add(icons::image("warning", 14.0).tint(theme::error_soft()));
+            ui.label(
+                RichText::new(format!(
+                    "This mesh would have about {} unknowns: solving it could take very long or run out of memory. Use a bigger element size, or mesh it anyway.",
+                    fmt_count(n)
+                ))
+                .color(theme::error_soft())
+                .size(12.0),
+            );
+        });
+        if ui.button("Mesh anyway").clicked() {
+            app.fea.allowed_big = Some(mk);
+            app.fea.key = 0;
+        }
+        return;
+    }
     if let Some(e) = app.fea.error.as_ref().filter(|_| !app.fea.computing) {
         ui.label(RichText::new(e).color(theme::error_soft()).size(12.5));
         return;
     }
     let Some(o) = app.fea.outcome.clone() else {
         if !app.fea.computing {
-            ui.label(RichText::new("Results appear here once the part is held and loaded.").color(theme::muted()).size(12.0));
+            let text = match study(app).map(|s| s.analysis) {
+                Some(Analysis::Transient) => "Results appear here once the part is loaded.",
+                _ => "Results appear here once the part is held and loaded.",
+            };
+            ui.label(RichText::new(text).color(theme::muted()).size(12.0));
         }
         return;
     };
+    // while a change is being solved, the numbers below are the previous result's
+    let stale = app.fea.computing;
+    if stale {
+        ui.label(RichText::new("The numbers below are from before your last change.").color(theme::muted()).italics().size(12.0));
+    }
     for w in &o.warnings {
         ui.horizontal_wrapped(|ui| {
             ui.add(icons::image("warning", 14.0).tint(theme::error_soft()));
@@ -889,10 +1027,23 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
             app.fea.scene_dirty = true;
         }
     });
+    row(ui, "Probes", |ui| {
+        if ui.checkbox(&mut app.fea.show_max, if modal { "mark max" } else if app.fea.field == Field::Safety { "mark min" } else { "mark max" }).on_hover_text("Mark where the value shown is largest (smallest for the factor of safety) and turn the view to it").changed() {
+            if app.fea.show_max {
+                go_to_extreme(app, &o);
+            }
+            app.fea.scene_dirty = true;
+        }
+        if !app.fea.pins.is_empty() && ui.small_button(format!("Clear {}", app.fea.pins.len())).on_hover_text("Remove the pinned probes").clicked() {
+            app.fea.pins.clear();
+        }
+    });
+    ui.label(RichText::new("Hover the part for values; click to pin a probe.").color(theme::muted()).size(11.5));
     ui.add_space(4.0);
+    let vcol = if stale { theme::muted() } else { theme::text() };
     let stat = |ui: &mut Ui, k: &str, v: String| {
         row(ui, k, |ui| {
-            ui.label(RichText::new(v).strong().size(12.5));
+            ui.label(RichText::new(v).strong().size(12.5).color(vcol));
         });
     };
     stat(ui, "Material", o.material.clone());
@@ -901,10 +1052,20 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
         Solution::Static { u, stress, reactions } => {
             let vm = stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max) as f64;
             stat(ui, "Max stress", format!("{} MPa", sig(vm)));
+            let pr: Vec<[f32; 3]> = stress.iter().map(crate::fea_solve::principal).collect();
+            let s1 = pr.iter().map(|p| p[0]).fold(f32::NEG_INFINITY, f32::max) as f64;
+            let s3 = pr.iter().map(|p| p[2]).fold(f32::INFINITY, f32::min) as f64;
+            row(ui, "Principal", |ui| {
+                ui.label(RichText::new(format!("{} / {} MPa", sig(s1), sig(s3))).strong().size(12.5).color(vcol))
+                    .on_hover_text("The largest tension (max principal stress) and the largest compression (min principal stress) anywhere in the part");
+            });
             stat(ui, "Max deflection", format!("{} mm", sig(fea::max_mag(u))));
-            let sf = o.mat.yield_mpa / vm.max(1e-12);
+            let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
+            let sf = stress.iter().zip(&y).map(|(s, y)| y / (crate::fea_solve::von_mises(s) as f64).max(1e-12)).fold(f64::INFINITY, f64::min);
             row(ui, "Factor of safety", |ui| {
-                let col = if sf < 1.0 {
+                let col = if stale {
+                    theme::muted()
+                } else if sf < 1.0 {
                     theme::error()
                 } else if sf < 2.0 {
                     Color32::from_rgb(0xe0, 0x9a, 0x20)
@@ -917,18 +1078,30 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
             if let Some(s) = study(app) {
                 for (id, r) in reactions {
                     if let Some(sp) = s.supports.iter().find(|x| x.id == *id) {
-                        stat(ui, &format!("{} reaction", sp.name), format!("{} N", sig(r.length())));
+                        // round-off (below a micronewton) shows as 0
+                        let r = r.map(|v| if v.abs() < 1e-6 { 0.0 } else { v });
+                        row(ui, &format!("{} reaction", sp.name), |ui| {
+                            ui.vertical(|ui| {
+                                ui.label(RichText::new(format!("{} N", sig(r.length()))).strong().size(12.5).color(vcol));
+                                ui.label(RichText::new(format!("x {} · y {} · z {}", sig(r.x), sig(r.y), sig(r.z))).color(theme::muted()).size(11.5));
+                            });
+                        });
                     }
                 }
             }
         }
         Solution::Modal { modes } => {
             ui.label(RichText::new("Click a mode to see its shape.").color(theme::muted()).size(12.0));
-            egui::Grid::new("fea-modes").num_columns(3).spacing([12.0, 2.0]).show(ui, |ui| {
+            let damped = modes.iter().any(|m| m.loss > 0.0);
+            egui::Grid::new("fea-modes").num_columns(if damped { 5 } else { 3 }).spacing([10.0, 2.0]).show(ui, |ui| {
                 ui.label(RichText::new("Mode").color(theme::muted()).size(11.5));
                 ui.label(RichText::new("Frequency").color(theme::muted()).size(11.5));
                 ui.label(RichText::new("Mass X / Y / Z").color(theme::muted()).size(11.5))
                     .on_hover_text("Effective mass along each axis, as a share of the whole: modes with a large share are the ones shaking excites");
+                if damped {
+                    ui.label(RichText::new("η").color(theme::muted()).size(11.5)).on_hover_text("The mode's loss factor: the materials' loss factors weighted by where it stores its strain energy");
+                    ui.label(RichText::new("−60 dB").color(theme::muted()).size(11.5)).on_hover_text("Ring-down time: how long the mode takes to die away to a thousandth of its amplitude");
+                }
                 ui.end_row();
                 for (i, m) in modes.iter().enumerate() {
                     if ui.add(egui::Button::selectable(app.fea.mode == i, RichText::new(format!("{}", i + 1)).size(12.5))).clicked() {
@@ -937,45 +1110,76 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
                         app.fea.stress_cache = None;
                         app.fea.scene_dirty = true;
                     }
-                    ui.label(RichText::new(format!("{} Hz", sig(m.freq))).size(12.5));
+                    let f = ui.label(RichText::new(format!("{} Hz", sig(m.freq))).size(12.5).color(if m.rigid { theme::muted() } else { theme::text() }));
+                    if m.rigid {
+                        f.on_hover_text("A rigid-body mode: the part moving as a whole, as nothing holds it");
+                    }
                     let p = m.participation.map(|x| format!("{:.0}", x * 100.0));
                     ui.label(RichText::new(format!("{} / {} / {} %", p[0], p[1], p[2])).color(theme::muted()).size(12.0));
+                    if damped {
+                        if m.loss > 0.0 && m.freq > 1.0 {
+                            ui.label(RichText::new(sig(m.loss)).color(theme::muted()).size(12.0));
+                            ui.label(RichText::new(fea::fmt_time(decay_60db(m.loss, m.freq))).color(theme::muted()).size(12.0));
+                        } else {
+                            ui.label("");
+                            ui.label("");
+                        }
+                    }
                     ui.end_row();
                 }
+                let sum = modes.iter().fold([0.0; 3], |a, m| [a[0] + m.participation[0], a[1] + m.participation[1], a[2] + m.participation[2]]);
+                ui.label(RichText::new("Sum").color(theme::muted()).size(11.5));
+                ui.label("");
+                ui.label(RichText::new(format!("{:.0} / {:.0} / {:.0} %", sum[0] * 100.0, sum[1] * 100.0, sum[2] * 100.0)).color(theme::muted()).size(12.0))
+                    .on_hover_text("Effective mass of the modes found: well short of 100 % means higher modes still matter for shaking along that axis");
+                ui.end_row();
             });
         }
         Solution::Transient(t) => {
             let peak = t.max_disp.iter().copied().fold(0.0, f64::max);
             let at = t.max_disp.iter().position(|x| *x == peak).map(|i| t.times[i]).unwrap_or(0.0);
             stat(ui, "Peak deflection", format!("{} mm at {}", sig(peak), fea::fmt_time(at)));
+            if let Some((vm, ts)) = o.peak_stress {
+                stat(ui, "Peak stress", format!("{} MPa at {}", sig(vm), fea::fmt_time(ts)));
+            }
+            if let Some(d) = t.decay {
+                stat(ui, "Ring-down (10 %)", fea::fmt_time(d));
+            }
             stat(ui, "First mode", format!("{} Hz", sig(t.f1)));
             stat(ui, "Time step", fea::fmt_time(t.dt));
             let fi = app.fea.frame.min(t.frames.len().saturating_sub(1));
             if let Some((tf, _)) = t.frames.get(fi) {
                 stat(ui, "Showing", fea::fmt_time(*tf));
             }
+            ui.add_space(4.0);
             history_plot(app, ui, t);
+            ui.add_space(12.0);
         }
     }
 }
 
-/// Largest displacement over time, with the frame being shown.
+/// Largest displacement over time, with the frame being shown: a caption above, the curve with some
+/// headroom, and the time axis below.
 fn history_plot(app: &mut App, ui: &mut Ui, t: &crate::fea_solve::TransientResult) {
-    let w = ui.available_width();
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 90.0), Sense::click_and_drag());
-    let p = ui.painter_at(rect);
-    p.rect_filled(rect, 4.0, theme::panel_2());
     let tmax = t.times.last().copied().unwrap_or(1.0).max(1e-12);
     let dmax = t.max_disp.iter().copied().fold(0.0, f64::max).max(1e-12);
-    let inner = rect.shrink2(egui::vec2(6.0, 8.0));
+    ui.label(RichText::new(format!("Largest displacement over time (peak {} mm)", sig(dmax))).color(theme::muted()).size(11.5));
+    let w = ui.available_width();
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 100.0), Sense::click_and_drag());
+    let p = ui.painter_at(rect);
+    p.rect_filled(rect, 4.0, theme::panel_2());
+    let inner = egui::Rect::from_min_max(rect.min + egui::vec2(6.0, 8.0), rect.max - egui::vec2(6.0, 18.0));
     let to = |tt: f64, d: f64| Pos2::new(inner.left() + (tt / tmax) as f32 * inner.width(), inner.bottom() - (d / dmax) as f32 * inner.height());
+    p.hline(inner.x_range(), inner.bottom(), Stroke::new(1.0, theme::border()));
     let pts: Vec<Pos2> = t.times.iter().zip(&t.max_disp).map(|(a, b)| to(*a, *b)).collect();
     p.add(egui::Shape::line(pts, Stroke::new(1.5, theme::accent())));
     if let Some((tf, _)) = t.frames.get(app.fea.frame) {
         let x = to(*tf, 0.0).x;
         p.vline(x, inner.y_range(), Stroke::new(1.0, theme::text()));
     }
-    p.text(rect.left_top() + egui::vec2(6.0, 2.0), egui::Align2::LEFT_TOP, format!("max displacement · peak {} mm", sig(dmax)), egui::FontId::proportional(10.5), theme::muted());
+    let font = egui::FontId::proportional(10.5);
+    p.text(Pos2::new(inner.left(), rect.bottom() - 2.0), egui::Align2::LEFT_BOTTOM, "0", font.clone(), theme::muted());
+    p.text(Pos2::new(inner.right(), rect.bottom() - 2.0), egui::Align2::RIGHT_BOTTOM, fea::fmt_time(tmax), font, theme::muted());
     if let Some(pos) = resp.interact_pointer_pos().filter(|_| resp.clicked() || resp.dragged()) {
         let tt = ((pos.x - inner.left()) / inner.width()).clamp(0.0, 1.0) as f64 * tmax;
         if let Some((i, _)) = t.frames.iter().enumerate().min_by(|a, b| (a.1.0 - tt).abs().total_cmp(&(b.1.0 - tt).abs())) {
@@ -985,6 +1189,12 @@ fn history_plot(app: &mut App, ui: &mut Ui, t: &crate::fea_solve::TransientResul
             app.fea.scene_dirty = true;
         }
     }
+}
+
+/// Time for a mode with loss factor `eta` at `freq` Hz to die away to a thousandth (−60 dB): its amplitude
+/// falls as e^(−η ω t / 2).
+pub fn decay_60db(eta: f64, freq: f64) -> f64 {
+    2.0 * 1000f64.ln() / (eta * std::f64::consts::TAU * freq).max(1e-300)
 }
 
 /// Three significant figures.
@@ -1046,14 +1256,21 @@ fn field_values(app: &mut App, o: &Outcome, disp: &[DVec3]) -> (Vec<f32>, f32, f
         Field::DispX => disp.iter().map(|d| d.x as f32).collect(),
         Field::DispY => disp.iter().map(|d| d.y as f32).collect(),
         Field::DispZ => disp.iter().map(|d| d.z as f32).collect(),
-        Field::Stress | Field::Safety => {
+        Field::Stress | Field::Safety | Field::Principal1 | Field::Principal3 => {
             let s = current_stress(app, o).unwrap_or_default();
-            let vm: Vec<f32> = s.iter().map(crate::fea_solve::von_mises).collect();
-            if field == Field::Safety { vm.iter().map(|v| (o.mat.yield_mpa as f32 / v.max(1e-9)).min(10.0)).collect() } else { vm }
+            match field {
+                Field::Principal1 => s.iter().map(|x| crate::fea_solve::principal(x)[0]).collect(),
+                Field::Principal3 => s.iter().map(|x| crate::fea_solve::principal(x)[2]).collect(),
+                Field::Safety => {
+                    let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
+                    s.iter().zip(&y).map(|(x, y)| (*y as f32 / crate::fea_solve::von_mises(x).max(1e-9)).min(10.0)).collect()
+                }
+                _ => s.iter().map(crate::fea_solve::von_mises).collect(),
+            }
         }
     };
     let unit = match field {
-        Field::Stress => " MPa",
+        Field::Stress | Field::Principal1 | Field::Principal3 => " MPa",
         Field::Safety => "",
         _ if modal => " (relative)",
         _ => " mm",
@@ -1347,6 +1564,74 @@ fn ray_tri(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
     (t > 0.0).then_some(t)
 }
 
+/// The surface node of the shown result nearest the cursor (within 10 points), facing the viewer.
+fn probe_node(app: &App, o: &Outcome, disp: &[DVec3], k: f64, l: Vec2) -> Option<u32> {
+    let cam = &app.camera;
+    let eye = cam.back.as_dvec3();
+    let mut best: Option<(f32, u32)> = None;
+    for (f, _) in &o.mesh.faces {
+        let p = |i: usize| o.mesh.nodes[f[i] as usize] + disp[f[i] as usize] * k;
+        if (p(1) - p(0)).cross(p(2) - p(0)).dot(eye) <= 0.0 {
+            continue;
+        }
+        for &nd in f {
+            let s = cam.project((o.mesh.nodes[nd as usize] + disp[nd as usize] * k).as_vec3());
+            let d = s.distance(l);
+            if d < 10.0 && best.map(|b| d < b.0).unwrap_or(true) {
+                best = Some((d, nd));
+            }
+        }
+    }
+    best.map(|b| b.1)
+}
+
+/// The node where the shown field is at its extreme: the smallest factor of safety or principal stress
+/// (the worst compression), else the largest value.
+fn extreme(vals: &[f32], field: Field, modal: bool) -> Option<u32> {
+    let low = !modal && matches!(field, Field::Safety | Field::Principal3);
+    let it = vals.iter().enumerate().filter(|(_, v)| v.is_finite());
+    let best = if low { it.min_by(|a, b| a.1.total_cmp(b.1)) } else { it.max_by(|a, b| a.1.total_cmp(b.1)) };
+    best.map(|b| b.0 as u32)
+}
+
+/// Turn the view to look at the extreme of the shown field.
+fn go_to_extreme(app: &mut App, o: &Outcome) {
+    let Some(disp) = current_disp(app, o) else { return };
+    let modal = matches!(o.solution, Solution::Modal { .. });
+    let (vals, ..) = field_values(app, o, &disp);
+    let field = if modal { Field::Disp } else { app.fea.field };
+    if let Some(nd) = extreme(&vals, field, modal) {
+        let k = deform_scale(app, o);
+        app.camera.target = (o.mesh.nodes[nd as usize] + disp[nd as usize] * k).as_vec3();
+        app.fea.scene_dirty = true;
+    }
+}
+
+/// A box of text lines (the first one strong) next to `at`, kept inside `clip`.
+fn probe_box(painter: &egui::Painter, at: Pos2, lines: &[String], clip: egui::Rect) {
+    let galleys: Vec<_> = lines
+        .iter()
+        .enumerate()
+        .map(|(i, l)| painter.layout_no_wrap(l.clone(), egui::FontId::proportional(if i == 0 { 13.0 } else { 11.5 }), if i == 0 { theme::text() } else { theme::muted() }))
+        .collect();
+    let w = galleys.iter().map(|g| g.size().x).fold(0.0, f32::max) + 14.0;
+    let h = galleys.iter().map(|g| g.size().y).sum::<f32>() + 8.0;
+    let mut r = egui::Rect::from_min_size(at, egui::vec2(w, h));
+    if r.right() > clip.right() - 4.0 {
+        r = r.translate(egui::vec2(-(w + 28.0), 0.0));
+    }
+    if r.bottom() > clip.bottom() - 4.0 {
+        r = r.translate(egui::vec2(0.0, clip.bottom() - 4.0 - r.bottom()));
+    }
+    painter.rect(r, 5.0, theme::label_bg(), Stroke::new(1.0, theme::border()), egui::StrokeKind::Inside);
+    let mut y = r.top() + 4.0;
+    for g in galleys {
+        let gh = g.size().y;
+        painter.galley(Pos2::new(r.left() + 7.0, y), g, theme::text());
+        y += gh;
+    }
+}
+
 fn step_anim(app: &mut App, ctx: &egui::Context) {
     if !app.fea.playing {
         app.fea.last_tick = None;
@@ -1433,8 +1718,26 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 app.fea.scene_dirty = true;
             }
         }
-    } else if app.fea.hover.take().is_some() {
-        app.fea.scene_dirty = true;
+    } else {
+        if app.fea.hover.take().is_some() {
+            app.fea.scene_dirty = true;
+        }
+        // a click on the result pins a probe there (or removes the one there)
+        if resp.clicked() && app.fea.show_results {
+            if let (Some(o), Some(l)) = (app.fea.outcome.clone(), local) {
+                if let Some(disp) = current_disp(app, &o) {
+                    let k = deform_scale(app, &o);
+                    if let Some(nd) = probe_node(app, &o, &disp, k, l) {
+                        match app.fea.pins.iter().position(|p| *p == nd) {
+                            Some(i) => {
+                                app.fea.pins.remove(i);
+                            }
+                            None => app.fea.pins.push(nd),
+                        }
+                    }
+                }
+            }
+        }
     }
     if !app.fea.fitted && study(app).map(|s| !app.studio_bodies(s.studio).is_empty()).unwrap_or(false) {
         app.fea.fitted = true;
@@ -1474,7 +1777,9 @@ fn overlay(app: &mut App, ui: &mut Ui, painter: &egui::Painter, rect: egui::Rect
         line = match &o.solution {
             Solution::Static { u, stress, .. } => {
                 let vm = stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max) as f64;
-                format!("Max stress {} MPa · max displacement {} mm · factor of safety {}", sig(vm), sig(fea::max_mag(u)), sig((o.mat.yield_mpa / vm.max(1e-12)).min(1e4)))
+                let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
+                let sf = stress.iter().zip(&y).map(|(s, y)| y / (crate::fea_solve::von_mises(s) as f64).max(1e-12)).fold(f64::INFINITY, f64::min);
+                format!("Max stress {} MPa · max displacement {} mm · factor of safety {}", sig(vm), sig(fea::max_mag(u)), sig(sf.min(1e4)))
             }
             Solution::Modal { modes } => modes.get(app.fea.mode).map(|m| format!("Mode {} · {} Hz", app.fea.mode + 1, sig(m.freq))).unwrap_or_default(),
             Solution::Transient(t) => t.frames.get(app.fea.frame).map(|f| format!("t = {}", fea::fmt_time(f.0))).unwrap_or_default(),
@@ -1519,33 +1824,57 @@ fn overlay(app: &mut App, ui: &mut Ui, painter: &egui::Painter, rect: egui::Rect
         let text = if rev && i == 4 && hi >= 10.0 { "≥ 10".to_string() } else { sig(v as f64) };
         painter.text(Pos2::new(bar.right() + 6.0, y), egui::Align2::LEFT_CENTER, text, egui::FontId::proportional(11.0), theme::text());
     }
-    // probe: the value at the surface node nearest the cursor
-    if let Some(l) = local {
-        let k = deform_scale(app, &o);
-        let cam = &app.camera;
-        let mut best: Option<(f32, u32)> = None;
-        let eye = cam.back.as_dvec3();
-        for (f, _) in &o.mesh.faces {
-            let p = |i: usize| o.mesh.nodes[f[i] as usize] + disp[f[i] as usize] * k;
-            if (p(1) - p(0)).cross(p(2) - p(0)).dot(eye) <= 0.0 {
-                continue;
+    // probes: pinned ones, the extreme value, and the node nearest the cursor
+    let field = if modal { Field::Disp } else { app.fea.field };
+    let stress = if modal { None } else { current_stress(app, &o) };
+    let k = deform_scale(app, &o);
+    let screen = |nd: u32| {
+        let s = app.camera.project((o.mesh.nodes[nd as usize] + disp[nd as usize] * k).as_vec3());
+        rect.left_top() + egui::vec2(s.x, s.y)
+    };
+    for (i, nd) in app.fea.pins.clone().into_iter().enumerate() {
+        if nd as usize >= vals.len() {
+            continue;
+        }
+        let at = screen(nd);
+        painter.circle(at, 4.0, theme::accent(), Stroke::new(1.5, theme::window()));
+        let text = format!("{} · {}{}", i + 1, sig(vals[nd as usize] as f64), unit);
+        let w = painter.layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), theme::text()).size().x;
+        crate::viewport::label_box(painter, at + egui::vec2(w / 2.0 + 14.0, -14.0), &text, theme::text());
+    }
+    if app.fea.show_max {
+        if let Some(nd) = extreme(&vals, field, modal) {
+            let at = screen(nd);
+            painter.circle_stroke(at, 9.0, Stroke::new(2.0, theme::error()));
+            painter.circle_filled(at, 3.0, theme::error());
+            let low = !modal && matches!(field, Field::Safety | Field::Principal3);
+            let text = format!("{} {}{}", if low { "min" } else { "max" }, sig(vals[nd as usize] as f64), unit);
+            let w = painter.layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), theme::error()).size().x;
+            crate::viewport::label_box(painter, at + egui::vec2(-w / 2.0 - 16.0, -16.0), &text, theme::error());
+        }
+    }
+    if let Some(nd) = local.and_then(|l| probe_node(app, &o, &disp, k, l)) {
+        let at = screen(nd);
+        painter.circle_filled(at, 3.5, theme::text());
+        let n = nd as usize;
+        let p = o.mesh.nodes[n];
+        let mut lines = vec![format!("{}{}", sig(vals[n] as f64), unit), format!("at {}, {}, {} mm", sig(p.x), sig(p.y), sig(p.z))];
+        match (&stress, field) {
+            (Some(st), Field::Stress | Field::Safety | Field::Principal1 | Field::Principal3) => {
+                let x = &st[n];
+                let pr = crate::fea_solve::principal(x);
+                lines.push(format!("von Mises {} MPa", sig(crate::fea_solve::von_mises(x) as f64)));
+                lines.push(format!("σ1 {} · σ2 {} · σ3 {} MPa", sig(pr[0] as f64), sig(pr[1] as f64), sig(pr[2] as f64)));
+                lines.push(format!("σx {} · σy {} · σz {}", sig(x[0] as f64), sig(x[1] as f64), sig(x[2] as f64)));
+                lines.push(format!("τxy {} · τyz {} · τzx {}", sig(x[3] as f64), sig(x[4] as f64), sig(x[5] as f64)));
             }
-            for &nd in f {
-                let s = cam.project((o.mesh.nodes[nd as usize] + disp[nd as usize] * k).as_vec3());
-                let d = s.distance(l);
-                if d < 10.0 && best.map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, nd));
-                }
+            _ => {
+                let d = disp[n];
+                let u = if modal { " (relative)" } else { " mm" };
+                lines.push(format!("x {} · y {} · z {}{u}", sig(d.x), sig(d.y), sig(d.z)));
             }
         }
-        if let Some((_, nd)) = best {
-            let s = cam.project((o.mesh.nodes[nd as usize] + disp[nd as usize] * k).as_vec3());
-            let at = rect.left_top() + egui::vec2(s.x, s.y);
-            painter.circle_filled(at, 3.5, theme::text());
-            let text = format!("{}{}", sig(vals[nd as usize] as f64), unit);
-            let w = painter.layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), theme::text()).size().x;
-            crate::viewport::label_box(painter, at + egui::vec2(w / 2.0 + 14.0, -14.0), &text, theme::text());
-        }
+        probe_box(painter, at + egui::vec2(14.0, -12.0), &lines, rect);
     }
     // playback strip for transient results
     if let Solution::Transient(t) = &o.solution {

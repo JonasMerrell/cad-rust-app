@@ -406,6 +406,8 @@ pub struct Input {
     pub materials: Vec<Option<String>>,
     /// Smallest radius of the parts' circular edges (holes, fillets).
     pub min_radius: Option<f64>,
+    /// The plane of each global face that is planar, as its CAD normal and a point on it (None: curved).
+    pub planar: Vec<Option<(DVec3, DVec3)>>,
 }
 
 /// Triangles of the parts a study analyses (all visible parts when none are chosen).
@@ -431,6 +433,10 @@ pub fn input(bodies: &[BodyMesh], doc: Option<&Document>, sel: &[BodyId]) -> Inp
             out.body.push(bi);
         }
         face_base += b.faces.len().max(1) as u32;
+        out.planar.extend(b.faces.iter().map(|f| Some((DVec3::from(f.normal).normalize_or_zero(), DVec3::from(f.center))).filter(|p| f.planar && p.0 != DVec3::ZERO)));
+        if b.faces.is_empty() {
+            out.planar.push(None);
+        }
         for e in &b.edges {
             if let Some((_, _, r)) = e.circle {
                 out.min_radius = Some(out.min_radius.map_or(r, |m: f64| m.min(r)));
@@ -472,6 +478,19 @@ impl Input {
             }
         }
         best.map(|b| b.1)
+    }
+
+    /// The element size the mesher uses for `size`: no smaller than 1/400 of the parts' largest side.
+    pub fn used_size(&self, size: f64) -> f64 {
+        let (lo, hi) = self.bounds();
+        size.max((hi - lo).max_element() / 400.0).max(1e-6)
+    }
+
+    /// Rough node count of a mesh with elements `size` across (some 24 nodes of 10-node tetrahedra per
+    /// cube of that size), before the refinement near holes and fillets.
+    pub fn estimate_nodes(&self, size: f64) -> f64 {
+        let vol: f64 = self.tris.iter().map(|t| t[0].dot(t[1].cross(t[2])) / 6.0).sum::<f64>().abs();
+        24.0 * vol / self.used_size(size).powi(3)
     }
 
     /// Element size from the parts' volume, small enough for a quick solve.
@@ -528,6 +547,8 @@ pub struct Outcome {
     pub solution: Solution,
     pub warnings: Vec<String>,
     pub mass: f64,
+    /// Transient: the largest von Mises stress (MPa) over the kept frames and its time (s).
+    pub peak_stress: Option<(f64, f64)>,
 }
 
 impl Outcome {
@@ -598,6 +619,10 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             Arc::new(mesh_input(study, input, size, cancel)?)
         }
     };
+    let mut warnings = vec![];
+    if mesh.size > size * 1.001 {
+        warnings.push(format!("Element size {} mm is too small for parts this big: used {} mm", crate::expr::trim(size, 4), crate::expr::trim(mesh.size, 4)));
+    }
     let (mut material, mat) = material_of(study, input);
     let parts = part_materials(study, input);
     let body_mats: Vec<Elastic> = if mesh.body.is_empty() { vec![] } else { parts.iter().map(|p| p.1).collect() };
@@ -606,7 +631,6 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         names.dedup();
         material = names.join(" + ");
     }
-    let mut warnings = vec![];
     let nn = mesh.nodes.len();
     // mesh faces of a list of picks, and the area of the CAD faces they stand for
     let faces_of = |picks: &[FacePick], what: &str, warnings: &mut Vec<String>| -> (Vec<usize>, f64) {
@@ -633,28 +657,53 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             ));
         }
     };
+    let (blo, bhi) = input.bounds();
+    // how far a node may lie off a planar face and still be on it (the mesher's cut points sit a hair off)
+    let on_plane = (bhi - blo).length() * 1e-4;
     let mut fixes = vec![];
-    let mut support_nodes = vec![];
+    // (support id, Fixed?, the nodes it holds with the direction each is held along (Fixed: none))
+    let mut support_nodes: Vec<(u64, Vec<(u32, Option<DVec3>)>)> = vec![];
+    let mut unheld = vec![];
     for s in study.supports.iter().filter(|s| !s.suppressed) {
         let (fs, cad) = faces_of(&s.faces, &s.name, &mut warnings);
         if fs.is_empty() {
             warnings.push(format!("{} has no faces", s.name));
+            unheld.push(s.name.clone());
+            continue;
         }
         coarse(&s.name, &fs, Some(cad), &mut warnings);
         let mut nodes: Vec<u32> = fs.iter().flat_map(|f| mesh.faces[*f].0).collect();
         nodes.sort_unstable();
         nodes.dedup();
         match s.kind {
-            SupportKind::Fixed => fixes.push(Fix::Fixed(nodes.clone())),
+            SupportKind::Fixed => {
+                fixes.push(Fix::Fixed(nodes.clone()));
+                support_nodes.push((s.id, nodes.iter().map(|v| (*v, None)).collect()));
+            }
             SupportKind::Roller => {
-                // each node slides along the surface: normal averaged over its faces
-                let mut normal = vec![DVec3::ZERO; nn];
+                // a node on a planar face slides in that face's plane (the CAD normal, not the facets', which
+                // tilt next to holes and fillets); a node only on curved faces slides along its averaged
+                // facet normal
+                let mut planes: Vec<Vec<DVec3>> = vec![vec![]; nn];
+                let mut curved = vec![DVec3::ZERO; nn];
                 for f in &fs {
-                    let t = &mesh.faces[*f].0;
-                    let p = |i: usize| mesh.nodes[t[i] as usize];
-                    let n = (p(1) - p(0)).cross(p(2) - p(0));
-                    for v in t {
-                        normal[*v as usize] += n;
+                    let (t, cad) = &mesh.faces[*f];
+                    match input.planar.get(*cad as usize).copied().flatten() {
+                        Some((n, at)) => {
+                            for v in t {
+                                let ps = &mut planes[*v as usize];
+                                if (mesh.nodes[*v as usize] - at).dot(n).abs() <= on_plane && !ps.iter().any(|q| q.dot(n).abs() > 1.0 - 1e-6) {
+                                    ps.push(n);
+                                }
+                            }
+                        }
+                        None => {
+                            let p = |i: usize| mesh.nodes[t[i] as usize];
+                            let n = (p(1) - p(0)).cross(p(2) - p(0));
+                            for v in t {
+                                curved[*v as usize] += n;
+                            }
+                        }
                     }
                 }
                 let snap = |d: DVec3| {
@@ -664,13 +713,23 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                         None => d,
                     }
                 };
-                fixes.push(Fix::Roller(nodes.iter().map(|v| (*v, snap(normal[*v as usize]))).collect()));
+                let mut held: Vec<(u32, DVec3)> = vec![];
+                for v in &nodes {
+                    let ps = &planes[*v as usize];
+                    if !ps.is_empty() {
+                        held.extend(ps.iter().map(|n| (*v, snap(*n))));
+                    } else if curved[*v as usize] != DVec3::ZERO && !fs.iter().any(|f| input.planar.get(mesh.faces[*f].1 as usize).copied().flatten().is_some() && mesh.faces[*f].0.contains(v)) {
+                        held.push((*v, snap(curved[*v as usize])));
+                    }
+                }
+                support_nodes.push((s.id, held.iter().map(|(v, n)| (*v, Some(*n))).collect()));
+                fixes.push(Fix::Roller(held));
             }
         }
-        support_nodes.push((s.id, nodes));
     }
     let mut force = vec![0.0; 3 * nn];
     let mut any_load = false;
+    let mut unloaded = vec![];
     for l in study.loads.iter().filter(|l| !l.suppressed) {
         let dir = DVec3::from(l.direction).normalize_or_zero();
         match l.kind {
@@ -691,6 +750,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 }
                 if fs.is_empty() {
                     warnings.push(format!("{} has no faces", l.name));
+                    unloaded.push(l.name.clone());
                 } else {
                     coarse(&l.name, &fs, cad, &mut warnings);
                     let area = crate::fea_solve::area_of(&mesh, &fs);
@@ -702,19 +762,25 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             }
         }
     }
-    let held = study.supports.iter().any(|s| !s.suppressed && !s.faces.is_empty());
+    // a support or load whose faces are gone says so, rather than asking for one to be added
+    let no_faces = |names: &[String]| format!("{} {} no faces on the parts: pick {} faces again", names.join(", "), if names.len() == 1 { "has" } else { "have" }, if names.len() == 1 { "its" } else { "their" });
+    let held = !fixes.is_empty();
     if study.analysis == Analysis::Static {
         if !held {
-            return Err("Add a support (Fixed or Roller) so the part is held".into());
-        }
-        if !any_load {
-            return Err("Add a load (Force, Pressure or Gravity)".into());
+            return Err(if unheld.is_empty() { "Add a support (Fixed or Roller) so the part is held".into() } else { no_faces(&unheld) });
         }
     }
-    if study.analysis == Analysis::Transient && !any_load {
-        return Err("Add a load (Force, Pressure or Gravity)".into());
+    if study.analysis != Analysis::Modal && !any_load {
+        return Err(if unloaded.is_empty() { "Add a load (Force, Pressure or Gravity)".into() } else { no_faces(&unloaded) });
+    }
+    if study.analysis == Analysis::Modal && study.loads.iter().any(|l| !l.suppressed) {
+        warnings.push("Loads are ignored in a modal analysis: natural frequencies depend only on the supports, the shape and the material".into());
+    }
+    if let Some(w) = hole_warning(input, &mesh) {
+        warnings.push(w);
     }
     let problem = Problem { mesh: &mesh, mat, body_mats: body_mats.clone(), fixes, force, couplings: vec![], masses: vec![] };
+    let free = crate::fea_solve::is_free(&problem);
     let solution = match study.analysis {
         Analysis::Static => {
             progress("Solving", 0.3);
@@ -732,14 +798,20 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                     ));
                 }
             }
-            let reactions = support_nodes.iter().map(|(id, nodes)| (*id, crate::fea_solve::reaction(&mesh, &mat, &body_mats, &r.u, &problem.force, nodes))).collect();
+            let reactions = reactions(&mesh, &mat, &body_mats, &r.u, &problem.force, &support_nodes);
+            if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &stress, None) {
+                warnings.push(w);
+            }
             Solution::Static { u: r.u, stress, reactions }
         }
         Analysis::Modal => {
             progress("Finding modes", 0.3);
-            let modes = crate::fea_solve::modal(&problem, study.modes.clamp(1, 50), cancel)?;
-            if !held {
-                warnings.push("No supports: the first six modes are the part moving freely (about 0 Hz)".into());
+            // a free part: its six rigid-body modes come first, then the modes asked for
+            let want = study.modes.clamp(1, 50);
+            let modes = crate::fea_solve::modal(&problem, if free { want + 6 } else { want }, cancel)?;
+            let rigid = modes.iter().filter(|m| m.rigid).count();
+            if rigid > 0 {
+                warnings.push(format!("No supports: the first {rigid} modes are the part moving as a whole (0 Hz); its vibration modes follow"));
             }
             Solution::Modal { modes }
         }
@@ -757,8 +829,116 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             Solution::Transient(r)
         }
     };
+    // the largest stress over a time history, and when
+    let peak_stress = match &solution {
+        Solution::Transient(t) => {
+            let mut best: Option<(f64, f64, Vec<[f32; 6]>)> = None;
+            for (tt, u) in &t.frames {
+                if cancel() {
+                    return Err("cancelled".into());
+                }
+                let s = crate::fea_solve::nodal_stress(&mesh, &mat, &body_mats, u);
+                let vm = s.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max) as f64;
+                if best.as_ref().is_none_or(|b| vm > b.0) {
+                    best = Some((vm, *tt, s));
+                }
+            }
+            best.map(|(vm, tt, s)| {
+                if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &s, Some(tt)) {
+                    warnings.push(w);
+                }
+                (vm, tt)
+            })
+        }
+        _ => None,
+    };
     let mass = mesh.tets.iter().enumerate().map(|(ei, t)| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * tet10_volume(&mesh, t)).sum();
-    Ok(Outcome { mesh, material, mat, body_mats, solution, warnings, mass })
+    Ok(Outcome { mesh, material, mat, body_mats, solution, warnings, mass, peak_stress })
+}
+
+/// Reaction force of each support. Every node's reaction is counted once: a Fixed support takes all of it
+/// (the first Fixed support holding the node), a Roller only the part along the direction it holds the node,
+/// leaving the rest (along another roller's normal) to the next support.
+fn reactions(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], u: &[f64], force: &[f64], supports: &[(u64, Vec<(u32, Option<DVec3>)>)]) -> Vec<(u64, DVec3)> {
+    let mut nodes: Vec<u32> = supports.iter().flat_map(|s| s.1.iter().map(|x| x.0)).collect();
+    nodes.sort_unstable();
+    nodes.dedup();
+    let r = crate::fea_solve::node_reactions(mesh, mat, body_mats, u, force, &nodes);
+    let mut rem: std::collections::HashMap<u32, DVec3> = nodes.into_iter().zip(r).collect();
+    let mut out: Vec<(u64, DVec3)> = supports.iter().map(|s| (s.0, DVec3::ZERO)).collect();
+    for (k, (_, held)) in supports.iter().enumerate() {
+        for (v, _) in held.iter().filter(|x| x.1.is_none()) {
+            if let Some(x) = rem.get_mut(v) {
+                out[k].1 += *x;
+                *x = DVec3::ZERO;
+            }
+        }
+    }
+    for (k, (_, held)) in supports.iter().enumerate() {
+        for (v, n) in held.iter().filter_map(|x| x.1.map(|n| (x.0, n))) {
+            if let Some(x) = rem.get_mut(&v) {
+                let c = n * x.dot(n);
+                out[k].1 += c;
+                *x -= c;
+            }
+        }
+    }
+    out
+}
+
+/// Yield strength at each node: the weakest material of the elements around it.
+pub fn node_yield(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic]) -> Vec<f64> {
+    let mut y = vec![f64::INFINITY; mesh.nodes.len()];
+    for (ei, t) in mesh.tets.iter().enumerate() {
+        let ym = crate::fea_solve::mat_at(mesh, body_mats, mat, ei).yield_mpa;
+        for v in t {
+            y[*v as usize] = y[*v as usize].min(ym);
+        }
+    }
+    y.iter().map(|v| if v.is_finite() { *v } else { mat.yield_mpa }).collect()
+}
+
+/// A warning when the stress somewhere passes the material's yield strength (at time `at` of a time history).
+fn yield_warning(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], stress: &[[f32; 6]], at: Option<f64>) -> Option<String> {
+    let y = node_yield(mesh, mat, body_mats);
+    let (k, ratio) = stress.iter().zip(&y).enumerate().map(|(k, (s, y))| (k, crate::fea_solve::von_mises(s) as f64 / y.max(1e-12))).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    if ratio <= 1.0 {
+        return None;
+    }
+    let vm = crate::fea_solve::von_mises(&stress[k]);
+    let when = at.map(|t| format!(" at {}", fmt_time(t))).unwrap_or_default();
+    Some(format!(
+        "The stress reaches {vm:.0} MPa{when}, above the yield strength ({:.0} MPa): the part would bend permanently there, which a linear analysis does not model",
+        y[k]
+    ))
+}
+
+/// A warning when the smallest hole or fillet has too few elements across for its peak stress to be
+/// trusted.
+fn hole_warning(input: &Input, mesh: &Mesh) -> Option<String> {
+    let radii = crate::fea_mesh::face_radii(&input.tris, &input.face);
+    // average edge length of the mesh on each curved face
+    let mut len: std::collections::HashMap<u32, (f64, usize)> = std::collections::HashMap::new();
+    for (f, cad) in &mesh.faces {
+        if !radii.contains_key(cad) {
+            continue;
+        }
+        let e = len.entry(*cad).or_default();
+        for (a, b) in [(0, 1), (1, 2), (2, 0)] {
+            e.0 += mesh.nodes[f[a] as usize].distance(mesh.nodes[f[b] as usize]);
+            e.1 += 1;
+        }
+    }
+    let (r, h) = len.iter().filter(|x| x.1.1 > 0).map(|(f, (sum, n))| (radii[f], sum / *n as f64)).min_by(|a, b| (a.0 / a.1).total_cmp(&(b.0 / b.1)))?;
+    let across = 2.0 * r / h;
+    // about six elements across a hole resolve its peak stress to within a few percent
+    (across < 5.0).then(|| {
+        format!(
+            "The smallest hole or fillet (radius {} mm) is only about {across:.0} elements across, so the peak stress there is rough: try an element size of {} mm or less",
+            crate::expr::trim(r, 3),
+            crate::expr::trim(nice(mesh.size.max(h) * across / 6.0), 3)
+        )
+    })
 }
 
 fn tet10_volume(m: &Mesh, t: &[u32; 10]) -> f64 {
@@ -774,5 +954,106 @@ pub fn fmt_time(t: f64) -> String {
         format!("{:.3} ms", t * 1e3)
     } else {
         format!("{:.1} µs", t * 1e6)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// A 60 × 30 × 4 mm plate with a 10 mm hole in the middle, as the CAD tessellation would give it.
+    /// Faces: 0 top, 1 bottom, 2 x = 0, 3 x = 60, 4 y = 0, 5 y = 30, 6 the hole.
+    fn plate() -> Input {
+        let (w, h, t, r, c) = (60.0, 30.0, 4.0, 5.0, DVec3::new(30.0, 15.0, 0.0));
+        // rays from the hole's centre: 48 around plus the four corners, so the outline keeps its corners
+        let mut ang: Vec<f64> = (0..48).map(|i| i as f64 * std::f64::consts::TAU / 48.0).collect();
+        for (x, y) in [(w, h), (0.0, h), (0.0, 0.0), (w, 0.0)] {
+            ang.push((y - c.y).atan2(x - c.x).rem_euclid(std::f64::consts::TAU));
+        }
+        ang.sort_by(f64::total_cmp);
+        let hole = |a: f64, z: f64| DVec3::new(c.x + r * a.cos(), c.y + r * a.sin(), z);
+        let edge = |a: f64, z: f64| {
+            let d = DVec3::new(a.cos(), a.sin(), 0.0);
+            let s = [if d.x > 1e-12 { (w - c.x) / d.x } else if d.x < -1e-12 { -c.x / d.x } else { f64::INFINITY }, if d.y > 1e-12 { (h - c.y) / d.y } else if d.y < -1e-12 { -c.y / d.y } else { f64::INFINITY }];
+            let p = c + d * s[0].min(s[1]);
+            DVec3::new(p.x.clamp(0.0, w), p.y.clamp(0.0, h), z)
+        };
+        let mut input = Input { planar: vec![], ..Default::default() };
+        let mut add = |input: &mut Input, f: u32, a: DVec3, b: DVec3, cc: DVec3| {
+            input.tris.push([a, b, cc]);
+            input.face.push(f);
+            input.body.push(0);
+        };
+        for i in 0..ang.len() {
+            let (a0, a1) = (ang[i], ang[(i + 1) % ang.len()]);
+            // top (outward +z) and bottom (−z) rings, hole wall (normal towards the axis)
+            add(&mut input, 0, hole(a0, t), edge(a0, t), edge(a1, t));
+            add(&mut input, 0, hole(a0, t), edge(a1, t), hole(a1, t));
+            add(&mut input, 1, hole(a0, 0.0), edge(a1, 0.0), edge(a0, 0.0));
+            add(&mut input, 1, hole(a0, 0.0), hole(a1, 0.0), edge(a1, 0.0));
+            add(&mut input, 6, hole(a0, 0.0), hole(a0, t), hole(a1, t));
+            add(&mut input, 6, hole(a0, 0.0), hole(a1, t), hole(a1, 0.0));
+        }
+        let q = |input: &mut Input, f: u32, p: [DVec3; 4]| {
+            input.tris.push([p[0], p[1], p[2]]);
+            input.tris.push([p[0], p[2], p[3]]);
+            input.face.extend([f; 2]);
+            input.body.extend([0; 2]);
+        };
+        let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+        q(&mut input, 2, [v(0.0, 0.0, 0.0), v(0.0, 0.0, t), v(0.0, h, t), v(0.0, h, 0.0)]);
+        q(&mut input, 3, [v(w, 0.0, 0.0), v(w, h, 0.0), v(w, h, t), v(w, 0.0, t)]);
+        q(&mut input, 4, [v(0.0, 0.0, 0.0), v(w, 0.0, 0.0), v(w, 0.0, t), v(0.0, 0.0, t)]);
+        q(&mut input, 5, [v(0.0, h, 0.0), v(0.0, h, t), v(w, h, t), v(w, h, 0.0)]);
+        let n = [v(0.0, 0.0, 1.0), v(0.0, 0.0, -1.0), v(-1.0, 0.0, 0.0), v(1.0, 0.0, 0.0), v(0.0, -1.0, 0.0), v(0.0, 1.0, 0.0)];
+        let at = [v(30.0, 3.0, t), v(30.0, 3.0, 0.0), v(0.0, 15.0, 2.0), v(w, 15.0, 2.0), v(30.0, 0.0, 2.0), v(30.0, h, 2.0)];
+        input.planar = (0..6).map(|i| Some((n[i], at[i]))).chain([None]).collect();
+        input.bodies = vec![(1, 0)];
+        input.materials = vec![None];
+        input.min_radius = Some(r);
+        input
+    }
+
+    fn pick(p: [f64; 3], n: [f64; 3]) -> FacePick {
+        FacePick { point: p, normal: n }
+    }
+
+    #[test]
+    fn roller_beside_a_hole_slides_in_its_plane() {
+        // the plate pulled by 3000 N, held by rollers on its far end, a side and the bottom (symmetry planes)
+        let input = plate();
+        let mut s = Study { material: "Steel".into(), mesh_size: Some(2.0), ..Default::default() };
+        for (p, n) in [([60.0, 15.0, 2.0], [1.0, 0.0, 0.0]), ([30.0, 0.0, 2.0], [0.0, -1.0, 0.0]), ([30.0, 3.0, 0.0], [0.0, 0.0, -1.0])] {
+            let id = s.add_support(SupportKind::Roller);
+            s.support_mut(id).unwrap().faces = vec![pick(p, n)];
+        }
+        let id = s.add_load(LoadKind::Force);
+        let l = s.load_mut(id).unwrap();
+        l.value = 3000.0;
+        l.direction = [-1.0, 0.0, 0.0];
+        l.faces = vec![pick([0.0, 15.0, 2.0], [-1.0, 0.0, 0.0])];
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let Solution::Static { stress, reactions, .. } = &o.solution else { panic!() };
+        // each roller only pushes along its normal, and the end takes the whole load
+        let r: Vec<DVec3> = reactions.iter().map(|x| x.1).collect();
+        assert!((r[0].x - 3000.0).abs() < 1.0 && r[0].y.abs() < 1e-6 && r[0].z.abs() < 1e-6, "{r:?}");
+        assert!(r[1].x.abs() < 1e-6 && r[1].z.abs() < 1e-6 && r[2].x.abs() < 1e-6 && r[2].y.abs() < 1e-6, "{r:?}");
+        let total = r.iter().fold(DVec3::ZERO, |a, b| a + *b);
+        assert!((total - DVec3::new(3000.0, 0.0, 0.0)).length() < 1.0, "{total}");
+        // net-section stress 37.5 MPa × Kt 2.3 (Peterson, d/W = 1/3): about 86 MPa
+        let vm = stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max);
+        assert!((vm - 86.0).abs() < 8.0, "{vm}");
+    }
+
+    #[test]
+    fn missing_load_faces_say_so() {
+        let input = plate();
+        let mut s = Study { material: "Steel".into(), mesh_size: Some(5.0), ..Default::default() };
+        let id = s.add_support(SupportKind::Fixed);
+        s.support_mut(id).unwrap().faces = vec![pick([60.0, 15.0, 2.0], [1.0, 0.0, 0.0])];
+        let id = s.add_load(LoadKind::Force);
+        s.load_mut(id).unwrap().faces = vec![pick([300.0, 15.0, 2.0], [1.0, 0.0, 0.0])];
+        let e = run(&s, &input, None, &|_, _| {}, &|| false).err().unwrap();
+        assert!(e.starts_with("Force 1 has no faces"), "{e}");
     }
 }
