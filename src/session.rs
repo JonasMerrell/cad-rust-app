@@ -229,7 +229,7 @@ impl App {
             let _ = serde_json::to_writer(&mut h, if i == self.cur_studio { &self.doc } else { &s.doc });
         }
         let ws = &self.ws;
-        let _ = serde_json::to_writer(&mut h, &(&ws.assemblies, &ws.drawings, &ws.cams, &ws.sims, &ws.tab_order));
+        let _ = serde_json::to_writer(&mut h, &(&ws.assemblies, &ws.drawings, &ws.cams, &ws.sims, &ws.pcbs, &ws.tab_order));
         for v in &ws.versions {
             h.0.write(v.name.as_bytes());
             h.0.write(v.created.as_bytes());
@@ -564,6 +564,7 @@ impl App {
         self.asm.dialog = None;
         self.cam = Default::default();
         self.fea = Default::default();
+        self.pcb = Default::default();
         self.renaming_tab = None;
         self.changed();
         let t = s.tab;
@@ -573,6 +574,7 @@ impl App {
             Tab::Drawing(i) => i < self.ws.drawings.len(),
             Tab::Cam(i) => i < self.ws.cams.len(),
             Tab::Sim(i) => i < self.ws.sims.len(),
+            Tab::Pcb(i) => i < self.ws.pcbs.len(),
         };
         self.tab = Tab::Studio(self.cur_studio);
         self.switch_tab(if valid { t } else { Tab::Studio(self.cur_studio) });
@@ -897,7 +899,7 @@ pub fn delete_effects(app: &App, t: Tab) -> Vec<String> {
                 out.push(format!("{}: no longer continues from it", c.name));
             }
         }
-        Tab::Drawing(_) | Tab::Sim(_) => {}
+        Tab::Drawing(_) | Tab::Sim(_) | Tab::Pcb(_) => {}
     }
     out
 }
@@ -924,6 +926,7 @@ fn tab_name(app: &App, t: Tab) -> String {
         Tab::Drawing(i) => ws.drawings.get(i).map(|s| s.name.clone()),
         Tab::Cam(i) => ws.cams.get(i).map(|s| s.name.clone()),
         Tab::Sim(i) => ws.sims.get(i).map(|s| s.name.clone()),
+        Tab::Pcb(i) => ws.pcbs.get(i).map(|s| s.name.clone()),
     }
     .unwrap_or_default()
 }

@@ -151,6 +151,7 @@ pub struct App {
     pub dwg: crate::drawing_ui::DrawUi,
     pub cam: crate::cam_ui::CamUi,
     pub fea: crate::fea_ui::FeaUi,
+    pub pcb: crate::pcb_ui::PcbUi,
     pub renaming_tab: Option<(crate::workspace::Tab, String)>,
     pub version_name: String,
     pub restore_version: Option<usize>,
@@ -251,6 +252,7 @@ impl App {
             dwg: Default::default(),
             cam: Default::default(),
             fea: Default::default(),
+            pcb: Default::default(),
             renaming_tab: None,
             version_name: String::new(),
             restore_version: None,
@@ -370,6 +372,9 @@ impl App {
         if let crate::workspace::Tab::Sim(_) = self.tab {
             return crate::fea_ui::undo(self);
         }
+        if let crate::workspace::Tab::Pcb(_) = self.tab {
+            return crate::pcb_ui::undo(self);
+        }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return crate::asm_ui::undo(self);
         }
@@ -400,6 +405,9 @@ impl App {
         }
         if let crate::workspace::Tab::Sim(_) = self.tab {
             return crate::fea_ui::redo(self);
+        }
+        if let crate::workspace::Tab::Pcb(_) = self.tab {
+            return crate::pcb_ui::redo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return crate::asm_ui::redo(self);
@@ -438,6 +446,9 @@ impl App {
         if let crate::workspace::Tab::Sim(_) = self.tab {
             return crate::fea_ui::can_undo(self);
         }
+        if let crate::workspace::Tab::Pcb(_) = self.tab {
+            return crate::pcb_ui::can_undo(self);
+        }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return !self.asm.undo.is_empty();
         }
@@ -453,6 +464,9 @@ impl App {
         }
         if let crate::workspace::Tab::Sim(_) = self.tab {
             return crate::fea_ui::can_redo(self);
+        }
+        if let crate::workspace::Tab::Pcb(_) = self.tab {
+            return crate::pcb_ui::can_redo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
             return !self.asm.redo.is_empty();
@@ -661,7 +675,7 @@ impl App {
             return;
         }
         self.sync_ws();
-        let counts = |w: &crate::workspace::Workspace| [w.studios.len(), w.assemblies.len(), w.drawings.len(), w.cams.len(), w.sims.len()];
+        let counts = |w: &crate::workspace::Workspace| [w.studios.len(), w.assemblies.len(), w.drawings.len(), w.cams.len(), w.sims.len(), w.pcbs.len()];
         let (old, new) = (counts(&self.ws), counts(&ws));
         let cur = self.cur_studio;
         if cur < ws.studios.len() && serde_json::to_string(&ws.studios[cur].doc).ok() != serde_json::to_string(&self.doc).ok() {
@@ -681,6 +695,7 @@ impl App {
             self.dwg = Default::default();
             self.cam = Default::default();
             self.fea = Default::default();
+            self.pcb = Default::default();
         }
         self.picks.clear();
         if self.result.bodies.is_empty() {
@@ -690,12 +705,13 @@ impl App {
         self.session.poke = true;
         self.changed();
         // show a tab Claude just made, or the Part Studio it moved to
-        let made = (1..5).rev().find(|&k| new[k] > old[k]);
+        let made = (1..6).rev().find(|&k| new[k] > old[k]);
         let t = match made {
             Some(1) => Tab::Assembly(new[1] - 1),
             Some(2) => Tab::Drawing(new[2] - 1),
             Some(3) => Tab::Cam(new[3] - 1),
             Some(4) => Tab::Sim(new[4] - 1),
+            Some(5) => Tab::Pcb(new[5] - 1),
             _ if studio != self.cur_studio && studio < new[0] => Tab::Studio(studio),
             _ => match self.tab {
                 Tab::Studio(_) => Tab::Studio(self.cur_studio),
@@ -703,6 +719,7 @@ impl App {
                 Tab::Drawing(i) if i < new[2] => self.tab,
                 Tab::Cam(i) if i < new[3] => self.tab,
                 Tab::Sim(i) if i < new[4] => self.tab,
+                Tab::Pcb(i) if i < new[5] => self.tab,
                 _ => Tab::Studio(self.cur_studio),
             },
         };
@@ -1160,6 +1177,7 @@ impl App {
                 crate::workspace::Tab::Drawing(_) => crate::drawing_ui::shortcuts(self, ctx),
                 crate::workspace::Tab::Cam(_) => crate::cam_ui::shortcuts(self, ctx),
                 crate::workspace::Tab::Sim(_) => crate::fea_ui::shortcuts(self, ctx),
+                crate::workspace::Tab::Pcb(_) => crate::pcb_ui::shortcuts(self, ctx),
                 _ if self.sketch.is_some() => crate::sketcher::shortcuts(self, ctx),
                 _ => {
                     if pressed(Key::A) && self.dialog.is_none() {
@@ -1210,6 +1228,7 @@ impl App {
             crate::workspace::Tab::Drawing(_) => return crate::drawing_ui::shortcuts(self, ctx),
             crate::workspace::Tab::Cam(_) => return crate::cam_ui::shortcuts(self, ctx),
             crate::workspace::Tab::Sim(_) => return crate::fea_ui::shortcuts(self, ctx),
+            crate::workspace::Tab::Pcb(_) => return crate::pcb_ui::shortcuts(self, ctx),
             _ => {}
         }
         if self.sketch.is_some() {
@@ -1548,6 +1567,7 @@ impl App {
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::toolbar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::toolbar(self, ui),
                     crate::workspace::Tab::Sim(_) => crate::fea_ui::toolbar(self, ui),
+                    crate::workspace::Tab::Pcb(_) => crate::pcb_ui::toolbar(self, ui),
                     _ if self.sketch.is_some() => crate::sketcher::toolbar(self, ui),
                     _ => self.model_tools(ui),
                 }
@@ -2602,6 +2622,8 @@ impl App {
             "Insert views, add dimensions and notes, then export".to_string()
         } else if let crate::workspace::Tab::Cam(_) = self.tab {
             "Set up the stock, add tools and operations, simulate, then export G-code · Space plays the simulation".to_string()
+        } else if let crate::workspace::Tab::Pcb(_) = self.tab {
+            crate::pcb_ui::hint(self)
         } else if let crate::workspace::Tab::Sim(_) = self.tab {
             "Add supports and loads, click their faces, then read the results · Space animates, hover for values".to_string()
         } else if let Some(s) = &self.sketch {
@@ -2693,6 +2715,7 @@ impl App {
                 Tab::Drawing(i) => (t, self.ws.drawings[i].name.clone(), "drawing"),
                 Tab::Cam(i) => (t, self.ws.cams[i].name.clone(), "cam"),
                 Tab::Sim(i) => (t, self.ws.sims[i].name.clone(), "simulation"),
+                Tab::Pcb(i) => (t, self.ws.pcbs[i].name.clone(), "pcb"),
             })
             .collect();
         let n_tabs = tabs.len();
@@ -2725,9 +2748,13 @@ impl App {
                     action = Some(("new-sim", Tab::Studio(0)));
                     ui.close();
                 }
+                if ui.add(egui::Button::image_and_text(icons::image("pcb", 15.0).tint(theme::text()), "PCB")).clicked() {
+                    action = Some(("new-pcb", Tab::Studio(0)));
+                    ui.close();
+                }
             })
             .response
-            .on_hover_text("Add a Part Studio, Assembly, Drawing, Manufacture or Simulation tab");
+            .on_hover_text("Add a Part Studio, Assembly, Drawing, Manufacture, Simulation or PCB tab");
             ui.add_space(6.0);
             // tabs scroll sideways when they don't fit (phones)
             let reserve = if self.phone { 115.0 } else { 220.0 };
@@ -2898,6 +2925,7 @@ impl App {
             Tab::Drawing(i) => ws.drawings.get(i).map(|s| s.name.clone()),
             Tab::Cam(i) => ws.cams.get(i).map(|s| s.name.clone()),
             Tab::Sim(i) => ws.sims.get(i).map(|s| s.name.clone()),
+            Tab::Pcb(i) => ws.pcbs.get(i).map(|s| s.name.clone()),
         };
         match a {
             "rename" => self.renaming_tab = name_of(&self.ws, t).map(|n| (t, n)),
@@ -2919,6 +2947,7 @@ impl App {
                                 }
                             }
                             Tab::Sim(i) => self.ws.sims[i].name = text,
+                            Tab::Pcb(i) => self.ws.pcbs[i].name = text,
                         }
                         self.ws_mark();
                     }
@@ -2975,6 +3004,12 @@ impl App {
                 self.fea = Default::default();
                 self.switch_tab(Tab::Sim(n - 1));
             }
+            "new-pcb" => {
+                let n = self.ws.pcbs.len() + 1;
+                self.ws.pcbs.push(crate::pcb::Pcb::new(format!("PCB {n}")));
+                self.pcb = Default::default();
+                self.switch_tab(Tab::Pcb(n - 1));
+            }
             "duplicate" => {
                 self.sync_ws();
                 self.ws_checkpoint(format!("duplicate “{}”", name_of(&self.ws, t).unwrap_or_default()), None, matches!(t, Tab::Studio(_)));
@@ -3004,11 +3039,16 @@ impl App {
                         s.name = format!("{} copy", s.name);
                         self.ws.sims.push(s);
                     }
+                    Tab::Pcb(i) => {
+                        let mut s = self.ws.pcbs[i].clone();
+                        s.name = format!("{} copy", s.name);
+                        self.ws.pcbs.push(s);
+                    }
                 }
                 self.ws_mark();
             }
             "delete" => {
-                let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len() + self.ws.cams.len() + self.ws.sims.len();
+                let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len() + self.ws.cams.len() + self.ws.sims.len() + self.ws.pcbs.len();
                 if total <= 1 || (matches!(t, Tab::Studio(_)) && self.ws.studios.len() <= 1) {
                     self.flash("A document needs at least one Part Studio", ToastKind::Info);
                     return;
@@ -3094,6 +3134,10 @@ impl App {
                         self.ws.sims.remove(i);
                         self.fea = Default::default();
                     }
+                    Tab::Pcb(i) => {
+                        self.ws.pcbs.remove(i);
+                        self.pcb = Default::default();
+                    }
                 }
                 // mates to instances that went with the tab
                 let pruned: usize = self.ws.assemblies.iter_mut().map(crate::session::prune_orphans).sum();
@@ -3149,6 +3193,7 @@ impl App {
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
                     crate::workspace::Tab::Sim(_) => crate::fea_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Pcb(_) => crate::pcb_ui::sidebar(self, ui),
                     _ => self.sidebar(ui),
                 }
             });
@@ -3166,6 +3211,8 @@ impl App {
                     crate::cam_ui::toolbar(self, ui);
                 } else if let crate::workspace::Tab::Sim(_) = self.tab {
                     crate::fea_ui::toolbar(self, ui);
+                } else if let crate::workspace::Tab::Pcb(_) = self.tab {
+                    crate::pcb_ui::toolbar(self, ui);
                 } else if self.sketch.is_some() {
                     crate::sketcher::toolbar(self, ui);
                 } else {
@@ -3265,6 +3312,7 @@ impl eframe::App for App {
                     crate::workspace::Tab::Drawing(_) => crate::drawing_ui::sidebar(self, ui),
                     crate::workspace::Tab::Cam(_) => crate::cam_ui::sidebar(self, ui),
                     crate::workspace::Tab::Sim(_) => crate::fea_ui::sidebar(self, ui),
+                    crate::workspace::Tab::Pcb(_) => crate::pcb_ui::sidebar(self, ui),
                     _ => self.sidebar(ui),
                 }
             });
@@ -3284,6 +3332,7 @@ impl eframe::App for App {
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
             crate::workspace::Tab::Cam(_) => crate::cam_ui::viewport(self, ui),
             crate::workspace::Tab::Sim(_) => crate::fea_ui::viewport(self, ui),
+            crate::workspace::Tab::Pcb(_) => crate::pcb_ui::viewport(self, ui),
             _ => {
                 crate::viewport::show(self, ui);
                 if self.dialog.is_some() {

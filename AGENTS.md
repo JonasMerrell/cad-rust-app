@@ -100,6 +100,11 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 | `export_gcode` | G-code for GRBL, LinuxCNC, Fanuc or Mach3 |
 | `create_simulation` / `edit_simulation` | Simulation tabs: linear elastic static, modal or transient analysis with a material (or each part's own, bonded where parts touch), `loss_factors`, element size, Fixed/Roller supports and Force/Pressure/Gravity loads on face refs (`at` and `radius` for a small impact patch); with no supports, modal and transient are free-free |
 | `solve_simulation` / `render_simulation` | mesh and solve: max stress, deflection, factor of safety, reactions; natural frequencies, each mode's loss factor and 60 dB decay time; peak response over time; colour-map PNG on the deformed shape. Progress goes to stderr. Support and load faces are checked when the simulation is created or edited |
+| `create_pcb` / `pcb_edit` | PCB tabs: a schematic and a two-layer board (size or outline, thickness, mask colour, design rules); `pcb_edit` also places parts (`at`, `rot`, `side`), adds schematic wires and labels, mounting holes and copper pours, clears routing and lays parts out (`auto_place`) |
+| `pcb_add_parts` / `pcb_connect` | parts from the symbol library with their footprints; nets by pin (`{"GND": ["U1.1", "C1.2"]}`, pins by number or by name), drawn as wire stubs with labels and power/ground ports |
+| `pcb_route` / `check_pcb` | the autorouter (two layers, vias) or tracks and vias by hand; the design rule check |
+| `pcb_info` / `render_pcb` | parts with their pads, positions and nets, the netlist and airwires; PNG of the board or the schematic |
+| `export_pcb` / `pcb_3d` | Gerber and drill ZIP with BOM and pick-and-place CSVs; a Part Studio of the board and part bodies for assemblies and STEP |
 
 The tool descriptions returned by `tools/list` give the full argument formats,
 with a description, type and (where there is a fixed set) the allowed values of

@@ -24,6 +24,8 @@ mod cam;
 mod ws;
 #[path = "agent_fea.rs"]
 mod fea;
+#[path = "agent_pcb.rs"]
+mod pcb;
 #[path = "agent_query.rs"]
 pub(crate) mod query;
 #[path = "agent_schema.rs"]
@@ -1513,6 +1515,7 @@ pub(crate) fn tools() -> Value {
     .map(|mut v| {
         v.extend(cam::tools());
         v.extend(fea::tools());
+        v.extend(pcb::tools());
         schema::complete(&mut v);
         Value::Array(v)
     })
