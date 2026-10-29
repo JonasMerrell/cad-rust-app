@@ -88,6 +88,15 @@ pub struct Dim {
     /// Label offset from the dimension's anchor, in sketch units.
     #[serde(default)]
     pub offset: [f64; 2],
+    /// A reference (driven) dimension: it shows the measured size in parentheses and drives nothing.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub driven: bool,
+}
+
+impl Dim {
+    pub fn new(expr: impl Into<String>, offset: [f64; 2]) -> Dim {
+        Dim { expr: expr.into(), offset, driven: false }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -185,6 +194,13 @@ pub enum Constraint {
         b: Id,
         dim: Dim,
     },
+    /// Point `p` is as far from line `l` as point `q` is from line `m` (keeps an offset chain even).
+    EqualDistance {
+        p: Id,
+        l: Id,
+        q: Id,
+        m: Id,
+    },
 }
 
 impl Constraint {
@@ -230,6 +246,7 @@ impl Constraint {
             Radius { c, .. } | Diameter { c, .. } => vec![c],
             Fix { p, .. } => vec![p],
             Symmetric { a, b, l } => vec![a, b, l],
+            EqualDistance { p, l, q, m } => vec![p, l, q, m],
             HorizontalPts { a, b }
             | VerticalPts { a, b }
             | Parallel { a, b }
@@ -251,7 +268,7 @@ impl Constraint {
             Parallel { .. } => "parallel",
             Perpendicular { .. } => "perpendicular",
             Tangent { .. } => "tangent",
-            Equal { .. } => "equal",
+            Equal { .. } | EqualDistance { .. } => "equal",
             Midpoint { .. } => "midpoint",
             Fix { .. } => "fix",
             Symmetric { .. } => "mirrorSketch",
@@ -444,6 +461,10 @@ impl Sketch {
                     sub(a);
                     sub(b)
                 }
+                EqualDistance { p, q, .. } => {
+                    sub(p);
+                    sub(q)
+                }
                 _ => {}
             }
         }
@@ -493,7 +514,12 @@ impl Sketch {
 
     /// Solve all constraints, keeping the points in `hold` (e.g. the dragged one) as still as possible.
     pub fn solve(&mut self, env: &Env, hold: &[Id]) -> SolveStatus {
-        let sys = System::build(self, env);
+        self.solve_without(env, hold, &[])
+    }
+
+    /// Solve with the constraints at the indices in `skip` left out.
+    fn solve_without(&mut self, env: &Env, hold: &[Id], skip: &[usize]) -> SolveStatus {
+        let sys = System::build(self, env, skip);
         let mut st = SolveStatus { bad_dims: sys.bad_dims.clone(), ..Default::default() };
         let mut x = sys.x0.clone();
         let mut w = vec![1.0; x.len()];
@@ -559,6 +585,85 @@ impl Sketch {
     }
 }
 
+impl Sketch {
+    /// The constraints that, each taken out on its own, let the sketch solve again: what
+    /// stops a sketch that doesn't solve. Constraint `keep` (the one just changed) stays in.
+    pub fn conflicts(&self, env: &Env, keep: usize) -> Vec<usize> {
+        if self.constraints.len() > 400 {
+            return vec![];
+        }
+        (0..self.constraints.len())
+            .filter(|&i| i != keep && !self.constraints[i].dim().map(|d| d.driven).unwrap_or(false))
+            .filter(|&i| self.clone().solve_without(env, &[], &[i]).ok)
+            .collect()
+    }
+
+    /// The size a dimension measures on the current geometry: mm, or degrees for angles.
+    pub fn measure(&self, k: &Constraint) -> Option<f64> {
+        use Constraint::*;
+        let line = |l: Id| match self.curve(l).map(|c| &c.geom) {
+            Some(Geom::Line { a, b }) => Some((self.pv(*a), self.pv(*b))),
+            _ => None,
+        };
+        let radius = |c: Id| match self.curve(c).map(|c| &c.geom) {
+            Some(Geom::Circle { r, .. }) => Some(*r),
+            Some(Geom::Arc { c, a, .. }) => Some((self.pv(*a) - self.pv(*c)).length()),
+            _ => None,
+        };
+        Some(match *k {
+            Distance { a, b, .. } => (self.pv(b) - self.pv(a)).length(),
+            AxisDistance { a, b, axis, .. } => (self.pv(b) - self.pv(a))[axis as usize].abs(),
+            PointLineDistance { p, l, .. } => {
+                let (a, b) = line(l)?;
+                ((b - a).perp_dot(self.pv(p) - a) / (b - a).length().max(1e-12)).abs()
+            }
+            Length { l, .. } => {
+                let (a, b) = line(l)?;
+                (b - a).length()
+            }
+            Radius { c, .. } => radius(c)?,
+            Diameter { c, .. } => 2.0 * radius(c)?,
+            Angle { a, b, .. } => {
+                let ((p, q), (r, t)) = (line(a)?, line(b)?);
+                // the residual allows theta and theta + 180°: report the one in [0, 180)
+                (q - p).angle_to(t - r).to_degrees().rem_euclid(180.0)
+            }
+            _ => return None,
+        })
+    }
+
+    /// The points connected to `id` (a point or curve) through curves and constraints.
+    pub fn group_of(&self, id: Id) -> HashSet<Id> {
+        let mut links: HashMap<Id, Vec<Id>> = HashMap::new();
+        let mut link = |a: Id, b: Id| {
+            links.entry(a).or_default().push(b);
+            links.entry(b).or_default().push(a);
+        };
+        for c in &self.curves {
+            for p in Self::curve_points(&c.geom) {
+                link(c.id, p);
+            }
+        }
+        for k in &self.constraints {
+            let r = k.refs();
+            for w in r.windows(2) {
+                link(w[0], w[1]);
+            }
+        }
+        let mut seen: HashSet<Id> = [id].into();
+        let mut todo = vec![id];
+        while let Some(x) = todo.pop() {
+            for y in links.get(&x).into_iter().flatten() {
+                if seen.insert(*y) {
+                    todo.push(*y);
+                }
+            }
+        }
+        seen.retain(|x| self.is_point(*x));
+        seen
+    }
+}
+
 fn norm2(r: &[f64]) -> f64 {
     r.iter().map(|v| v * v).sum::<f64>()
 }
@@ -612,6 +717,28 @@ enum Res {
         d: f64,
     },
     RadiusIs(RIdx, f64),
+    /// The radius to `p` (an end shared with line a-b) is perpendicular to the line.
+    PerpAt {
+        p: usize,
+        c: usize,
+        a: usize,
+        b: usize,
+    },
+    /// `p` (an end two arcs share) lies on the line through both centres.
+    CollinearAt {
+        p: usize,
+        c1: usize,
+        c2: usize,
+    },
+    /// |dist(p, line a-b)| - |dist(q, line c-d)|
+    EqualDist {
+        p: usize,
+        a: usize,
+        b: usize,
+        q: usize,
+        c: usize,
+        d: usize,
+    },
     /// midpoint of p,q on line a-b and p-q perpendicular to it
     Symmetric {
         p: usize,
@@ -701,6 +828,23 @@ impl Res {
                 out.push((dd.perp_dot(p2(x, p) - p2(x, a)) / l).abs() - d)
             }
             Res::RadiusIs(r, v) => out.push(rad(x, r) - v),
+            Res::PerpAt { p, c, a, b } => {
+                let u = (p2(x, p) - p2(x, c)).normalize_or_zero();
+                let v = (p2(x, b) - p2(x, a)).normalize_or_zero();
+                out.push(u.dot(v) * 10.0)
+            }
+            Res::CollinearAt { p, c1, c2 } => {
+                let u = (p2(x, p) - p2(x, c1)).normalize_or_zero();
+                let v = (p2(x, p) - p2(x, c2)).normalize_or_zero();
+                out.push(u.perp_dot(v) * 10.0)
+            }
+            Res::EqualDist { p, a, b, q, c, d } => {
+                let dist = |p: usize, a: usize, b: usize| {
+                    let dd = p2(x, b) - p2(x, a);
+                    (dd.perp_dot(p2(x, p) - p2(x, a)) / dd.length().max(1e-9)).abs()
+                };
+                out.push(dist(p, a, b) - dist(q, c, d))
+            }
             Res::Symmetric { p, q, a, b } => {
                 let d = p2(x, b) - p2(x, a);
                 let l = d.length().max(1e-9);
@@ -728,6 +872,9 @@ impl Res {
             Res::EqualR(a, b) => [r(a), r(b)].concat(),
             Res::RadiusIs(rr, _) => r(rr),
             Res::Symmetric { p, q, a, b } => [pt(p), pt(q), pt(a), pt(b)].concat(),
+            Res::EqualDist { p, a, b, q, c, d } => [pt(p), pt(a), pt(b), pt(q), pt(c), pt(d)].concat(),
+            Res::PerpAt { p, c, a, b } => [pt(p), pt(c), pt(a), pt(b)].concat(),
+            Res::CollinearAt { p, c1, c2 } => [pt(p), pt(c1), pt(c2)].concat(),
         };
         v.sort_unstable();
         v.dedup();
@@ -736,7 +883,7 @@ impl Res {
 }
 
 impl System {
-    fn build(s: &Sketch, env: &Env) -> System {
+    fn build(s: &Sketch, env: &Env, skip: &[usize]) -> System {
         let mut x0 = vec![];
         let mut pidx = HashMap::new();
         let mut ridx = HashMap::new();
@@ -770,6 +917,10 @@ impl System {
         }
         let mut bad_dims = vec![];
         for (ki, k) in s.constraints.iter().enumerate() {
+            // reference dimensions only measure
+            if skip.contains(&ki) || k.dim().map(|d| d.driven).unwrap_or(false) {
+                continue;
+            }
             let val = |d: &Dim, kind: Kind| -> Option<f64> { expr::eval(&d.expr, kind, env).ok() };
             let pi = |id: Id| pidx.get(&id).copied();
             use Constraint::*;
@@ -804,7 +955,26 @@ impl System {
                         vec![Res::Perp(p, q, r, t)]
                     }
                     Tangent { a, b, inner } => {
-                        if let Some((la, lb)) = line(*a) {
+                        // Curves that already share an end point are tangent where they meet. Measuring that
+                        // directly matters: the distance form has a zero gradient there (it is at a minimum),
+                        // which hid the constraint from the rank count and over-reported the DOF.
+                        let ends = |id: Id| match curve(id) {
+                            Some(Geom::Line { a, b }) | Some(Geom::Arc { a, b, .. }) => vec![a, b],
+                            _ => vec![],
+                        };
+                        let centre = |id: Id| match curve(id) {
+                            Some(Geom::Arc { c, .. }) => Some(c),
+                            _ => None,
+                        };
+                        let shared = ends(*a).into_iter().find(|p| ends(*b).contains(p));
+                        let (ca, cb) = (centre(*a), centre(*b));
+                        if let Some(p) = shared.filter(|_| ca.is_some() || cb.is_some()) {
+                            match (line(*a).or(line(*b)), ca, cb) {
+                                (Some((la, lb)), Some(c), None) | (Some((la, lb)), None, Some(c)) => vec![Res::PerpAt { p: pi(p)?, c: pi(c)?, a: la, b: lb }],
+                                (None, Some(c1), Some(c2)) => vec![Res::CollinearAt { p: pi(p)?, c1: pi(c1)?, c2: pi(c2)? }],
+                                _ => return None,
+                            }
+                        } else if let Some((la, lb)) = line(*a) {
                             let (c, r) = circ(*b)?;
                             vec![Res::LineCircleTangent { a: la, b: lb, c, r }]
                         } else if let Some((la, lb)) = line(*b) {
@@ -851,6 +1021,11 @@ impl System {
                         let (p, q) = line(*a)?;
                         let (r, t) = line(*b)?;
                         vec![Res::Angle(p, q, r, t, val(dim, Kind::Angle)?)]
+                    }
+                    EqualDistance { p, l, q, m } => {
+                        let (a, b) = line(*l)?;
+                        let (c, d) = line(*m)?;
+                        vec![Res::EqualDist { p: pi(*p)?, a, b, q: pi(*q)?, c, d }]
                     }
                 })
             })();
@@ -999,7 +1174,7 @@ fn null_space(j: &[Vec<f64>], n: usize) -> (usize, Vec<Vec<f64>>) {
             break;
         }
         let piv = (row..m).max_by(|&i, &k| a[i][c].abs().total_cmp(&a[k][c].abs())).unwrap();
-        if a[piv][c].abs() < 1e-8 {
+        if a[piv][c].abs() < 1e-6 {
             continue;
         }
         a.swap(row, piv);
@@ -1199,11 +1374,11 @@ mod tests {
         s.constraints.push(Constraint::Vertical { l: l[1] });
         s.constraints.push(Constraint::Vertical { l: l[3] });
         s.constraints.push(Constraint::Fix { p: p[0], x: 0.0, y: 0.0 });
-        s.constraints.push(Constraint::Length { l: l[0], dim: Dim { expr: "40".into(), offset: [0.0; 2] } });
+        s.constraints.push(Constraint::Length { l: l[0], dim: Dim::new("40", [0.0; 2]) });
         let st = s.solve(&env, &[]);
         assert!(st.ok);
         assert_eq!(st.dof, 1);
-        s.constraints.push(Constraint::Length { l: l[1], dim: Dim { expr: "20".into(), offset: [0.0; 2] } });
+        s.constraints.push(Constraint::Length { l: l[1], dim: Dim::new("20", [0.0; 2]) });
         let st = s.solve(&env, &[]);
         assert!(st.ok);
         assert_eq!(st.dof, 0);
@@ -1231,6 +1406,119 @@ mod tests {
         assert!((d - r).abs() < 1e-6, "{d} {r}");
     }
 
+    /// A rectangle fixed at the origin with width and height dimensions: (sketch, lines).
+    fn defined_rectangle() -> (Sketch, Vec<Id>) {
+        let mut s = Sketch::default();
+        let p: Vec<Id> = [(0.0, 0.0), (40.0, 0.0), (40.0, 20.0), (0.0, 20.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        let l: Vec<Id> = (0..4).map(|i| s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false)).collect();
+        s.constraints.push(Constraint::Horizontal { l: l[0] });
+        s.constraints.push(Constraint::Horizontal { l: l[2] });
+        s.constraints.push(Constraint::Vertical { l: l[1] });
+        s.constraints.push(Constraint::Vertical { l: l[3] });
+        s.constraints.push(Constraint::Fix { p: p[0], x: 0.0, y: 0.0 });
+        s.constraints.push(Constraint::Length { l: l[0], dim: Dim::new("40", [0.0; 2]) });
+        s.constraints.push(Constraint::Length { l: l[1], dim: Dim::new("20", [0.0; 2]) });
+        (s, l)
+    }
+
+    #[test]
+    fn reference_dimensions_measure_without_driving() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let (mut s, l) = defined_rectangle();
+        let mut top = Dim::new("40", [0.0; 2]);
+        top.driven = true;
+        s.constraints.push(Constraint::Length { l: l[2], dim: top });
+        assert_eq!(s.solve(&env, &[]).dof, 0);
+        // changing the width still solves, and the reference follows
+        s.constraints[5].dim_mut().unwrap().expr = "55".into();
+        let st = s.solve(&env, &[]);
+        assert!(st.ok && st.dof == 0, "{st:?}");
+        assert!((s.measure(&s.constraints[7]).unwrap() - 55.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn conflicts_name_the_redundant_dimension() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let (mut s, l) = defined_rectangle();
+        // a second driving width: any new width now fails, and the culprit is found
+        s.constraints.push(Constraint::Length { l: l[2], dim: Dim::new("40", [0.0; 2]) });
+        assert!(s.solve(&env, &[]).ok);
+        s.constraints[5].dim_mut().unwrap().expr = "50".into();
+        assert!(!s.solve(&env, &[]).ok);
+        let c = s.conflicts(&env, 5);
+        assert!(c.contains(&7), "{c:?}");
+        assert!(!c.contains(&4) && !c.contains(&6), "{c:?}");
+    }
+
+    #[test]
+    fn groups_follow_curves_and_constraints() {
+        let mut s = Sketch::default();
+        let p: Vec<Id> = (0..4).map(|i| s.add_point(DVec2::new(i as f64, 0.0))).collect();
+        let l0 = s.add_curve(Geom::Line { a: p[0], b: p[1] }, false);
+        let l1 = s.add_curve(Geom::Line { a: p[2], b: p[3] }, false);
+        assert_eq!(s.group_of(l0), [p[0], p[1]].into());
+        assert_eq!(s.group_of(p[3]), [p[2], p[3]].into());
+        s.constraints.push(Constraint::Parallel { a: l0, b: l1 });
+        assert_eq!(s.group_of(p[0]).len(), 4);
+    }
+
+    #[test]
+    fn equal_distance_keeps_offsets_even() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        let b = s.add_point(DVec2::new(10.0, 0.0));
+        let base = s.add_curve(Geom::Line { a, b }, false);
+        let p = s.add_point(DVec2::new(0.0, 3.0));
+        let q = s.add_point(DVec2::new(5.0, 7.0));
+        s.constraints.push(Constraint::Fix { p: a, x: 0.0, y: 0.0 });
+        s.constraints.push(Constraint::Fix { p: b, x: 10.0, y: 0.0 });
+        s.constraints.push(Constraint::Fix { p, x: 0.0, y: 3.0 });
+        s.constraints.push(Constraint::EqualDistance { p: q, l: base, q: p, m: base });
+        assert!(s.solve(&env, &[]).ok);
+        assert!((s.pv(q).y.abs() - 3.0).abs() < 1e-6, "{}", s.pv(q));
+    }
+
+    #[test]
+    fn tangent_at_a_shared_end_counts_once() {
+        // a slot: two lines and two arcs, tangent where they meet, equal arcs, axis parallel:
+        // position, angle, length and radius are free, so 5 DOF at any size and angle
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        for (scale, ang) in [(1.0, 0.0), (37.0, 2.0), (250.0, 0.7)] {
+            let mut s = Sketch::default();
+            let at = |v: DVec2| DVec2::from_angle(ang).rotate(v) * scale;
+            let (c1, c2, n) = (at(DVec2::ZERO), at(DVec2::new(2.0, 0.0)), at(DVec2::new(0.0, 0.4)));
+            let a = s.add_point(c1);
+            let b = s.add_point(c2);
+            let p1 = s.add_point(c1 + n);
+            let p2 = s.add_point(c2 + n);
+            let p3 = s.add_point(c2 - n);
+            let p4 = s.add_point(c1 - n);
+            let l1 = s.add_curve(Geom::Line { a: p1, b: p2 }, false);
+            let l2 = s.add_curve(Geom::Line { a: p3, b: p4 }, false);
+            let a1 = s.add_curve(Geom::Arc { c: b, a: p3, b: p2 }, false);
+            let a2 = s.add_curve(Geom::Arc { c: a, a: p1, b: p4 }, false);
+            let axis = s.add_curve(Geom::Line { a, b }, true);
+            for (l, ar) in [(l1, a1), (l1, a2), (l2, a1), (l2, a2)] {
+                s.constraints.push(Constraint::Tangent { a: l, b: ar, inner: false });
+            }
+            s.constraints.push(Constraint::Equal { a: a1, b: a2 });
+            s.constraints.push(Constraint::Parallel { a: axis, b: l1 });
+            let st = s.solve(&env, &[]);
+            assert!(st.ok && st.dof == 5, "scale {scale}: {st:?}");
+            // one more tangent (to a free circle) takes one more
+            let c = s.add_point(at(DVec2::new(1.0, 3.0)));
+            let ci = s.add_curve(Geom::Circle { c, r: scale }, false);
+            assert_eq!(s.solve(&env, &[]).dof, 8);
+            s.constraints.push(Constraint::Tangent { a: l1, b: ci, inner: false });
+            assert_eq!(s.solve(&env, &[]).dof, 7);
+        }
+    }
+
     #[test]
     fn text_follows_anchor() {
         let mut s = Sketch::default();
@@ -1246,3 +1534,4 @@ mod tests {
         assert!(b.0.x > 45.0, "{b:?}");
     }
 }
+

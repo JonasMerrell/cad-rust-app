@@ -420,7 +420,14 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
                 continue;
             }
             let (a, b) = (vid(p.at(w[0])), vid(p.at(w[1])));
-            if a == b && matches!(seg, Seg::Line { .. }) {
+            // a sliver between two splits that merged into one vertex (e.g. where a line meets an arc
+            // tangentially) is no edge; only a whole circle may start and end at the same vertex
+            let sliver = match seg {
+                Seg::Arc { r, t0, t1, .. } => r * (t1 - t0).abs() < TOL * 100.0,
+                Seg::Poly { ref pts, .. } => pts.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f64>() < TOL * 100.0,
+                Seg::Line { .. } => true,
+            };
+            if a == b && sliver {
                 continue;
             }
             // skip duplicate overlapping edges

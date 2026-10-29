@@ -200,20 +200,25 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     if let Some((_, r)) = best {
         return Some(r);
     }
-    // model edges
-    let mut best: Option<(f32, Ref)> = None;
+    // model edges: the nearest one on screen that no face hides
+    let mut near: Vec<(f32, DVec3, Ref)> = vec![];
     for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
         for e in &b.edges {
             let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(Vec3::from(*p))).collect();
-            for w in pts.windows(2) {
+            for (k, w) in pts.windows(2).enumerate() {
                 let d = seg_px(w[0], w[1]);
-                if d < px * 0.85 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, Ref::Edge { point: e.mid, name: Default::default() }));
+                if d < px * 0.85 {
+                    // the 3D point under the cursor (the view is orthographic, so the screen parameter carries over)
+                    let dd = w[1] - w[0];
+                    let t = if dd.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(dd) / dd.length_squared()).clamp(0.0, 1.0) };
+                    let (p0, p1) = (Vec3::from(e.pts[k]).as_dvec3(), Vec3::from(e.pts[k + 1]).as_dvec3());
+                    near.push((d, p0 + (p1 - p0) * t as f64, Ref::Edge { point: e.mid, name: Default::default() }));
                 }
             }
         }
     }
-    if let Some((_, r)) = best {
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
         return Some(r);
     }
     // curve features
@@ -320,6 +325,28 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
     }
     best.map(|b| b.1)
+}
+
+/// Whether a face of a shown body lies in front of model point `p` (an edge point behind the part).
+fn occluded(app: &App, p: DVec3) -> bool {
+    let cam = &app.camera;
+    let (o, d) = cam.ray(cam.project(p.as_vec3()));
+    let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
+    let depth = (p - o).dot(d);
+    // faces that end at the edge meet the ray at its own depth: allow a few pixels of slack for tessellation
+    let (lo, hi) = app.model_bounds();
+    let slack = (cam.wpp() as f64 * 3.0).max((hi - lo).length() * 1e-4);
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        for tri in b.indices.chunks(3) {
+            let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+            if let Some(t) = ray_tri(o, d, v(tri[0]), v(tri[1]), v(tri[2])) {
+                if t < depth - slack && section_keeps(app, o + d * t) {
+                    return true;
+                }
+            }
+        }
+    }
+    false
 }
 
 fn section_keeps(app: &App, p: DVec3) -> bool {

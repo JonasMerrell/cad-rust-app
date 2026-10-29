@@ -1,5 +1,6 @@
 //! 2D drawings into sketches: DXF (lines, arcs, circles, polylines with bulges, splines, ellipses,
-//! block inserts) and SVG (every path, curves kept as fixed outlines).
+//! block inserts) and SVG (every path: circles, ellipses and circular arcs stay exact, other curves
+//! become fixed outlines).
 
 use std::collections::HashMap;
 
@@ -477,69 +478,227 @@ fn walk(g: &usvg::Group, to_mm: &dyn Fn(f32, f32) -> DVec2, d: &mut Drawing) {
                     tf.map_point(&mut q);
                     to_mm(q.x, q.y)
                 };
-                // one subpath at a time: straight ones become lines, curved ones fixed outlines
-                let mut pts: Vec<DVec2> = vec![];
-                let mut curved = false;
-                let flush = |pts: &mut Vec<DVec2>, curved: &mut bool, closed: bool, d: &mut Drawing| {
-                    if closed && pts.len() > 2 && pts[0].distance(*pts.last().unwrap()) < 1e-9 {
-                        pts.pop();
-                    }
-                    if pts.len() >= 2 {
-                        if *curved {
-                            d.items.push(Item::Poly { pts: std::mem::take(pts), closed });
-                        } else {
-                            let n = pts.len();
-                            let segs = if closed { n } else { n - 1 };
-                            for i in 0..segs {
-                                d.items.push(Item::Line(pts[i], pts[(i + 1) % n]));
-                            }
-                        }
-                    }
-                    pts.clear();
-                    *curved = false;
-                };
+                // one subpath at a time
+                let mut segs: Vec<Seg> = vec![];
+                let mut at = DVec2::ZERO;
+                let mut start = DVec2::ZERO;
                 for seg in p.data().segments() {
                     use usvg::tiny_skia_path::PathSegment as S;
                     match seg {
                         S::MoveTo(q) => {
-                            flush(&mut pts, &mut curved, false, d);
-                            pts.push(map(q));
+                            subpath(&mut segs, false, d);
+                            at = map(q);
+                            start = at;
                         }
-                        S::LineTo(q) => pts.push(map(q)),
+                        S::LineTo(q) => {
+                            let q = map(q);
+                            segs.push(Seg::Line(at, q));
+                            at = q;
+                        }
                         S::QuadTo(c, q) => {
-                            let (a, c, b) = (*pts.last().unwrap_or(&map(c)), map(c), map(q));
-                            let n = bezier_steps(&[a, c, b]);
-                            pts.extend((1..=n).map(|i| {
-                                let t = i as f64 / n as f64;
-                                a * (1.0 - t) * (1.0 - t) + c * 2.0 * t * (1.0 - t) + b * t * t
-                            }));
-                            curved = true;
+                            // as the equivalent cubic
+                            let (c, q) = (map(c), map(q));
+                            segs.push(Seg::Cubic([at, at + (c - at) * (2.0 / 3.0), q + (c - q) * (2.0 / 3.0), q]));
+                            at = q;
                         }
                         S::CubicTo(c1, c2, q) => {
-                            let (a, c1, c2, b) = (*pts.last().unwrap_or(&map(c1)), map(c1), map(c2), map(q));
-                            let n = bezier_steps(&[a, c1, c2, b]);
-                            pts.extend((1..=n).map(|i| {
-                                let t = i as f64 / n as f64;
-                                let u = 1.0 - t;
-                                a * u * u * u + c1 * 3.0 * t * u * u + c2 * 3.0 * t * t * u + b * t * t * t
-                            }));
-                            curved = true;
+                            let q = map(q);
+                            segs.push(Seg::Cubic([at, map(c1), map(c2), q]));
+                            at = q;
                         }
                         S::Close => {
-                            let start = pts.first().copied();
-                            flush(&mut pts, &mut curved, true, d);
-                            if let Some(s) = start {
-                                pts.push(s);
+                            if at.distance(start) > 1e-9 {
+                                segs.push(Seg::Line(at, start));
                             }
+                            subpath(&mut segs, true, d);
+                            at = start;
                         }
                     }
                 }
-                flush(&mut pts, &mut curved, false, d);
+                subpath(&mut segs, false, d);
             }
             usvg::Node::Image(_) => d.skip("IMAGE"),
             usvg::Node::Text(_) => d.skip("TEXT"),
         }
     }
+}
+
+/// A piece of an SVG subpath (quadratic Béziers are raised to cubics).
+#[derive(Clone, Copy, Debug)]
+enum Seg {
+    Line(DVec2, DVec2),
+    Cubic([DVec2; 4]),
+}
+
+fn cubic_at(c: &[DVec2; 4], t: f64) -> DVec2 {
+    let u = 1.0 - t;
+    c[0] * u * u * u + c[1] * 3.0 * t * u * u + c[2] * 3.0 * t * t * u + c[3] * t * t * t
+}
+
+/// Turn a subpath into items: straight pieces become lines; a closed run of curves that is an ellipse
+/// (what `<circle>` and `<ellipse>` become) a circle or ellipse; curves that are circular arcs (SVG `A`)
+/// arcs; anything else one fixed outline.
+fn subpath(segs: &mut Vec<Seg>, closed: bool, d: &mut Drawing) {
+    let segs = std::mem::take(segs);
+    let segs: Vec<Seg> = segs
+        .into_iter()
+        .filter(|s| match s {
+            Seg::Line(a, b) => a.distance(*b) > 1e-9,
+            Seg::Cubic(c) => c.iter().any(|p| p.distance(c[0]) > 1e-9),
+        })
+        .collect();
+    if segs.is_empty() {
+        return;
+    }
+    let curved = segs.iter().any(|s| matches!(s, Seg::Cubic(_)));
+    if curved && closed && segs.iter().all(|s| matches!(s, Seg::Cubic(_))) {
+        let pts: Vec<DVec2> = segs.iter().flat_map(|s| if let Seg::Cubic(c) = s { (0..8).map(|i| cubic_at(c, i as f64 / 8.0)).collect() } else { vec![] }).collect();
+        if let Some(it) = fit_ellipse(&pts) {
+            d.items.push(it);
+            return;
+        }
+    }
+    let arcs: Vec<Option<(DVec2, f64, f64)>> = segs.iter().map(|s| if let Seg::Cubic(c) = s { cubic_arc(c) } else { None }).collect();
+    if segs.iter().zip(&arcs).all(|(s, a)| matches!(s, Seg::Line(..)) || a.is_some()) {
+        // lines, and arcs merged where consecutive pieces continue the same circle
+        let mut run: Option<(DVec2, f64, DVec2, f64)> = None;
+        let flush = |run: &mut Option<(DVec2, f64, DVec2, f64)>, d: &mut Drawing| {
+            if let Some((c, r, start, sweep)) = run.take() {
+                if sweep.abs() >= TAU - 1e-6 {
+                    d.items.push(Item::Circle { c, r });
+                } else {
+                    let a = (start - c).to_angle();
+                    // items run counter-clockwise
+                    let (a0, a1) = if sweep > 0.0 { (a, a + sweep) } else { (a + sweep, a) };
+                    d.items.push(Item::Arc { c, r, a0, a1 });
+                }
+            }
+        };
+        for (s, a) in segs.iter().zip(&arcs) {
+            match (s, a) {
+                (Seg::Line(p, q), _) => {
+                    flush(&mut run, d);
+                    d.items.push(Item::Line(*p, *q));
+                }
+                (Seg::Cubic(cb), Some((c, r, sweep))) => {
+                    let tol = 1e-3 * r + 1e-6;
+                    match &mut run {
+                        Some((rc, rr, _, rs)) if rc.distance(*c) < tol && (*rr - r).abs() < tol && rs.signum() == sweep.signum() => *rs += sweep,
+                        _ => {
+                            flush(&mut run, d);
+                            run = Some((*c, *r, cb[0], *sweep));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        flush(&mut run, d);
+        return;
+    }
+    // a fixed outline through every piece
+    let mut pts = vec![];
+    for s in &segs {
+        match s {
+            Seg::Line(a, b) => {
+                if pts.is_empty() {
+                    pts.push(*a);
+                }
+                pts.push(*b);
+            }
+            Seg::Cubic(c) => {
+                if pts.is_empty() {
+                    pts.push(c[0]);
+                }
+                let n = bezier_steps(c);
+                pts.extend((1..=n).map(|i| cubic_at(c, i as f64 / n as f64)));
+            }
+        }
+    }
+    if closed && pts.len() > 2 && pts[0].distance(*pts.last().unwrap()) < 1e-9 {
+        pts.pop();
+    }
+    if pts.len() >= 2 {
+        d.items.push(Item::Poly { pts, closed });
+    }
+}
+
+/// The circle a cubic follows, if it is a circular arc: (centre, radius, signed sweep).
+fn cubic_arc(c: &[DVec2; 4]) -> Option<(DVec2, f64, f64)> {
+    let (a, m, b) = (c[0], cubic_at(c, 0.5), c[3]);
+    let ctr = circumcenter(a, m, b)?;
+    let r = (a - ctr).length();
+    let tol = 1e-3 * r + 1e-6;
+    if [0.1, 0.25, 0.4, 0.6, 0.75, 0.9].iter().any(|t| ((cubic_at(c, *t) - ctr).length() - r).abs() > tol) {
+        return None;
+    }
+    let sweep = (a - ctr).angle_to(m - ctr) + (m - ctr).angle_to(b - ctr);
+    Some((ctr, r, sweep))
+}
+
+fn circumcenter(a: DVec2, b: DVec2, c: DVec2) -> Option<DVec2> {
+    let d = 2.0 * (a.x * (b.y - c.y) + b.x * (c.y - a.y) + c.x * (a.y - b.y));
+    if d.abs() < 1e-12 * (a.distance(b) * b.distance(c)).max(1e-12) {
+        return None;
+    }
+    let (a2, b2, c2) = (a.length_squared(), b.length_squared(), c.length_squared());
+    Some(DVec2::new((a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d, (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d))
+}
+
+/// The full circle or ellipse through closed-curve samples `pts`, if they lie on one.
+fn fit_ellipse(pts: &[DVec2]) -> Option<Item> {
+    if pts.len() < 8 {
+        return None;
+    }
+    // A x² + B xy + C y² + D x + E y = 1, about the centroid and scaled for conditioning
+    let o = pts.iter().fold(DVec2::ZERO, |a, p| a + *p) / pts.len() as f64;
+    let s = pts.iter().map(|p| p.distance(o)).fold(0.0, f64::max);
+    if s < 1e-9 {
+        return None;
+    }
+    let mut ata = vec![vec![0.0; 5]; 5];
+    let mut atb = vec![0.0; 5];
+    for p in pts {
+        let q = (*p - o) / s;
+        let row = [q.x * q.x, q.x * q.y, q.y * q.y, q.x, q.y];
+        for i in 0..5 {
+            atb[i] += row[i];
+            for j in 0..5 {
+                ata[i][j] += row[i] * row[j];
+            }
+        }
+    }
+    let [a, b, c, dx, ey]: [f64; 5] = crate::sketch::solve_dense(ata, atb).try_into().ok()?;
+    // centre: 2 M x0 = -(D, E) with M = [[A, B/2], [B/2, C]]
+    let det = a * c - b * b / 4.0;
+    if det <= 1e-12 {
+        return None;
+    }
+    let x0 = DVec2::new(-(c * dx - b / 2.0 * ey) / (2.0 * det), -(a * ey - b / 2.0 * dx) / (2.0 * det));
+    let k = 1.0 + a * x0.x * x0.x + b * x0.x * x0.y + c * x0.y * x0.y;
+    let mean = (a + c) / 2.0;
+    let diff = (((a - c) / 2.0).powi(2) + (b / 2.0).powi(2)).sqrt();
+    let (l1, l2) = (mean - diff, mean + diff);
+    if l1 <= 0.0 || k <= 0.0 {
+        return None;
+    }
+    let (ra, rb) = ((k / l1).sqrt() * s, (k / l2).sqrt() * s);
+    let ctr = o + x0 * s;
+    // every sample on it, to a fraction of its size
+    let tol = 5e-4 * ra + 1e-6;
+    for p in pts {
+        let y = (*p - o) / s - x0;
+        let q = a * y.x * y.x + b * y.x * y.y + c * y.y * y.y;
+        let f = (q / k).sqrt();
+        if f <= 0.0 || (y.length() * s * (1.0 - 1.0 / f)).abs() > tol {
+            return None;
+        }
+    }
+    if (ra - rb).abs() < tol {
+        return Some(Item::Circle { c: ctr, r: (ra + rb) / 2.0 });
+    }
+    let dir = if b.abs() < 1e-12 { if a <= c { DVec2::X } else { DVec2::Y } } else { DVec2::new(b / 2.0, l1 - a).normalize() };
+    Some(Item::Ellipse { c: ctr, major: dir * ra, ratio: rb / ra, t0: 0.0, t1: TAU })
 }
 
 /// Enough steps to keep a Bézier within about 0.01 mm.
@@ -671,18 +830,39 @@ mod tests {
             <g transform="translate(5 0)"><circle cx="20" cy="40" r="5"/></g>
         </svg>"#;
         let d = svg(svg_src).unwrap();
-        // the rectangle as 4 lines, the curve and the circle as outlines
+        // the rectangle as 4 lines, the curve as an outline, the circle as a circle
         let lines = d.items.iter().filter(|i| matches!(i, Item::Line(..))).count();
         let polys: Vec<&Item> = d.items.iter().filter(|i| matches!(i, Item::Poly { .. })).collect();
         assert_eq!(lines, 4);
-        assert_eq!(polys.len(), 2);
+        assert_eq!(polys.len(), 1);
         // mm, Y up from the page's bottom: the rectangle spans y 30..40
         let ys: Vec<f64> = d.items.iter().filter_map(|i| if let Item::Line(a, _) = i { Some(a.y) } else { None }).collect();
         assert!(ys.iter().all(|y| (y - 30.0).abs() < 1e-3 || (y - 40.0).abs() < 1e-3), "{ys:?}");
-        let Item::Poly { pts, closed } = polys[1] else { panic!() };
+        let Item::Poly { closed, .. } = polys[0] else { panic!() };
         assert!(*closed);
-        let c = pts.iter().fold(DVec2::ZERO, |a, p| a + *p) / pts.len() as f64;
-        assert!((c - DVec2::new(25.0, 10.0)).length() < 0.05, "{c}");
-        assert!(pts.iter().all(|p| (p.distance(DVec2::new(25.0, 10.0)) - 5.0).abs() < 0.02));
+        let circle = d.items.iter().find_map(|i| if let Item::Circle { c, r } = i { Some((*c, *r)) } else { None }).expect("the circle stays a circle");
+        assert!((circle.0 - DVec2::new(25.0, 10.0)).length() < 1e-3 && (circle.1 - 5.0).abs() < 1e-3, "{circle:?}");
+    }
+
+    #[test]
+    fn svg_ellipses_and_arcs_stay_exact() {
+        let svg_src = br#"<svg xmlns="http://www.w3.org/2000/svg" width="100mm" height="100mm" viewBox="0 0 100 100">
+            <ellipse cx="50" cy="50" rx="20" ry="10" transform="rotate(30 50 50)"/>
+            <path d="M 10 90 A 10 10 0 0 1 30 90 L 30 95 L 10 95 Z"/>
+        </svg>"#;
+        let d = svg(svg_src).unwrap();
+        let Some(Item::Ellipse { c, major, ratio, .. }) = d.items.iter().find(|i| matches!(i, Item::Ellipse { .. })) else { panic!("{:?}", d.items) };
+        assert!((*c - DVec2::new(50.0, 50.0)).length() < 1e-3, "{c}");
+        assert!((major.length() - 20.0).abs() < 1e-2 && (ratio - 0.5).abs() < 1e-3, "{major} {ratio}");
+        // rotated 30° clockwise on the page is -30° with Y up (or the opposite end of the axis)
+        let ang = major.y.atan2(major.x).to_degrees().rem_euclid(180.0);
+        assert!((ang - 150.0).abs() < 0.1, "{ang}");
+        // the half circle is one arc, centre (20, 10) in mm with Y up, joined by three lines
+        let arcs: Vec<&Item> = d.items.iter().filter(|i| matches!(i, Item::Arc { .. })).collect();
+        assert_eq!(arcs.len(), 1, "{:?}", d.items);
+        let Item::Arc { c, r, a0, a1 } = arcs[0] else { panic!() };
+        assert!((*c - DVec2::new(20.0, 10.0)).length() < 1e-3 && (r - 10.0).abs() < 1e-3, "{c} {r}");
+        assert!(((a1 - a0).rem_euclid(TAU) - std::f64::consts::PI).abs() < 1e-3);
+        assert_eq!(d.items.iter().filter(|i| matches!(i, Item::Line(..))).count(), 3);
     }
 }

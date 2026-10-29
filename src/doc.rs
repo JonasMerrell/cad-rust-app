@@ -828,6 +828,15 @@ impl Document {
         format!("{label} {n}")
     }
 
+    /// `base`, or `base 2`, `base 3`, … when a feature already has that name.
+    pub fn unique_name(&self, base: &str) -> String {
+        let taken = |n: &str| self.features.iter().any(|f| f.name == n);
+        if !taken(base) {
+            return base.to_string();
+        }
+        (2..).map(|i| format!("{base} {i}")).find(|n| !taken(n)).unwrap()
+    }
+
     /// Insert at the rollback bar and move the bar past it.
     pub fn insert(&mut self, name: String, op: Op) -> FeatId {
         let id = self.new_id();
