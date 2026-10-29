@@ -56,6 +56,7 @@
 #include <ShapeBuild_ReShape.hxx>
 #include <ShapeUpgrade_UnifySameDomain.hxx>
 #include <Standard_Failure.hxx>
+#include <Standard_ErrorHandler.hxx>
 #include <TColgp_HArray1OfPnt.hxx>
 #include <TopExp_Explorer.hxx>
 #include <TopTools_ListOfShape.hxx>
@@ -95,7 +96,9 @@ inline std::unique_ptr<TopoDS_Shape> ex_null(const char *why) {
   return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape());
 }
 
-#define EX_TRY try {
+// OCC_CATCH_SIGNALS: after ex_catch_signals(), a crash inside OCCT jumps back here and
+// is thrown as a Standard_Failure (otherwise OCCT exits the process)
+#define EX_TRY try { OCC_CATCH_SIGNALS
 #define EX_CATCH(what)                                                                                                 \
   }                                                                                                                    \
   catch (const Standard_Failure &e) {                                                                                  \
@@ -894,7 +897,7 @@ inline std::unique_ptr<TopoDS_Shape> ex_offset_faces(const TopoDS_Shape &s, cons
 #include <algorithm>
 #include <functional>
 
-#define EX_QTRY try {
+#define EX_QTRY try { OCC_CATCH_SIGNALS
 #define EX_QCATCH(what, empty)                                                                                         \
   }                                                                                                                    \
   catch (const Standard_Failure &e) {                                                                                  \
@@ -1712,6 +1715,13 @@ inline bool ex_write_stl(const TopoDS_Shape &s, rust::Str path, double linear, d
 
 /// A null shape (FreeCAD's Part.Shape()).
 inline std::unique_ptr<TopoDS_Shape> ex_null_shape() { return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape()); }
+
+#include <OSD.hxx>
+
+/// Turn crashes inside OCCT (access violations, ...) into Standard_Failure exceptions,
+/// which the ex_ functions catch and report, instead of killing the process. FreeCAD does
+/// the same at startup; some 2D offsets otherwise segfault.
+inline void ex_catch_signals() { OSD::SetSignal(Standard_False); }
 
 #include <BRepTools_WireExplorer.hxx>
 
