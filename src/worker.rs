@@ -113,6 +113,10 @@ pub struct KernelClient {
     queued: Vec<(usize, Document)>,
     export: Option<(u64, String)>,
     pub crashes: u32,
+    /// Features that crashed the worker: (part studio, feature, fingerprint of the feature and
+    /// everything before it). They stay skipped until that changes, so later rebuilds don't
+    /// crash on them again.
+    crashed: Vec<(usize, FeatId, u64)>,
     /// Last Part Studio list sent, re-sent when the worker restarts.
     studios: Vec<Document>,
     studios_json: String,
@@ -130,7 +134,7 @@ impl KernelClient {
     }
 
     fn with_ctx(ctx: Option<egui::Context>) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, ctx, studios: vec![], studios_json: String::new() };
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
         k.spawn();
         k
     }
@@ -219,7 +223,13 @@ impl KernelClient {
         }
     }
 
-    fn start(&mut self, tag: usize, doc: Document, skip: Vec<FeatId>) {
+    fn start(&mut self, tag: usize, doc: Document, mut skip: Vec<FeatId>) {
+        self.crashed.retain(|(t, f, h)| *t != tag || fingerprint(&doc, *f) == Some(*h));
+        for (t, f, _) in &self.crashed {
+            if *t == tag && !skip.contains(f) {
+                skip.push(*f);
+            }
+        }
         let id = self.next_id;
         self.next_id += 1;
         self.send(&Request::Rebuild { id, tag, doc: doc.clone(), skip: skip.clone() });
@@ -309,6 +319,9 @@ impl KernelClient {
                         // retry without the feature that crashed, unless a newer request is waiting
                         if let Some(f) = running {
                             skip.push(f);
+                            if let Some(h) = fingerprint(&doc, f) {
+                                self.crashed.push((tag, f, h));
+                            }
                         }
                         let newer = self.queued.iter().position(|q| q.0 == tag).map(|i| self.queued.remove(i).1);
                         match newer {
@@ -322,6 +335,17 @@ impl KernelClient {
         }
         out
     }
+}
+
+/// A hash of feature `id` with everything it can depend on: the variables, configurations,
+/// units and every feature up to it. `None` when the feature is gone.
+fn fingerprint(doc: &Document, id: FeatId) -> Option<u64> {
+    use std::hash::{Hash, Hasher};
+    let i = doc.index_of(id)?;
+    let json = serde_json::to_string(&(&doc.variables, &doc.configs, doc.active_config, &doc.units, &doc.features[..=i], &doc.custom_features)).ok()?;
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    json.hash(&mut h);
+    Some(h.finish())
 }
 
 impl KernelClient {

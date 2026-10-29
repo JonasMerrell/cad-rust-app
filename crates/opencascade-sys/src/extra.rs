@@ -27,6 +27,8 @@ mod inner {
         pub fn ex_chamfer(s: &TopoDS_Shape, edges: &TopTools_ListOfShape, d: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_shell(s: &TopoDS_Shape, faces: &TopTools_ListOfShape, t: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_thicken(s: &TopoDS_Shape, t: f64) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_reversed(s: &TopoDS_Shape) -> UniquePtr<TopoDS_Shape>;
+        pub fn ex_hollow(s: &TopoDS_Shape, t: f64) -> UniquePtr<TopoDS_Shape>;
         #[allow(clippy::too_many_arguments)]
         pub fn ex_draft(s: &TopoDS_Shape, faces: &TopTools_ListOfShape, dx: f64, dy: f64, dz: f64, angle: f64, px: f64, py: f64, pz: f64, nx: f64, ny: f64, nz: f64) -> UniquePtr<TopoDS_Shape>;
         pub fn ex_sweep(profile_wire: &TopoDS_Shape, spine: &TopoDS_Shape, frenet: bool) -> UniquePtr<TopoDS_Shape>;

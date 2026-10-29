@@ -72,6 +72,34 @@ pub fn shell(s: &Shape, faces: &[Face], t: f64) -> R<Shape> {
     take(ex::ex_shell(&s.inner, &l, t), "shell")
 }
 
+/// Hollow a solid and keep it closed: a cavity leaving walls `t` thick inside its surface
+/// (t > 0), or walls `-t` thick grown around it (t < 0).
+pub fn hollow(s: &Shape, t: f64) -> R<Shape> {
+    take(ex::ex_hollow(&s.inner, t), "shell")
+}
+
+pub fn reversed(s: &Shape) -> R<Shape> {
+    take(ex::ex_reversed(&s.inner), "reverse")
+}
+
+/// Check what an operation on solids made: an inside-out result is turned right way out, and
+/// an invalid one or one without volume is an error (`hint` says what to try), so a failed
+/// operation never passes for a part. Results without solids (surfaces, empty) pass as they are.
+pub fn checked(s: Shape, what: &str, hint: &str) -> R<Shape> {
+    if count(&s, SOLID) == 0 {
+        return Ok(s);
+    }
+    let v = mass_props(&s, 0).map(|m| m.0).unwrap_or(0.0);
+    if v.abs() <= 1e-9 {
+        return Err(format!("{what} produced a solid with no volume{hint}"));
+    }
+    let s = if v < 0.0 { reversed(&s)? } else { s };
+    if !is_valid(&s) {
+        return Err(format!("{what} produced invalid geometry{hint}"));
+    }
+    Ok(s)
+}
+
 pub fn thicken(s: &Shape, t: f64) -> R<Shape> {
     take(ex::ex_thicken(&s.inner, t), "thicken")
 }

@@ -3,7 +3,9 @@
 `cad-app script file.rhai [args…]` runs a [Rhai](https://rhai.rs) script with no window, using the
 same OpenCascade kernel as the editor. Arguments are in the `ARGS` array, `print` writes to stdout,
 and the script's last value is printed as JSON. A failed operation throws an error with OCCT's
-message, which `try { … } catch (e) { … }` can catch; an uncaught error exits with code 1. Results
+message, which `try { … } catch (e) { … }` can catch; an uncaught error exits with code 1. Fillets,
+chamfers, shells and booleans also throw when the result is not a valid solid or has no volume (an
+inside-out result is turned right way out). Results
 are deterministic: the same script gives the same numbers on every run.
 
 Custom features (`define_custom_feature`) get the same API.
@@ -47,7 +49,7 @@ export_step(body, "body.step");
 | `s.translate(v)`, `s.rotate(point, axis, deg)`, `s.mirror(point, normal)`, `s.transform(mat3, t)`, `s.copy()` | placement |
 | `s.move(x, y, z)`, `s.rotate_x/y/z(deg)`, `s.place(point, normal)`, `s.scale(f)` | placement about the origin |
 | `compound(shapes)`, `s.solids()` | group shapes, split into solids |
-| `s.shell(faces, t)` | hollow out, opening the given faces (`[]`: a closed hollow) |
+| `s.shell(faces, t)` | hollow out, opening the given faces (`[]`: a closed hollow with a cavity inside); walls `t` thick inside the outer surface, or for negative `t` grown outside it (up to version 0.4.0 the sign was the other way round) |
 | `s.fillet(edges, r)`, `s.fillet(edges, r1, r2)`, `s.chamfer(edges, d)` | fillet or chamfer chosen edges in one operation |
 | `s.fillet(r)`, `s.chamfer(d)` | every edge |
 

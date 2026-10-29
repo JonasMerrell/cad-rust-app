@@ -36,7 +36,8 @@ impl OriginPlane {
 }
 
 /// Something the user picked. Model faces and edges are referred to by a point on
-/// them so the reference survives rebuilds that renumber topology.
+/// them and, once the kernel has seen them, by a persistent name (see `TopoName`),
+/// so the reference survives rebuilds that renumber or move topology.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(tag = "kind", rename_all = "snake_case")]
 pub enum Ref {
@@ -50,9 +51,13 @@ pub enum Ref {
     Face {
         point: [f64; 3],
         normal: [f64; 3],
+        #[serde(default, skip_serializing_if = "TopoName::is_empty")]
+        name: TopoName,
     },
     Edge {
         point: [f64; 3],
+        #[serde(default, skip_serializing_if = "TopoName::is_empty")]
+        name: TopoName,
     },
     Vertex {
         point: [f64; 3],
@@ -105,6 +110,47 @@ impl Ref {
     pub fn is_planar(&self) -> bool {
         matches!(self, Ref::OriginPlane { .. } | Ref::FeaturePlane { .. } | Ref::Face { .. })
     }
+}
+
+/// What a model face is, independent of where it currently is: the feature that made it
+/// and its role there. Roles: "start" and "end" (the caps of an extrude or a partial
+/// revolve), "side" (made by sketch curve `n`), "wall" (of the hole at sketch point `n`),
+/// "fillet" and "chamfer" (made from the feature's `n`-th edge).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq, Eq, Hash)]
+pub struct FaceName {
+    pub feature: FeatId,
+    pub role: String,
+    #[serde(default)]
+    pub n: u64,
+}
+
+/// Persistent name of a picked face (one `FaceName`) or edge (the two faces it joins).
+/// Empty for picks the kernel could not name (imported parts, faces a later feature
+/// reshaped) and in older documents; those are found by their point alone.
+/// Names never take part in comparisons: two refs to the same spot are the same pick.
+#[derive(Clone, Debug, Default, Serialize, Deserialize)]
+#[serde(transparent)]
+pub struct TopoName(pub Vec<FaceName>);
+
+impl TopoName {
+    pub fn is_empty(&self) -> bool {
+        self.0.is_empty()
+    }
+}
+
+impl PartialEq for TopoName {
+    fn eq(&self, _: &TopoName) -> bool {
+        true
+    }
+}
+
+/// A reference the kernel resolved during a rebuild, with its name filled in and its
+/// point moved onto where the geometry is now. Applied with `Document::apply_ref_updates`.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct RefUpdate {
+    pub feature: FeatId,
+    pub old: Ref,
+    pub new: Ref,
 }
 
 /// (feature that created it, index among that feature's new bodies)
@@ -798,6 +844,35 @@ impl Document {
         let pairs: Vec<(String, String)> =
             self.variables.iter().map(|v| (v.name.clone(), cfg.and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone()))).collect();
         expr::resolve_vars(&pairs, self.units)
+    }
+
+    /// Store names and fresh points the kernel found for references (not an undoable
+    /// edit: the model is the same). Only refs that still read exactly as the kernel saw
+    /// them change. Returns whether anything changed.
+    pub fn apply_ref_updates(&mut self, updates: &[RefUpdate]) -> bool {
+        fn walk(v: &mut serde_json::Value, old: &serde_json::Value, new: &serde_json::Value) -> bool {
+            if v == old {
+                *v = new.clone();
+                return true;
+            }
+            match v {
+                serde_json::Value::Array(a) => a.iter_mut().fold(false, |c, x| walk(x, old, new) | c),
+                serde_json::Value::Object(o) => o.values_mut().fold(false, |c, x| walk(x, old, new) | c),
+                _ => false,
+            }
+        }
+        let mut changed = false;
+        for u in updates {
+            let Some(f) = self.feature_mut(u.feature) else { continue };
+            let (Ok(mut v), Ok(old), Ok(new)) = (serde_json::to_value(&f.op), serde_json::to_value(&u.old), serde_json::to_value(&u.new)) else { continue };
+            if walk(&mut v, &old, &new) {
+                if let Ok(op) = serde_json::from_value(v) {
+                    f.op = op;
+                    changed = true;
+                }
+            }
+        }
+        changed
     }
 
     pub fn to_json(&self) -> String {
