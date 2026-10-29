@@ -29,6 +29,7 @@ mod drawing_export;
 mod drawing_ui;
 mod expr;
 mod fea;
+mod fea_adv;
 mod fea_mesh;
 mod fea_solve;
 mod fea_ui;

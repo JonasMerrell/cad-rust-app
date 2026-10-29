@@ -510,6 +510,37 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("export_gcode", "path") => out_path("the G-code file"),
         ("create_simulation" | "edit_simulation", "material") => en(&fea_materials(), "material for every part (\"\" = each part's own)"),
         ("create_simulation" | "edit_simulation", "mesh_size") => json!({"type": ["number", "null"], "exclusiveMinimum": 0, "description": "element size, mm (null = auto)"}),
+        ("create_simulation" | "edit_simulation", "mode") => en(&["simple", "advanced"], "simple: supports and loads; advanced: crackh3d's BCs and solver (static)"),
+        ("create_simulation" | "edit_simulation", "solver") => en(&["iterative", "direct"], "advanced: CG+AMG (default) or sparse Cholesky"),
+        ("create_simulation" | "edit_simulation", "gravity") => json!({"oneOf": [xyz("acceleration in g"), json!({"type": "null"})], "description": "advanced: acceleration of the whole part in g (null = none)"}),
+        ("create_simulation" | "edit_simulation", "bcs") => arr(
+            json!({"type": "object", "properties": {
+                "type": en(&crate::fea_adv::BcType::KINDS, "what the BC does"),
+                "u": json!({"type": "array", "items": {"type": ["number", "null"]}, "minItems": 3, "maxItems": 3, "description": "displacement / remote_rigid: mm per axis, null = free"}),
+                "rot": json!({"type": "array", "items": {"type": ["number", "null"]}, "minItems": 3, "maxItems": 3, "description": "remote_rigid: rad per axis, null = free"}),
+                "p": t("number", "pressure, MPa"), "t": xyz("traction, MPa"), "f": xyz("force, N"), "k": xyz("spring stiffness per area, N/mm³"),
+                "point": xyz("remote reference point"), "force": xyz("remote force, N"), "moment": xyz("remote moment, N·mm"), "at": xyz("point_force: where"),
+                "faces": arr(face_pick("a face ref"), "faces it acts on"), "name": t("string", "name")
+            }, "required": ["type"], "additionalProperties": false, "description": "one boundary condition"}),
+            "advanced boundary conditions (replace the list)",
+        ),
+        ("create_simulation" | "edit_simulation", "periodic") => arr(
+            obj(
+                json!({"a": arr(face_pick("a face ref"), "side A (leads)"), "b": arr(face_pick("a face ref"), "side B (follows A)"), "offset": xyz("from A to B (default from the faces' centres)"), "jump": xyz("u_B - u_A, mm"), "name": t("string", "name")}),
+                &[],
+                "one periodic pair",
+            ),
+            "advanced periodic pairs (replace the list)",
+        ),
+        ("create_simulation" | "edit_simulation", "refine") => t("boolean", "refine the mesh at small holes and fillets (default true)"),
+        ("create_simulation" | "edit_simulation", "mesh_controls") => arr(
+            obj(
+                json!({"faces": arr(face_pick("a face ref"), "faces to mesh finer"), "size": json!({"type": "number", "exclusiveMinimum": 0, "description": "element size on the faces, mm"}), "name": t("string", "name")}),
+                &["size"],
+                "one mesh control",
+            ),
+            "mesh controls: smaller elements on chosen faces (replace the list)",
+        ),
         ("create_simulation" | "edit_simulation", "modes") => json!({"type": "integer", "minimum": 1, "maximum": 50, "description": "modal: how many modes (default 6)"}),
         ("create_simulation" | "edit_simulation", "loss_factors") => {
             json!({"type": "object", "additionalProperties": {"type": "number"}, "description": "structural loss factor η per material name"})

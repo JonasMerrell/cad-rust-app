@@ -2603,7 +2603,11 @@ impl App {
         } else if let crate::workspace::Tab::Cam(_) = self.tab {
             "Set up the stock, add tools and operations, simulate, then export G-code · Space plays the simulation".to_string()
         } else if let crate::workspace::Tab::Sim(_) = self.tab {
-            "Add supports and loads, click their faces, then read the results · Space animates, hover for values".to_string()
+            if crate::fea_ui::study(self).is_some_and(|s| s.mode == crate::fea::SimMode::Advanced) {
+                "Add boundary conditions and periodic pairs, click their faces, then read the results · hover for values".to_string()
+            } else {
+                "Add supports and loads, click their faces, then read the results · Space animates, hover for values".to_string()
+            }
         } else if let Some(s) = &self.sketch {
             crate::sketcher::status_text(self, s)
         } else if self.print_view && self.sketch.is_none() && self.dialog.is_none() {

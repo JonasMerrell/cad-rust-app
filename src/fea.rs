@@ -7,7 +7,7 @@ use glam::DVec3;
 use serde::{Deserialize, Serialize};
 
 use crate::doc::{BodyId, Document};
-use crate::fea_mesh::{Mesh, Surface};
+use crate::fea_mesh::{Mesh, Sizing, Surface};
 use crate::fea_solve::{Elastic, Fix, Mode, Problem, Profile, TransientResult, TransientSettings};
 use crate::kernel::BodyMesh;
 
@@ -192,6 +192,19 @@ impl ProfileKind {
     }
 }
 
+/// A smaller element size on some faces, such as a fillet where the peak stress is.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct MeshControl {
+    pub id: u64,
+    pub name: String,
+    #[serde(default)]
+    pub faces: Vec<FacePick>,
+    /// Element size on the faces (mm); it grows back to the study's size away from them.
+    pub size: f64,
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub suppressed: bool,
+}
+
 /// Settings of a transient analysis.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Transient {
@@ -244,6 +257,16 @@ impl Transient {
     }
 }
 
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum SimMode {
+    /// Supports and loads, solved by the app (static, modal and transient).
+    #[default]
+    Simple,
+    /// crackh3d's boundary conditions and solver, and periodic BCs (static only).
+    Advanced,
+}
+
 /// A Simulation tab.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 pub struct Study {
@@ -254,12 +277,23 @@ pub struct Study {
     pub bodies: Vec<BodyId>,
     #[serde(default)]
     pub analysis: Analysis,
+    #[serde(default, skip_serializing_if = "is_simple")]
+    pub mode: SimMode,
+    /// The boundary conditions of Advanced mode.
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub advanced: crate::fea_adv::Advanced,
     /// Material name from `MATERIALS`; empty: the parts' own material (steel when none is set).
     #[serde(default)]
     pub material: String,
     /// Element size (mm); None: worked out from the part size.
     #[serde(default)]
     pub mesh_size: Option<f64>,
+    /// Refine the mesh by itself at holes and fillets.
+    #[serde(default = "yes")]
+    pub refine: bool,
+    /// Smaller element sizes on chosen faces.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub mesh_controls: Vec<MeshControl>,
     #[serde(default)]
     pub supports: Vec<Support>,
     #[serde(default)]
@@ -280,6 +314,18 @@ fn modes() -> usize {
     6
 }
 
+fn yes() -> bool {
+    true
+}
+
+fn is_simple(m: &SimMode) -> bool {
+    *m == SimMode::Simple
+}
+
+fn is_default(a: &crate::fea_adv::Advanced) -> bool {
+    *a == crate::fea_adv::Advanced::default()
+}
+
 impl Default for Study {
     fn default() -> Self {
         Study {
@@ -287,8 +333,12 @@ impl Default for Study {
             studio: 0,
             bodies: vec![],
             analysis: Analysis::Static,
+            mode: SimMode::Simple,
+            advanced: Default::default(),
             material: String::new(),
             mesh_size: None,
+            refine: true,
+            mesh_controls: vec![],
             supports: vec![],
             loads: vec![],
             modes: modes(),
@@ -301,7 +351,8 @@ impl Default for Study {
 
 impl Study {
     fn take_id(&mut self) -> u64 {
-        self.next_id = self.next_id.max(1 + self.supports.iter().map(|s| s.id).chain(self.loads.iter().map(|l| l.id)).max().unwrap_or(0));
+        self.next_id =
+            self.next_id.max(1 + self.supports.iter().map(|s| s.id).chain(self.loads.iter().map(|l| l.id)).chain(self.mesh_controls.iter().map(|c| c.id)).chain(self.advanced.ids()).max().unwrap_or(0));
         let id = self.next_id;
         self.next_id += 1;
         id
@@ -326,6 +377,41 @@ impl Study {
         id
     }
 
+    /// Add an advanced boundary condition of a kind (`fea_adv::BcType::KINDS`).
+    pub fn add_adv_bc(&mut self, kind: &str) -> Option<u64> {
+        let bc = crate::fea_adv::BcType::new(kind)?;
+        let id = self.take_id();
+        let n = self.advanced.bcs.iter().filter(|b| b.bc.key() == kind).count() + 1;
+        let name = format!("{} {n}", crate::fea_adv::BcType::label_of(kind).split(" (").next().unwrap_or(kind));
+        self.advanced.bcs.push(crate::fea_adv::AdvBc { id, name, bc, faces: vec![], suppressed: false });
+        Some(id)
+    }
+
+    /// Add a periodic pair (with no faces yet).
+    pub fn add_periodic(&mut self) -> u64 {
+        let id = self.take_id();
+        let n = self.advanced.periodic.len() + 1;
+        self.advanced.periodic.push(crate::fea_adv::Periodic { id, name: format!("Periodic {n}"), ..Default::default() });
+        id
+    }
+
+    /// Add a mesh control of `size` mm (with no faces yet).
+    pub fn add_mesh_control(&mut self, size: f64) -> u64 {
+        let id = self.take_id();
+        let n = self.mesh_controls.len() + 1;
+        self.mesh_controls.push(MeshControl { id, name: format!("Mesh control {n}"), faces: vec![], size, suppressed: false });
+        id
+    }
+
+    pub fn mesh_control_mut(&mut self, id: u64) -> Option<&mut MeshControl> {
+        self.mesh_controls.iter_mut().find(|s| s.id == id)
+    }
+
+    /// The element size the study meshes with: its own, or one worked out from the parts.
+    pub fn element_size(&self, input: &Input) -> f64 {
+        self.mesh_size.unwrap_or_else(|| input.auto_size(self.refine))
+    }
+
     pub fn support_mut(&mut self, id: u64) -> Option<&mut Support> {
         self.supports.iter_mut().find(|s| s.id == id)
     }
@@ -339,11 +425,23 @@ impl Study {
         if let Some(s) = self.supports.iter_mut().find(|s| s.id == id) {
             return Some(&mut s.faces);
         }
+        if let Some(c) = self.mesh_controls.iter_mut().find(|s| s.id == id) {
+            return Some(&mut c.faces);
+        }
+        if let Some(c) = self.advanced.bcs.iter_mut().find(|s| s.id == id) {
+            return Some(&mut c.faces);
+        }
         self.loads.iter_mut().find(|s| s.id == id).map(|l| &mut l.faces)
     }
 
     pub fn faces(&self, id: u64) -> Option<&Vec<FacePick>> {
-        self.supports.iter().find(|s| s.id == id).map(|s| &s.faces).or_else(|| self.loads.iter().find(|s| s.id == id).map(|l| &l.faces))
+        self.supports
+            .iter()
+            .find(|s| s.id == id)
+            .map(|s| &s.faces)
+            .or_else(|| self.loads.iter().find(|s| s.id == id).map(|l| &l.faces))
+            .or_else(|| self.mesh_controls.iter().find(|s| s.id == id).map(|c| &c.faces))
+            .or_else(|| self.advanced.bcs.iter().find(|s| s.id == id).map(|c| &c.faces))
     }
 }
 
@@ -493,8 +591,9 @@ impl Input {
         24.0 * vol / self.used_size(size).powi(3)
     }
 
-    /// Element size from the parts' volume, small enough for a quick solve.
-    pub fn auto_size(&self) -> f64 {
+    /// Element size from the parts' volume, small enough for a quick solve. Unless the mesh is `refine`d
+    /// at holes and fillets, it also shrinks for them.
+    pub fn auto_size(&self, refine: bool) -> f64 {
         let vol: f64 = self.tris.iter().map(|t| t[0].dot(t[1].cross(t[2])) / 6.0).sum::<f64>().abs();
         let (lo, hi) = self.bounds();
         let ext = hi - lo;
@@ -502,7 +601,7 @@ impl Input {
         let h = (vol.max(1e-9) / 1200.0).cbrt();
         let h = h.min(ext.min_element().max(1e-6) / 3.0);
         // holes and fillets want a few elements around them
-        let h = match self.min_radius {
+        let h = match self.min_radius.filter(|_| !refine) {
             Some(r) => h.min(r / 2.0).max(ext.max_element() / 60.0).min(h),
             None => h,
         };
@@ -600,10 +699,54 @@ pub fn mixed(study: &Study, input: &Input) -> bool {
     m.iter().any(|x| x.0 != m[0].0)
 }
 
+/// Element size wanted on a hole or fillet of radius `r`: about six elements across a hole resolve its
+/// peak stress to within a few percent.
+pub fn hole_size(r: f64) -> f64 {
+    r / 3.0
+}
+
+/// Where the study's mesh is finer than `size`: at holes and fillets (when it refines by itself) and on
+/// the faces of its mesh controls.
+pub fn sizing(study: &Study, input: &Input, size: f64) -> Sizing {
+    let mut out = Sizing::default();
+    if study.refine {
+        let mut radii: Vec<(u32, f64)> = crate::fea_mesh::face_radii(&input.tris, &input.face).into_iter().collect();
+        radii.sort_unstable_by_key(|x| x.0);
+        for (f, r) in radii {
+            // no finer than an eighth of the element size, so a tiny fillet doesn't swamp the mesh
+            let s = hole_size(r).max(size / 8.0);
+            if s < 0.8 * size {
+                out.add_tris(input.tris.iter().zip(&input.face).filter(|x| *x.1 == f).map(|x| x.0), s);
+            }
+        }
+    }
+    for c in study.mesh_controls.iter().filter(|c| !c.suppressed && c.size > 0.0 && c.size < size) {
+        let ids: Vec<u32> = c.faces.iter().filter_map(|p| input.resolve(p)).collect();
+        out.add_tris(input.tris.iter().zip(&input.face).filter(|x| ids.contains(x.1)).map(|x| x.0), c.size);
+    }
+    out
+}
+
+/// Rough node count of the study's mesh with elements `size` across, refinement included.
+pub fn estimate_nodes(study: &Study, input: &Input, size: f64) -> f64 {
+    let h = input.used_size(size);
+    let mut n = input.estimate_nodes(size);
+    // each refined face adds a layer whose element size grows from s to h at GRADING per mm: about
+    // ∫ A / (s + g d)³ dd = A / 2g (1/s² - 1/h²) cubes' worth. Bisected tets are less regular than the
+    // lattice's and the grading spreads past the face's edges, so measured meshes come out about 70 nodes
+    // per such cube rather than 24.
+    for (area, s) in sizing(study, input, size).patches {
+        let s = s.max(h / 16.0);
+        n += 70.0 * area / (2.0 * crate::fea_mesh::GRADING) * (1.0 / (s * s) - 1.0 / (h * h));
+    }
+    n
+}
+
 /// Mesh the study's parts: as one when they share a material, part by part (bonded) when they don't.
 pub fn mesh_input(study: &Study, input: &Input, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
     let surf = Surface::new(input.tris.clone(), input.face.clone(), input.body.clone());
-    if mixed(study, input) { crate::fea_mesh::mesh_parts(&surf, size, cancel) } else { crate::fea_mesh::mesh(&surf, size, cancel) }
+    let sz = sizing(study, input, size);
+    if mixed(study, input) { crate::fea_mesh::mesh_parts(&surf, size, &sz, cancel) } else { crate::fea_mesh::mesh(&surf, size, &sz, cancel) }
 }
 
 /// Mesh the parts (or reuse `mesh`) and solve the study.
@@ -611,7 +754,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     if input.tris.is_empty() {
         return Err("No parts to analyse".into());
     }
-    let size = study.mesh_size.unwrap_or_else(|| input.auto_size());
+    let size = study.element_size(input);
     let mesh = match mesh {
         Some(m) => m,
         None => {
@@ -622,6 +765,12 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     let mut warnings = vec![];
     if mesh.size > size * 1.001 {
         warnings.push(format!("Element size {} mm is too small for parts this big: used {} mm", crate::expr::trim(size, 4), crate::expr::trim(mesh.size, 4)));
+    }
+    if study.mode == SimMode::Advanced {
+        if let Some(w) = hole_warning(input, &mesh) {
+            warnings.push(w);
+        }
+        return crate::fea_adv::run(study, input, mesh, progress, &mut warnings);
     }
     let (mut material, mat) = material_of(study, input);
     let parts = part_materials(study, input);
@@ -941,7 +1090,7 @@ fn hole_warning(input: &Input, mesh: &Mesh) -> Option<String> {
     })
 }
 
-fn tet10_volume(m: &Mesh, t: &[u32; 10]) -> f64 {
+pub(crate) fn tet10_volume(m: &Mesh, t: &[u32; 10]) -> f64 {
     let p = |i: usize| m.nodes[t[i] as usize];
     (p(1) - p(0)).cross(p(2) - p(0)).dot(p(3) - p(0)) / 6.0
 }
@@ -1018,11 +1167,9 @@ mod tests {
         FacePick { point: p, normal: n }
     }
 
-    #[test]
-    fn roller_beside_a_hole_slides_in_its_plane() {
-        // the plate pulled by 3000 N, held by rollers on its far end, a side and the bottom (symmetry planes)
-        let input = plate();
-        let mut s = Study { material: "Steel".into(), mesh_size: Some(2.0), ..Default::default() };
+    /// The plate pulled by 3000 N, held by rollers on its far end, a side and the bottom (symmetry planes).
+    fn pulled(size: f64, refine: bool) -> Study {
+        let mut s = Study { material: "Steel".into(), mesh_size: Some(size), refine, ..Default::default() };
         for (p, n) in [([60.0, 15.0, 2.0], [1.0, 0.0, 0.0]), ([30.0, 0.0, 2.0], [0.0, -1.0, 0.0]), ([30.0, 3.0, 0.0], [0.0, 0.0, -1.0])] {
             let id = s.add_support(SupportKind::Roller);
             s.support_mut(id).unwrap().faces = vec![pick(p, n)];
@@ -1032,6 +1179,18 @@ mod tests {
         l.value = 3000.0;
         l.direction = [-1.0, 0.0, 0.0];
         l.faces = vec![pick([0.0, 15.0, 2.0], [-1.0, 0.0, 0.0])];
+        s
+    }
+
+    fn peak_stress(o: &Outcome) -> f32 {
+        let Solution::Static { stress, .. } = &o.solution else { panic!() };
+        stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max)
+    }
+
+    #[test]
+    fn roller_beside_a_hole_slides_in_its_plane() {
+        let input = plate();
+        let s = pulled(2.0, false);
         let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
         let Solution::Static { stress, reactions, .. } = &o.solution else { panic!() };
         // each roller only pushes along its normal, and the end takes the whole load
@@ -1043,6 +1202,103 @@ mod tests {
         // net-section stress 37.5 MPa × Kt 2.3 (Peterson, d/W = 1/3): about 86 MPa
         let vm = stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max);
         assert!((vm - 86.0).abs() < 8.0, "{vm}");
+    }
+
+    #[test]
+    fn refining_at_the_hole_finds_its_peak_stress() {
+        // 5 mm elements are two across the hole: far too coarse for its stress, unless the mesh refines there
+        let input = plate();
+        let coarse = run(&pulled(5.0, false), &input, None, &|_, _| {}, &|| false).unwrap();
+        let fine = run(&pulled(5.0, true), &input, None, &|_, _| {}, &|| false).unwrap();
+        let uniform = run(&pulled(2.0, false), &input, None, &|_, _| {}, &|| false).unwrap();
+        let (vc, vf) = (peak_stress(&coarse), peak_stress(&fine));
+        eprintln!("coarse {vc} ({} nodes) refined {vf} ({} nodes, smallest {}, {:.1}°) uniform 2 mm {} ({} nodes)", coarse.mesh.nodes.len(), fine.mesh.nodes.len(), fine.mesh.smallest, fine.mesh.min_dihedral, peak_stress(&uniform), uniform.mesh.nodes.len());
+        assert!(coarse.warnings.iter().any(|w| w.contains("smallest hole")), "{:?}", coarse.warnings);
+        assert!(!fine.warnings.iter().any(|w| w.contains("smallest hole")), "{:?}", fine.warnings);
+        assert!((vf - 86.0).abs() < 6.0, "{vf}");
+        assert!(fine.mesh.smallest < 2.0 && fine.mesh.size == 5.0);
+        // and with fewer nodes than a mesh that fine everywhere
+        assert!(fine.mesh.nodes.len() < uniform.mesh.nodes.len());
+        for t in &fine.mesh.tets {
+            assert!(crate::fea_mesh::tet10_valid(&std::array::from_fn(|i| fine.mesh.nodes[t[i] as usize])));
+        }
+    }
+
+    /// The pulled plate in Advanced mode: symmetry instead of the rollers and a total force, through
+    /// crackh3d's solver.
+    fn pulled_advanced(size: f64, solver: crate::fea_adv::SolverKind) -> Study {
+        use crate::fea_adv::BcType;
+        let mut s = Study { material: "Steel".into(), mesh_size: Some(size), refine: false, mode: SimMode::Advanced, ..Default::default() };
+        s.advanced.solver = solver;
+        for (p, n) in [([60.0, 15.0, 2.0], [1.0, 0.0, 0.0]), ([30.0, 0.0, 2.0], [0.0, -1.0, 0.0]), ([30.0, 3.0, 0.0], [0.0, 0.0, -1.0])] {
+            let id = s.add_adv_bc("symmetry").unwrap();
+            s.advanced.bc_mut(id).unwrap().faces = vec![pick(p, n)];
+        }
+        let id = s.add_adv_bc("force").unwrap();
+        let b = s.advanced.bc_mut(id).unwrap();
+        b.bc = BcType::Force { f: [-3000.0, 0.0, 0.0] };
+        b.faces = vec![pick([0.0, 15.0, 2.0], [-1.0, 0.0, 0.0])];
+        s
+    }
+
+    #[test]
+    fn advanced_mode_matches_simple() {
+        let input = plate();
+        let simple = run(&pulled(2.0, false), &input, None, &|_, _| {}, &|| false).unwrap();
+        for solver in [crate::fea_adv::SolverKind::Direct, crate::fea_adv::SolverKind::Iterative] {
+            let adv = run(&pulled_advanced(2.0, solver), &input, None, &|_, _| {}, &|| false).unwrap();
+            let (a, b) = (peak_stress(&simple), peak_stress(&adv));
+            assert!((a - b).abs() < 0.01 * a, "{solver:?}: simple {a} advanced {b}");
+            let Solution::Static { reactions, .. } = &adv.solution else { panic!() };
+            assert!((reactions[0].1.x - 3000.0).abs() < 1.0, "{reactions:?}");
+        }
+    }
+
+    /// A box from the origin to `hi`; faces 0 −x, 1 +x, 2 −y, 3 +y, 4 −z, 5 +z.
+    fn block(hi: DVec3) -> Input {
+        let c = |i: usize| DVec3::new([0.0, hi.x][i & 1], [0.0, hi.y][(i >> 1) & 1], [0.0, hi.z][(i >> 2) & 1]);
+        let quads = [[0, 4, 6, 2], [1, 3, 7, 5], [0, 1, 5, 4], [2, 6, 7, 3], [0, 2, 3, 1], [4, 5, 7, 6]];
+        let mut input = Input::default();
+        for (fi, q) in quads.iter().enumerate() {
+            input.tris.push([c(q[0]), c(q[1]), c(q[2])]);
+            input.tris.push([c(q[0]), c(q[2]), c(q[3])]);
+            input.face.extend([fi as u32; 2]);
+            input.body.extend([0; 2]);
+            let n = (c(q[1]) - c(q[0])).cross(c(q[2]) - c(q[0])).normalize();
+            input.planar.push(Some((n, c(q[0]))));
+        }
+        input.bodies = vec![(1, 0)];
+        input.materials = vec![None];
+        input
+    }
+
+    #[test]
+    fn periodic_pair_stretches_a_bar() {
+        // a 40 × 10 × 10 bar whose ends are periodic, B 0.04 mm further along x than A (a mean strain of
+        // 0.001), held by symmetry on a side and the bottom and in x at one end: plain tension, E ε = 200 MPa
+        let input = block(DVec3::new(40.0, 10.0, 10.0));
+        let mut s = Study { material: "Steel".into(), mesh_size: Some(2.5), refine: false, mode: SimMode::Advanced, ..Default::default() };
+        for (p, n) in [([20.0, 0.0, 5.0], [0.0, -1.0, 0.0]), ([20.0, 5.0, 0.0], [0.0, 0.0, -1.0])] {
+            let id = s.add_adv_bc("symmetry").unwrap();
+            s.advanced.bc_mut(id).unwrap().faces = vec![pick(p, n)];
+        }
+        // the periodic pair holds the ends together, not the bar in x: hold one end's x
+        let id = s.add_adv_bc("displacement").unwrap();
+        let b = s.advanced.bc_mut(id).unwrap();
+        b.bc = crate::fea_adv::BcType::Displacement { u: [Some(0.0), None, None] };
+        b.faces = vec![pick([0.0, 5.0, 5.0], [-1.0, 0.0, 0.0])];
+        let id = s.add_periodic();
+        let p = s.advanced.periodic_mut(id).unwrap();
+        p.a = vec![pick([0.0, 5.0, 5.0], [-1.0, 0.0, 0.0])];
+        p.b = vec![pick([40.0, 5.0, 5.0], [1.0, 0.0, 0.0])];
+        p.jump = [0.04, 0.0, 0.0];
+        assert_eq!(crate::fea_adv::offset_of(p, &input), Some(DVec3::new(40.0, 0.0, 0.0)));
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let Solution::Static { u, stress, .. } = &o.solution else { panic!() };
+        for (i, p) in o.mesh.nodes.iter().enumerate() {
+            assert!((u[3 * i] - 0.001 * p.x).abs() < 1e-7, "u_x {} at {p}", u[3 * i]);
+            assert!((stress[i][0] - 200.0).abs() < 0.1, "σx {} at {p}", stress[i][0]);
+        }
     }
 
     #[test]

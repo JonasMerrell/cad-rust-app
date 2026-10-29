@@ -1117,7 +1117,7 @@ mod tests {
 
     #[test]
     fn cantilever_matches_beam_theory() {
-        let m = mesh(&beam(), 2.5, &|| false).unwrap();
+        let m = mesh(&beam(), 2.5, &Default::default(), &|| false).unwrap();
         assert!(m.min_dihedral > 20.0);
         let p = cantilever(&m);
         let u = static_solve(&p, &|| false).unwrap().u;
@@ -1141,7 +1141,7 @@ mod tests {
 
     #[test]
     fn free_part_has_six_rigid_modes() {
-        let m = mesh(&beam(), 3.4, &|| false).unwrap();
+        let m = mesh(&beam(), 3.4, &Default::default(), &|| false).unwrap();
         let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![], force: vec![0.0; 3 * m.nodes.len()], couplings: vec![], masses: vec![] };
         let modes = modal(&p, 9, &|| false).unwrap();
         // exactly six rigid-body modes at 0 Hz, and none among the rest
@@ -1165,8 +1165,8 @@ mod tests {
         t.extend(t2);
         f.extend(f2);
         b.extend(b2);
-        let whole = mesh(&beam(), 2.5, &|| false).unwrap();
-        let parts = crate::fea_mesh::mesh_parts(&Surface::new(t, f, b), 2.5, &|| false).unwrap();
+        let whole = mesh(&beam(), 2.5, &Default::default(), &|| false).unwrap();
+        let parts = crate::fea_mesh::mesh_parts(&Surface::new(t, f, b), 2.5, &Default::default(), &|| false).unwrap();
         // no faces left between the parts: they share their nodes there
         assert!(!parts.faces.iter().any(|(fc, _)| fc[..3].iter().all(|v| (parts.nodes[*v as usize].x - 50.0).abs() < 0.3)));
         // so the bonded beam bends like the one-piece beam, and has no stress peak at the joint
