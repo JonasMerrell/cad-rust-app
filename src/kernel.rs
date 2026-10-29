@@ -26,6 +26,9 @@ pub struct FaceInfo {
     pub normal: [f64; 3],
     pub planar: bool,
     pub area: f64,
+    /// Persistent name of the face (the feature and role that made it), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<crate::doc::FaceName>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -1753,6 +1756,12 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
             mesh.id = b.id;
             out.issues.extend(check_body(&b.shape, &mesh, valid));
             mesh.name = if mesh.surface { format!("Surface {}", i + 1) } else { format!("Part {}", i + 1) };
+            // face names, for what refers to the part from outside the Part Studio (mate connectors)
+            if mesh.faces.len() <= 600 {
+                for (f, info) in unique_faces(&b.shape).iter().zip(mesh.faces.iter_mut()) {
+                    info.name = m.face_name_of(f);
+                }
+            }
             out.bodies.push(mesh);
         }
     }
@@ -2494,7 +2503,7 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
             out.indices.extend(t.map(|i| base + i as u32));
             out.tri_face.push(fi as u32);
         }
-        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area });
+        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None });
     }
     // tight bounds from the triangulation (OCCT's box includes control points and tolerances)
     if !out.positions.is_empty() {

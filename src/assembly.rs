@@ -153,6 +153,19 @@ pub struct ConnRef {
     /// Circle radius (axes), when picked.
     #[serde(default)]
     pub size: f64,
+    /// Planar faces: key of the face's persistent name (`face_key`), 0 when it had none.
+    #[serde(default)]
+    pub name: u64,
+}
+
+/// A stable key for a face's persistent name (FNV-1a over feature, role and number); 0 for none.
+pub fn face_key(n: &Option<crate::doc::FaceName>) -> u64 {
+    let Some(n) = n else { return 0 };
+    let mut h: u64 = 0xcbf29ce484222325;
+    for b in n.feature.to_le_bytes().iter().chain(n.role.as_bytes()).chain(&n.n.to_le_bytes()) {
+        h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+    }
+    h.max(1)
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -552,7 +565,7 @@ pub fn infer_connector(inst: u64, leaf: usize, mesh: &BodyMesh, face: Option<usi
     let leaf = leaf as u32;
     if let Some((ei, e)) = edge.and_then(|e| mesh.edges.get(e).map(|x| (e, x))) {
         if let Some((c, n, r)) = e.circle {
-            return Some(mk(c.into(), n.into(), Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: true, size: r })));
+            return Some(mk(c.into(), n.into(), Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: true, size: r, name: 0 })));
         }
         let a = DVec3::from(e.pts[0].map(|v| v as f64));
         let b = DVec3::from(e.pts[e.pts.len() - 1].map(|v| v as f64));
@@ -565,7 +578,7 @@ pub fn infer_connector(inst: u64, leaf: usize, mesh: &BodyMesh, face: Option<usi
         // at the picked point, moved onto the face's plane
         let n = DVec3::from(f.normal).normalize();
         let o = hit - n * (hit - DVec3::from(f.center)).dot(n);
-        return Some(mk(o, n, Some(ConnRef { leaf, kind: 0, index: fi as u32, ..Default::default() })));
+        return Some(mk(o, n, Some(ConnRef { leaf, kind: 0, index: fi as u32, name: face_key(&f.name), ..Default::default() })));
     }
     // curved face: the circular edge whose axis this face wraps around
     let mut best: Option<(f64, Connector)> = None;
@@ -577,7 +590,7 @@ pub fn infer_connector(inst: u64, leaf: usize, mesh: &BodyMesh, face: Option<usi
             let err = (radial - r).abs();
             if err < 0.05 * r.max(1.0) && best.as_ref().map(|b| err < b.0).unwrap_or(true) {
                 // put the connector on the axis level with the click
-                best = Some((err, mk(c + n * v.dot(n), n, Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: false, size: r }))));
+                best = Some((err, mk(c + n * v.dot(n), n, Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: false, size: r, name: 0 }))));
             }
         }
     }
@@ -600,7 +613,9 @@ fn face_contains(mesh: &BodyMesh, fi: usize, p: DVec3, n: DVec3) -> bool {
 /// nearest parallel face whose outline holds it. Returns the new origin and the reference.
 fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -> Option<(DVec3, ConnRef)> {
     let tol = 1e-3 * (1.0 + o.length() * 1e-3);
-    let planes = |want: Option<u32>| -> Option<(DVec3, ConnRef)> {
+    let planes = |want: Option<ConnRef>| -> Option<(DVec3, ConnRef)> {
+        // a face with the picked face's persistent name, when it had one and it is still there
+        let named = want.filter(|w| w.name != 0).and_then(|w| mesh.faces.iter().position(|f| face_key(&f.name) == w.name));
         let mut best: Option<(f64, usize, DVec3)> = None;
         for (fi, f) in mesh.faces.iter().enumerate().filter(|(_, f)| f.planar) {
             let n = DVec3::from(f.normal).normalize();
@@ -612,13 +627,17 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
             if !face_contains(mesh, fi, q, n) {
                 continue;
             }
-            // the face it was picked on wins; else the nearest one along the normal
-            let score = if want == Some(fi as u32) { -1.0 } else { d.abs() };
+            // the face it was picked on wins (by name, else by index); else the nearest one along the normal
+            let picked = match named {
+                Some(k) => k == fi,
+                None => want.map(|w| w.index) == Some(fi as u32),
+            };
+            let score = if picked { -1.0 } else { d.abs() };
             if best.map(|b| score < b.0).unwrap_or(true) {
                 best = Some((score, fi, q));
             }
         }
-        best.map(|(_, fi, q)| (q, ConnRef { leaf, kind: 0, index: fi as u32, ..Default::default() }))
+        best.map(|(_, fi, q)| (q, ConnRef { leaf, kind: 0, index: fi as u32, name: face_key(&mesh.faces[fi].name), ..Default::default() }))
     };
     let axes = |want: Option<ConnRef>| -> Option<(DVec3, ConnRef)> {
         let mut best: Option<(f64, usize, DVec3, f64, f64)> = None;
@@ -646,7 +665,7 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
         }
         let centre = want.map(|w| w.centre).unwrap_or((o - c).length() < tol);
         let q = if centre { c } else { c + z * (o - c).dot(z) };
-        Some((q, ConnRef { leaf, kind: 1, index: ei as u32, centre, size: r }))
+        Some((q, ConnRef { leaf, kind: 1, index: ei as u32, centre, size: r, name: 0 }))
     };
     let lines = |want: Option<u32>| -> Option<(DVec3, ConnRef)> {
         let mut best: Option<(f64, usize, DVec3)> = None;
@@ -665,7 +684,7 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
         best.map(|(_, ei, m)| (m, ConnRef { leaf, kind: 2, index: ei as u32, ..Default::default() }))
     };
     match on {
-        Some(r) if r.kind == 0 => planes(Some(r.index)),
+        Some(r) if r.kind == 0 => planes(Some(r)),
         Some(r) if r.kind == 1 => axes(Some(r)),
         Some(r) => lines(Some(r.index)),
         None => {
@@ -799,8 +818,8 @@ mod tests {
     fn slab(h: f32) -> BodyMesh {
         let positions = vec![0.0, 0.0, 0.0, 40.0, 0.0, 0.0, 40.0, 40.0, 0.0, 0.0, 40.0, 0.0, 0.0, 0.0, h, 40.0, 0.0, h, 40.0, 40.0, h, 0.0, 40.0, h];
         let faces = vec![
-            FaceInfo { center: [20.0, 20.0, 0.0], normal: [0.0, 0.0, -1.0], planar: true, area: 1600.0 },
-            FaceInfo { center: [20.0, 20.0, h as f64], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0 },
+            FaceInfo { center: [20.0, 20.0, 0.0], normal: [0.0, 0.0, -1.0], planar: true, area: 1600.0, name: None },
+            FaceInfo { center: [20.0, 20.0, h as f64], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: None },
         ];
         BodyMesh { positions, indices: vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7], tri_face: vec![0, 0, 1, 1], faces, ..Default::default() }
     }
@@ -834,6 +853,31 @@ mod tests {
         assert_eq!(refresh_connectors(&mut all, 0, &|_, _| Some(&gone)), vec![3]);
         // the moving side of a new mate is the less constrained one
         assert_eq!(mate_anchor(&all[0], 3), vec![1]);
+    }
+
+    #[test]
+    fn connectors_keep_to_their_named_face() {
+        // two 40 x 40 faces facing up, one over the other: the connector is on the lower one ("end" of feature 1)
+        let level = |z: f32, base: u32| (vec![0.0, 0.0, z, 40.0, 0.0, z, 40.0, 40.0, z, 0.0, 40.0, z], vec![base, base + 1, base + 2, base, base + 2, base + 3]);
+        let name = |n: u64| Some(crate::doc::FaceName { feature: 1, role: "end".into(), n });
+        let face = |z: f64, n: u64| FaceInfo { center: [20.0, 20.0, z], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: name(n) };
+        let mesh = |faces: [(f32, u64); 2]| {
+            let (mut positions, mut indices) = (vec![], vec![]);
+            for (k, (z, _)) in faces.iter().enumerate() {
+                let (p, i) = level(*z, 4 * k as u32);
+                positions.extend(p);
+                indices.extend(i);
+            }
+            BodyMesh { positions, indices, tri_face: vec![0, 0, 1, 1], faces: faces.iter().map(|(z, n)| face(*z as f64, *n)).collect(), ..Default::default() }
+        };
+        let before = mesh([(8.0, 0), (60.0, 1)]);
+        let c = infer_connector(1, 0, &before, Some(0), None, DVec3::new(10.0, 10.0, 8.0)).unwrap();
+        assert_ne!(c.on.unwrap().name, 0);
+        // rebuilt: the lower face moved up past the old spot of nothing, and the faces came out in the other order
+        let after = mesh([(30.0, 1), (45.0, 0)]);
+        let (q, r) = locate(&after, c.on, 0, c.origin.into(), c.z.into()).unwrap();
+        assert_eq!(r.index, 1, "found by name, not by index or nearness");
+        assert!((q.z - 45.0).abs() < 1e-9);
     }
 
     fn revolute(id: u64, inst: u64, at: [f64; 3]) -> Mate {

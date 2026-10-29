@@ -274,7 +274,7 @@ impl Model<'_> {
     }
 
     /// The first name (in feature order) of the faces a model face lies on, if any.
-    fn face_name_of(&self, f: &Face) -> Option<FaceName> {
+    pub(super) fn face_name_of(&self, f: &Face) -> Option<FaceName> {
         let s = surf_of(f)?;
         self.named.iter().find(|m| overlap(&s, f, &m.surf, &m.face)).map(|m| m.name.clone())
     }
