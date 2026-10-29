@@ -368,7 +368,10 @@ impl Sim {
         let check_every = ((1.0 / self.cell).ceil() as usize).max(1);
         let mut work = 0;
         for k in 1..=n {
-            let p = from.lerp(to, k as f64 / n as f64);
+            // from + (to - from)·t, not lerp's from·(1 - t) + to·t: that rounds a coordinate the move
+            // doesn't change differently at every step, and a cell right on the cutter's rim then drops
+            // in and out of its footprint along a plunge, leaving a sliver a later rapid "cuts"
+            let p = if k == n { to } else { from + (to - from) * (k as f64 / n as f64) };
             if !self.fixtures.is_empty() {
                 self.hit_fixtures(ci, op, step, p);
             }
@@ -665,5 +668,45 @@ impl Sim {
             }
         }
         (tris, col)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::cam::ToolKind;
+
+    /// A drill pecking down through a plate: every re-entry rapid stops 0.3 mm above the last depth, so it
+    /// must never cut. The hole sits a hair off the grid (as a hole found on a real model does), which puts
+    /// cells right on the drill's rim: the plunge must sweep the same footprint all the way down.
+    #[test]
+    fn peck_drill_reentry_rapids_cut_nothing() {
+        let part = Part::new(&[], &[], "top");
+        let mut cam = Cam::default();
+        let drill = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Drill && (t.diameter - 6.8).abs() < 1e-9).unwrap();
+        let t = cam.add_tool(drill);
+        let stock = (DVec3::new(-10.0, -10.0, 0.0), DVec3::new(90.0, 60.0, 13.0));
+        for y in [15.0, 15.000000000000002, 14.999999999999998, 35.000000000000007] {
+            let (x, z) = (60.0, |d: f64| 13.0 + d);
+            let at = |d: f64| [x, y, z(d)];
+            let moves = vec![
+                Move::Rapid(at(10.0)),
+                Move::Rapid(at(1.0)),
+                Move::Feed(at(-7.8), 300.0),
+                Move::Rapid(at(1.0)),
+                Move::Rapid(at(-7.5)),
+                Move::Feed(at(-14.6), 300.0),
+                Move::Rapid(at(1.0)),
+                Move::Rapid(at(-14.3)),
+                Move::Feed(at(-15.543), 300.0),
+                Move::Rapid(at(10.0)),
+            ];
+            let tp = Toolpath { op: 1, tool: t, moves, ..Default::default() };
+            let mut sim = Sim::new(&cam, &part, stock, &[tp], 500);
+            assert!((sim.cell - 0.2).abs() < 1e-12);
+            sim.run_to(usize::MAX, usize::MAX);
+            assert!(sim.events.is_empty(), "hole at y = {y:?}: {:?}", sim.events);
+            assert!(sim.removed > 0.0);
+        }
     }
 }
