@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::{Cam, Tool};
+use crate::cam::{Cam, Coolant, Tool, ToolKind};
 use crate::cam_paths::{Move, Toolpath};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -35,20 +35,54 @@ fn num(v: f64) -> String {
 }
 
 fn comment(text: &str) -> String {
-    // parentheses can't nest in G-code comments
-    let t: String = text
-        .chars()
-        .map(|c| {
-            if c == '(' {
-                '['
-            } else if c == ')' {
-                ']'
-            } else {
-                c
+    format!("({})", ascii(text))
+}
+
+/// Comment text in plain ASCII (some controllers and senders mangle anything else): Ø → D, ° → deg, × → x,
+/// accented letters without their accents, other characters dropped. Parentheses can't nest in G-code comments.
+fn ascii(text: &str) -> String {
+    let mut t = String::new();
+    for c in text.chars() {
+        match c {
+            '(' => t.push('['),
+            ')' => t.push(']'),
+            'Ø' | 'ø' | '⌀' => t.push('D'),
+            '°' => t.push_str("deg"),
+            '×' => t.push('x'),
+            '–' | '—' | '−' => t.push('-'),
+            '·' => t.push('-'),
+            '…' => t.push_str("..."),
+            '‘' | '’' => t.push('\''),
+            '“' | '”' => t.push('"'),
+            'µ' => t.push('u'),
+            c if c.is_ascii() => t.push(c),
+            c => {
+                // à, é, ü, ñ, … : the base letter
+                let base = match c {
+                    'à' | 'á' | 'â' | 'ã' | 'ä' | 'å' => "a",
+                    'À' | 'Á' | 'Â' | 'Ã' | 'Ä' | 'Å' => "A",
+                    'è' | 'é' | 'ê' | 'ë' => "e",
+                    'È' | 'É' | 'Ê' | 'Ë' => "E",
+                    'ì' | 'í' | 'î' | 'ï' => "i",
+                    'Ì' | 'Í' | 'Î' | 'Ï' => "I",
+                    'ò' | 'ó' | 'ô' | 'õ' | 'ö' => "o",
+                    'Ò' | 'Ó' | 'Ô' | 'Õ' | 'Ö' => "O",
+                    'ù' | 'ú' | 'û' | 'ü' => "u",
+                    'Ù' | 'Ú' | 'Û' | 'Ü' => "U",
+                    'ç' => "c",
+                    'Ç' => "C",
+                    'ñ' => "n",
+                    'Ñ' => "N",
+                    'ß' => "ss",
+                    'æ' => "ae",
+                    'Æ' => "AE",
+                    _ => "",
+                };
+                t.push_str(base);
             }
-        })
-        .collect();
-    format!("({t})")
+        }
+    }
+    t
 }
 
 struct Out {
@@ -125,10 +159,42 @@ impl Out {
         self.motion = None;
         self.feed = None;
     }
+
+    /// Lift the spindle all the way up in machine coordinates: work Z heights aren't safe while the tool
+    /// length offset is off or about to change. GRBL (often not homed) goes up to the work clearance height.
+    fn top(&mut self, d: Dialect, safe_w: f64) {
+        match d {
+            Dialect::Grbl => self.z_up(safe_w),
+            Dialect::Fanuc => {
+                self.line("G91 G28 Z0");
+                self.line("G90");
+                self.forget();
+            }
+            Dialect::LinuxCnc | Dialect::Mach3 => {
+                self.line("G53 G0 Z0");
+                self.forget();
+            }
+        }
+    }
+}
+
+/// A message for the operator: shown on screen by LinuxCNC and Mach3, a plain comment elsewhere.
+fn message(d: Dialect, text: &str) -> String {
+    match d {
+        Dialect::LinuxCnc => comment(&format!("MSG, {text}")),
+        Dialect::Mach3 => comment(&format!("MSG,{text}")),
+        _ => comment(text),
+    }
 }
 
 /// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates).
+#[cfg(test)]
 pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String {
+    gcode_noted(cam, paths, origin, safe, None)
+}
+
+/// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice).
+pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>) -> String {
     let d = dialect(&cam.post);
     let mut o = Out { s: String::new(), last: [None; 3], motion: None, feed: None };
     let safe_w = safe - origin.z;
@@ -137,7 +203,18 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         o.line(&format!("O{:04} {}", cam.program % 10000, comment(&cam.name)));
     }
     o.line(&comment(&format!("{} - made by cad-rust-app", cam.name)));
-    o.line(&comment(&format!("work zero: {}", cam.origin.label().to_lowercase())));
+    o.line(&comment(&format!("work zero: {}", work_zero.unwrap_or_else(|| cam.origin.label().to_lowercase()))));
+    for n in cam.setup_notes() {
+        o.line(&comment(&n));
+    }
+    match d {
+        Dialect::Mach3 => {
+            o.line(&comment("Mach3: dwells (G4 P) are in seconds - untick 'G4 dwell param in milliseconds' in General Config"));
+            o.line(&comment("Mach3: retracts use G53 G0 Z0 - reference (home) the machine first"));
+        }
+        Dialect::LinuxCnc => o.line(&comment("retracts use G53 G0 Z0 - home the machine first")),
+        _ => {}
+    }
     let mut used: Vec<u64> = vec![];
     for p in paths.iter().filter(|p| !p.moves.is_empty()) {
         if !used.contains(&p.tool) {
@@ -150,12 +227,17 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
             o.line(&comment(&if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) }));
         }
     }
+    if d != Dialect::LinuxCnc && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
+        o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
+    }
     let total: f64 = paths.iter().map(|p| p.time).sum();
     o.line(&comment(&format!("estimated time {}:{:02}", (total / 60.0).floor(), (total % 60.0).round() as i64)));
     match d {
         Dialect::Grbl => o.line("G21 G17 G90 G94"),
-        Dialect::LinuxCnc => o.line("G21 G17 G40 G49 G80 G90 G94 G64 P0.01"),
-        Dialect::Fanuc | Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G94"),
+        // G91.1: arc centres (I, J) relative to the start, whatever the controller was left in
+        Dialect::LinuxCnc => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94 G64 P0.01"),
+        Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94"),
+        Dialect::Fanuc => o.line("G21 G17 G40 G49 G80 G90 G94"),
     }
     o.line("G54");
     for l in fill(&cam.post_text.header, cam, None) {
@@ -163,7 +245,7 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
     }
     let mut cur_tool: Option<u64> = None;
     let mut spindle_rpm: Option<f64> = None;
-    let mut coolant = false;
+    let mut coolant = Coolant::Off;
     for tp in paths {
         if tp.moves.is_empty() {
             continue;
@@ -174,14 +256,14 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         o.line(&comment(&format!("{} - {}", op.map(|o| o.name.as_str()).unwrap_or("operation"), op.map(|o| o.kind.label()).unwrap_or(""))));
         if cur_tool != Some(tool.id) {
             if cur_tool.is_some() || d != Dialect::Grbl {
-                o.z_up(safe_w);
+                o.top(d, safe_w);
                 if spindle_rpm.is_some() {
                     o.line("M5");
                     spindle_rpm = None;
                 }
-                if coolant {
+                if coolant.is_on() {
                     o.line("M9");
-                    coolant = false;
+                    coolant = Coolant::Off;
                 }
             }
             let probing = cam.probe.mode != "off";
@@ -193,16 +275,17 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
                 match d {
                     Dialect::Grbl => {
                         if cur_tool.is_some() {
-                            o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
+                            o.line(&comment(&format!("change to T{}: {}", tool.number, tool_text(tool))));
                             o.line("M0");
                         } else {
-                            o.line(&comment(&format!("load T{}: {}", tool.number, tool.describe())));
+                            o.line(&comment(&format!("load T{}: {}", tool.number, tool_text(tool))));
                         }
                     }
                     _ => {
                         if !cam.machine.tool_changer {
                             // manual tool change: stop for the operator, then pick up the new length offset
-                            o.line(&comment(&format!("change to T{}: {}", tool.number, tool.describe())));
+                            let verb = if cur_tool.is_some() { "change to" } else { "load" };
+                            o.line(&message(d, &format!("{verb} T{}: {}, then press cycle start", tool.number, tool_text(tool))));
                             o.line("M0");
                         }
                         o.line(&format!("T{} M6", tool.number));
@@ -218,16 +301,30 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
             o.forget();
             cur_tool = Some(tool.id);
         }
-        if spindle_rpm != Some(tool.rpm) {
-            o.line(&format!("S{} M3", num(tool.rpm.round())));
-            spindle_rpm = Some(tool.rpm);
+        // never above the spindle's top speed (the toolpath's feeds are scaled to match)
+        let rpm = cam.spindle_rpm(tool).round();
+        if spindle_rpm != Some(rpm) {
+            if rpm < tool.rpm.round() {
+                o.line(&comment(&format!("T{} is set to {} rpm: capped at the spindle's {}", tool.number, num(tool.rpm.round()), num(rpm))));
+            }
+            o.line(&format!("S{} M3", num(rpm)));
+            spindle_rpm = Some(rpm);
             // let the spindle come up to speed
-            o.line(if d == Dialect::Fanuc { "G4 P2000" } else { "G4 P2" });
+            if cam.machine.spin_up > 0.0 {
+                o.line(&dwell(d, cam.machine.spin_up));
+            }
         }
-        let want_coolant = tool.coolant || op.map(|o| o.coolant).unwrap_or(false);
-        if want_coolant != coolant {
-            o.line(if want_coolant { "M8" } else { "M9" });
-            coolant = want_coolant;
+        let want = cam.coolant_for(tool, op);
+        if want != coolant {
+            if coolant.is_on() && want.is_on() {
+                o.line("M9");
+            }
+            match want {
+                Coolant::Flood => o.line("M8"),
+                Coolant::Mist => o.line("M7"),
+                _ => o.line("M9"),
+            }
+            coolant = want;
         }
         let mut pos = DVec3::new(0.0, 0.0, safe);
         let mut first = true;
@@ -276,14 +373,20 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
                     o.mv(1, DVec3::from(p) - origin, Some(f));
                     pos = p.into();
                 }
-                Move::Dwell(s) => match d {
-                    Dialect::Fanuc => o.line(&format!("G4 P{}", (s * 1000.0).round())),
-                    _ => o.line(&format!("G4 P{}", num(s))),
-                },
+                Move::Dwell(s) => o.line(&dwell(d, s)),
                 Move::Tap { z, r, pitch } => {
                     let w = pos - origin;
                     let (zw, rw) = (z - origin.z, r - origin.z);
-                    let f = tool.rpm * pitch;
+                    let f = rpm * pitch;
+                    if tool.tapping_head {
+                        // the head reverses the tap when the spindle pulls back: feed in, then out faster by its ratio
+                        o.mv(0, DVec3::new(w.x, w.y, rw), None);
+                        o.mv(1, DVec3::new(w.x, w.y, zw), Some(f));
+                        o.mv(1, DVec3::new(w.x, w.y, rw), Some(f * tool.reverse_ratio.max(0.1)));
+                        pos = DVec3::new(pos.x, pos.y, r);
+                        first = false;
+                        continue;
+                    }
                     match d {
                         Dialect::LinuxCnc => {
                             o.mv(0, DVec3::new(w.x, w.y, rw), None);
@@ -301,9 +404,9 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
                             o.line(&comment("tapping - use a floating tap holder"));
                             o.mv(0, DVec3::new(w.x, w.y, rw), None);
                             o.mv(1, DVec3::new(w.x, w.y, zw), Some(f));
-                            o.line(&format!("M4 S{}", num(tool.rpm.round())));
+                            o.line(&format!("M4 S{}", num(rpm)));
                             o.mv(1, DVec3::new(w.x, w.y, rw), Some(f));
-                            o.line(&format!("M3 S{}", num(tool.rpm.round())));
+                            o.line(&format!("M3 S{}", num(rpm)));
                         }
                     }
                     pos = DVec3::new(pos.x, pos.y, r);
@@ -313,34 +416,47 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
         }
     }
     o.line("");
-    o.z_up(safe_w);
+    o.top(d, safe_w);
     o.line("M5");
-    if coolant {
+    if coolant.is_on() {
         o.line("M9");
     }
     for l in fill(&cam.post_text.footer, cam, None) {
         o.line(&l);
     }
-    match d {
-        Dialect::Fanuc => {
-            o.line("G91 G28 Z0");
-            o.line("G90");
-            o.line("M30");
-            o.line("%");
-        }
-        _ => o.line("M30"),
+    o.line("M30");
+    if d == Dialect::Fanuc {
+        o.line("%");
     }
     o.s
 }
 
+/// A pause of `s` seconds: Fanuc counts G4 P in milliseconds, the others in seconds.
+fn dwell(d: Dialect, s: f64) -> String {
+    match d {
+        Dialect::Fanuc => format!("G4 P{}", (s * 1000.0).round()),
+        _ => format!("G4 P{}", num(s)),
+    }
+}
+
+/// The tool for the operator: its description, and how a tap is held.
+fn tool_text(t: &Tool) -> String {
+    if t.kind == ToolKind::Tap && t.tapping_head {
+        format!("{} in the self-reversing tapping head", t.describe())
+    } else {
+        t.describe()
+    }
+}
+
 /// The user's G-code with its placeholders filled in, line by line.
 fn fill(text: &str, cam: &Cam, tool: Option<&Tool>) -> Vec<String> {
-    let mut t = text.replace("{program}", &cam.program.to_string()).replace("{setup}", &cam.name);
+    // names go in as plain ASCII, like the comments the post writes
+    let mut t = text.replace("{program}", &cam.program.to_string()).replace("{setup}", &ascii(&cam.name));
     if let Some(tool) = tool {
         t = t
             .replace("{tool}", &tool.number.to_string())
-            .replace("{name}", &tool.name)
-            .replace("{desc}", &tool.describe())
+            .replace("{name}", &ascii(&tool.name))
+            .replace("{desc}", &ascii(&tool.describe()))
             .replace("{diameter}", &num(tool.diameter))
             .replace("{rpm}", &num(tool.rpm.round()));
     }
@@ -528,6 +644,12 @@ fn fit_arcs(pts: &[DVec3]) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn comments_are_ascii() {
+        assert_eq!(comment("T1 Ø6 90° chamfer (M5 × 0.8) – Müller"), "(T1 D6 90deg chamfer [M5 x 0.8] - Muller)");
+        assert!(comment("日本 ok").is_ascii());
+    }
 
     #[test]
     fn fits_arcs_and_helices() {

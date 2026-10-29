@@ -593,6 +593,7 @@ pub fn jaw_setup(held: &Cam) -> Cam {
         post: held.post.clone(),
         program: held.program + 1,
         machine: held.machine.clone(),
+        coolant: held.coolant,
         arcs: held.arcs,
         probe: held.probe.clone(),
         post_text: held.post_text.clone(),
@@ -604,7 +605,6 @@ pub fn jaw_setup(held: &Cam) -> Cam {
         .max_by(|a, b| a.diameter.total_cmp(&b.diameter))
         .unwrap_or_else(|| cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat).unwrap_or_default());
     cam::suggest(&mut t, &sj.material, c.max_rpm, c.min_rpm);
-    t.coolant = held.tools.iter().any(|t| t.coolant);
     let tool = c.add_tool(t);
     let face = c.add_op(OpKind::Face, tool);
     c.op_mut(face).unwrap().name = "Skim jaw tops".into();

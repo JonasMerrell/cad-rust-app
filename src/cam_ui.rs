@@ -389,7 +389,7 @@ pub(crate) fn fit(app: &mut App) {
     let mut a = DVec3::splat(f64::INFINITY);
     let mut b = DVec3::splat(f64::NEG_INFINITY);
     for k in 0..8 {
-        let p = part.to_part(DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z, hi.z][(k >> 2) & 1]));
+        let p = DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z, hi.z][(k >> 2) & 1]);
         a = a.min(p);
         b = b.max(p);
     }
@@ -498,6 +498,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let mut make_jaws = false;
     let mut print_jaws = false;
     let mut goto: Option<String> = None;
+    let mut save_machine = None;
     {
         let c = &mut app.ws.cams[ci];
         let jaw_tab = !c.jaws_of.is_empty();
@@ -810,7 +811,9 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         row(ui, "Rapid Z", |ui| {
             ui.add(limit_value(&mut c.machine.rapid_z, " mm/min")).on_hover_text("Z rapid rate for cycle times; not set: same as Rapid X/Y");
         });
-        ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) for you to change tools");
+        num(ui, "Spin-up wait", &mut c.machine.spin_up, " s", 0.0..=60.0, 0.5);
+        coolant_combo(ui, "cam-setup-coolant", &mut c.coolant, "auto (flood on metal)");
+        ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) with a message for you to change tools");
         ui.checkbox(&mut c.arcs, "Arcs in the G-code (G2/G3)").on_hover_text("Write arcs where the toolpath runs along circles: shorter files and smoother motion than many short lines");
         row(ui, "Tool probing", |ui| {
             let label = |m: &str| match m {
@@ -867,6 +870,15 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         // hand edits make it a custom machine
         if (c.machine.clone(), c.max_rpm, c.rapid_rate) != before {
             c.machine.name.clear();
+        }
+        if ui.button("Save as my machine").on_hover_text("New setups start from these machine settings (controller, spindle, machine, coolant, probing, custom G-code) when the document has no setup to copy them from").clicked() {
+            save_machine = Some(cam::MachineSettings::of(c));
+        }
+    }
+    if let Some(m) = save_machine {
+        match cam::save_machine(&m) {
+            Ok(p) => app.flash_info(format!("Saved the machine to {}", p.display()), Some(std::time::Duration::from_secs(3))),
+            Err(e) => app.flash(format!("Could not save the machine: {e}"), ToastKind::Error),
         }
     }
     if print_jaws {
@@ -1142,7 +1154,9 @@ fn templates_ui(app: &mut App, ui: &mut Ui) {
     let mut add = None;
     let mut gone = None;
     ui.add_space(2.0);
-    ui.menu_button(RichText::new("Templates").size(12.5), |ui| {
+    // a click in the name box must not close it: only a click outside does
+    let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+    egui::containers::menu::MenuButton::new(RichText::new("Templates").size(12.5)).config(keep_open).ui(ui, |ui| {
         ui.set_min_width(240.0);
         ui.label(RichText::new("SAVE THESE OPERATIONS").color(theme::muted()).size(11.0).strong());
         ui.horizontal(|ui| {
@@ -1346,6 +1360,13 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Leave on walls", &mut o.leave, " mm", -5.0..=50.0, 0.05);
             num(ui, "Leave on floors", &mut o.leave_floor, " mm", 0.0..=50.0, 0.05);
             num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
+            let thin = tool.as_ref().map(|t| cam::chip_thinning(cam_paths::stepover(&o, t) / t.diameter.max(1e-9))).unwrap_or(1.0);
+            row(ui, "Chip thinning", |ui| {
+                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the loops")).on_hover_text(
+                    "The loops take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
+                     Kept on the safe side: at most ×1.5, and not on the helix entries",
+                );
+            });
             rest_row(ui, &mut o.rest);
             row(ui, "Loops", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
@@ -1456,6 +1477,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         }
         OpKind::Deburr => {
             num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=20.0, 0.05);
+            opt(ui, "Top", &mut o.top, stock_top, " mm", "the top of the stock");
+            opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "every edge the tool reaches");
             num(ui, "Sharper than", &mut o.edge_angle, "°", 5.0..=170.0, 1.0);
             row(ui, "Edges", |ui| {
                 if o.edges.is_empty() {
@@ -1594,7 +1617,15 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Teeth length", &mut t.cutting_width, " mm", 0.1..=100.0, 0.1);
             num(ui, "Neck Ø", &mut t.neck_diameter, " mm", 0.1..=100.0, 0.05);
         }
-        ToolKind::Tap => num(ui, "Pitch", &mut t.pitch, " mm", 0.1..=10.0, 0.05),
+        ToolKind::Tap => {
+            num(ui, "Pitch", &mut t.pitch, " mm", 0.1..=10.0, 0.05);
+            ui.checkbox(&mut t.tapping_head, "Self-reversing tapping head").on_hover_text(
+                "The tap sits in a tapping head that reverses it when the spindle pulls back: the G-code just feeds in and out with the spindle running forward (no G84, no spindle reversal)",
+            );
+            if t.tapping_head {
+                num(ui, "Reverse ratio", &mut t.reverse_ratio, "×", 0.5..=4.0, 0.05);
+            }
+        }
         _ => {}
     }
     num(ui, "Flute length", &mut t.flute_length, " mm", 0.1..=500.0, 0.1);
@@ -1633,6 +1664,11 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
         }
     });
     num(ui, "Spindle", &mut t.rpm, " rpm", 10.0..=100000.0, 50.0);
+    if max_rpm > 0.0 && t.rpm > max_rpm {
+        ui.label(RichText::new(format!("Runs at the spindle's {} rpm, feeds scaled to {}%", max_rpm.round(), (max_rpm / t.rpm * 100.0).round())).color(theme::error_soft()).size(12.0));
+    } else if min_rpm > 0.0 && t.rpm < min_rpm {
+        ui.label(RichText::new(format!("Below the spindle's {} rpm minimum: little torque", min_rpm.round())).color(theme::error_soft()).size(12.0));
+    }
     num(ui, "Feed", &mut t.feed, " mm/min", 1.0..=50000.0, 5.0);
     num(ui, "Plunge feed", &mut t.plunge_feed, " mm/min", 1.0..=50000.0, 5.0);
     if !t.kind.is_hole_tool() {
@@ -1644,7 +1680,18 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
             }
         });
     }
-    ui.checkbox(&mut t.coolant, "Coolant");
+    coolant_combo(ui, "cam-tool-coolant", &mut t.coolant, "the setup's");
+}
+
+fn coolant_combo(ui: &mut Ui, id: &str, v: &mut cam::Coolant, auto: &str) {
+    row(ui, "Coolant", |ui| {
+        let label = |c: cam::Coolant| if c == cam::Coolant::Auto { auto.to_string() } else { c.label().to_string() };
+        egui::ComboBox::from_id_salt(id).selected_text(label(*v)).show_ui(ui, |ui| {
+            for c in cam::Coolant::ALL {
+                ui.selectable_value(v, c, label(c));
+            }
+        });
+    });
 }
 
 /// Side view of a tool's cutting profile.
@@ -1687,6 +1734,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
             }
         });
         ui.separator();
+        let setup = cam(app).cloned();
         let mine = cam::load_library();
         let mut all: Vec<(bool, Tool)> = mine.into_iter().map(|t| (true, t)).collect();
         all.extend(cam::presets().into_iter().map(|t| (false, t)));
@@ -1709,7 +1757,22 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
                         add.push(t.clone());
                     }
                     ui.label(RichText::new(&t.name).size(12.5));
-                    ui.label(RichText::new(format!("{} rpm · {} mm/min", t.rpm, t.feed)).color(theme::muted()).size(11.5));
+                    // the speed and feed it gets in this setup: suggested for its stock and spindle, capped at the top speed
+                    let (rpm, feed, low) = match &setup {
+                        Some(c) => {
+                            let mut a = t.clone();
+                            if a.rpm <= 0.0 || !*own {
+                                cam::suggest(&mut a, &c.stock.material, c.max_rpm, c.min_rpm);
+                            }
+                            let rpm = c.spindle_rpm(&a);
+                            (rpm, a.feed * rpm / a.rpm.max(1.0), c.min_rpm > 0.0 && rpm < c.min_rpm)
+                        }
+                        None => (t.rpm, t.feed, false),
+                    };
+                    let r = ui.label(RichText::new(format!("{} rpm · {} mm/min", rpm.round(), feed.round())).color(if low { theme::error_soft() } else { theme::muted() }).size(11.5));
+                    if low {
+                        r.on_hover_text("Below the spindle's minimum speed");
+                    }
                 });
             }
         });
@@ -1751,7 +1814,7 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
 
 pub fn gcode_for(c: &Cam, part: &Part, paths: &[Toolpath]) -> String {
     let ctx = cam_paths::Ctx::new(c, part);
-    crate::cam_post::gcode(c, paths, ctx.origin, ctx.safe())
+    crate::cam_post::gcode_noted(c, paths, ctx.origin, ctx.safe(), Some(cam_paths::work_zero_note(c, part)))
 }
 
 pub(crate) fn export_dialog(app: &mut App) {
@@ -1760,12 +1823,11 @@ pub(crate) fn export_dialog(app: &mut App) {
         app.flash("Toolpaths are still being made", ToastKind::Info);
         return;
     }
-    let ext = if c.post == "fanuc" {
-        "nc"
-    } else if c.post == "linuxcnc" {
-        "ngc"
-    } else {
-        "gcode"
+    let ext = match c.post.as_str() {
+        "fanuc" => "nc",
+        "linuxcnc" => "ngc",
+        "mach3" => "tap",
+        _ => "gcode",
     };
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
     let Some(p) = app.save_file_dialog("G-code", &[ext, "nc", "gcode", "ngc", "tap"], format!("{name}.{ext}")) else { return };
@@ -1814,6 +1876,25 @@ fn start_sim(app: &mut App, run: bool) {
     app.cam.scene_dirty = true;
 }
 
+/// The operation and the kind of move the simulation is at: "Contour 1 (T1) · feed to X12 Y-3 Z-4 · move 812 of 2400".
+fn sim_step_text(app: &App) -> Option<String> {
+    let sim = app.cam.sim.as_ref()?;
+    let k = sim.done.min(sim.total().checked_sub(1)?);
+    let (op, m) = sim.move_at(k)?;
+    let c = cam(app)?;
+    let op = c.op(op)?;
+    let tool = c.tool(op.tool).map(|t| format!(" (T{})", t.number)).unwrap_or_default();
+    let o = app.cam.part.as_ref().map(|p| cam_paths::work_origin(c, p)).unwrap_or_default();
+    let at = |p: [f64; 3]| format!("X{} Y{} Z{}", cam::fmt_mm(p[0] - o.x), cam::fmt_mm(p[1] - o.y), cam::fmt_mm(p[2] - o.z));
+    let what = match m {
+        Move::Rapid(p) => format!("rapid to {}", at(p)),
+        Move::Feed(p, f) => format!("feed to {} at {}", at(p), f.round()),
+        Move::Tap { z, .. } => format!("tap to Z{}", cam::fmt_mm(z - o.z)),
+        Move::Dwell(s) => format!("dwell {} s", cam::fmt_mm(s)),
+    };
+    Some(format!("{}{tool} · {what} · move {} of {}", op.name, k + 1, sim.total()))
+}
+
 fn sim_ui(app: &mut App, ui: &mut Ui) {
     let Some(sim) = &app.cam.sim else { return };
     let total = sim.total();
@@ -1853,6 +1934,9 @@ fn sim_ui(app: &mut App, ui: &mut Ui) {
         ui.add(egui::Slider::new(&mut app.cam.speed, 1.0..=2000.0).logarithmic(true).suffix(" moves/s"));
     });
     ui.label(RichText::new(format!("Move {done} of {total} · {:.1} cm³ removed", removed / 1000.0)).color(theme::muted()).size(12.0));
+    if let Some(now) = sim_step_text(app) {
+        ui.label(RichText::new(now).size(12.0));
+    }
     if ui.checkbox(&mut app.cam.show_part, "Show the part").on_hover_text("Show the finished part, see-through, over the stock").changed() {
         app.cam.scene_dirty = true;
     }
@@ -1955,6 +2039,8 @@ fn build_scene(app: &App) -> SceneData {
     // (a tab that machines soft jaws shows the jaws instead)
     let jaw_tab = !c.jaws_of.is_empty();
     let bodies: &[BodyMesh] = if (sim_on && !app.cam.show_part) || jaw_tab { &[] } else { app.studio_bodies(c.studio) };
+    // everything is drawn as it sits on the machine, spindle up: the parts turned by the setup's rotation
+    let rot = app.cam.part.as_ref().map(|p| p.rot.as_mat3()).unwrap_or(glam::Mat3::IDENTITY);
     for m in bodies {
         let hidden = doc.and_then(|d| d.parts.get(&crate::doc::body_key(m.id))).map(|p| p.hidden).unwrap_or(false);
         if if c.bodies.is_empty() { hidden } else { !c.bodies.contains(&m.id) } {
@@ -1962,18 +2048,18 @@ fn build_scene(app: &App) -> SceneData {
         }
         let col = doc.and_then(|d| d.parts.get(&crate::doc::body_key(m.id))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
         for t in m.indices.chunks(3) {
-            let p = |i: u32| Vec3::new(m.positions[3 * i as usize], m.positions[3 * i as usize + 1], m.positions[3 * i as usize + 2]);
+            let p = |i: u32| rot * Vec3::new(m.positions[3 * i as usize], m.positions[3 * i as usize + 1], m.positions[3 * i as usize + 2]);
             s.tri(sim_on, [p(t[0]), p(t[1]), p(t[2])], rgba(col, if sim_on { 0.25 } else { 1.0 }));
         }
         if !sim_on {
             for e in &m.edges {
-                let pts: Vec<Vec3> = e.pts.iter().map(|p| Vec3::from(*p)).collect();
+                let pts: Vec<Vec3> = e.pts.iter().map(|p| rot * Vec3::from(*p)).collect();
                 s.polyline(&pts, 1.2, rgba(vp::edge(), 1.0), false);
             }
         }
     }
     let Some(part) = &app.cam.part else { return s };
-    let to = |p: DVec3| part.to_part(p).as_vec3();
+    let to = |p: DVec3| p.as_vec3();
     if jaw_tab && (!sim_on || app.cam.show_part) {
         let col = rgba(Color32::from_rgb(0x9f, 0xb8, 0xd8), if sim_on { 0.25 } else { 1.0 });
         for t in &part.tris {
@@ -2151,7 +2237,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
             let origin = cam_paths::work_origin(c, &part);
             let angle = c.op(id).map(|o| o.edge_angle).unwrap_or(30.0);
-            let scr = |p: DVec3| app.camera.project(part.to_part(p).as_vec3());
+            let scr = |p: DVec3| app.camera.project(p.as_vec3());
             let existing: Vec<[f64; 3]> = c.op(id).map(|o| o.edges.clone()).unwrap_or_default();
             // clicking a pick again removes it
             if let Some(k) = existing.iter().position(|e| scr(DVec3::from(*e) + origin).distance(local) < 8.0) {
@@ -2242,9 +2328,13 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 }
                 let mut t = app.cam.sim_target as f64;
                 ui.spacing_mut().slider_width = (strip.width() - 120.0).max(60.0);
-                if ui.add(egui::Slider::new(&mut t, 0.0..=total.max(1) as f64).show_value(false)).changed() {
+                let r = ui.add(egui::Slider::new(&mut t, 0.0..=total.max(1) as f64).show_value(false));
+                if r.changed() {
                     app.cam.sim_target = t as usize;
                     app.cam.playing = false;
+                }
+                if let Some(now) = sim_step_text(app) {
+                    r.on_hover_text(now);
                 }
                 if ui.small_button("Close").clicked() {
                     app.cam.sim_on = false;

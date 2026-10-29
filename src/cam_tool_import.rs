@@ -170,7 +170,12 @@ fn fusion_tool(e: &Value) -> Result<Option<Tool>, String> {
         if let Some(v) = f("stepover") {
             t.stepover = (v * k / d).clamp(0.01, 1.0);
         }
-        t.coolant = p.get("tool-coolant").and_then(|c| c.as_str()).map(|c| c != "disabled").unwrap_or(false);
+        // "disabled" is Fusion's default: leave it to the setup's coolant
+        t.coolant = match p.get("tool-coolant").and_then(|c| c.as_str()) {
+            Some(c) if c.contains("mist") || c.contains("air") => crate::cam::Coolant::Mist,
+            Some(c) if c != "disabled" => crate::cam::Coolant::Flood,
+            _ => crate::cam::Coolant::Auto,
+        };
     } else {
         // no feeds: suggested when the tool is added to a setup
         t.rpm = 0.0;
@@ -258,7 +263,7 @@ mod tests {
         let t = &r.tools[0];
         assert_eq!((t.kind, t.number, t.flutes), (ToolKind::Flat, 4, 3));
         assert_eq!((t.diameter, t.flute_length, t.stickout, t.rpm, t.feed, t.plunge_feed), (6.0, 18.0, 25.0, 18000.0, 1500.0, 400.0));
-        assert!((t.stepover - 0.4).abs() < 1e-9 && t.coolant);
+        assert!((t.stepover - 0.4).abs() < 1e-9 && t.coolant == crate::cam::Coolant::Flood);
         assert_eq!(t.holder, vec![[32.0, 0.0], [34.0, 20.0], [40.0, 20.0], [40.0, 50.0]]);
         assert_eq!(t.name, "6mm 3FL (Acme)");
         let c = &r.tools[1];

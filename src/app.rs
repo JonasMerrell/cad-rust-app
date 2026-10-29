@@ -2479,7 +2479,9 @@ impl App {
                 ui.add_space(4.0);
                 self.units_combo(ui);
                 let versions = if self.phone { format!("V{}", self.ws.versions.len()) } else { format!("Versions ({})", self.ws.versions.len()) };
-                ui.menu_button(RichText::new(versions).size(12.0), |ui| {
+                // a click in the name box must not close it: only a click outside does
+                let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
+                egui::containers::menu::MenuButton::new(RichText::new(versions).size(12.0)).config(keep_open).ui(ui, |ui| {
                     ui.set_min_width(260.0);
                     ui.horizontal(|ui| {
                         ui.add(egui::TextEdit::singleline(&mut self.version_name).hint_text("Version name").desired_width(150.0));
@@ -2591,7 +2593,8 @@ impl App {
                     Tab::Studio(i) => i,
                     _ => self.cur_studio,
                 };
-                self.ws.cams.push(crate::cam::Cam { name: format!("Manufacture {n}"), studio, ..Default::default() });
+                // the machine settings of the last setup, else the user's saved machine
+                self.ws.cams.push(crate::cam::new_setup(format!("Manufacture {n}"), studio, &self.ws.cams, crate::cam::load_machine()));
                 self.cam = Default::default();
                 self.switch_tab(Tab::Cam(n - 1));
             }

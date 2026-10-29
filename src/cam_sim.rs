@@ -321,6 +321,11 @@ impl Sim {
         self.moves.len()
     }
 
+    /// The operation and move at step `k` of the run.
+    pub fn move_at(&self, k: usize) -> Option<(u64, Move)> {
+        self.moves.get(k).map(|m| (m.1, m.2))
+    }
+
     pub fn tool_pos(&self) -> DVec3 {
         self.pos
     }
@@ -372,7 +377,10 @@ impl Sim {
                 continue;
             }
             work += 1;
-            self.stamp(ci, op, step, p, rapid, k % check_every == 0 || k == n);
+            // straight up only ever leaves material: it can't be a rapid into the stock (the tool can sit beside a
+            // wall the grid shows a little inside it)
+            let rising = to.z > from.z && (to - from).truncate().length() < 1e-9;
+            self.stamp(ci, op, step, p, rapid && !rising, k % check_every == 0 || k == n);
         }
         self.pos = to;
         work
