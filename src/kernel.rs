@@ -2961,65 +2961,370 @@ pub struct ProjView {
     #[serde(default)]
     pub hatch: Vec<[[f64; 2]; 2]>,
     pub bbox: [[f64; 2]; 2],
+    /// Visible tangent edges (where faces join smoothly, e.g. fillets), drawn thin.
+    #[serde(default)]
+    pub smooth: Vec<Vec<[f64; 2]>>,
+    /// Every model edge projected, visible or not, with its identity, so dimensions can be
+    /// attached to model geometry and follow it when the model changes.
+    #[serde(default)]
+    pub edges: Vec<ProjEdge>,
+    /// Holes made by Hole features, for callouts.
+    #[serde(default)]
+    pub holes: Vec<ProjHole>,
+    /// Section views: where the cutting plane went (p·dir, mm).
+    #[serde(default)]
+    pub cut: Option<f64>,
+    /// Assembly views: a point on each item (its centroid), for balloons.
+    #[serde(default)]
+    pub items: Vec<[f64; 2]>,
+}
+
+/// A model edge seen in a view.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjEdge {
+    /// The part: its body id in a Part Studio view, (item index, 0) in an assembly view.
+    pub part: BodyId,
+    /// Index of the edge in the part (OpenCascade's edge order, stable while the topology is).
+    pub index: u32,
+    /// 0 straight, 1 circle or arc, 2 other.
+    pub kind: u8,
+    pub pts: Vec<[f64; 2]>,
+    /// A circle or arc seen square on: centre x, y and radius in the view.
+    #[serde(default)]
+    pub circle: Option<[f64; 3]>,
+    /// A circle seen edge on: its centre and its axis direction in the view.
+    #[serde(default)]
+    pub axis: Option<[f64; 4]>,
+}
+
+/// A hole from a Hole feature, as seen in a view.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjHole {
+    pub feature: FeatId,
+    /// Where the hole starts, in the view.
+    pub at: [f64; 2],
+    /// The hole's axis is along the view direction (it shows as circles).
+    pub square: bool,
+    pub dia: f64,
+    pub through: bool,
+    pub depth: f64,
+    /// 0 simple, 1 counterbore, 2 countersink.
+    pub kind: u8,
+    /// Counterbore or countersink diameter.
+    pub dia2: f64,
+    /// Counterbore depth, or countersink angle in degrees.
+    pub v2: f64,
+}
+
+/// One projection to make: a view direction (towards the viewer) and up, and what to show.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjReq {
+    pub dir: [f64; 3],
+    pub up: [f64; 3],
+    #[serde(default)]
+    pub section: bool,
+    /// Section cutting plane as p·dir (mm); None cuts through the middle.
+    #[serde(default)]
+    pub cut: Option<f64>,
+    /// Only these parts of the Part Studio (all when empty).
+    #[serde(default)]
+    pub bodies: Vec<BodyId>,
+    /// An assembly: (Part Studio, body, row-major 3x4 pose) per part, from the workspace's
+    /// Part Studios (see STUDIOS); the document is not used.
+    #[serde(default)]
+    pub items: Vec<(usize, BodyId, [f64; 12])>,
+}
+
+impl From<([f64; 3], [f64; 3], bool)> for ProjReq {
+    fn from((dir, up, section): ([f64; 3], [f64; 3], bool)) -> Self {
+        ProjReq { dir, up, section, ..Default::default() }
+    }
+}
+
+/// A hole of a Hole feature in model coordinates.
+struct HoleSpec {
+    feature: FeatId,
+    p: DVec3,
+    down: DVec3,
+    dia: f64,
+    through: bool,
+    depth: f64,
+    kind: u8,
+    dia2: f64,
+    v2: f64,
+}
+
+/// Build the document, noting the holes its Hole features make.
+fn build_with_holes(doc: &Document) -> (Vec<Body>, Vec<HoleSpec>) {
+    let mut m = Model::new(doc);
+    let mut holes = vec![];
+    let end = doc.rollback_index();
+    for (i, f) in doc.features.iter().enumerate() {
+        if i >= end || f.suppressed || m.run(f.id).is_err() {
+            continue;
+        }
+        if let Op::Hole { points, hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, .. } = &f.op {
+            let (kind, dia2, v2) = match hole_type {
+                HoleType::Simple => (0, 0.0, 0.0),
+                HoleType::Counterbore => (1, m.len(cb_diameter).unwrap_or(0.0), m.len(cb_depth).unwrap_or(0.0)),
+                HoleType::Countersink => (2, m.len(cs_diameter).unwrap_or(0.0), m.ang(cs_angle).unwrap_or(90.0)),
+            };
+            let (Ok(dia), d) = (m.len(diameter), if *through { 0.0 } else { m.len(depth).unwrap_or(0.0) }) else { continue };
+            for r in points {
+                if let Ok((p, n)) = m.hole_point(r) {
+                    holes.push(HoleSpec { feature: f.id, p, down: -n, dia, through: *through, depth: d, kind, dia2, v2 });
+                }
+            }
+        }
+    }
+    (m.bodies, holes)
 }
 
 fn polylines_2d(s: &Shape) -> Vec<Vec<[f64; 2]>> {
     unique_edges(s).iter().map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>()).filter(|p| p.len() >= 2).collect()
 }
 
-/// Hidden-line projections of a Part Studio's parts, one per (direction, up, section) entry.
-/// Section views cut the parts through their centre, square to the view, and hatch the cut.
-pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3], bool)]) -> Vec<ProjView> {
-    let bodies = build_bodies(doc);
-    let shapes: Vec<&Shape> = bodies.iter().map(|b| &b.shape).collect();
-    let Ok(all) = occ::compound(&shapes) else { return vec![ProjView::default(); views.len()] };
+/// Hidden-line projections of a Part Studio's parts (or an assembly's), one per request.
+/// Section views cut the parts square to the view (through the middle unless a cut is given)
+/// and hatch the cut.
+pub fn project(doc: &Document, views: &[ProjReq]) -> Vec<ProjView> {
+    let mut built: Option<(Vec<Body>, Vec<HoleSpec>)> = None;
     views
         .iter()
-        .map(|(d, u, section)| {
-            let (d, u) = (DVec3::from(*d), DVec3::from(*u));
-            let mut v = ProjView::default();
-            let mut shape = dup(&all);
-            if *section {
-                let bb = opencascade::bounding_box::aabb(&all);
-                let c = (bb.min() + bb.max()) / 2.0;
-                let size = (bb.max() - bb.min()).length() * 2.0 + 10.0;
-                // remove the half towards the viewer
-                if let Ok(h) = half_space(c, d, size) {
-                    if let Ok(cut) = occ::cut(&all, &h) {
-                        shape = cut;
+        .map(|req| {
+            // the parts to show, each with an identity for dimension anchors
+            let mut parts: Vec<(BodyId, Shape)> = vec![];
+            let mut holes: Vec<(DVec3, DVec3, &HoleSpec)> = vec![];
+            if req.items.is_empty() {
+                let (bodies, specs) = built.get_or_insert_with(|| build_with_holes(doc));
+                for b in bodies.iter().filter(|b| req.bodies.is_empty() || req.bodies.contains(&b.id)) {
+                    parts.push((b.id, dup(&b.shape)));
+                }
+                // holes in the parts shown
+                for h in specs.iter() {
+                    if req.bodies.is_empty() || bodies.iter().filter(|b| req.bodies.contains(&b.id)).any(|b| aabb_contains(&b.shape, h.p, 0.5)) {
+                        holes.push((h.p, h.down, h));
                     }
                 }
-                // hatch the faces lying on the cutting plane
-                let vx = u.cross(d).normalize();
-                let vy = d.cross(vx);
-                let to2 = |p: DVec3| glam::DVec2::new(p.dot(vx), p.dot(vy));
-                for f in unique_faces(&shape) {
-                    let g = face_geom(&f);
-                    if !(g.planar && g.normal.dot(d) > 0.999 && (g.center - c).dot(d).abs() < 1e-4 * size.max(1.0)) {
+            } else {
+                let studios = STUDIOS.lock().map(|s| s.clone()).unwrap_or_default();
+                let mut cache: HashMap<usize, Vec<Body>> = HashMap::new();
+                for (k, (studio, body, m)) in req.items.iter().enumerate() {
+                    let bs = cache.entry(*studio).or_insert_with(|| studios.get(*studio).map(build_bodies).unwrap_or_default());
+                    let Some(b) = bs.iter().find(|b| b.id == *body) else { continue };
+                    let rot = DMat3::from_cols(DVec3::new(m[0], m[4], m[8]), DVec3::new(m[1], m[5], m[9]), DVec3::new(m[2], m[6], m[10]));
+                    if let Ok(s) = occ::transform(&b.shape, rot, DVec3::new(m[3], m[7], m[11])) {
+                        parts.push(((k as u64, 0), s));
+                    }
+                }
+            }
+            project_parts(parts, &holes, req)
+        })
+        .collect()
+}
+
+fn aabb_contains(s: &Shape, p: DVec3, margin: f64) -> bool {
+    let bb = opencascade::bounding_box::aabb(s);
+    (p - bb.min()).min_element() > -margin && (bb.max() - p).min_element() > -margin
+}
+
+fn project_parts(parts: Vec<(BodyId, Shape)>, holes: &[(DVec3, DVec3, &HoleSpec)], req: &ProjReq) -> ProjView {
+    let (d, u) = (DVec3::from(req.dir).normalize_or(DVec3::Z), DVec3::from(req.up).normalize_or(DVec3::Y));
+    let vx = u.cross(d).normalize_or(DVec3::X);
+    let vy = d.cross(vx);
+    let to2 = |p: DVec3| [p.dot(vx), p.dot(vy)];
+    let mut v = ProjView::default();
+    let shapes: Vec<&Shape> = parts.iter().map(|p| &p.1).collect();
+    let Ok(all) = occ::compound(&shapes) else { return v };
+    // the item centroids (bounding box centres) for balloons
+    if !req.items.is_empty() {
+        v.items = parts.iter().map(|(_, s)| {
+            let bb = opencascade::bounding_box::aabb(s);
+            to2((bb.min() + bb.max()) / 2.0)
+        }).collect();
+    }
+    let mut parts = parts;
+    if req.section {
+        let bb = opencascade::bounding_box::aabb(&all);
+        let size = (bb.max() - bb.min()).length() * 2.0 + 10.0;
+        let mid = (bb.min() + bb.max()) / 2.0;
+        let cut = req.cut.unwrap_or(mid.dot(d));
+        let c = mid + d * (cut - mid.dot(d));
+        v.cut = Some(cut);
+        // remove the half towards the viewer, part by part so each keeps its identity
+        if let Ok(h) = half_space(c, d, size) {
+            for p in parts.iter_mut() {
+                if let Ok(cut) = occ::cut(&p.1, &h) {
+                    p.1 = cut;
+                }
+            }
+        }
+        // hatch the faces lying on the cutting plane
+        for (_, s) in &parts {
+            for f in unique_faces(s) {
+                let g = face_geom(&f);
+                if !(g.planar && g.normal.dot(d) > 0.999 && (g.center - c).dot(d).abs() < 1e-4 * size.max(1.0)) {
+                    continue;
+                }
+                let tris: Vec<[glam::DVec2; 3]> = face_tris(&f).iter().map(|t| t.map(|p| glam::DVec2::from(to2(p)))).collect();
+                v.hatch.extend(hatch_triangles(&tris, 2.0));
+            }
+        }
+    }
+    parts.retain(|p| !unique_faces(&p.1).is_empty());
+    let shapes: Vec<&Shape> = parts.iter().map(|p| &p.1).collect();
+    let Ok(shape) = occ::compound(&shapes) else { return v };
+    // one hidden-line pass over every part together, so parts hide each other
+    if let Ok(s) = occ::hlr(&shape, d, u, 0) {
+        v.visible.extend(polylines_2d(&s));
+    }
+    if let Ok(s) = occ::hlr(&shape, d, u, 2) {
+        v.visible.extend(polylines_2d(&s));
+    }
+    if let Ok(s) = occ::hlr(&shape, d, u, 1) {
+        v.smooth.extend(polylines_2d(&s));
+    }
+    for kind in [3, 4] {
+        if let Ok(s) = occ::hlr(&shape, d, u, kind) {
+            v.hidden.extend(polylines_2d(&s));
+        }
+    }
+    // a hidden edge lying under a visible one is not shown
+    v.hidden = drop_covered(&v.hidden, &v.visible, 0.02);
+    // model edges with their identity
+    for (part, s) in &parts {
+        for (i, e) in unique_edges(s).iter().enumerate() {
+            let pts3: Vec<DVec3> = e.approximation_segments().collect();
+            if pts3.len() < 2 {
+                continue;
+            }
+            let ty = e.edge_type();
+            let kind = match ty {
+                opencascade::primitives::EdgeType::Line => 0,
+                opencascade::primitives::EdgeType::Circle => 1,
+                _ => 2,
+            };
+            let mut pe = ProjEdge { part: *part, index: i as u32, kind, pts: pts3.iter().map(|p| to2(*p)).collect(), circle: None, axis: None };
+            if kind == 1 && pts3.len() >= 3 {
+                if let Some((c, n)) = circle_from_points(&pts3) {
+                    let r = (pts3[0] - c).length();
+                    let c2 = to2(c);
+                    if n.dot(d).abs() > 0.999 {
+                        pe.circle = Some([c2[0], c2[1], r]);
+                    } else if n.dot(d).abs() < 1e-3 {
+                        let a = to2(n);
+                        pe.axis = Some([c2[0], c2[1], a[0], a[1]]);
+                    }
+                }
+            }
+            v.edges.push(pe);
+        }
+    }
+    for (p, down, h) in holes {
+        v.holes.push(ProjHole {
+            feature: h.feature,
+            at: to2(*p),
+            square: down.dot(d).abs() > 0.999,
+            dia: h.dia,
+            through: h.through,
+            depth: h.depth,
+            kind: h.kind,
+            dia2: h.dia2,
+            v2: h.v2,
+        });
+    }
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in v.visible.iter().chain(v.smooth.iter()).flatten() {
+        lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+        hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+    }
+    v.bbox = if lo[0].is_finite() { [lo, hi] } else { [[0.0; 2]; 2] };
+    v
+}
+
+/// The parts of `lines` not lying (within `tol`) on any of `cover`, as polylines.
+fn drop_covered(lines: &[Vec<[f64; 2]>], cover: &[Vec<[f64; 2]>], tol: f64) -> Vec<Vec<[f64; 2]>> {
+    use glam::DVec2;
+    // bucket the covering segments on a grid
+    let cell = 2.0;
+    let key = |p: DVec2| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64);
+    let mut grid: HashMap<(i64, i64), Vec<(DVec2, DVec2)>> = HashMap::new();
+    for pl in cover {
+        for w in pl.windows(2) {
+            let (a, b) = (DVec2::from(w[0]), DVec2::from(w[1]));
+            let (k0, k1) = (key(a.min(b) - DVec2::splat(tol)), key(a.max(b) + DVec2::splat(tol)));
+            if (k1.0 - k0.0 + 1) * (k1.1 - k0.1 + 1) > 4096 {
+                // a very long segment: put it in the cells along it
+                let n = ((b - a).length() / cell).ceil() as usize + 1;
+                for i in 0..=n {
+                    let p = a.lerp(b, i as f64 / n as f64);
+                    grid.entry(key(p)).or_default().push((a, b));
+                }
+                continue;
+            }
+            for x in k0.0..=k1.0 {
+                for y in k0.1..=k1.1 {
+                    grid.entry((x, y)).or_default().push((a, b));
+                }
+            }
+        }
+    }
+    let covered = |p: DVec2| -> bool {
+        grid.get(&key(p)).map(|segs| {
+            segs.iter().any(|(a, b)| {
+                let d = *b - *a;
+                let t = if d.length_squared() < 1e-18 { 0.0 } else { ((p - *a).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
+                (*a + d * t - p).length() < tol
+            })
+        }).unwrap_or(false)
+    };
+    let mut out = vec![];
+    for pl in lines {
+        let mut run: Vec<[f64; 2]> = vec![];
+        for w in pl.windows(2) {
+            let (a, b) = (DVec2::from(w[0]), DVec2::from(w[1]));
+            // sample the segment; keep the uncovered stretches
+            let n = (((b - a).length() / 0.25).ceil() as usize).clamp(1, 400);
+            for i in 0..n {
+                let (t0, t1) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
+                let (p0, p1) = (a.lerp(b, t0), a.lerp(b, t1));
+                let hide = covered(p0) && covered(p1) && covered((p0 + p1) / 2.0);
+                if hide {
+                    if run.len() >= 2 {
+                        out.push(std::mem::take(&mut run));
+                    }
+                    run.clear();
+                    continue;
+                }
+                if run.last().map(|l| DVec2::from(*l).distance(p0) > 1e-12).unwrap_or(true) {
+                    if run.len() >= 2 {
+                        out.push(std::mem::take(&mut run));
+                    }
+                    run = vec![p0.into()];
+                }
+                run.push(p1.into());
+            }
+        }
+        if run.len() >= 2 {
+            out.push(run);
+        }
+    }
+    // join the samples of each straight stretch back into one segment
+    out.into_iter()
+        .map(|pl| {
+            let mut s: Vec<[f64; 2]> = vec![pl[0]];
+            for i in 1..pl.len() {
+                if s.len() >= 2 && i + 1 <= pl.len() {
+                    let (a, b, c) = (DVec2::from(s[s.len() - 2]), DVec2::from(s[s.len() - 1]), DVec2::from(pl[i]));
+                    if (b - a).perp_dot(c - b).abs() < 1e-9 * (1.0 + (b - a).length() * (c - b).length()) && (b - a).dot(c - b) > 0.0 {
+                        *s.last_mut().unwrap() = pl[i];
                         continue;
                     }
-                    let tris: Vec<[glam::DVec2; 3]> = face_tris(&f).iter().map(|t| t.map(to2)).collect();
-                    v.hatch.extend(hatch_triangles(&tris, 2.0));
                 }
+                s.push(pl[i]);
             }
-            for kind in [0, 1, 2] {
-                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
-                    v.visible.extend(polylines_2d(&s));
-                }
-            }
-            for kind in [3, 4] {
-                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
-                    v.hidden.extend(polylines_2d(&s));
-                }
-            }
-            let mut lo = [f64::INFINITY; 2];
-            let mut hi = [f64::NEG_INFINITY; 2];
-            for p in v.visible.iter().flatten() {
-                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
-            }
-            v.bbox = if lo[0].is_finite() { [lo, hi] } else { [[0.0; 2]; 2] };
-            v
+            s
         })
         .collect()
 }
@@ -3070,13 +3375,66 @@ mod projection_tests {
             *depth = "10".into();
         }
         doc.insert("E".into(), e);
-        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false)]);
-        let sec = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], true)]);
+        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false).into()]);
+        let sec = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], true).into()]);
         assert!(!sec[0].hatch.is_empty());
         let b = v[0].bbox;
         assert!((b[1][0] - b[0][0] - 40.0).abs() < 1e-6, "{b:?}");
         assert!((b[1][1] - b[0][1] - 10.0).abs() < 1e-6, "{b:?}");
         assert!(v[0].visible.len() >= 4);
+        // every model edge is listed with its identity; the box has 12
+        assert_eq!(v[0].edges.len(), 12);
+        // a cut placed off centre
+        let off = project(&doc, &[ProjReq { dir: [0.0, -1.0, 0.0], up: [0.0, 0.0, 1.0], section: true, cut: Some(-5.0), ..Default::default() }]);
+        assert_eq!(off[0].cut, Some(-5.0));
+        // the back edges of the box lie under the front ones: no hidden lines are left
+        assert!(v[0].hidden.iter().all(|pl| pl.len() < 2), "{:?}", v[0].hidden);
+    }
+
+    #[test]
+    fn hidden_segments_under_visible_ones_are_dropped() {
+        let vis = vec![vec![[0.0, 0.0], [10.0, 0.0]]];
+        let hid = vec![vec![[5.0, 0.0], [20.0, 0.0]], vec![[0.0, 5.0], [10.0, 5.0]]];
+        let out = drop_covered(&hid, &vis, 0.02);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!((out[0][0][0] - 10.0).abs() < 0.3 && (out[0][out[0].len() - 1][0] - 20.0).abs() < 1e-9, "{out:?}");
+        assert_eq!(out[0].len(), 2, "one straight stretch: {out:?}");
+        assert_eq!(out[1], vec![[0.0, 5.0], [10.0, 5.0]]);
+    }
+
+    #[test]
+    fn parts_hide_each_other_and_holes_are_reported() {
+        // a 40x10x20 block in front of a lower 40x10x10 block behind it, seen from the front
+        let mut doc = Document::default();
+        let mut s = crate::sketch::Sketch::default();
+        for (x0, y0, y1) in [(0.0, 0.0, 10.0), (0.0, 20.0, 30.0)] {
+            let p: Vec<_> = [(x0, y0), (x0 + 40.0, y0), (x0 + 40.0, y1), (x0, y1)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+            for i in 0..4 {
+                s.add_curve(crate::sketch::Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+            }
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+            *depth = "20".into();
+        }
+        doc.insert("E".into(), e);
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 25.0] });
+            *depth = "10".into();
+        }
+        doc.insert("E2".into(), e);
+        let v = &project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false).into()])[0];
+        // the back block's top edge (z = 10) is behind the front block: hidden, not visible
+        let at10 = |pls: &Vec<Vec<[f64; 2]>>| pls.iter().any(|pl| pl.len() >= 2 && pl.iter().all(|p| (p[1] - 10.0).abs() < 1e-6) && (pl[0][0] - pl[pl.len() - 1][0]).abs() > 30.0);
+        assert!(!at10(&v.visible), "{:?}", v.visible);
+        assert!(at10(&v.hidden), "{:?}", v.hidden);
+        // one part only
+        let body = build_bodies(&doc)[0].id;
+        let one = &project(&doc, &[ProjReq { dir: [0.0, -1.0, 0.0], up: [0.0, 0.0, 1.0], bodies: vec![body], ..Default::default() }])[0];
+        assert!(one.edges.iter().all(|e| e.part == body));
     }
 }
 

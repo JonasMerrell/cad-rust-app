@@ -24,21 +24,24 @@
   {"tool": "assembly_mate", "args": {"assembly": 1, "kind": "fastened", "a": {"instance": 1, "face": [30, 10, 8]}, "b": {"instance": 2, "face": [30, 10, 0]}}},
   {"tool": "assembly_explode", "args": {"assembly": 0, "steps": [{"instances": [2, 3], "direction": [0,0,1], "distance": 30}]}},
   {"tool": "assembly_info", "args": {"assembly": 1}},
-  {"tool": "render_assembly", "args": {"assembly": 1, "path": "/tmp/asm1.png"}},
-  {"tool": "render_assembly", "args": {"assembly": 0, "explode": 1, "path": "/tmp/asm0x.png"}},
+  {"tool": "render_assembly", "args": {"assembly": 1, "path": "asm1.png"}},
+  {"tool": "render_assembly", "args": {"assembly": 0, "explode": 1, "path": "asm0x.png"}},
   {"tool": "switch_part_studio", "args": {"index": 0}},
   {"tool": "create_drawing", "args": {"name": "Plate", "sheet": "A3"}},
   {"tool": "drawing_add", "args": {"drawing": 0, "items": [
+    {"type": "title", "part": "Plate", "part_no": "P-001", "material": "AlMg3", "revision": "A", "drawn_by": "CAD", "tolerance": "ISO 2768-m"},
     {"type": "auto_dimensions", "view": 2},
-    {"type": "gdt", "kind": "position", "tolerance": "Ø0.1", "datums": "A B", "position": [150, 200], "leader": [120, 190]},
+    {"type": "view", "dir": "front", "hidden_lines": true, "position": [335, 95], "scale": 2},
+    {"type": "section", "view": 2, "at": [30, 20], "line": "horizontal", "position": [335, 140]},
+    {"type": "gdt", "kind": "position", "tolerance": "Ø0.1", "datums": "A B", "position": [100, 228], "leader": [75, 182]},
     {"type": "datum", "letter": "A", "position": [60, 30], "leader": [70, 55]},
     {"type": "note", "text": "Break sharp edges ±0.2", "position": [30, 25]},
-    {"type": "view", "dir": "iso", "sheet": 2, "position": [200, 150], "scale": 2},
+    {"type": "view", "assembly": 0, "dir": "iso", "sheet": 2, "position": [200, 150], "scale": 2},
     {"type": "bom", "assembly": 0, "sheet": 2}
   ]}},
   {"tool": "drawing_info", "args": {"drawing": 0}},
-  {"tool": "render_drawing", "args": {"drawing": 0, "path": "/tmp/dwg1.png"}},
-  {"tool": "render_drawing", "args": {"drawing": 0, "sheet": 2, "path": "/tmp/dwg2.png"}},
-  {"tool": "export_drawing", "args": {"drawing": 0, "path": "/tmp/dwg.pdf"}},
-  {"tool": "save_document", "args": {"path": "/tmp/asmdoc.json"}}
+  {"tool": "render_drawing", "args": {"drawing": 0, "path": "dwg1.png"}},
+  {"tool": "render_drawing", "args": {"drawing": 0, "sheet": 2, "path": "dwg2.png"}},
+  {"tool": "export_drawing", "args": {"drawing": 0, "path": "dwg.pdf"}},
+  {"tool": "save_document", "args": {"path": "asmdoc.json"}}
 ]

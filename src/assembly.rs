@@ -125,12 +125,34 @@ pub struct ExplodeStep {
 }
 
 /// A mate connector in the instance's own coordinates.
-#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq)]
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Connector {
     pub inst: u64,
     pub origin: [f64; 3],
     pub z: [f64; 3],
     pub x: [f64; 3],
+    /// The geometry it was placed on, to find it again after the part changes.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub on: Option<ConnRef>,
+}
+
+/// What a mate connector sits on: a planar face, a circle's axis or a straight edge of one of
+/// the instance's parts. After a Part Studio rebuild the connector is moved onto the matching
+/// geometry of the new part (see `refresh_connectors`).
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ConnRef {
+    /// Which part of the instance (index into `leaves`).
+    pub leaf: u32,
+    /// 0 planar face, 1 axis of a circular edge or cylindrical face, 2 straight edge.
+    pub kind: u8,
+    /// Face (planar) or edge index in the part's mesh when it was picked.
+    pub index: u32,
+    /// On a circular edge: the connector is at the circle's centre (else on the axis where it was picked).
+    #[serde(default)]
+    pub centre: bool,
+    /// Circle radius (axes), when picked.
+    #[serde(default)]
+    pub size: f64,
 }
 
 #[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq)]
@@ -490,10 +512,16 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
     for (i, p) in poses.into_iter().enumerate() {
         asm.instances[i].pose = p;
     }
-    // report unsatisfied mates
+    let failed = failed_mates(asm);
+    SolveResult { ok: failed.is_empty(), failed }
+}
+
+/// Mates whose conditions do not hold at the current poses (residual above tolerance).
+pub fn failed_mates(asm: &Assembly) -> Vec<u64> {
     let mut failed = vec![];
-    for m in &mates {
-        if let (Some(a), Some(b)) = (asm.world(m.a.as_ref().unwrap()), asm.world(m.b.as_ref().unwrap())) {
+    for m in asm.mates.iter().filter(|m| !m.suppressed) {
+        let (Some(ca), Some(cb)) = (m.a.as_ref(), m.b.as_ref()) else { continue };
+        if let (Some(a), Some(b)) = (asm.world(ca), asm.world(cb)) {
             let mut r = vec![];
             mate_residuals(m, a, b, &mut r);
             if r.iter().any(|v| v.abs() > 1e-4) {
@@ -501,33 +529,47 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
             }
         }
     }
-    SolveResult { ok: failed.is_empty(), failed }
+    failed
 }
 
-/// Infer a mate connector from a pick on a part: circular edges and cylindrical
-/// faces give their axis, planar faces their centre and normal. `hit` and the
-/// returned connector are in the part's own coordinates.
-pub fn infer_connector(inst: u64, mesh: &BodyMesh, face: Option<usize>, edge: Option<usize>, hit: DVec3) -> Option<Connector> {
-    let mk = |o: DVec3, z: DVec3| {
+/// The X axis a connector with Z axis `z` gets: the same for `z` and `-z`, so connectors on
+/// opposed faces (fastened face to face) line up without turning the part over.
+pub fn connector_x(o: DVec3, z: DVec3) -> DVec3 {
+    let a = z.abs();
+    let big = if a.x >= a.y && a.x >= a.z { z.x } else if a.y >= a.z { z.y } else { z.z };
+    let zc = if big < 0.0 { -z } else { z };
+    DVec3::from(crate::kernel::frame_from(o, zc).x)
+}
+
+/// Infer a mate connector from a pick on a part (`leaf` of the instance): circular edges and
+/// cylindrical faces give their axis, planar faces the picked point and their normal. `hit`
+/// and the returned connector are in the part's own coordinates.
+pub fn infer_connector(inst: u64, leaf: usize, mesh: &BodyMesh, face: Option<usize>, edge: Option<usize>, hit: DVec3) -> Option<Connector> {
+    let mk = |o: DVec3, z: DVec3, on: Option<ConnRef>| {
         let z = z.normalize();
-        let x = crate::kernel::frame_from(o, z).x;
-        Connector { inst, origin: o.into(), z: z.into(), x }
+        Connector { inst, origin: o.into(), z: z.into(), x: connector_x(o, z).into(), on }
     };
-    if let Some(e) = edge.and_then(|e| mesh.edges.get(e)) {
-        if let Some((c, n, _)) = e.circle {
-            return Some(mk(c.into(), n.into()));
+    let leaf = leaf as u32;
+    if let Some((ei, e)) = edge.and_then(|e| mesh.edges.get(e).map(|x| (e, x))) {
+        if let Some((c, n, r)) = e.circle {
+            return Some(mk(c.into(), n.into(), Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: true, size: r })));
         }
         let a = DVec3::from(e.pts[0].map(|v| v as f64));
         let b = DVec3::from(e.pts[e.pts.len() - 1].map(|v| v as f64));
-        return Some(mk(DVec3::from(e.mid), (b - a).normalize()));
+        let on = e.linear.then_some(ConnRef { leaf, kind: 2, index: ei as u32, ..Default::default() });
+        return Some(mk(DVec3::from(e.mid), (b - a).normalize(), on));
     }
-    let f = mesh.faces.get(face?)?;
+    let fi = face?;
+    let f = mesh.faces.get(fi)?;
     if f.planar {
-        return Some(mk(f.center.into(), f.normal.into()));
+        // at the picked point, moved onto the face's plane
+        let n = DVec3::from(f.normal).normalize();
+        let o = hit - n * (hit - DVec3::from(f.center)).dot(n);
+        return Some(mk(o, n, Some(ConnRef { leaf, kind: 0, index: fi as u32, ..Default::default() })));
     }
     // curved face: the circular edge whose axis this face wraps around
     let mut best: Option<(f64, Connector)> = None;
-    for e in &mesh.edges {
+    for (ei, e) in mesh.edges.iter().enumerate() {
         if let Some((c, n, r)) = e.circle {
             let (c, n) = (DVec3::from(c), DVec3::from(n).normalize());
             let v = hit - c;
@@ -535,16 +577,171 @@ pub fn infer_connector(inst: u64, mesh: &BodyMesh, face: Option<usize>, edge: Op
             let err = (radial - r).abs();
             if err < 0.05 * r.max(1.0) && best.as_ref().map(|b| err < b.0).unwrap_or(true) {
                 // put the connector on the axis level with the click
-                best = Some((err, mk(c + n * v.dot(n), n)));
+                best = Some((err, mk(c + n * v.dot(n), n, Some(ConnRef { leaf, kind: 1, index: ei as u32, centre: false, size: r }))));
             }
         }
     }
-    best.map(|b| b.1).or_else(|| Some(mk(f.center.into(), f.normal.into())))
+    best.map(|b| b.1).or_else(|| Some(mk(f.center.into(), f.normal.into(), None)))
+}
+
+/// Whether `p` (on the plane of planar face `fi`) lies inside that face.
+fn face_contains(mesh: &BodyMesh, fi: usize, p: DVec3, n: DVec3) -> bool {
+    let v = |i: u32| DVec3::new(mesh.positions[3 * i as usize] as f64, mesh.positions[3 * i as usize + 1] as f64, mesh.positions[3 * i as usize + 2] as f64);
+    let tol = 1e-4;
+    mesh.indices.chunks(3).zip(&mesh.tri_face).filter(|(_, f)| **f as usize == fi).any(|(t, _)| {
+        let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+        let q = p - n * (p - a).dot(n);
+        [(a, b), (b, c), (c, a)].iter().all(|(u, w)| (*w - *u).cross(q - *u).dot(n) >= -tol * (*w - *u).length())
+    })
+}
+
+/// Find a connector's geometry on its part (`mesh`, in the part's own coordinates; `o`, `z` too).
+/// With no record of what it was on (older files), it is attached to what it sits on, or to the
+/// nearest parallel face whose outline holds it. Returns the new origin and the reference.
+fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -> Option<(DVec3, ConnRef)> {
+    let tol = 1e-3 * (1.0 + o.length() * 1e-3);
+    let planes = |want: Option<u32>| -> Option<(DVec3, ConnRef)> {
+        let mut best: Option<(f64, usize, DVec3)> = None;
+        for (fi, f) in mesh.faces.iter().enumerate().filter(|(_, f)| f.planar) {
+            let n = DVec3::from(f.normal).normalize();
+            if n.dot(z) < 0.999 {
+                continue;
+            }
+            let d = (DVec3::from(f.center) - o).dot(n);
+            let q = o + n * d;
+            if !face_contains(mesh, fi, q, n) {
+                continue;
+            }
+            // the face it was picked on wins; else the nearest one along the normal
+            let score = if want == Some(fi as u32) { -1.0 } else { d.abs() };
+            if best.map(|b| score < b.0).unwrap_or(true) {
+                best = Some((score, fi, q));
+            }
+        }
+        best.map(|(_, fi, q)| (q, ConnRef { leaf, kind: 0, index: fi as u32, ..Default::default() }))
+    };
+    let axes = |want: Option<ConnRef>| -> Option<(DVec3, ConnRef)> {
+        let mut best: Option<(f64, usize, DVec3, f64, f64)> = None;
+        for (ei, e) in mesh.edges.iter().enumerate() {
+            let Some((c, n, r)) = e.circle else { continue };
+            let (c, n) = (DVec3::from(c), DVec3::from(n).normalize());
+            if n.dot(z).abs() < 0.999 {
+                continue;
+            }
+            let v = o - c;
+            let off = (v - n * v.dot(n)).length();
+            let score = match want {
+                Some(w) if w.index == ei as u32 => -1.0,
+                Some(w) => off + (r - w.size).abs() + if w.centre { v.length() * 1e-3 } else { 0.0 },
+                None => off + v.length() * 1e-3,
+            };
+            if best.map(|b| score < b.0).unwrap_or(true) {
+                best = Some((score, ei, c, r, off));
+            }
+        }
+        let (_, ei, c, r, off) = best?;
+        let size = want.map(|w| w.size).unwrap_or(r);
+        if off > 2.0 * size.max(r) + 1.0 && want.map(|w| w.index != ei as u32).unwrap_or(true) {
+            return None;
+        }
+        let centre = want.map(|w| w.centre).unwrap_or((o - c).length() < tol);
+        let q = if centre { c } else { c + z * (o - c).dot(z) };
+        Some((q, ConnRef { leaf, kind: 1, index: ei as u32, centre, size: r }))
+    };
+    let lines = |want: Option<u32>| -> Option<(DVec3, ConnRef)> {
+        let mut best: Option<(f64, usize, DVec3)> = None;
+        for (ei, e) in mesh.edges.iter().enumerate().filter(|(_, e)| e.linear && e.pts.len() >= 2) {
+            let a = DVec3::from(e.pts[0].map(|v| v as f64));
+            let b = DVec3::from(e.pts[e.pts.len() - 1].map(|v| v as f64));
+            if (b - a).normalize_or_zero().dot(z).abs() < 0.999 {
+                continue;
+            }
+            let m = DVec3::from(e.mid);
+            let score = if want == Some(ei as u32) { -1.0 } else { (m - o).length() };
+            if best.map(|b| score < b.0).unwrap_or(true) {
+                best = Some((score, ei, m));
+            }
+        }
+        best.map(|(_, ei, m)| (m, ConnRef { leaf, kind: 2, index: ei as u32, ..Default::default() }))
+    };
+    match on {
+        Some(r) if r.kind == 0 => planes(Some(r.index)),
+        Some(r) if r.kind == 1 => axes(Some(r)),
+        Some(r) => lines(Some(r.index)),
+        None => {
+            // what it sits on now, else the nearest parallel face that holds it
+            let exact = |x: Option<(DVec3, ConnRef)>| x.filter(|(q, _)| (*q - o).length() < tol);
+            exact(planes(None)).or_else(|| exact(axes(None))).or_else(|| exact(lines(None))).or_else(|| planes(None))
+        }
+    }
+}
+
+/// Move the open assembly's mate connectors onto their parts' current geometry (after a Part
+/// Studio rebuild). Returns the mates whose geometry could not be found; their connectors
+/// stay where they were. `mesh` gives a Part Studio body's mesh.
+pub fn refresh_connectors<'m>(all: &mut [Assembly], ai: usize, mesh: &dyn Fn(usize, BodyId) -> Option<&'m BodyMesh>) -> Vec<u64> {
+    let mut lost = vec![];
+    let Some(asm) = all.get(ai) else { return lost };
+    let mut updates: Vec<(usize, bool, Connector)> = vec![];
+    for (mi, m) in asm.mates.iter().enumerate() {
+        for (side, c) in [(true, m.a), (false, m.b)] {
+            let Some(c) = c else { continue };
+            let Some(inst) = asm.instance(c.inst) else { continue };
+            let leaves = leaves(all, inst);
+            let found = (|| {
+                let li = c.on.map(|r| r.leaf as usize).or_else(|| (leaves.len() == 1).then_some(0))?;
+                let l = leaves.get(li)?;
+                let mesh = mesh(l.studio, l.body)?;
+                let (o, z) = (l.pose.inverse_apply(c.origin.into()), l.pose.inverse_dir(c.z.into()).normalize());
+                let (q, r) = locate(mesh, c.on, li as u32, o, z)?;
+                Some(Connector { origin: l.pose.apply(q).into(), on: Some(r), ..c })
+            })();
+            match found {
+                Some(n) => {
+                    if n != c {
+                        updates.push((mi, side, n));
+                    }
+                }
+                // older connectors on nothing in particular keep their coordinates
+                None if c.on.is_some() => {
+                    if !lost.contains(&m.id) {
+                        lost.push(m.id);
+                    }
+                }
+                None => {}
+            }
+        }
+    }
+    let asm = &mut all[ai];
+    for (mi, side, c) in updates {
+        if side {
+            asm.mates[mi].a = Some(c);
+        } else {
+            asm.mates[mi].b = Some(c);
+        }
+    }
+    lost
+}
+
+/// Which side of a new mate should stay put while it is solved: the instance with more mates
+/// (or fixed), else the one inserted first. The other one moves to meet it.
+pub fn mate_anchor(asm: &Assembly, mate: u64) -> Vec<u64> {
+    let Some(m) = asm.mates.iter().find(|m| m.id == mate) else { return vec![] };
+    let (Some(a), Some(b)) = (m.a, m.b) else { return vec![] };
+    let weight = |id: u64| {
+        let fixed = asm.instance(id).map(|x| x.fixed).unwrap_or(false);
+        let mates = asm.mates.iter().filter(|o| o.id != mate && !o.suppressed && (o.a.map(|c| c.inst) == Some(id) || o.b.map(|c| c.inst) == Some(id))).count();
+        (fixed, mates)
+    };
+    let (wa, wb) = (weight(a.inst), weight(b.inst));
+    let pos = |id: u64| asm.instances.iter().position(|x| x.id == id).unwrap_or(usize::MAX);
+    if wa > wb || (wa == wb && pos(a.inst) < pos(b.inst)) { vec![a.inst] } else { vec![b.inst] }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::kernel::FaceInfo;
 
     fn inst(id: u64, fixed: bool, t: [f64; 3]) -> Instance {
         Instance { id, name: format!("i{id}"), studio: 0, body: (1, 0), pose: Pose { t, ..Default::default() }, fixed, hidden: false, sub: None }
@@ -574,8 +771,8 @@ mod tests {
         a.instances.push(inst(1, true, [0.0; 3]));
         a.instances.push(inst(2, false, [30.0, 5.0, 40.0]));
         // top face centre of a 10 mm cube on the first, bottom face of the second
-        let ca = Connector { inst: 1, origin: [5.0, 5.0, 10.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
-        let cb = Connector { inst: 2, origin: [5.0, 5.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
+        let ca = Connector { inst: 1, origin: [5.0, 5.0, 10.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None };
+        let cb = Connector { inst: 2, origin: [5.0, 5.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0], on: None };
         a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Fastened, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
         let r = solve(&mut a, &[], &|_| DVec3::splat(5.0));
         assert!(r.ok, "{:?}", r.failed);
@@ -588,8 +785,8 @@ mod tests {
         let mut a = Assembly::default();
         a.instances.push(inst(1, true, [0.0; 3]));
         a.instances.push(inst(2, false, [3.0, 1.0, 7.0]));
-        let ca = Connector { inst: 1, origin: [0.0, 0.0, 5.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
-        let cb = Connector { inst: 2, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
+        let ca = Connector { inst: 1, origin: [0.0, 0.0, 5.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None };
+        let cb = Connector { inst: 2, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0], on: None };
         a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Revolute, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
         let r = solve(&mut a, &[], &|_| DVec3::ZERO);
         assert!(r.ok);
@@ -598,9 +795,50 @@ mod tests {
         assert!((zb + DVec3::Z).length() < 1e-5);
     }
 
+    /// A 40 × 40 slab `h` thick: face 0 the bottom, face 1 the top.
+    fn slab(h: f32) -> BodyMesh {
+        let positions = vec![0.0, 0.0, 0.0, 40.0, 0.0, 0.0, 40.0, 40.0, 0.0, 0.0, 40.0, 0.0, 0.0, 0.0, h, 40.0, 0.0, h, 40.0, 40.0, h, 0.0, 40.0, h];
+        let faces = vec![
+            FaceInfo { center: [20.0, 20.0, 0.0], normal: [0.0, 0.0, -1.0], planar: true, area: 1600.0 },
+            FaceInfo { center: [20.0, 20.0, h as f64], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0 },
+        ];
+        BodyMesh { positions, indices: vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7], tri_face: vec![0, 0, 1, 1], faces, ..Default::default() }
+    }
+
+    #[test]
+    fn connectors_follow_a_rebuilt_part() {
+        // an arm fastened on the top of an 8 mm plate at a picked point; the plate becomes 20 mm thick
+        let thin = slab(8.0);
+        let ca = infer_connector(1, 0, &thin, Some(1), None, DVec3::new(30.0, 10.0, 8.0)).unwrap();
+        assert!((DVec3::from(ca.origin) - DVec3::new(30.0, 10.0, 8.0)).length() < 1e-9, "picked point, not the face centre");
+        let cb = infer_connector(2, 0, &thin, Some(0), None, DVec3::new(30.0, 10.0, 0.0)).unwrap();
+        // opposed faces get the same x axis up to sign, so fastening does not spin the part
+        assert!(DVec3::from(ca.x).dot(cb.x.into()).abs() > 0.999);
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 30.0]));
+        a.mates.push(Mate { id: 3, name: "m".into(), kind: MateKind::Fastened, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        assert!((a.instances[1].pose.t[2] - 8.0).abs() < 1e-5);
+        assert!(DMat3::from_cols_array(&a.instances[1].pose.r).abs_diff_eq(DMat3::IDENTITY, 1e-6), "fastened face to face keeps the orientation");
+        let thick = slab(20.0);
+        let mut all = vec![a];
+        let lost = refresh_connectors(&mut all, 0, &|_, _| Some(&thick));
+        assert!(lost.is_empty());
+        let a = &mut all[0];
+        assert!(solve(a, &[], &|_| DVec3::ZERO).ok);
+        assert!((a.instances[1].pose.t[2] - 20.0).abs() < 1e-5, "{:?}", a.instances[1].pose.t);
+        // a part that lost the face: the mate is reported, not silently kept
+        let gone = BodyMesh { faces: vec![thick.faces[0].clone()], tri_face: vec![0, 0], indices: thick.indices[..6].to_vec(), positions: thick.positions.clone(), ..Default::default() };
+        let mut all = vec![all.remove(0)];
+        assert_eq!(refresh_connectors(&mut all, 0, &|_, _| Some(&gone)), vec![3]);
+        // the moving side of a new mate is the less constrained one
+        assert_eq!(mate_anchor(&all[0], 3), vec![1]);
+    }
+
     fn revolute(id: u64, inst: u64, at: [f64; 3]) -> Mate {
-        let ca = Connector { inst: 1, origin: at, z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] };
-        let cb = Connector { inst, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0] };
+        let ca = Connector { inst: 1, origin: at, z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None };
+        let cb = Connector { inst, origin: [0.0, 0.0, 0.0], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0], on: None };
         Mate { id, name: format!("r{id}"), kind: MateKind::Revolute, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false }
     }
 
