@@ -2094,11 +2094,15 @@ mod tests {
             let ctx = Ctx::new(&c, &part);
             (ctx.origin, ctx.stock.1.z)
         };
-        for post in ["grbl", "linuxcnc", "fanuc", "mach3"] {
+        for post in ["grbl", "linuxcnc", "fanuc", "mach3", "rcnc"] {
             c.post = post.into();
             let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
             assert!(g.contains("G21") && g.contains("M30"), "{post}");
             assert_eq!(g.contains("T1 M6"), post != "grbl", "{post}");
+            if post == "rcnc" {
+                // rcnc's own M6 handles the pause and the measuring
+                assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");
+            }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {
                 if let Some(z) = l.split_whitespace().find(|w| w.starts_with('Z')) {

@@ -41,6 +41,7 @@ mod kernel;
 mod occ;
 mod regions;
 mod printing;
+mod rcnc;
 mod render;
 mod script;
 mod script_api;

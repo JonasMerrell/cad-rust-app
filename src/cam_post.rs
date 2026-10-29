@@ -19,7 +19,8 @@ fn dialect(post: &str) -> Dialect {
     match post {
         "linuxcnc" => Dialect::LinuxCnc,
         "fanuc" | "haas" => Dialect::Fanuc,
-        "mach3" | "mach4" => Dialect::Mach3,
+        // rcnc runs Mach3-dialect G-code
+        "mach3" | "mach4" | "rcnc" => Dialect::Mach3,
         _ => Dialect::Grbl,
     }
 }
@@ -208,6 +209,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         o.line(&comment(&n));
     }
     match d {
+        Dialect::Mach3 if cam.post == "rcnc" => o.line(&comment("retracts use G53 G0 Z0 - home the machine first")),
         Dialect::Mach3 => {
             o.line(&comment("Mach3: dwells (G4 P) are in seconds - untick 'G4 dwell param in milliseconds' in General Config"));
             o.line(&comment("Mach3: retracts use G53 G0 Z0 - reference (home) the machine first"));
@@ -281,6 +283,9 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                             o.line(&comment(&format!("load T{}: {}", tool.number, tool_text(tool))));
                         }
                     }
+                    // rcnc's M6 shows the new tool, waits for it, measures it on the setter
+                    // and sets work Z, so no pause and no length offset
+                    Dialect::Mach3 if cam.post == "rcnc" => o.line(&format!("T{} M6", tool.number)),
                     _ => {
                         if !cam.machine.tool_changer {
                             // manual tool change: stop for the operator, then pick up the new length offset

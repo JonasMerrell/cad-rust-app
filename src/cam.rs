@@ -1258,7 +1258,7 @@ pub fn set_machine(c: &mut Cam, name: &str) -> bool {
 }
 
 /// G-code dialects.
-pub const POSTS: [(&str, &str); 4] = [("grbl", "GRBL"), ("linuxcnc", "LinuxCNC"), ("fanuc", "Fanuc / Haas"), ("mach3", "Mach3 / Mach4")];
+pub const POSTS: [(&str, &str); 5] = [("grbl", "GRBL"), ("linuxcnc", "LinuxCNC"), ("fanuc", "Fanuc / Haas"), ("mach3", "Mach3 / Mach4"), ("rcnc", "rcnc")];
 
 /// A Manufacture tab: one setup with its tools and operations.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
