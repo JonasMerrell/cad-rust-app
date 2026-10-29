@@ -87,7 +87,27 @@ pub const SYMBOLS: &[SymbolKind] = &[
     },
     SymbolKind { key: "SW", name: "Push button", prefix: "SW", value: "SW", footprint: "SW_6mm", footprints: &["SW_6mm"], tags: "switch button tactile" },
     SymbolKind { key: "Y", name: "Crystal", prefix: "Y", value: "16MHz", footprint: "Crystal_HC49", footprints: &["Crystal_HC49"], tags: "crystal oscillator quartz" },
+    SymbolKind {
+        key: "PICO",
+        name: "Raspberry Pi Pico",
+        prefix: "U",
+        value: "Pico",
+        footprint: "RPi_Pico",
+        footprints: &["RPi_Pico", "DIP-40"],
+        tags: "raspberry pi pico rp2040 microcontroller mcu board module firmware",
+    },
 ];
+
+/// The Raspberry Pi Pico's header pins, 1 to 40.
+pub const PICO_PINS: [&str; 40] = [
+    "GP0", "GP1", "GND", "GP2", "GP3", "GP4", "GP5", "GND", "GP6", "GP7", "GP8", "GP9", "GND", "GP10", "GP11", "GP12", "GP13", "GND", "GP14", "GP15", "GP16", "GP17", "GND", "GP18", "GP19", "GP20", "GP21", "GND", "GP22", "RUN", "GP26", "GP27", "AGND",
+    "GP28", "ADC_VREF", "3V3", "3V3_EN", "GND", "VSYS", "VBUS",
+];
+
+/// Default pin names for a library symbol (the Pico's pinout).
+pub fn default_pin_names(key: &str) -> Vec<String> {
+    if key == "PICO" { PICO_PINS.iter().map(|s| s.to_string()).collect() } else { vec![] }
+}
 
 pub fn symbol_kind(key: &str) -> Option<&'static SymbolKind> {
     SYMBOLS.iter().find(|s| s.key.eq_ignore_ascii_case(key))
@@ -121,7 +141,7 @@ pub fn footprint_names() -> Vec<String> {
     for n in [2, 3, 4, 5, 8, 10, 20] {
         v.push(format!("PinHeader_2x{n:02}"));
     }
-    for s in ["Terminal_2P", "Terminal_3P", "SW_6mm", "Crystal_HC49"] {
+    for s in ["Terminal_2P", "Terminal_3P", "SW_6mm", "Crystal_HC49", "RPi_Pico"] {
         v.push(s.into());
     }
     v
@@ -391,6 +411,24 @@ pub fn footprint(name: &str) -> Option<Footprint> {
                 f.body = vec![Solid::Box { lo: [-3.0, -3.0, 0.0], hi: [3.0, 3.0, 3.5] }, Solid::Cyl { c: [0.0, 0.0], r: 1.75, z0: 3.5, h: 1.5 }];
                 body_rect = ([-3.0, -3.0], [3.0, 3.0]);
             }
+            "RPi_Pico" => {
+                // the module's castellated edge holes: 1..20 down the left, 21..40 up the right
+                for i in 0..20 {
+                    f.pads.push(tht(i + 1, [-8.89, 24.13 - i as f64 * 2.54], 1.7, 1.0));
+                }
+                for i in 0..20 {
+                    f.pads.push(tht(21 + i, [8.89, -24.13 + i as f64 * 2.54], 1.7, 1.0));
+                }
+                f.silk = vec![G::Rect([-10.5, -25.5], [10.5, 25.5]), G::Rect([-4.0, 23.0], [4.0, 26.5])];
+                f.body = vec![
+                    Solid::Box { lo: [-10.5, -25.5, 0.0], hi: [10.5, 25.5, 1.0] },
+                    Solid::Box { lo: [-3.5, -3.5, 1.0], hi: [3.5, 3.5, 1.9] },
+                    Solid::Box { lo: [-4.0, 22.0, 1.0], hi: [4.0, 26.5, 3.8] },
+                    Solid::Box { lo: [-2.0, -13.0, 1.0], hi: [2.0, -9.0, 2.0] },
+                ];
+                f.color = [30, 120, 60];
+                body_rect = ([-10.5, -25.5], [10.5, 26.5]);
+            }
             "Crystal_HC49" => {
                 f.pads = vec![tht(1, [-2.44, 0.0], 1.5, 0.8), tht(2, [2.44, 0.0], 1.5, 0.8)];
                 f.pads[0].shape = PadShape::Round;
@@ -455,6 +493,9 @@ fn arc(c: P, r: f64, a0: f64, a1: f64) -> G {
 /// The symbol for a library key; `pins` are the footprint's pad numbers (for ICs and connectors)
 /// and `names` optional pin names by position.
 pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
+    if names.is_empty() && key == "PICO" {
+        return symbol("U", pins, &default_pin_names(key));
+    }
     let up = [0.0, -1.0];
     let down = [0.0, 1.0];
     let two = |a: &str, b: &str| vec![pin(1, a, [0.0, 5.08], up, 2.54), pin(2, b, [0.0, -5.08], down, 2.54)];

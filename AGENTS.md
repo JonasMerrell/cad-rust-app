@@ -105,7 +105,7 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 | `pcb_route` / `check_pcb` | the autorouter (two layers, vias) or tracks and vias by hand; the design rule check |
 | `pcb_info` / `render_pcb` | parts with their pads, positions and nets, the netlist and airwires; PNG of the board or the schematic |
 | `export_pcb` / `pcb_3d` | Gerber and drill ZIP with BOM and pick-and-place CSVs; a Part Studio of the board and part bodies for assemblies and STEP |
-| `pcb_sim_setup` / `simulate_pcb` | circuit simulation of the schematic: sources (default a DC supply per power port, by name), ground, pressed switches, probes; DC operating point (net voltages, part currents and power), transient (min/max/average/RMS, period, frequency, duty per probe) or AC sweep (gain, −3 dB points), with a plot PNG and CSV. Part models come from their values (see `pcb_sim_setup`) |
+| `pcb_sim_setup` / `simulate_pcb` | circuit simulation of the schematic: sources (default a DC supply per power port, by name), ground, pressed switches, probes; DC operating point (net voltages, part currents and power), transient (min/max/average/RMS, period, frequency, duty per probe) or AC sweep (gain, −3 dB points), with a plot PNG and CSV. Part models come from their values (see `pcb_sim_setup`). A Raspberry Pi Pico (symbol `PICO`, pins by name like `U1.GP15`) runs the firmware given in `pcb_sim_setup` `mcus` during transients; `simulate_pcb` returns its serial output with times, notes and pin states, and `V(U1.GP0)` … `V(U1.GP29)` probe its GPIOs |
 
 The tool descriptions returned by `tools/list` give the full argument formats,
 with a description, type and (where there is a fixed set) the allowed values of
@@ -132,6 +132,9 @@ smaller tool, pencil clean-up of the pocket's fillets, then a second setup that
 flips the part and starts from the stock the first one left.
 `examples/cam-engrave.json` V-carves text from a sketch into a plate and traces
 a border and a line drawing from another sketch.
+`examples/pico-dimmer.json` runs firmware on a Raspberry Pi Pico in a circuit: it
+reads a divider on the ADC, dims an LED with PWM and prints the reading, and the
+transient shows the LED current and the filtered PWM.
 
 ## Example
 
