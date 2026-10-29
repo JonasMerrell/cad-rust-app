@@ -180,8 +180,38 @@ pub fn stock_box(cam: &Cam, part: &Part) -> (DVec3, DVec3) {
     }
 }
 
-/// The work origin (G54 zero) in setup coordinates.
+/// The corners of the stock carried from an earlier setup when this setup tilts it off square (3+2): its
+/// bounding box is then bigger than the block, and its corners are points in the air.
+pub fn tilted_block(cam: &Cam, part: &Part) -> Option<[DVec3; 8]> {
+    let [a, b] = cam.stock.carried?;
+    if part.rot.to_cols_array().iter().all(|v| v.abs() < 1e-9 || (v.abs() - 1.0).abs() < 1e-9) {
+        return None;
+    }
+    Some(std::array::from_fn(|k| part.rot * DVec3::new([a[0], b[0]][k & 1], [a[1], b[1]][(k >> 1) & 1], [a[2], b[2]][(k >> 2) & 1])))
+}
+
+/// The highest corner of a tilted block (front-left of equally high ones).
+fn top_corner(c: &[DVec3; 8]) -> DVec3 {
+    let zmax = c.iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max);
+    *c.iter().filter(|p| p.z > zmax - 1e-6).min_by(|a, b| (a.x + a.y).total_cmp(&(b.x + b.y))).unwrap()
+}
+
+/// The work origin (G54 zero) in setup coordinates. On a tilted block it is a point on the block, not on its
+/// bounding box: the highest corner, the middle of the face that looks most up, or the lowest corner.
 pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
+    if let Some(c) = tilted_block(cam, part) {
+        match cam.origin {
+            Origin::StockTopCorner => return top_corner(&c),
+            Origin::StockTopCenter => {
+                // the middle of the face that looks most up (faces by their corner bits: bit `b` of the corner index at `v`)
+                let up = |b: usize, v: usize| (part.rot * DVec3::AXES[b]).z * if v == 1 { 1.0 } else { -1.0 };
+                let (b, v) = (0..3).flat_map(|b| [(b, 0), (b, 1)]).max_by(|x, y| up(x.0, x.1).total_cmp(&up(y.0, y.1))).unwrap();
+                return (0..8).filter(|k| (k >> b) & 1 == v).map(|k| c[k]).sum::<DVec3>() / 4.0;
+            }
+            Origin::StockBottomCorner => return *c.iter().min_by(|a, b| a.z.total_cmp(&b.z)).unwrap(),
+            _ => {}
+        }
+    }
     let (lo, hi) = stock_box(cam, part);
     match cam.origin {
         Origin::StockTopCorner => DVec3::new(lo.x, lo.y, hi.z),
@@ -189,6 +219,26 @@ pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
         Origin::StockBottomCorner => lo,
         Origin::PartTopCorner => DVec3::new(part.lo.x, part.lo.y, part.hi.z),
         Origin::Model => DVec3::ZERO,
+    }
+}
+
+/// Where the work zero is, for the operator; on a tilted block also where its highest corner is from there,
+/// a point to touch off on.
+pub fn work_zero_note(cam: &Cam, part: &Part) -> String {
+    let Some(c) = tilted_block(cam, part) else { return cam.origin.label().to_lowercase() };
+    let o = work_origin(cam, part);
+    let what = match cam.origin {
+        Origin::StockTopCorner => "the highest corner of the tilted stock".to_string(),
+        Origin::StockTopCenter => "the middle of the tilted stock's upper face, on its surface".to_string(),
+        Origin::StockBottomCorner => "the lowest corner of the tilted stock".to_string(),
+        other => other.label().to_lowercase(),
+    };
+    let t = top_corner(&c) - o;
+    if t.length() < 1e-6 {
+        what
+    } else {
+        let f = crate::cam::fmt_mm;
+        format!("{what}; the stock's highest corner is at X{} Y{} Z{} from it", f(t.x), f(t.y), f(t.z))
     }
 }
 
@@ -564,8 +614,10 @@ impl<'a> Pb<'a> {
         let dz = z_from - z;
         let mut ramp_len = if dz > 1e-6 { dz / self.ramp.tan().max(1e-3) } else { 0.0 };
         if ramp_len > per * 20.0 || per < self.tool.diameter * 0.1 {
-            // too tight to ramp: plunge
-            self.cut(DVec3::new(s0.x, s0.y, z), self.plunge);
+            // too tight to ramp along the loop: spiral down inside it, or plunge when there's no room for that either
+            if !self.helix_in(&pts, z_from, z) {
+                self.cut(DVec3::new(s0.x, s0.y, z), self.plunge);
+            }
             ramp_len = 0.0;
         }
         let total = ramp_len + per;
@@ -622,6 +674,25 @@ impl<'a> Pb<'a> {
                 self.cut(DVec3::new(p.x, p.y, z), self.plunge);
             }
         }
+    }
+
+    /// Get down from `z_from` to `z` on a helix inside the closed loop `pts` (tool centres), ending at its first
+    /// point. False when the loop is too small for a helix (the caller plunges).
+    fn helix_in(&mut self, pts: &[P2], z_from: f64, z: f64) -> bool {
+        let n = pts.len() as f64;
+        let c = pts.iter().fold(DVec2::ZERO, |a, p| a + DVec2::from(*p)) / n;
+        // the helix stays inside the loop: no further from its middle than the nearest point of it
+        let room = pts.iter().map(|p| DVec2::from(*p).distance(c)).fold(f64::INFINITY, f64::min);
+        let rh = (room * 0.9).min(self.tool.diameter * 0.25);
+        if rh < self.tool.diameter * 0.05 || !inside(&vec![vec![pts.to_vec()]], c.to_array()) {
+            return false;
+        }
+        let pitch = (std::f64::consts::TAU * rh * self.ramp.tan()).max(self.tool.diameter * 0.05);
+        self.cut(DVec3::new(c.x + rh, c.y, z_from), self.feed);
+        helix(self, c.x, c.y, rh, z_from, z, -pitch, 1.0);
+        helix(self, c.x, c.y, rh, z, z, 0.0, 1.0);
+        self.cut(DVec3::new(pts[0][0], pts[0][1], z), self.feed);
+        true
     }
 
     /// Clear the tool-centre area `area` at height z with offset rings, spiralling out from the middle of each region.
@@ -1069,10 +1140,19 @@ fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
     for tp in paths.iter_mut() {
         let Some(tool) = cam.tool(tp.tool) else { continue };
         if cam.max_rpm > 0.0 && tool.rpm > cam.max_rpm + 0.5 {
-            tp.warnings.push(format!("T{} runs at {} rpm but the spindle tops out at {}", tool.number, tool.rpm.round(), cam.max_rpm.round()));
+            tp.warnings.push(format!(
+                "T{} is set to {} rpm but the spindle tops out at {}: it runs at {} with its feeds scaled to {}% (same chip load)",
+                tool.number,
+                tool.rpm.round(),
+                cam.max_rpm.round(),
+                cam.max_rpm.round(),
+                (cam.max_rpm / tool.rpm * 100.0).round()
+            ));
         }
-        if cam.min_rpm > 0.0 && tool.rpm > 0.0 && tool.rpm < cam.min_rpm - 0.5 && tool.kind != crate::cam::ToolKind::Tap {
-            tp.warnings.push(format!("T{} runs at {} rpm, below the spindle's {} rpm minimum (low torque)", tool.number, tool.rpm.round(), cam.min_rpm.round()));
+        if let Some(e) = tap_danger(cam, tool) {
+            tp.warnings.push(e);
+        } else if cam.min_rpm > 0.0 && tool.rpm > 0.0 && cam.spindle_rpm(tool) < cam.min_rpm - 0.5 {
+            tp.warnings.push(format!("T{} runs at {} rpm, below the spindle's {} rpm minimum (low torque)", tool.number, cam.spindle_rpm(tool).round(), cam.min_rpm.round()));
         }
         if m.max_feed > 0.0 {
             let mut fast = 0.0f64;
@@ -1110,6 +1190,82 @@ fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
             }
         }
     }
+}
+
+/// Advice on the order of the operations and on holding the work: things that are legal but likely not meant.
+pub fn hints(cam: &Cam, part: &Part, paths: &[Toolpath]) -> Vec<String> {
+    let mut v = vec![];
+    let ops: Vec<&Operation> = paths.iter().filter(|p| !p.moves.is_empty()).filter_map(|p| cam.op(p.op)).collect();
+    // edge breaking before the cuts that make the edges
+    for (i, a) in ops.iter().enumerate() {
+        if !matches!(a.kind, OpKind::Chamfer | OpKind::Deburr) {
+            continue;
+        }
+        let later: Vec<&str> = ops[i + 1..]
+            .iter()
+            .filter(|b| matches!(b.kind, OpKind::Face | OpKind::Clear | OpKind::Pocket | OpKind::Contour | OpKind::Adaptive | OpKind::Drill | OpKind::Bore))
+            .map(|b| b.name.as_str())
+            .collect();
+        if !later.is_empty() {
+            v.push(format!(
+                "{} runs before {}: it chamfers edges those haven't cut yet (grooving the stock, dimpling holes still to be drilled) and they may cut its chamfers away; move it after them",
+                a.name,
+                later.join(", ")
+            ));
+        }
+    }
+    let (lo, hi) = stock_box(cam, part);
+    let margin = (part.lo.x - lo.x).min(part.lo.y - lo.y).min(hi.x - part.hi.x).min(hi.y - part.hi.y);
+    let held = !cam.fixtures.is_empty() || cam.soft_jaws.is_some();
+    let mut below = vec![];
+    for tp in paths.iter().filter(|p| !p.moves.is_empty()) {
+        let (Some(op), Some(t)) = (cam.op(tp.op), cam.tool(tp.tool)) else { continue };
+        if op.kind == OpKind::Contour && op.tabs > 0 && op.side != Side::Inside && margin < t.diameter + op.leave + 1.0 {
+            v.push(format!(
+                "{}: the tabs hold the part to the stock around it, but the stock reaches only {} mm past the part and the tool is Ø{}: nothing is left outside the cut for them to hold on to; give the stock a wider side margin",
+                op.name,
+                crate::cam::fmt_mm(margin),
+                crate::cam::fmt_mm(t.diameter)
+            ));
+        }
+        let low = tp.moves.iter().filter_map(|m| match m {
+            Move::Feed(p, _) => Some(p[2]),
+            Move::Tap { z, .. } => Some(*z),
+            _ => None,
+        });
+        let low = low.fold(f64::INFINITY, f64::min);
+        if !held && low < lo.z - 0.01 {
+            below.push(format!("{} ({} mm)", op.name, crate::cam::fmt_mm(lo.z - low)));
+        }
+        if op.kind == OpKind::Adaptive && !op.chip_thinning {
+            let k = crate::cam::chip_thinning(stepover(op, t) / t.diameter.max(1e-9));
+            if k > 1.05 {
+                v.push(format!("{} takes a {}% cut: with chip_thinning on its feed would rise ×{k:.2} for the same chip load", op.name, (stepover(op, t) / t.diameter * 100.0).round()));
+            }
+        }
+    }
+    if !below.is_empty() {
+        v.push(format!(
+            "cutting below the stock bottom with no fixtures defined: {}. Lay the stock on a spoilboard or sacrificial plate, and add the clamps or screws that hold it as fixtures so the toolpaths keep clear of them",
+            below.join(", ")
+        ));
+    }
+    v
+}
+
+/// A tap that the spindle reverses (G84 or M4) at a speed where it has almost no torque: likely a broken tap.
+pub fn tap_danger(cam: &Cam, tool: &Tool) -> Option<String> {
+    if tool.kind != ToolKind::Tap || tool.tapping_head || cam.min_rpm <= 0.0 || cam.spindle_rpm(tool) >= cam.min_rpm - 0.5 {
+        return None;
+    }
+    Some(format!(
+        "T{} taps at {} rpm, below the spindle's {} rpm minimum: a high-speed spindle has almost no torque there and the tapping cycle \
+         reverses it at depth, so the tap is likely to break. Hold the tap in a self-reversing tapping head (tool option), or cut the \
+         thread with a thread mill",
+        tool.number,
+        cam.spindle_rpm(tool).round(),
+        cam.min_rpm.round()
+    ))
 }
 
 /// The setups that run before `ci`, oldest first: each one carries on from the one before it.
@@ -1176,6 +1332,8 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         tp.warnings.push("no parts to machine".into());
         return tp;
     }
+    // above the spindle's top speed it runs at the top speed, with the feeds scaled to keep the chip load
+    let slow = if tool.rpm > 0.0 { ctx.cam.spindle_rpm(tool) / tool.rpm } else { 1.0 };
     let mut pb = Pb {
         tool,
         moves: vec![],
@@ -1183,8 +1341,8 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         safe: ctx.safe(),
         retract: ctx.cam.retract.max(0.1),
         ramp: op.ramp_angle.clamp(0.5, 90.0).to_radians(),
-        feed: tool.feed.max(1.0),
-        plunge: tool.plunge_feed.max(1.0),
+        feed: (tool.feed * slow).max(1.0),
+        plunge: (tool.plunge_feed * slow).max(1.0),
     };
     if matches!(op.kind, OpKind::Clear | OpKind::Pocket | OpKind::Bore | OpKind::Adaptive) && matches!(tool.kind, ToolKind::Ball) {
         tp.warnings.push("ball end mill: floors will have scallops; use a flat end mill to finish them".into());
@@ -1739,9 +1897,11 @@ fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
                 time += d / f.max(1.0) * 60.0;
             }
             Move::Tap { z, r, pitch } => {
-                let l = 2.0 * (r - z).abs();
-                cut += l;
-                time += l / (tool.rpm.max(1.0) * pitch.max(0.01)) * 60.0 + 1.0;
+                // a tapping head unscrews the tap faster than it went in
+                let back = if tool.tapping_head { 1.0 / tool.reverse_ratio.max(0.1) } else { 1.0 };
+                let l = (r - z).abs();
+                cut += 2.0 * l;
+                time += l * (1.0 + back) / (cam.spindle_rpm(tool).max(1.0) * pitch.max(0.01)) * 60.0 + 1.0;
             }
             Move::Dwell(s) => time += s,
         }
@@ -1990,9 +2150,162 @@ mod tests {
         c.post_text.footer = "G53 G0 X0 Y0".into();
         let g = crate::cam_post::gcode(&c, &paths, origin, safe);
         assert!(g.contains(&format!("(program {} {})", c.program, c.name)), "{g}");
-        assert!(g.contains("M0 (load T2: Ø3 flat end mill"), "{g}");
+        assert!(g.contains("M0 (load T2: D3 flat end mill"), "{g}");
         assert_eq!(g.matches("(load T").count(), 2);
         let end = g.find("G53 G0 X0 Y0").unwrap();
         assert!(end < g.find("M30").unwrap() && end > g.find("M5").unwrap());
+    }
+    #[test]
+    fn mach3_program_for_a_manual_high_speed_mill() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let small = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 3.0).unwrap();
+        let t2 = c.add_tool(small);
+        c.add_op(OpKind::Face, t);
+        c.add_op(OpKind::Pocket, t2);
+        c.post = "mach3".into();
+        c.max_rpm = 10000.0;
+        c.min_rpm = 6000.0;
+        let rpm = c.tool(t).unwrap().rpm;
+        assert!(rpm > 10000.0, "{rpm}");
+        let paths = generate(&c, &part);
+        // above the top speed: run at it, with the feeds scaled down to the same chip load
+        let feed = c.tool(t).unwrap().feed;
+        let fastest = paths[0].moves.iter().filter_map(|m| if let Move::Feed(_, f) = m { Some(*f) } else { None }).fold(0.0, f64::max);
+        assert!((fastest - feed * 10000.0 / rpm).abs() < 1.0, "{fastest} vs {feed}");
+        assert!(paths[0].warnings.iter().any(|w| w.contains("tops out")), "{:?}", paths[0].warnings);
+        let (origin, safe) = {
+            let ctx = Ctx::new(&c, &part);
+            (ctx.origin, ctx.safe())
+        };
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(g.contains("G21 G17 G40 G49 G80 G90 G91.1 G94"), "{g}");
+        assert!(g.contains("S10000 M3") && !g.contains(&format!("S{} M3", rpm.round())));
+        // the spin-up wait is the machine's, in seconds (and said so for Mach3's profile setting)
+        assert!(g.contains("G4 P5\n") && g.contains("G4 dwell param in milliseconds"));
+        // retracts in machine coordinates before each tool change and at the end
+        let t1 = g.find("T1 M6").unwrap();
+        let t2 = g.find("T2 M6").unwrap();
+        assert!(g[..t1].contains("G53 G0 Z0") && g[t1..t2].contains("G53 G0 Z0"));
+        let end = g.rfind("G53 G0 Z0").unwrap();
+        assert!(end > t2 && end < g.find("M30").unwrap());
+        // no tool changer: the operator is told what to load, and the program waits
+        assert!(g.contains("(MSG,change to T2: D3 flat end mill") && g[..t2].ends_with("M0\n"), "{g}");
+        // aluminium: flood coolant by default
+        assert!(g.contains("M8") && g.contains("M9"));
+        c.coolant = crate::cam::Coolant::Off;
+        let dry = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(!dry.contains("M8"));
+        // LinuxCNC retracts the same way; Fanuc returns home with G28; GRBL stays in work coordinates
+        c.post = "linuxcnc".into();
+        assert!(crate::cam_post::gcode(&c, &paths, origin, safe).contains("G53 G0 Z0"));
+        c.post = "fanuc".into();
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(g.contains("G91 G28 Z0") && g.contains("G4 P5000") && !g.contains("G53 G0 Z0"));
+        c.post = "grbl".into();
+        assert!(!crate::cam_post::gcode(&c, &paths, origin, safe).contains("G53"));
+    }
+
+    #[test]
+    fn tapping_on_a_high_speed_spindle() {
+        let part = plate();
+        let (mut c, _) = setup();
+        c.post = "mach3".into();
+        c.min_rpm = 12000.0;
+        let mut tap = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Tap && t.diameter == 5.0).unwrap();
+        crate::cam::suggest(&mut tap, "Aluminium", c.max_rpm, c.min_rpm);
+        let t = c.add_tool(tap);
+        let id = c.add_op(OpKind::Tap, t);
+        c.op_mut(id).unwrap().points = vec![[30.0, 20.0]];
+        c.op_mut(id).unwrap().bottom = Some(-8.0);
+        let paths = generate(&c, &part);
+        // a G84 that reverses a spindle with no torque at that speed: an error, not just a warning
+        assert!(paths[0].warnings.iter().any(|w| w.contains("below the spindle's 12000 rpm minimum") && w.contains("tapping head")), "{:?}", paths[0].warnings);
+        assert!(tap_danger(&c, c.tool(t).unwrap()).is_some());
+        let (origin, safe) = {
+            let ctx = Ctx::new(&c, &part);
+            (ctx.origin, ctx.safe())
+        };
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(g.contains("G84") && g.contains("no rigid tapping"));
+        // in a self-reversing tapping head: straight in and out with the spindle running forward (blind: stops two pitches short)
+        c.tools.iter_mut().find(|x| x.id == t).unwrap().tapping_head = true;
+        let paths = generate(&c, &part);
+        assert!(tap_danger(&c, c.tool(t).unwrap()).is_none());
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(!g.contains("G84") && !g.contains("M4") && !g.contains("no rigid tapping"), "{g}");
+        let tool = c.tool(t).unwrap();
+        let f = tool.rpm * tool.pitch;
+        assert!(g.contains(&format!("G1 Z-6.4 F{}", f.round())) && g.contains(&format!("F{}", (f * 1.75).round())), "{g}");
+    }
+
+    #[test]
+    fn tight_loops_spiral_in_instead_of_plunging() {
+        let tool = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap();
+        let mut pb = Pb { tool: &tool, moves: vec![], pos: None, safe: 10.0, retract: 2.0, ramp: 3f64.to_radians(), feed: 1000.0, plunge: 300.0 };
+        // a loop 0.8 across: far too short to ramp along
+        let l: Contour = (0..16).map(|k| std::f64::consts::TAU * k as f64 / 16.0).map(|a| [20.0 + 0.4 * a.cos(), 20.0 + 0.4 * a.sin()]).collect();
+        pb.cut_loop(&l, -3.0, 0.0, 0.0, None, None);
+        let mut prev = DVec3::new(0.0, 0.0, 10.0);
+        let mut down = 0;
+        for m in &pb.moves {
+            let p = m.end(prev);
+            if matches!(m, Move::Feed(..)) && p.z < prev.z - 1e-9 && p.z < -1e-9 {
+                down += 1;
+                assert!(p.truncate().distance(prev.truncate()) > 1e-3, "plunges straight down at {p}");
+                assert!(p.truncate().distance(DVec2::splat(20.0)) < 0.4 + 1e-6);
+            }
+            prev = p;
+        }
+        assert!(down > 10, "{down}");
+        assert!((prev.z + 3.0).abs() < 1e-9);
+    }
+
+    #[test]
+    fn tilted_setup_zero_is_on_the_block() {
+        let part_in = PartInput { tris: plate().tris, ..Default::default() };
+        let mut c = Cam { origin: crate::cam::Origin::StockTopCorner, ..Default::default() };
+        c.stock.carried = Some([[-3.0, -3.0, 0.0], [63.0, 43.0, 11.0]]);
+        c.tilt = [20.0, 0.0];
+        let part = Part::from_input(&part_in, &c);
+        let o = work_origin(&c, &part);
+        let corners = tilted_block(&c, &part).unwrap();
+        // the highest real corner of the block, not a corner of its (bigger) bounding box
+        assert!(corners.iter().any(|k| k.distance(o) < 1e-9));
+        assert!((o.z - stock_box(&c, &part).1.z).abs() < 1e-9);
+        let (lo, hi) = stock_box(&c, &part);
+        assert!(o.y > lo.y + 1.0 || o.y < hi.y - 1.0);
+        c.origin = crate::cam::Origin::StockTopCenter;
+        let o = work_origin(&c, &part);
+        // the middle of the tilted top face: on the block's surface
+        let n = part.rot * DVec3::Z;
+        let top = part.rot * DVec3::new(30.0, 20.0, 11.0);
+        assert!(o.distance(top) < 1e-9 && n.z > 0.9, "{o} {top}");
+        assert!(work_zero_note(&c, &part).contains("highest corner is at"));
+        assert!(c.setup_notes().iter().any(|n| n.contains("20° about X (back edge raised)")));
+        // square setups keep the bounding box
+        c.tilt = [0.0, 0.0];
+        let part = Part::from_input(&part_in, &c);
+        assert!(tilted_block(&c, &part).is_none());
+    }
+
+    #[test]
+    fn hints_on_order_and_holding() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let ch = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap();
+        let ch = c.add_tool(ch);
+        c.add_op(OpKind::Chamfer, ch);
+        let k = c.add_op(OpKind::Contour, t);
+        c.op_mut(k).unwrap().tabs = 4;
+        let h = hints(&c, &part, &generate(&c, &part));
+        assert!(h.iter().any(|h| h.starts_with("Chamfer 1 runs before Contour 1")), "{h:?}");
+        assert!(h.iter().any(|h| h.contains("tabs hold")), "{h:?}");
+        assert!(h.iter().any(|h| h.contains("below the stock bottom")), "{h:?}");
+        c.ops.reverse();
+        c.stock.side = 12.0;
+        c.fixtures.push(Default::default());
+        let h = hints(&c, &part, &generate(&c, &part));
+        assert!(h.is_empty(), "{h:?}");
     }
 }

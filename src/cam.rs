@@ -112,6 +112,58 @@ impl ToolKind {
     }
 }
 
+/// Coolant: off, flood (M8) or mist (M7). `Auto` on a tool means "as the setup says"; on a setup it means
+/// flood for metal stock and off for wood, plastic and foam.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Hash, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum Coolant {
+    #[default]
+    Auto,
+    Off,
+    Flood,
+    Mist,
+}
+
+impl Coolant {
+    pub const ALL: [Coolant; 4] = [Coolant::Auto, Coolant::Off, Coolant::Flood, Coolant::Mist];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Coolant::Auto => "auto",
+            Coolant::Off => "off",
+            Coolant::Flood => "flood (M8)",
+            Coolant::Mist => "mist (M7)",
+        }
+    }
+
+    pub fn is_on(self) -> bool {
+        matches!(self, Coolant::Flood | Coolant::Mist)
+    }
+}
+
+/// Coolant as a name, or as the true/false of older files (true = flood, false = the setup's).
+fn coolant_or_bool<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Coolant, D::Error> {
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum C {
+        B(bool),
+        C(Coolant),
+    }
+    Ok(match C::deserialize(d)? {
+        C::B(true) => Coolant::Flood,
+        C::B(false) => Coolant::Auto,
+        C::C(c) => c,
+    })
+}
+
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+fn is_default_ratio(r: &f64) -> bool {
+    *r == 1.75
+}
+
 /// A cutting tool. Lengths are mm, feeds mm/min.
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(default)]
@@ -151,7 +203,17 @@ pub struct Tool {
     pub neck_diameter: f64,
     /// "carbide", "hss" or "cobalt"
     pub material: String,
-    pub coolant: bool,
+    /// Coolant for this tool; `Auto` = the setup's.
+    #[serde(deserialize_with = "coolant_or_bool")]
+    pub coolant: Coolant,
+    /// Taps: held in a self-reversing tapping head, so the spindle keeps turning forward and the program
+    /// just feeds in and out (no G84, no spindle reversal). Needed on a high-speed spindle.
+    #[serde(skip_serializing_if = "is_false")]
+    pub tapping_head: bool,
+    /// The tapping head's reverse ratio: it unscrews the tap this many times faster than it went in,
+    /// so the program pulls out that much faster.
+    #[serde(skip_serializing_if = "is_default_ratio")]
+    pub reverse_ratio: f64,
     pub rpm: f64,
     pub feed: f64,
     pub plunge_feed: f64,
@@ -183,7 +245,9 @@ impl Default for Tool {
             cutting_width: 0.0,
             neck_diameter: 0.0,
             material: "carbide".into(),
-            coolant: false,
+            coolant: Coolant::Auto,
+            tapping_head: false,
+            reverse_ratio: 1.75,
             rpm: 12000.0,
             feed: 1000.0,
             plunge_feed: 300.0,
@@ -797,6 +861,10 @@ pub struct Operation {
     pub depth: f64,
     /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
     pub lead: f64,
+    /// Adaptive: raise the feed for radial chip thinning (the loops take a thin cut, so the chips are thinner
+    /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
+    #[serde(skip_serializing_if = "is_false")]
+    pub chip_thinning: bool,
 }
 
 impl Default for Operation {
@@ -843,6 +911,7 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            chip_thinning: false,
         }
     }
 }
@@ -950,11 +1019,13 @@ pub struct Machine {
     pub rapid_z: f64,
     /// Automatic tool changer; without one the program pauses (M0) for each tool change.
     pub tool_changer: bool,
+    /// Seconds to wait after starting the spindle before cutting (a VFD spindle needs a few to come up to speed).
+    pub spin_up: f64,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: true }
+        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0 }
     }
 }
 
@@ -1180,7 +1251,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6 };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true
@@ -1222,6 +1293,9 @@ pub struct Cam {
     pub program: u32,
     /// The machine it runs on (travel, feed limit, tool changer).
     pub machine: Machine,
+    /// Coolant for the tools that don't set their own (`Auto`: flood for metal stock, off otherwise).
+    #[serde(deserialize_with = "coolant_or_bool")]
+    pub coolant: Coolant,
     /// Name of the setup (Manufacture tab) whose leftover stock this one starts from; empty = fresh stock.
     /// Use it to flip the part and machine the other side.
     pub follows: String,
@@ -1262,6 +1336,7 @@ impl Default for Cam {
             post: "grbl".into(),
             program: 1000,
             machine: Machine::default(),
+            coolant: Coolant::Auto,
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
@@ -1356,5 +1431,219 @@ impl Cam {
 
     pub fn op_mut(&mut self, id: u64) -> Option<&mut Operation> {
         self.ops.iter_mut().find(|o| o.id == id)
+    }
+
+    /// The speed a tool really runs at: its own, capped at the spindle's maximum.
+    pub fn spindle_rpm(&self, t: &Tool) -> f64 {
+        if self.max_rpm > 0.0 && t.rpm > self.max_rpm {
+            self.max_rpm
+        } else {
+            t.rpm
+        }
+    }
+
+    /// The coolant an operation runs with: the operation's (when it asks for it), else the tool's, else the setup's.
+    pub fn coolant_for(&self, t: &Tool, op: Option<&Operation>) -> Coolant {
+        let setup = match self.coolant {
+            Coolant::Auto if is_metal(&self.stock.material) => Coolant::Flood,
+            Coolant::Auto => Coolant::Off,
+            c => c,
+        };
+        let c = if t.coolant == Coolant::Auto { setup } else { t.coolant };
+        if !c.is_on() && op.map(|o| o.coolant).unwrap_or(false) {
+            Coolant::Flood
+        } else {
+            c
+        }
+    }
+
+    /// What the operator does before running the program: how the part sits (the side up, a 3+2 tilt) and
+    /// what holds it. Plain lines for the G-code header and the setup sheet.
+    pub fn setup_notes(&self) -> Vec<String> {
+        let mut v = vec![];
+        if !self.jaws_of.is_empty() {
+            v.push(format!("clamp both soft jaw blanks of {} in the vise on a spacer, tops level", self.jaws_of));
+        } else if !self.follows.is_empty() {
+            v.push(format!("carries on from {}: clamp the part it left with its {} side up", self.follows, self.orient));
+        } else if self.orient != "top" {
+            v.push(format!("clamp the part with its {} side up", self.orient));
+        }
+        if self.tilt != [0.0; 2] {
+            let mut t = vec![];
+            if self.tilt[0] != 0.0 {
+                t.push(format!("{}° about X ({} edge raised)", fmt_mm(self.tilt[0].abs()), if self.tilt[0] > 0.0 { "back" } else { "front" }));
+            }
+            if self.tilt[1] != 0.0 {
+                t.push(format!("{}° about Y ({} edge raised)", fmt_mm(self.tilt[1].abs()), if self.tilt[1] > 0.0 { "left" } else { "right" }));
+            }
+            v.push(format!("3+2 setup: tilt the part {} on an angle block or tilting vise before running", t.join(", then ")));
+        }
+        if let Some(sj) = &self.soft_jaws {
+            v.push(format!("hold the part {} mm deep in the soft jaws (vise closing along Y)", fmt_mm(sj.grip)));
+        }
+        for f in &self.fixtures {
+            v.push(format!(
+                "fixture {}: X{} to {}, Y{} to {}, Z{} to {} (work)",
+                f.name,
+                fmt_mm(f.min[0]),
+                fmt_mm(f.max[0]),
+                fmt_mm(f.min[1]),
+                fmt_mm(f.max[1]),
+                fmt_mm(f.min[2]),
+                fmt_mm(f.max[2])
+            ));
+        }
+        v
+    }
+}
+
+/// Metal stock, which wants coolant.
+pub fn is_metal(material: &str) -> bool {
+    !["Plastic", "Hardwood", "Softwood / MDF", "Foam"].iter().any(|m| m.eq_ignore_ascii_case(material.trim()))
+}
+
+/// Feed factor for radial chip thinning at a radial engagement of `ae` × the tool diameter: the chip is thinner
+/// than the feed per tooth when the tool takes less than half its width. Capped at 1.5 to stay on the safe side.
+pub fn chip_thinning(ae: f64) -> f64 {
+    let a = ae.clamp(0.01, 1.0);
+    if a >= 0.5 {
+        1.0
+    } else {
+        (1.0 / (2.0 * (a * (1.0 - a)).sqrt())).min(1.5)
+    }
+}
+
+// ---------------------------------------------------------------- saved machine
+
+/// The machine side of a setup: controller, spindle, machine limits, coolant, probing and custom G-code.
+/// New setups start from the document's last setup or from the one the user saved.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct MachineSettings {
+    pub post: String,
+    pub max_rpm: f64,
+    pub min_rpm: f64,
+    pub rapid_rate: f64,
+    pub clearance: f64,
+    pub retract: f64,
+    pub arcs: bool,
+    pub coolant: Coolant,
+    pub machine: Machine,
+    pub probe: Probe,
+    pub post_text: PostText,
+}
+
+impl Default for MachineSettings {
+    fn default() -> Self {
+        MachineSettings::of(&Cam::default())
+    }
+}
+
+impl MachineSettings {
+    pub fn of(c: &Cam) -> MachineSettings {
+        MachineSettings {
+            post: c.post.clone(),
+            max_rpm: c.max_rpm,
+            min_rpm: c.min_rpm,
+            rapid_rate: c.rapid_rate,
+            clearance: c.clearance,
+            retract: c.retract,
+            arcs: c.arcs,
+            coolant: c.coolant,
+            machine: c.machine.clone(),
+            probe: c.probe.clone(),
+            post_text: c.post_text.clone(),
+        }
+    }
+
+    pub fn apply(&self, c: &mut Cam) {
+        c.post = self.post.clone();
+        c.max_rpm = self.max_rpm;
+        c.min_rpm = self.min_rpm;
+        c.rapid_rate = self.rapid_rate;
+        c.clearance = self.clearance;
+        c.retract = self.retract;
+        c.arcs = self.arcs;
+        c.coolant = self.coolant;
+        c.machine = self.machine.clone();
+        c.probe = self.probe.clone();
+        c.post_text = self.post_text.clone();
+    }
+}
+
+fn machine_path() -> Option<std::path::PathBuf> {
+    library_path().map(|p| p.with_file_name("machine.json"))
+}
+
+/// The machine the user saved (~/.config/cad-rust-app/machine.json).
+pub fn load_machine() -> Option<MachineSettings> {
+    machine_path().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|t| serde_json::from_str(&t).ok())
+}
+
+pub fn save_machine(m: &MachineSettings) -> Result<std::path::PathBuf, String> {
+    let p = machine_path().ok_or("no config folder (HOME isn't set)")?;
+    std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
+    std::fs::write(&p, serde_json::to_string_pretty(m).unwrap_or_default()).map_err(|e| e.to_string())?;
+    Ok(p)
+}
+
+/// A new setup: its machine settings come from the document's last setup, else from `saved`, else the defaults.
+pub fn new_setup(name: String, studio: usize, cams: &[Cam], saved: Option<MachineSettings>) -> Cam {
+    let mut c = Cam { name, studio, ..Default::default() };
+    if let Some(m) = cams.iter().rev().find(|c| c.jaws_of.is_empty()).map(MachineSettings::of).or(saved) {
+        m.apply(&mut c);
+    }
+    c
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn coolant_reads_old_files_and_follows_the_setup() {
+        // older files keep coolant as true/false
+        let t: Tool = serde_json::from_str(r#"{"coolant": true}"#).unwrap();
+        assert_eq!(t.coolant, Coolant::Flood);
+        let t: Tool = serde_json::from_str(r#"{"coolant": false}"#).unwrap();
+        assert_eq!(t.coolant, Coolant::Auto);
+        let t: Tool = serde_json::from_str(r#"{"coolant": "mist"}"#).unwrap();
+        assert_eq!(t.coolant, Coolant::Mist);
+        let back: Tool = serde_json::from_str(&serde_json::to_string(&t).unwrap()).unwrap();
+        assert_eq!(back, t);
+        // a tool that leaves it to the setup: flood on metal, off on wood, or what the setup says
+        let mut c = Cam::default();
+        let t = Tool::default();
+        assert_eq!(c.coolant_for(&t, None), Coolant::Flood);
+        c.stock.material = "Hardwood".into();
+        assert_eq!(c.coolant_for(&t, None), Coolant::Off);
+        let op = Operation { coolant: true, ..Default::default() };
+        assert_eq!(c.coolant_for(&t, Some(&op)), Coolant::Flood);
+        c.coolant = Coolant::Mist;
+        assert_eq!(c.coolant_for(&t, None), Coolant::Mist);
+        assert_eq!(c.coolant_for(&Tool { coolant: Coolant::Off, ..Default::default() }, None), Coolant::Off);
+    }
+
+    #[test]
+    fn new_setups_keep_the_machine() {
+        let saved = MachineSettings { post: "mach3".into(), min_rpm: 12000.0, machine: Machine { spin_up: 6.0, ..Default::default() }, ..Default::default() };
+        // an empty document: the saved machine
+        let c = new_setup("A".into(), 0, &[], Some(saved.clone()));
+        assert_eq!((c.post.as_str(), c.min_rpm, c.machine.spin_up, c.machine.tool_changer), ("mach3", 12000.0, 6.0, false));
+        // otherwise the last setup's
+        let mut prev = Cam { post: "linuxcnc".into(), max_rpm: 18000.0, ..Default::default() };
+        prev.machine.tool_changer = true;
+        let c = new_setup("B".into(), 0, &[prev], Some(saved));
+        assert_eq!((c.post.as_str(), c.max_rpm, c.machine.tool_changer, c.name.as_str()), ("linuxcnc", 18000.0, true, "B"));
+        assert!(c.tools.is_empty() && c.ops.is_empty());
+        // nothing to go on: GRBL defaults, no tool changer
+        assert!(!new_setup("C".into(), 0, &[], None).machine.tool_changer);
+    }
+
+    #[test]
+    fn chip_thinning_is_capped() {
+        assert_eq!(chip_thinning(0.5), 1.0);
+        assert!((chip_thinning(0.2) - 1.25).abs() < 1e-9);
+        assert_eq!(chip_thinning(0.1), 1.5);
     }
 }
