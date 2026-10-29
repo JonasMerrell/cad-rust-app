@@ -22,6 +22,8 @@ pub enum Tab {
     Cam(usize),
     /// Simulation (FEA) tab.
     Sim(usize),
+    /// PCB tab: schematic and board.
+    Pcb(usize),
 }
 
 impl Default for Tab {
@@ -44,6 +46,9 @@ pub struct Workspace {
     /// Simulation tabs.
     #[serde(default, rename = "simulations", skip_serializing_if = "Vec::is_empty")]
     pub sims: Vec<crate::fea::Study>,
+    /// PCB tabs.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub pcbs: Vec<crate::pcb::Pcb>,
     #[serde(default)]
     pub active: Tab,
     /// Saved snapshots (like Onshape versions), each a workspace JSON without versions.
@@ -89,6 +94,7 @@ impl Default for Workspace {
             drawings: vec![],
             cams: vec![],
             sims: vec![],
+            pcbs: vec![],
             active: Tab::Studio(0),
             versions: vec![],
             tab_order: vec![],
@@ -120,7 +126,8 @@ impl Workspace {
             .chain((0..self.assemblies.len()).map(Tab::Assembly))
             .chain((0..self.drawings.len()).map(Tab::Drawing))
             .chain((0..self.cams.len()).map(Tab::Cam))
-            .chain((0..self.sims.len()).map(Tab::Sim));
+            .chain((0..self.sims.len()).map(Tab::Sim))
+            .chain((0..self.pcbs.len()).map(Tab::Pcb));
         let all: Vec<Tab> = all.collect();
         let mut out: Vec<Tab> = self.tab_order.iter().copied().filter(|t| all.contains(t)).collect();
         out.dedup();
@@ -142,7 +149,7 @@ impl Workspace {
     pub fn forget_tab(&mut self, t: Tab) {
         let same = |a: Tab, b: Tab| std::mem::discriminant(&a) == std::mem::discriminant(&b);
         let idx = |t: Tab| match t {
-            Tab::Studio(i) | Tab::Assembly(i) | Tab::Drawing(i) | Tab::Cam(i) | Tab::Sim(i) => i,
+            Tab::Studio(i) | Tab::Assembly(i) | Tab::Drawing(i) | Tab::Cam(i) | Tab::Sim(i) | Tab::Pcb(i) => i,
         };
         let with = |t: Tab, i: usize| match t {
             Tab::Studio(_) => Tab::Studio(i),
@@ -150,6 +157,7 @@ impl Workspace {
             Tab::Drawing(_) => Tab::Drawing(i),
             Tab::Cam(_) => Tab::Cam(i),
             Tab::Sim(_) => Tab::Sim(i),
+            Tab::Pcb(_) => Tab::Pcb(i),
         };
         self.tab_order.retain(|x| *x != t);
         for x in &mut self.tab_order {

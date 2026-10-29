@@ -401,6 +401,7 @@ fn editor_context(app: &App) -> String {
         Tab::Drawing(i) => format!("Drawing {i} \"{}\"", app.ws.drawings.get(i).map(|s| s.name.as_str()).unwrap_or("")),
         Tab::Cam(i) => format!("Manufacture {i} \"{}\"", app.ws.cams.get(i).map(|s| s.name.as_str()).unwrap_or("")),
         Tab::Sim(i) => format!("Simulation {i} \"{}\"", app.ws.sims.get(i).map(|s| s.name.as_str()).unwrap_or("")),
+        Tab::Pcb(i) => format!("PCB {i} \"{}\"", app.ws.pcbs.get(i).map(|s| s.name.as_str()).unwrap_or("")),
     };
     let mut lines = vec![format!("Open tab: {tab}"), format!("Units: {}", app.doc.units.label())];
     match &app.path {

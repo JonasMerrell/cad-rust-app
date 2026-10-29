@@ -370,7 +370,7 @@ impl Session {
                 }
                 return Ok((json!({"simulation": si, "saved": a.get("path")}), Some(png)));
             }
-            _ => return Err(format!("unknown tool {name}")),
+            _ => return self.pcb_call(name, a),
         };
         Ok((v, None))
     }
