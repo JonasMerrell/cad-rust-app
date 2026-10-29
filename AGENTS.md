@@ -85,7 +85,10 @@ assembly and a drawing and hand the file to the GUI. Mate sides are given as
 its own coordinates, the same numbers `list_geometry` reports. A cylindrical
 face or circular edge mates on its axis. `drawing_info` lists each view's
 corner points, straight lines and circles in view coordinates, ready to pass to
-`dimension` items. `examples/assembly-drawing.json` walks through all of it, and
+`dimension` items. Dimensions and mate connectors remember the model edge or
+face they were placed on and follow it when the Part Studio is rebuilt; a
+dimension whose edge is gone is shown as dangling, a mate as failed.
+`examples/assembly-drawing.json` walks through all of it, and
 `examples/cam-plate.json` machines a plate (face, pocket, drill, thread mill,
 chamfer, contour with tabs), simulates it and writes G-code.
 `examples/cam-3d.json` does the same for a filleted mould block with 3D ops

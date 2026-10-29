@@ -23,7 +23,7 @@ pub enum Request {
     Interference { id: u64, items: Vec<(usize, crate::doc::BodyId, [f64; 12])> },
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
-    Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<([f64; 3], [f64; 3], bool)> },
+    Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<kernel::ProjReq> },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -237,9 +237,10 @@ impl KernelClient {
         self.state = KernelState::Busy;
     }
 
-    pub fn project(&mut self, tag: usize, key: String, doc: &Document, views: Vec<([f64; 3], [f64; 3], bool)>) {
+    pub fn project<V: Into<kernel::ProjReq>>(&mut self, tag: usize, key: String, doc: &Document, views: Vec<V>) {
         let id = self.next_id;
         self.next_id += 1;
+        let views = views.into_iter().map(Into::into).collect();
         self.send(&Request::Project { id, tag, key, doc: doc.clone(), views });
     }
 
@@ -393,7 +394,7 @@ impl KernelClient {
         })
     }
 
-    pub fn project_blocking(&mut self, tag: usize, key: &str, doc: &Document, views: Vec<([f64; 3], [f64; 3], bool)>) -> Result<Vec<kernel::ProjView>, String> {
+    pub fn project_blocking<V: Into<kernel::ProjReq>>(&mut self, tag: usize, key: &str, doc: &Document, views: Vec<V>) -> Result<Vec<kernel::ProjView>, String> {
         self.project(tag, key.to_string(), doc, views);
         self.wait_for(|o| match o {
             Outcome::Projected(t, k, v) if t == tag && k == key => Some(v),

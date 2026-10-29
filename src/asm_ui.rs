@@ -35,6 +35,8 @@ pub struct Drag {
     pub start: Pose,
     pub rotate: bool,
     pub moved: Vec2,
+    /// Moving: the plane the grabbed point slides in (point, normal), world coordinates.
+    pub plane: (DVec3, DVec3),
 }
 
 pub type Snap = (Vec<Assembly>, Vec<Drawing>);
@@ -51,12 +53,18 @@ pub struct AsmUi {
     pub undo: Vec<Snap>,
     pub redo: Vec<Snap>,
     pub failed: Vec<u64>,
+    /// Mates whose geometry could not be found after the parts changed.
+    pub lost: Vec<u64>,
     /// Relation being made: (kind, first mate, second mate, ratio, reverse).
     pub relation: Option<(RelationKind, Option<u64>, Option<u64>, f64, bool)>,
     /// Last interference check: instance id pairs and overlap volume; None while running.
     pub clashes: Option<Vec<(u64, u64, f64)>>,
     pub clash_ids: Vec<u64>,
     pub checking: bool,
+    /// Something moved or changed since the last interference check.
+    pub clash_stale: bool,
+    /// Fingerprint of the parts' geometry the mate connectors were last placed on.
+    pub geom_sig: u64,
     /// Exploded view distance factor (0 = assembled); with explode steps, 0..1 runs through them.
     pub explode: f32,
     /// Measure tool picks: world point and face normal (None for edges).
@@ -83,6 +91,7 @@ pub fn asm_mut(app: &mut App) -> Option<&mut Assembly> {
 
 /// Record an undo step for assembly/drawing edits.
 pub fn checkpoint(app: &mut App) {
+    app.asm.clash_stale = true;
     let snap = (app.ws.assemblies.clone(), app.ws.drawings.clone());
     app.asm.undo.push(snap);
     if app.asm.undo.len() > 200 {
@@ -184,8 +193,56 @@ pub fn solve(app: &mut App, hold: &[u64]) {
     let Some(i) = asm_index(app) else { return };
     let centers: Vec<(u64, DVec3)> = app.ws.assemblies[i].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
     let r = assembly::solve(&mut app.ws.assemblies[i], hold, &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO));
+    // mates whose geometry went away in a Part Studio edit stay failed
+    let lost: Vec<u64> = app.asm.failed.iter().copied().filter(|m| app.asm.lost.contains(m)).collect();
     app.asm.failed = r.failed;
+    for m in lost {
+        if !app.asm.failed.contains(&m) {
+            app.asm.failed.push(m);
+        }
+    }
+    app.asm.clash_stale = true;
     app.asm.scene_dirty = true;
+}
+
+/// After the parts change (a Part Studio rebuilt), move the mate connectors onto the new
+/// geometry and solve again.
+fn follow_parts(app: &mut App) {
+    let Some(i) = asm_index(app) else { return };
+    // a cheap fingerprint of the geometry the instances use
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let leaves: Vec<assembly::Leaf> = app.ws.assemblies[i].instances.iter().flat_map(|x| assembly::leaves(&app.ws.assemblies, x)).collect();
+    for l in &leaves {
+        if let Some(m) = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body) {
+            (l.studio, l.body, m.volume.to_bits(), m.area.to_bits(), m.faces.len(), m.edges.len()).hash(&mut h);
+        } else {
+            (l.studio, l.body).hash(&mut h);
+        }
+    }
+    let sig = h.finish();
+    if sig == app.asm.geom_sig {
+        return;
+    }
+    let first = app.asm.geom_sig == 0;
+    app.asm.geom_sig = sig;
+    let meshes: std::collections::HashMap<(usize, crate::doc::BodyId), crate::kernel::BodyMesh> =
+        leaves.iter().filter_map(|l| app.studio_bodies(l.studio).iter().find(|b| b.id == l.body).map(|m| ((l.studio, l.body), m.clone()))).collect();
+    let before = serde_json::to_string(&app.ws.assemblies[i].mates).unwrap_or_default();
+    let lost = assembly::refresh_connectors(&mut app.ws.assemblies, i, &|s, b| meshes.get(&(s, b)));
+    let moved = serde_json::to_string(&app.ws.assemblies[i].mates).unwrap_or_default() != before;
+    app.asm.lost = lost.clone();
+    if moved || !lost.is_empty() {
+        solve(app, &[]);
+        for m in lost {
+            if !app.asm.failed.contains(&m) {
+                app.asm.failed.push(m);
+            }
+        }
+        if !first {
+            app.asm.clash_stale = true;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -831,7 +888,7 @@ fn connector_for(app: &App, h: &Hit) -> Option<Connector> {
     let a = asm(app)?;
     let x = a.instance(h.inst)?;
     let part = parts_of(app, x).into_iter().nth(h.leaf)??;
-    let c = assembly::infer_connector(h.inst, part.mesh, h.face, h.edge, h.local.into())?;
+    let c = assembly::infer_connector(h.inst, h.leaf, part.mesh, h.face, h.edge, h.local.into())?;
     // from the part's coordinates into the instance's
     let l = part.local;
     Some(Connector { origin: l.apply(c.origin.into()).into(), z: l.dir(c.z.into()).into(), x: l.dir(c.x.into()).into(), ..c })
@@ -926,6 +983,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
 
+    follow_parts(app);
     if asm(app).map(|a| a.instances.is_empty()).unwrap_or(true) && !app.asm.insert_open {
         app.asm.insert_open = true;
     }
@@ -973,7 +1031,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                         d.active = if active == 0 { 1 } else { 0 };
                     }
                     if solve_now {
-                        solve(app, &[]);
+                        // the instance with fewer mates (or inserted later) moves to meet the other
+                        let hold = asm(app).map(|a| assembly::mate_anchor(a, mid)).unwrap_or_default();
+                        solve(app, &hold);
                     }
                     app.asm.scene_dirty = true;
                 }
@@ -1004,7 +1064,12 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     checkpoint(app);
                     let start = asm(app).and_then(|a| a.instance(h.inst)).map(|x| x.pose).unwrap_or_default();
                     let rotate = ui.input(|i| i.modifiers.shift);
-                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO });
+                    // slide in the plane of the grabbed face, else in the world plane facing the camera most
+                    let (p, n) = hit_world(app, &h).unwrap_or((DVec3::ZERO, None));
+                    let back = app.camera.back.as_dvec3().normalize();
+                    let world = [DVec3::Z, DVec3::Y, DVec3::X].into_iter().max_by(|a, b| a.dot(back).abs().partial_cmp(&b.dot(back).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(DVec3::Z);
+                    let n = n.filter(|n| n.dot(back).abs() > 0.2).unwrap_or(world);
+                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO, plane: (p, n) });
                 }
             }
         }
@@ -1019,8 +1084,23 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 let w = (cam.up.as_dvec3() * d.moved.x as f64 + cam.right().as_dvec3() * d.moved.y as f64) * 0.01;
                 d.start.perturbed(w, DVec3::ZERO, c)
             } else {
-                let wpp = cam.wpp() as f64;
-                let v = cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp);
+                // the grabbed point follows the pointer across its plane
+                let (p0, n) = d.plane;
+                let hit = |s: Vec2| {
+                    let (o, dir) = cam.ray(s);
+                    let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
+                    let den = dir.dot(n);
+                    (den.abs() > 1e-9).then(|| o + dir * ((p0 - o).dot(n) / den))
+                };
+                let now = ui.input(|i| i.pointer.latest_pos()).map(local);
+                let start = now.map(|q| q - d.moved);
+                let v = match (start.and_then(hit), now.and_then(hit)) {
+                    (Some(a), Some(b)) if (b - a).length() < 1e6 => b - a,
+                    _ => {
+                        let wpp = cam.wpp() as f64;
+                        cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp)
+                    }
+                };
                 d.start.perturbed(DVec3::ZERO, v, DVec3::ZERO)
             };
             let id = d.inst;
@@ -1097,6 +1177,7 @@ fn check_interference(app: &mut App) {
         }
     }
     app.asm.clash_ids = ids;
+    app.asm.clash_stale = false;
     let docs = app.studio_docs();
     app.kernel.set_studios(docs);
     app.kernel.interference(items);
@@ -1119,13 +1200,17 @@ fn clashes_ui(app: &mut App, ui: &mut Ui) {
     }
     let Some(list) = app.asm.clashes.clone() else { return };
     let Some(a) = asm(app) else { return };
+    let stale = app.asm.clash_stale;
+    if stale {
+        ui.label(RichText::new("Out of date: parts changed since this check. Run Interference again.").color(theme::muted()).italics().size(12.0));
+    }
     if list.is_empty() {
-        ui.label(RichText::new("No parts overlap").color(theme::ok_green()).size(12.5));
+        ui.label(RichText::new("No parts overlap").color(if stale { theme::muted() } else { theme::ok_green() }).size(12.5));
     }
     let name = |id: u64| a.instance(id).map(|x| x.name.clone()).unwrap_or_default();
-    let rows: Vec<(u64, u64, String)> = list.iter().map(|(p, q, v)| (*p, *q, format!("{} ∩ {} · {} mm³", name(*p), name(*q), crate::expr::trim(*v, 2)))).collect();
+    let rows: Vec<(u64, u64, String)> = list.iter().map(|(p, q, v)| (*p, *q, format!("{} overlaps {} · {} mm³", name(*p), name(*q), crate::expr::trim(*v, 2)))).collect();
     for (p, q, text) in rows {
-        if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(theme::error_soft())).min_size(egui::vec2(ui.available_width(), 20.0))).clicked() {
+        if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(if stale { theme::muted() } else { theme::error_soft() })).min_size(egui::vec2(ui.available_width(), 20.0))).clicked() {
             app.asm.sel = vec![p, q];
             app.asm.scene_dirty = true;
         }

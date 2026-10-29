@@ -1112,7 +1112,7 @@ mod tests {
     fn orphan_mates_are_pruned() {
         use crate::assembly::{Assembly, Connector, Instance, Mate, MateKind};
         let inst = |id| Instance { id, name: String::new(), studio: 0, body: (0, 0).into(), pose: Default::default(), fixed: false, hidden: false, sub: None };
-        let con = |inst| Some(Connector { inst, origin: [0.0; 3], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0] });
+        let con = |inst| Some(Connector { inst, origin: [0.0; 3], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None });
         let mate = |id, a, b| Mate {
             id,
             name: String::new(),
