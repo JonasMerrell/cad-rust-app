@@ -2646,6 +2646,9 @@ impl App {
     /// The hint line, drawn over the bottom-left of the work area.
     fn hint_ui(&self, ctx: &egui::Context, area: egui::Rect) {
         let msg = self.hint_text();
+        if msg.is_empty() {
+            return;
+        }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hint")));
         let font = egui::FontId::proportional(12.0);
         let g = painter.layout(msg, font, theme::muted(), area.width() - 260.0);

@@ -95,7 +95,7 @@ fn free_sch_spot(p: &Pcb) -> P {
 }
 
 impl Session {
-    fn pcb_idx(&self, a: &Value) -> R<usize> {
+    pub(super) fn pcb_idx(&self, a: &Value) -> R<usize> {
         let i = a.get("pcb").and_then(|v| v.as_u64()).ok_or("give pcb (the PCB tab's index from create_pcb)")? as usize;
         if i >= self.ws.pcbs.len() {
             return Err(format!("no PCB tab {i}"));
@@ -384,7 +384,7 @@ impl Session {
                 let errors: Vec<Value> = r.into_iter().flat_map(|r| r.features.iter()).filter_map(|f| f.error.clone().map(|e| json!({"feature": f.id, "error": e}))).collect();
                 json!({"studio": si, "name": self.ws.studios[si].name, "parts": r.map(|r| r.bodies.len()).unwrap_or(0), "errors": errors, "hint": "it is now the active Part Studio: render it, export it as STEP, or insert its parts into an assembly"})
             }
-            _ => return Err(format!("unknown tool {name}")),
+            _ => return self.circuit_call(name, a),
         };
         Ok((v, None))
     }

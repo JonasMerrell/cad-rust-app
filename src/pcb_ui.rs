@@ -17,6 +17,8 @@ pub enum View {
     #[default]
     Schematic,
     Board,
+    /// The schematic with probes and the waveform plot.
+    Simulate,
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -61,9 +63,9 @@ struct Route {
 
 /// Derived data, rebuilt when the PCB changes.
 #[derive(Default)]
-struct Cache {
+pub(crate) struct Cache {
     pcb: Option<usize>,
-    nl: Netlist,
+    pub(crate) nl: Netlist,
     pads: Vec<WPad>,
     fills: Vec<pcb::Fill>,
     air: Vec<pcb::Airwire>,
@@ -92,15 +94,16 @@ pub struct PcbUi {
     redo: Vec<Pcb>,
     last_ck: Option<Instant>,
     dirty: bool,
-    cache: Cache,
+    pub(crate) cache: Cache,
     pub issues: Option<Vec<Issue>>,
     lib_search: String,
     label_text: String,
     zone_net: String,
     highlight: Option<String>,
-    hover: P,
+    pub(crate) hover: P,
     pin_text: String,
     pin_text_for: Option<u64>,
+    pub sim: crate::circuit_ui::SimUi,
 }
 
 impl Default for PcbUi {
@@ -134,6 +137,7 @@ impl Default for PcbUi {
             hover: [0.0; 2],
             pin_text: String::new(),
             pin_text_for: None,
+            sim: Default::default(),
         }
     }
 }
@@ -200,7 +204,7 @@ fn record(app: &mut App, before: Pcb) {
 }
 
 /// Make an edit as its own undo step.
-fn edit(app: &mut App, f: impl FnOnce(&mut Pcb)) {
+pub(crate) fn edit(app: &mut App, f: impl FnOnce(&mut Pcb)) {
     let Some(i) = index(app) else { return };
     let before = app.ws.pcbs[i].clone();
     f(&mut app.ws.pcbs[i]);
@@ -233,7 +237,7 @@ fn refresh(app: &mut App) {
 
 fn vi(v: View) -> usize {
     match v {
-        View::Schematic => 0,
+        View::Schematic | View::Simulate => 0,
         View::Board => 1,
     }
 }
@@ -426,6 +430,7 @@ pub fn hint(app: &App) -> String {
         (_, Tool::Zone) => "Click the corners of the pour, double-click or Enter to close it · or use Pour in the sidebar".into(),
         (_, Tool::Hole) => "Click to add a mounting hole".into(),
         (View::Schematic, _) => "Add parts from the library, wire their pins (W), name nets (L) · B switches to the board".into(),
+        (View::Simulate, _) => crate::circuit_ui::hint(app),
         (View::Board, _) => "Drag parts onto the board (R rotates, F flips), then route (X) or autoroute · L changes layer · B back to the schematic".into(),
     }
 }
@@ -437,6 +442,15 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let board = app.pcb.view == View::Board;
+    if app.pcb.view == View::Simulate {
+        if pressed(egui::Key::F) {
+            fit(app);
+        }
+        if pressed(egui::Key::B) {
+            set_view(app, View::Board);
+        }
+        return crate::circuit_ui::shortcuts(app, ctx);
+    }
     if pressed(egui::Key::Escape) {
         if app.pcb.route.is_some() || !app.pcb.wire.is_empty() || !app.pcb.zone_pts.is_empty() {
             app.pcb.route = None;
@@ -524,15 +538,20 @@ fn via_here(app: &mut App) {
 pub fn toolbar(app: &mut App, ui: &mut Ui) {
     let board = app.pcb.view == View::Board;
     App::group(ui, |ui| {
-        if app.tool_button(ui, "pcbSchematic", "Schematic", "The circuit: parts, wires and net labels (B)", true, !board, true).clicked() {
+        if app.tool_button(ui, "pcbSchematic", "Schematic", "The circuit: parts, wires and net labels (B)", true, app.pcb.view == View::Schematic, true).clicked() {
             set_view(app, View::Schematic);
         }
         if app.tool_button(ui, "pcbBoard", "Board", "The layout: footprints, tracks and copper (B)", true, board, true).clicked() {
             set_view(app, View::Board);
         }
+        if app.tool_button(ui, "pcbSim", "Simulate", "Simulate the circuit: DC, transient and AC, with probes and plots", true, app.pcb.view == View::Simulate, true).clicked() {
+            set_view(app, View::Simulate);
+        }
     });
     let t = app.pcb.tool.clone();
-    if !board {
+    if app.pcb.view == View::Simulate {
+        crate::circuit_ui::toolbar(app, ui);
+    } else if !board {
         App::group(ui, |ui| {
             if app.tool_button(ui, "select", "Select", "Select and drag (Esc)", false, t == Tool::Select, true).clicked() {
                 set_tool(app, Tool::Select);
@@ -636,6 +655,10 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     refresh(app);
     let before = app.ws.pcbs[i].clone();
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
+        if app.pcb.view == View::Simulate {
+            crate::circuit_ui::sidebar(app, ui);
+            return;
+        }
         if app.pcb.view == View::Schematic {
             section(ui, "Library", |ui| library_ui(app, ui));
             if matches!(app.pcb.tool, Tool::Label(_)) {
@@ -968,6 +991,8 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
     vec![
         ("Schematic view", "pcbSchematic", |a| set_view(a, View::Schematic)),
         ("Board view", "pcbBoard", |a| set_view(a, View::Board)),
+        ("Simulate circuit", "pcbSim", |a| set_view(a, View::Simulate)),
+        ("Run circuit simulation", "play", crate::circuit_ui::run),
         ("Wire", "pcbWire", |a| set_tool(a, Tool::Wire)),
         ("Net label", "pcbLabel", |a| set_tool(a, Tool::Label(LabelKind::Net))),
         ("Route tracks", "pcbRoute", |a| {
@@ -984,14 +1009,14 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
 
 // ---------------------------------------------------------------- viewport
 
-struct Xf {
-    rect: egui::Rect,
-    zoom: f32,
+pub(crate) struct Xf {
+    pub(crate) rect: egui::Rect,
+    pub(crate) zoom: f32,
     center: P,
 }
 
 impl Xf {
-    fn s(&self, p: P) -> Pos2 {
+    pub(crate) fn s(&self, p: P) -> Pos2 {
         Pos2::new(self.rect.center().x + ((p[0] - self.center[0]) as f32) * self.zoom, self.rect.center().y - ((p[1] - self.center[1]) as f32) * self.zoom)
     }
     fn w(&self, s: Pos2) -> P {
@@ -1219,7 +1244,9 @@ fn close_zone(app: &mut App) {
 pub fn viewport(app: &mut App, ui: &mut Ui) {
     let Some(pi) = index(app) else { return };
     refresh(app);
-    let rect = ui.available_rect_before_wrap();
+    let sim = app.pcb.view == View::Simulate;
+    let full = ui.available_rect_before_wrap();
+    let (rect, plot_rect) = if sim { crate::circuit_ui::split(app, full) } else { (full, None) };
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     app.viewport_rect = rect;
     let k = vi(app.pcb.view);
@@ -1280,6 +1307,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let right = resp.clicked_by(egui::PointerButton::Secondary);
     if board {
         board_input(app, pi, &resp, &xf, hover, tol, clicked, double, right);
+    } else if sim {
+        crate::circuit_ui::sim_input(app, pi, hover, tol, clicked);
     } else {
         sch_input(app, pi, &resp, &xf, hover, tol, clicked, double, right);
     }
@@ -1294,6 +1323,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         let list = pcb_export::schematic_scene(p, &c.nl, app.pcb.highlight.as_deref());
         paint(&painter, &xf, &list);
         sch_overlay(app, pi, &painter, &xf);
+        if sim {
+            crate::circuit_ui::overlay(app, pi, &painter, &xf);
+        }
     }
     // the cursor position
     if let Some(h) = hover {
@@ -1304,6 +1336,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     if app.pcb.tool != Tool::Select || app.pcb.drag.is_some() {
         ui.ctx().request_repaint();
+    }
+    if let Some(r) = plot_rect {
+        crate::circuit_ui::plot(app, ui, r);
     }
 }
 

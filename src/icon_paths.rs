@@ -196,5 +196,10 @@ pub const ICONS: &[(&str, &str)] = &[
     ("pcbPlace", "M4 4h7v7H4zM13 13h7v7h-7zM15 4h5v5h-5z"),
     ("pcbFlip", "M12 3v18M8 7l-4 5 4 5M16 7l4 5-4 5"),
     ("pcbRotate", "M20 12a8 8 0 1 1-2.3-5.7M20 4v5h-5"),
+    ("pcbSim", "M3 5h18v14H3zM5 14c2 0 2-6 4-6s2 8 4 8 2-6 4-6 2 3 2 3"),
+    ("play", "M7 4l12 8-12 8z"),
+    ("simDc", "M4 9h16M4 15h3M10 15h4M17 15h3"),
+    ("simTran", "M3 17h4V7h5v10h5V7h4"),
+    ("simAc", "M3 12c2-7 4.5-7 6.5 0s4.5 7 6.5 0 3-5 5-5"),
     ("pcbHole", "M12 5a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM12 2v3M12 19v3M2 12h3M19 12h3"),
 ];
