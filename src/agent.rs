@@ -89,6 +89,8 @@ impl Session {
                 *frame = *fr;
             }
         }
+        // persistent names of the faces and edges features refer to, so later changes keep them
+        self.doc.apply_ref_updates(&self.result.refs);
         Ok(())
     }
 
@@ -185,7 +187,7 @@ impl Session {
                 let plane = parse_plane(a.get("plane").unwrap_or(&json!("top")))?;
                 let frame = match &plane {
                     Ref::OriginPlane { plane } => plane.frame(),
-                    Ref::Face { point, normal } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
+                    Ref::Face { point, normal, .. } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
                     Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied().ok_or("that plane has not been built")?,
                     _ => Frame::TOP,
                 };
@@ -199,8 +201,16 @@ impl Session {
                 let sid = id_arg(a, "sketch_id")?;
                 let items = a.get("items").and_then(|i| i.as_array()).ok_or("give items")?.clone();
                 let mut created = vec![];
-                for it in &items {
-                    created.push(self.sketch_item(sid, it)?);
+                // all or nothing: a bad item leaves the sketch as it was
+                let before = self.sketch_mut(sid)?.clone();
+                for (i, it) in items.iter().enumerate() {
+                    match self.sketch_item(sid, it) {
+                        Ok(c) => created.push(c),
+                        Err(e) => {
+                            *self.sketch_mut(sid)? = before;
+                            return Err(format!("item {}: {e} (nothing was added)", i + 1));
+                        }
+                    }
                 }
                 // points at the same place (e.g. a polyline end and a spline start) become one point
                 let merged = merge_coincident(self.sketch_mut(sid)?);
@@ -441,7 +451,7 @@ impl Session {
                         let plane = parse_plane(a.get("plane").unwrap_or(&json!("top")))?;
                         let frame = match &plane {
                             Ref::OriginPlane { plane } => plane.frame(),
-                            Ref::Face { point, normal } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
+                            Ref::Face { point, normal, .. } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
                             Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied().ok_or("that plane has not been built")?,
                             _ => Frame::TOP,
                         };

@@ -956,6 +956,8 @@ impl App {
                             *frame = *fr;
                         }
                     }
+                    // and the persistent names of picked faces and edges (neither)
+                    self.doc.apply_ref_updates(&r.refs);
                     self.result = r;
                     self.print_cache.borrow_mut().clear();
                     self.scene_dirty = true;
@@ -1839,7 +1841,7 @@ impl App {
         match r {
             Ref::OriginPlane { plane } => Some(plane.frame()),
             Ref::FeaturePlane { feature } => self.result.frames.get(feature).copied(),
-            Ref::Face { point, normal } if r.is_planar() => Some(crate::kernel::plane_frame((*point).into(), (*normal).into())),
+            Ref::Face { point, normal, .. } if r.is_planar() => Some(crate::kernel::plane_frame((*point).into(), (*normal).into())),
             _ => None,
         }
     }
@@ -2161,6 +2163,21 @@ impl App {
         row(ui, "Surface area", fmt_area(area, units));
         row(ui, "Mass", if all_mass { format!("{} g", crate::expr::trim(mass, 2)) } else { "set a material".into() });
         row(ui, "Centre of mass", format!("{}, {}, {}", units.fmt(c.x), units.fmt(c.y), units.fmt(c.z)));
+        if all_mass {
+            // inertia about the centre of mass: each part's tensor scaled by its density, moved there
+            let mut it = glam::DMat3::ZERO;
+            for b in &bodies {
+                let rho = self.part_props(b.id).material.and_then(|m| doc::MATERIALS.iter().find(|x| x.0 == m).map(|x| x.1)).unwrap_or(0.0) / 1000.0;
+                let d = glam::DVec3::from(b.centroid) - c;
+                let shift = glam::DMat3::IDENTITY * d.length_squared() - glam::DMat3::from_cols(d * d.x, d * d.y, d * d.z);
+                it += glam::DMat3::from_cols_array(&b.inertia) * rho + shift * (b.volume * rho);
+            }
+            let g = |v: f64| crate::expr::trim(v, 1);
+            row(ui, "Inertia (g·mm²)", format!("Ixx {}, Iyy {}, Izz {}", g(it.x_axis.x), g(it.y_axis.y), g(it.z_axis.z)));
+            row(ui, "", format!("Ixy {}, Ixz {}, Iyz {}", g(it.y_axis.x), g(it.z_axis.x), g(it.z_axis.y)));
+        } else {
+            row(ui, "Inertia", "set a material".into());
+        }
         row(ui, "Size", format!("{} × {} × {} {}", units.fmt(size.x), units.fmt(size.y), units.fmt(size.z), units.label()));
     }
 
@@ -2223,7 +2240,7 @@ impl App {
     }
 
     fn variables(&mut self, ui: &mut Ui) {
-        let (_, errs) = self.doc.var_values();
+        let (vals, errs) = self.doc.var_values();
         let mut remove = None;
         egui::Grid::new("vars").num_columns(3).spacing([6.0, 4.0]).show(ui, |ui| {
             let cfg = self.doc.active_config.and_then(|c| self.doc.configs.get(c)).cloned();
@@ -2250,7 +2267,12 @@ impl App {
                         self.changed();
                     }
                 } else {
-                    let mut txt = RichText::new(&v.expr).monospace();
+                    // an expression shows what it comes to
+                    let shown = match vals.get(&v.name) {
+                        Some(x) if v.expr.trim().parse::<f64>().is_err() => format!("{} = {}", v.expr, self.doc.units.fmt(*x)),
+                        _ => v.expr.clone(),
+                    };
+                    let mut txt = RichText::new(shown).monospace();
                     if errs.get(i).map(|e| e.is_some()).unwrap_or(false) {
                         txt = txt.color(theme::error_soft());
                     }

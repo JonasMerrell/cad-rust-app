@@ -215,7 +215,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
             for w in pts.windows(2) {
                 let d = seg_px(w[0], w[1]);
                 if d < px * 0.85 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, Ref::Edge { point: e.mid }));
+                    best = Some((d, Ref::Edge { point: e.mid, name: Default::default() }));
                 }
             }
         }
@@ -275,7 +275,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
                     if section_keeps(app, o + d * t) {
                         let fi = b.tri_face[ti] as usize;
                         let fa = &b.faces[fi];
-                        consider(&mut best, t, Ref::Face { point: (o + d * t).into(), normal: fa.normal });
+                        consider(&mut best, t, Ref::Face { point: (o + d * t).into(), normal: fa.normal, name: Default::default() });
                     }
                 }
             }
@@ -561,7 +561,7 @@ fn build_scene(app: &App) -> SceneData {
             }
         }
         for e in &b.edges {
-            let r = Ref::Edge { point: e.mid };
+            let r = Ref::Edge { point: e.mid, name: Default::default() };
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r);
             let (col, w) = if picked {
@@ -753,7 +753,7 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
 
 fn hover_text(app: &App, r: &Ref) -> String {
     match r {
-        Ref::Edge { point } => {
+        Ref::Edge { point, .. } => {
             for b in &app.result.bodies {
                 if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
                     let kind = if e.linear {
@@ -1017,7 +1017,7 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
 pub fn body_of(app: &App, r: &Ref) -> Option<crate::doc::BodyId> {
     match r {
         Ref::Body { body } => Some(*body),
-        Ref::Edge { point } => app.result.bodies.iter().find(|b| b.edges.iter().any(|e| e.mid == *point)).map(|b| b.id),
+        Ref::Edge { point, .. } => app.result.bodies.iter().find(|b| b.edges.iter().any(|e| e.mid == *point)).map(|b| b.id),
         Ref::Face { point, .. } => {
             let p = DVec3::from(*point);
             let mut best: Option<(f64, crate::doc::BodyId)> = None;
@@ -1088,7 +1088,7 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         close = true;
                     }
                 }
-                if let Ref::Face { point, normal } = t {
+                if let Ref::Face { point, normal, .. } = t {
                     if t.is_planar() && ui.button("Add decal (image)…").clicked() {
                         let (p, n) = (*point, *normal);
                         close = true;
@@ -1100,7 +1100,7 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                     app.start_feature("sketch");
                     close = true;
                 }
-                if let Ref::Face { point, normal } = t {
+                if let Ref::Face { point, normal, .. } = t {
                     if ui.button("View normal to").clicked() {
                         app.camera.set_orientation(DVec3::from(*normal).as_vec3(), if normal[2].abs() > 0.9 { Vec3::Y } else { Vec3::Z });
                         app.camera.target = DVec3::from(*point).as_vec3();
@@ -1147,8 +1147,8 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
 
 fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
     match r {
-        Ref::Face { point, normal } => Some((DVec3::from(*point), Some(DVec3::from(*normal)))),
-        Ref::Edge { point } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
+        Ref::Face { point, normal, .. } => Some((DVec3::from(*point), Some(DVec3::from(*normal)))),
+        Ref::Edge { point, .. } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
         Ref::SketchPoint { sketch, point } => {
             let f = app.doc.feature(*sketch)?;
             if let Op::Sketch { sketch, frame, .. } = &f.op { Some((frame.to_world(sketch.point(*point)?.v()), None)) } else { None }
@@ -1162,7 +1162,7 @@ fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
 pub fn measure_pair(app: &App, m: &Measure) -> Option<(DVec3, DVec3, String)> {
     let u = app.doc.units;
     if m.picks.len() == 1 {
-        if let Ref::Edge { point } = &m.picks[0] {
+        if let Ref::Edge { point, .. } = &m.picks[0] {
             for b in &app.result.bodies {
                 if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
                     let a = DVec3::from(e.pts[0].map(|x| x as f64));

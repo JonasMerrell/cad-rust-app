@@ -220,7 +220,7 @@ impl App {
                     return;
                 }
             },
-            Ref::Face { point, normal } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
+            Ref::Face { point, normal, .. } => crate::kernel::plane_frame((*point).into(), (*normal).into()),
             _ => Frame::TOP,
         };
         let before = self.doc.clone();
