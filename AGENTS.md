@@ -57,6 +57,7 @@ runs in this folder. Other MCP clients start the same command
 | `define_custom_feature` | scripted feature types (Rhai): parameters + selection in, solids out; use with `add_feature` kind `custom` |
 | `new_part_studio` / `switch_part_studio` | more Part Studios in one document (e.g. one per part) |
 | `create_assembly` / `assembly_insert` | assemblies of parts, or of other assemblies as rigid sub-assemblies |
+| `list_standard_parts` / `insert_standard_part` | ISO/DIN screws, nuts, washers, pins, shafts, bearings, NEMA steppers and T-slot extrusions, built parametrically in a "Standard parts" Part Studio and inserted into an assembly |
 | `assembly_mate` / `assembly_relation` / `assembly_move` | mates (fastened, revolute, slider, cylindrical, planar, ball) picked by a point on a face or edge; gear/rack/screw relations |
 | `assembly_info` / `render_assembly` / `assembly_explode` | poses, BOM, interference check; shaded and exploded renders |
 | `export_web` | an interactive 3D page (.html, opens in a browser) of an assembly, its slider/cylindrical/revolute mates moving within their limits and gear/rack relations following, or of a Part Studio's parts |

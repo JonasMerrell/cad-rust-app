@@ -533,6 +533,46 @@ impl Session {
                 self.ws.assemblies.push(Assembly { name, ..Default::default() });
                 json!({"assembly": self.ws.assemblies.len() - 1})
             }
+            "list_standard_parts" => json!({
+                "standards": crate::stdparts::catalogue_json(),
+                "note": "insert_standard_part puts one in an assembly. Screws: the seating plane (under the head; the top of countersunk and set screws) is z = 0, shank down -Z. Nuts, washers, bearings, pins, shafts and extrusions stand on z = 0 along +Z. Motors: mounting face z = 0, shaft up +Z."
+            }),
+            "insert_standard_part" => {
+                let std = crate::stdparts::find(a.get("standard").and_then(|s| s.as_str()).ok_or("give standard (from list_standard_parts, e.g. \"ISO 4762\")")?)
+                    .ok_or("no such standard; list_standard_parts lists them")?;
+                let size = match a.get("size") {
+                    Some(Value::String(s)) => std.parse_size(s).ok_or_else(|| format!("no size {s} in {}", std.key))?,
+                    Some(v) => v.as_f64().ok_or("size is a label like \"M5\" or a number")?,
+                    None => std.default.0,
+                };
+                let length = a.get("length").and_then(|v| v.as_f64()).or(std.lengths.map(|_| std.default.1));
+                if self.ws.assemblies.is_empty() && a.get("assembly").is_none() {
+                    self.ws.assemblies.push(Assembly { name: "Assembly 1".into(), ..Default::default() });
+                }
+                self.sync();
+                let si = crate::stdparts::studio_index(&mut self.ws);
+                let (body, _, added) = if si == self.cur {
+                    crate::stdparts::add_to_doc(&mut self.doc, std, size, length)?
+                } else {
+                    crate::stdparts::add_to_doc(&mut self.ws.studios[si].doc, std, size, length)?
+                };
+                if si == self.cur {
+                    self.rebuild()?;
+                } else if added {
+                    self.others.remove(&si);
+                }
+                let mut b = a.clone();
+                b["assembly"] = a.get("assembly").cloned().unwrap_or(json!(0));
+                b["studio"] = json!(si);
+                b["body"] = json!([body.0, body.1]);
+                if let Some(e) = self.ensure_built(si).err().or_else(|| self.others.get(&si).and_then(|r| r.features.iter().find(|f| f.id == body.0)).and_then(|f| f.error.clone())) {
+                    return Err(format!("{}: {e}", std.title(size, length)));
+                }
+                let (mut v, _) = self.ws_call("assembly_insert", &b)?;
+                v["part"] = json!(std.title(size, length));
+                v["part_studio"] = json!(si);
+                v
+            }
             "assembly_insert" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();
