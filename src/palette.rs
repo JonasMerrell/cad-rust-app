@@ -86,19 +86,125 @@ fn commands(app: &App) -> Vec<Cmd> {
                 }),
             ));
             v.push(cmd("View normal to selection", "View", "normal", Some("N"), "look at", Action::Run(|a| a.view_normal_to_selection())));
-            v.push(cmd("Import a model or drawing…", "File", "import", None, "step iges stl obj dxf svg", Action::Run(|a| a.import_step())));
-            for (label, view, key) in [("Iso view", "iso", "0"), ("Front view", "front", "1"), ("Top view", "top", "2"), ("Right view", "right", "3")] {
+            v.push(cmd("Import a model or drawing…", "File", "importFile", None, "step iges stl obj dxf svg", Action::Run(|a| a.import_step())));
+            for (label, view, key) in [
+                ("Iso view", "iso", Some("0")),
+                ("Front view", "front", Some("1")),
+                ("Top view", "top", Some("2")),
+                ("Right view", "right", Some("3")),
+                ("Back view", "back", None),
+                ("Bottom view", "bottom", None),
+                ("Left view", "left", None),
+            ] {
                 v.push(cmd(
                     label,
                     "View",
                     "isoView",
-                    Some(key),
-                    "camera",
+                    key,
+                    "camera standard",
                     Action::Run(match view {
                         "front" => |a| set_view(a, crate::camera::StdView::Front),
                         "top" => |a| set_view(a, crate::camera::StdView::Top),
                         "right" => |a| set_view(a, crate::camera::StdView::Right),
+                        "back" => |a| set_view(a, crate::camera::StdView::Back),
+                        "bottom" => |a| set_view(a, crate::camera::StdView::Bottom),
+                        "left" => |a| set_view(a, crate::camera::StdView::Left),
                         _ => |a| set_view(a, crate::camera::StdView::Iso),
+                    }),
+                ));
+            }
+            for (label, plane) in [("Section view: Top plane", 0u8), ("Section view: Front plane", 1), ("Section view: Right plane", 2)] {
+                v.push(cmd(
+                    label,
+                    "View",
+                    "section",
+                    None,
+                    "cut clip cross",
+                    Action::Run(match plane {
+                        0 => |a| set_section(a, 0),
+                        1 => |a| set_section(a, 1),
+                        _ => |a| set_section(a, 2),
+                    }),
+                ));
+            }
+            v.push(cmd(
+                "Section view through the selection",
+                "View",
+                "section",
+                None,
+                "cut clip cross face plane",
+                Action::Run(|a| match a.section_through_selection() {
+                    Some(s) => {
+                        a.section = Some(s);
+                        a.scene_dirty = true;
+                    }
+                    None => a.flash("Select a plane or flat face to cut through", crate::app::ToastKind::Info),
+                }),
+            ));
+            if app.section.is_some() {
+                v.push(cmd(
+                    "End section view",
+                    "View",
+                    "section",
+                    None,
+                    "cut clip off none",
+                    Action::Run(|a| {
+                        a.section = None;
+                        a.scene_dirty = true;
+                    }),
+                ));
+            }
+            v.push(cmd(
+                "Realistic rendering",
+                "View",
+                "sun",
+                None,
+                "lighting reflections render",
+                Action::Run(|a| {
+                    a.realistic = !a.realistic;
+                    a.scene_dirty = true;
+                }),
+            ));
+            v.push(cmd(
+                "Printability view",
+                "View",
+                "printer",
+                None,
+                "overhang thin wall 3d print",
+                Action::Run(|a| {
+                    a.print_view = !a.print_view;
+                    a.scene_dirty = true;
+                }),
+            ));
+            for (label, ext) in [("Export STEP…", "step"), ("Export IGES…", "iges"), ("Export STL…", "stl")] {
+                v.push(cmd(
+                    label,
+                    "File",
+                    "export",
+                    None,
+                    "save download 3d print",
+                    Action::Run(match ext {
+                        "step" => |a| a.export("step"),
+                        "iges" => |a| a.export("iges"),
+                        _ => |a| a.export("stl"),
+                    }),
+                ));
+            }
+            v.push(cmd("Export OBJ…", "File", "export", None, "save download mesh", Action::Run(|a| a.export_obj())));
+            v.push(cmd("Send to slicer", "File", "printer", None, "3d print orca", Action::Run(|a| a.send_to_slicer())));
+            for (label, u) in [("Units: millimetres", "mm"), ("Units: centimetres", "cm"), ("Units: metres", "m"), ("Units: inches", "in"), ("Units: feet", "ft")] {
+                v.push(cmd(
+                    label,
+                    "Units",
+                    "ruler",
+                    None,
+                    "unit metric imperial mm cm in inch",
+                    Action::Run(match u {
+                        "mm" => |a| a.request_units(crate::expr::Units::Mm),
+                        "cm" => |a| a.request_units(crate::expr::Units::Cm),
+                        "m" => |a| a.request_units(crate::expr::Units::M),
+                        "in" => |a| a.request_units(crate::expr::Units::In),
+                        _ => |a| a.request_units(crate::expr::Units::Ft),
                     }),
                 ));
             }
@@ -140,17 +246,33 @@ fn commands(app: &App) -> Vec<Cmd> {
             }),
         ));
     }
+    if matches!(app.tab, Tab::Studio(_) | Tab::Assembly(_)) {
+        v.push(cmd("Export web viewer (HTML)…", "File", "export", None, "save share browser html", Action::Run(|a| a.export_web())));
+    }
+    v.push(cmd("Screenshot (PNG)…", "File", "export", None, "image picture save", Action::Run(|a| a.session.screenshot = true)));
+    let theme = if app.dark { "Light mode" } else { "Dark mode" };
+    v.push(cmd(
+        theme,
+        "Theme",
+        if app.dark { "sun" } else { "moon" },
+        None,
+        "theme dark light colours appearance",
+        Action::Run(|a| a.session.toggle_dark = true),
+    ));
+    v.push(cmd("Keyboard shortcuts", "Help", "keyboard", Some("F1"), "keys help hotkeys list", Action::Run(|a| a.session.show_shortcuts = true)));
+    v.push(cmd("New document", "File", "file", Some("Ctrl+N"), "new part blank start", Action::Run(|a| a.guard(crate::session::Pending::New))));
     v.push(cmd("Design with Claude", "Claude", "chat", Some("Ctrl+L"), "ai chat natural language assistant agent", Action::Run(crate::claude_ui::toggle)));
     v.push(cmd("Undo", "Edit", "undo", Some("Ctrl+Z"), "", Action::Run(|a| a.undo())));
     v.push(cmd("Redo", "Edit", "redo", Some("Ctrl+Y"), "", Action::Run(|a| a.redo())));
-    v.push(cmd("Save", "File", "download", Some("Ctrl+S"), "", Action::Run(|a| a.save(false))));
-    v.push(cmd("Save as…", "File", "download", Some("Ctrl+Shift+S"), "", Action::Run(|a| a.save(true))));
-    v.push(cmd("Open…", "File", "file", Some("Ctrl+O"), "load document", Action::Run(|a| a.open_dialog())));
+    v.push(cmd("Save", "File", "save", Some("Ctrl+S"), "", Action::Run(|a| a.save(false))));
+    v.push(cmd("Save as…", "File", "save", Some("Ctrl+Shift+S"), "copy", Action::Run(|a| a.save(true))));
+    v.push(cmd("Open…", "File", "folder", Some("Ctrl+O"), "load document", Action::Run(|a| a.open_dialog())));
     for (label, icon, what) in [
         ("New Part Studio", "partStudio", "new-studio"),
         ("New Assembly", "assembly", "new-assembly"),
         ("New Drawing", "drawing", "new-drawing"),
         ("New Manufacture (CAM)", "cam", "new-cam"),
+        ("New Simulation (FEA)", "simulation", "new-sim"),
     ] {
         v.push(cmd(
             label,
@@ -162,6 +284,7 @@ fn commands(app: &App) -> Vec<Cmd> {
                 "new-studio" => |a| a.tab_action("new-studio", a.tab),
                 "new-assembly" => |a| a.tab_action("new-assembly", a.tab),
                 "new-drawing" => |a| a.tab_action("new-drawing", a.tab),
+                "new-sim" => |a| a.tab_action("new-sim", a.tab),
                 _ => |a| a.tab_action("new-cam", a.tab),
             }),
         ));
@@ -185,6 +308,11 @@ fn set_view(a: &mut App, v: crate::camera::StdView) {
     a.scene_dirty = true;
 }
 
+fn set_section(a: &mut App, plane: u8) {
+    a.section = Some(a.section_for(plane, false));
+    a.scene_dirty = true;
+}
+
 /// How well `q` matches: words that start a word of the label score best, then words inside it, then
 /// letters in order. None = no match.
 fn score(c: &Cmd, q: &str) -> Option<i32> {
@@ -193,6 +321,10 @@ fn score(c: &Cmd, q: &str) -> Option<i32> {
     let mut total = 0;
     for w in q.split_whitespace() {
         let starts = label.split(|ch: char| !ch.is_alphanumeric()).any(|x| x.starts_with(w));
+        // the whole word typed beats a longer word starting with it
+        if label.split(|ch: char| !ch.is_alphanumeric()).any(|x| x == w) {
+            total += 5;
+        }
         total += if label.starts_with(w) {
             100
         } else if starts {
@@ -211,8 +343,8 @@ fn score(c: &Cmd, q: &str) -> Option<i32> {
             }
         };
     }
-    // shorter labels first among equals
-    Some(total * 100 - label.len() as i32)
+    // among equals the command list's order decides (common commands come first there)
+    Some(total)
 }
 
 fn ranked(app: &App) -> Vec<Cmd> {
@@ -224,6 +356,7 @@ fn ranked(app: &App) -> Vec<Cmd> {
         return v;
     }
     let mut v: Vec<(i32, Cmd)> = all.into_iter().filter_map(|c| score(&c, &q).map(|s| (s, c))).collect();
+    // stable: equal scores keep the list's order
     v.sort_by(|a, b| b.0.cmp(&a.0));
     v.into_iter().map(|x| x.1).collect()
 }
@@ -253,7 +386,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         return;
     }
     let list = ranked(app);
-    let shown = list.len().min(12);
+    let shown = list.len();
+    let moved = ctx.input(|i| i.key_pressed(Key::ArrowDown) || i.key_pressed(Key::ArrowUp));
     if ctx.input(|i| i.key_pressed(Key::ArrowDown)) {
         app.palette.sel = (app.palette.sel + 1).min(shown.saturating_sub(1));
     }
@@ -287,7 +421,10 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             if list.is_empty() {
                 ui.label(RichText::new("No command matches").color(theme::muted()).size(12.5));
             }
-            for (k, c) in list.iter().take(shown).enumerate() {
+            // about 12 rows, scrolling for more
+            let rows = egui::ScrollArea::vertical().max_height(12.0 * 26.0).auto_shrink([false, true]).show(ui, |ui| {
+            let mut run = None;
+            for (k, c) in list.iter().enumerate() {
                 let sel = k == app.palette.sel;
                 let resp = ui
                     .horizontal(|ui| {
@@ -305,9 +442,17 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 if resp.clicked() {
                     run = Some(c.clone());
                 }
-                if resp.hovered() {
+                if sel && moved {
+                    resp.scroll_to_me(None);
+                }
+                if resp.hovered() && ui.input(|i| i.pointer.delta() != egui::Vec2::ZERO) {
                     app.palette.sel = k;
                 }
+            }
+            run
+            });
+            if rows.inner.is_some() {
+                run = rows.inner;
             }
             if app.palette.query.is_empty() && !app.palette.recent.is_empty() {
                 ui.label(RichText::new("Recent first · ↑↓ to choose · Enter to run · Esc to close").color(theme::muted()).size(11.0));
@@ -360,5 +505,18 @@ mod tests {
         assert!(score(&c("Export G-code…"), "export g").is_some() && score(&c("Export G-code…"), "export q").is_none());
         // found by its group and extra words too
         assert!(score(&cmd("Simulate", "Manufacture", "x", None, "crash", Action::Feature("x")), "crash").is_some());
+        // a name match beats a group match
+        assert!(score(&c("Section view: Top plane"), "view") > score(&cmd("Sketch", "View", "x", None, "", Action::Feature("x")), "view"));
+    }
+
+    #[test]
+    fn fillet_before_fill() {
+        // equal prefix matches keep the command list's order, which has Fillet before Fill
+        let fil: Vec<&str> = crate::app::FEATURE_GROUPS.iter().flat_map(|g| g.iter().copied()).filter(|k| k.starts_with("fill")).collect();
+        assert_eq!(fil, ["fillet", "fill"]);
+        let c = |label: &str| cmd(label, "Feature", "x", None, "", Action::Feature("x"));
+        assert_eq!(score(&c("Fillet"), "fil"), score(&c("Fill"), "fil"));
+        // the whole word still wins when typed
+        assert!(score(&c("Fill"), "fill") > score(&c("Fillet"), "fill"));
     }
 }

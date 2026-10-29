@@ -81,7 +81,8 @@ const DARK_PAL: Palette = Palette {
     panel_2: hex(0x26292e),
     border: hex(0x2c2f35),
     text: hex(0xe3e6ea),
-    muted: hex(0x8b929c),
+    // at least 4.5:1 on the panels
+    muted: hex(0x969da7),
     accent: hex(0x4c9bff),
     ok_green: hex(0x5cc47a),
     error: hex(0xff7a7a),
@@ -107,7 +108,8 @@ const LIGHT_PAL: Palette = Palette {
     panel_2: hex(0xf0f2f5),
     border: hex(0xe2e5e9),
     text: hex(0x1f2329),
-    muted: hex(0x6b7380),
+    // at least 4.5:1 on the panels
+    muted: hex(0x636b77),
     accent: hex(0x1a6fd9),
     ok_green: hex(0x1f8a4c),
     error: hex(0xd03a3a),
@@ -133,8 +135,8 @@ const DARK_VP: ViewPalette = ViewPalette {
     body: hex(0xa4b2c1),
     edge: hex(0x1c2026),
     hover: hex(0xffb547),
-    // selection stands apart from blue sketch geometry and the amber hover
-    picked: hex(0xff6a3d),
+    // selection: a cyan blue, apart from error red, the amber hover and the sketch blue
+    picked: hex(0x2ed3ff),
     plane: hex(0x6f8fb3),
     sketch: hex(0x56b6ff),
     construction: hex(0x7d8a99),
@@ -157,7 +159,7 @@ const LIGHT_VP: ViewPalette = ViewPalette {
     body: hex(0x8a9eb1),
     edge: hex(0x1b2630),
     hover: hex(0xf3a73b),
-    picked: hex(0xe8451c),
+    picked: hex(0x009ee0),
     plane: hex(0x8fb2d9),
     sketch: hex(0x1a73d9),
     construction: hex(0x8a96a3),

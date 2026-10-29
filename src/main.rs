@@ -48,11 +48,13 @@ mod script_num;
 mod script_ui;
 mod sketch;
 mod sketch_import;
+mod session;
 mod sketcher;
 mod stdparts;
 mod stdparts_ui;
 mod text;
 mod theme;
+mod units_switch;
 mod viewport;
 mod web_asm;
 mod web_export;
@@ -115,7 +117,8 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
-        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 1000.0]).with_min_inner_size([320.0, 400.0]).with_title("cad-app"),
+        // the window opens at the size it had last time
+        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("cad-app"),
         ..Default::default()
     };
     eframe::run_native("cad-app", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))

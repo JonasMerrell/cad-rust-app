@@ -325,6 +325,14 @@ fn delete_selection(app: &mut App) {
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
+    if crate::app::key_mods(ctx).0 {
+        // Ctrl+A selects every instance; other Ctrl keys are not the letters' tools
+        if pressed(egui::Key::A) && app.asm.dialog.is_none() {
+            app.asm.sel = asm(app).map(|a| a.instances.iter().map(|x| x.id).collect()).unwrap_or_default();
+            app.asm.scene_dirty = true;
+        }
+        return;
+    }
     if pressed(egui::Key::Escape) {
         if app.asm.dialog.is_some() {
             mate_cancel(app);
@@ -359,7 +367,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn fit(app: &mut App) {
+pub fn fit(app: &mut App) {
     let Some(a) = asm(app) else { return };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
@@ -1039,14 +1047,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         scene: app.scene.clone(),
         view_proj: app.camera.view_proj(),
         eye_dir: app.camera.back,
-        clip: match app.section {
-            Some(sec) => {
-                let n = [Vec3::Z, -Vec3::Y, Vec3::X][sec.plane as usize];
-                let (n, w) = if sec.flip { (-n, -(sec.offset as f32)) } else { (n, sec.offset as f32) };
-                [n.x, n.y, n.z, w]
-            }
-            None => [0.0; 4],
-        },
+        clip: app.section.map(|s| s.clip()).unwrap_or([0.0; 4]),
         size_px: [rect.width() * ppp, rect.height() * ppp],
         pixels_per_point: ppp,
         realistic: app.realistic,

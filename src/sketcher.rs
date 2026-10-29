@@ -535,6 +535,10 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         app.scene_dirty = true;
         return;
     }
+    if crate::app::key_mods(ctx).0 {
+        // other Ctrl keys are not the letters' tools
+        return;
+    }
     if crate::app::key_mods(ctx).1 && ctx.input(|i| i.key_pressed(Key::E)) {
         app.extrude_from_sketch();
         return;

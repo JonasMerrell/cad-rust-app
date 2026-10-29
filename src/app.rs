@@ -55,10 +55,41 @@ pub struct Toast {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Section {
-    /// 0 = XY (top), 1 = XZ (front), 2 = YZ (right)
+    /// 0 = XY (top), 1 = XZ (front), 2 = YZ (right), 3 = a selected plane or flat face
     pub plane: u8,
     pub flip: bool,
+    /// Distance of the cut from the origin along `normal`, in mm.
     pub offset: f64,
+    /// The cut plane's normal (unflipped); the side it points to is cut away.
+    pub normal: [f64; 3],
+}
+
+impl Section {
+    pub fn origin_normal(plane: u8) -> [f64; 3] {
+        [[0.0, 0.0, 1.0], [0.0, -1.0, 0.0], [1.0, 0.0, 0.0]][plane.min(2) as usize]
+    }
+
+    /// A cut through an origin plane, `offset` along its normal.
+    pub fn origin(plane: u8, flip: bool, offset: f64) -> Self {
+        Section { plane, flip, offset, normal: Self::origin_normal(plane) }
+    }
+
+    /// Clip plane for the renderer: keeps points where w - n·p >= 0.
+    pub fn clip(&self) -> [f32; 4] {
+        let n = glam::DVec3::from(self.normal);
+        let (n, w) = if self.flip { (-n, -self.offset) } else { (n, self.offset) };
+        [n.x as f32, n.y as f32, n.z as f32, w as f32]
+    }
+
+    pub fn keeps(&self, p: glam::DVec3) -> bool {
+        let c = self.clip();
+        c[3] as f64 - glam::DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64).dot(p) >= 0.0
+    }
+
+    pub fn label(&self) -> String {
+        let name = ["Top", "Front", "Right", "Selection"][self.plane.min(3) as usize];
+        format!("{name}{}", if self.flip { " (flipped)" } else { "" })
+    }
 }
 
 /// The feature dialog: a feature inserted into the document that is being edited.
@@ -158,6 +189,8 @@ pub struct App {
     pub realistic: bool,
     /// Decoded decal images by (id, data hash): RGBA pixels and size.
     pub decal_images: std::cell::RefCell<std::collections::HashMap<(u64, u64), (Arc<Vec<u8>>, [u32; 2])>>,
+    /// Unsaved-changes tracking, autosave, file prompts, tab undo and their windows.
+    pub session: crate::session::Session,
 }
 
 /// What the left panel shows; picked with the icon rail on the far left.
@@ -245,12 +278,18 @@ impl App {
             send_result: Default::default(),
             realistic: false,
             decal_images: Default::default(),
+            session: Default::default(),
         };
+        if let Some(z) = app.session.prefs.zoom.filter(|z| (0.5..=3.0).contains(z)) {
+            cc.egui_ctx.set_zoom_factor(z);
+        }
+        app.mark_saved();
         if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
             app.open_path(std::path::PathBuf::from(p));
         } else {
             app.home.open = true;
         }
+        app.session.recover = crate::session::leftover_autosaves();
         app.flash_info("Loading the OpenCascade kernel…", None);
         app
     }
@@ -315,9 +354,16 @@ impl App {
     pub fn changed(&mut self) {
         self.dirty_model = true;
         self.scene_dirty = true;
+        self.session.poke = true;
     }
 
     pub fn undo(&mut self) {
+        // a tab operation (delete, rename, duplicate, restore a version) that was the last change
+        self.refresh_hash();
+        if self.ws_latest(false) {
+            self.ws_undo_step(false);
+            return;
+        }
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::undo(self);
         }
@@ -344,6 +390,11 @@ impl App {
     }
 
     pub fn redo(&mut self) {
+        self.refresh_hash();
+        if self.ws_latest(true) {
+            self.ws_undo_step(true);
+            return;
+        }
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::redo(self);
         }
@@ -369,7 +420,18 @@ impl App {
         }
     }
 
+    /// "Undo", or what a tab-level undo would bring back.
+    pub fn undo_label(&self) -> String {
+        match self.session.ws_undo.last() {
+            Some(s) if self.ws_latest(false) => format!("Undo {}", s.label),
+            _ => "Undo".into(),
+        }
+    }
+
     pub fn can_undo(&self) -> bool {
+        if self.ws_latest(false) {
+            return true;
+        }
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::can_undo(self);
         }
@@ -383,6 +445,9 @@ impl App {
     }
 
     pub fn can_redo(&self) -> bool {
+        if self.ws_latest(true) {
+            return true;
+        }
         if let crate::workspace::Tab::Cam(_) = self.tab {
             return crate::cam_ui::can_redo(self);
         }
@@ -542,6 +607,9 @@ impl App {
         self.load_workspace(crate::workspace::Workspace::default());
         self.doc.units = units;
         self.path = None;
+        self.camera.set_view(StdView::Iso);
+        self.fit_view();
+        self.mark_saved();
     }
 
     /// Put the live Part Studio back into the workspace.
@@ -572,6 +640,7 @@ impl App {
         self.cam = Default::default();
         self.fea = Default::default();
         self.first_fit = true;
+        self.session.fitted_asm.clear();
         self.tab = crate::workspace::Tab::Studio(0);
         self.changed();
         let active = self.ws.active;
@@ -618,6 +687,7 @@ impl App {
             // frame the first parts Claude makes
             self.first_fit = true;
         }
+        self.session.poke = true;
         self.changed();
         // show a tab Claude just made, or the Part Studio it moved to
         let made = (1..5).rev().find(|&k| new[k] > old[k]);
@@ -703,10 +773,9 @@ impl App {
 
     // ------------------------------------------------------------ files
 
+    /// Open a document (asking first about unsaved changes).
     pub fn open_dialog(&mut self) {
-        if let Some(p) = self.open_file_dialog("Part", &["json"]) {
-            self.open_path(p);
-        }
+        self.guard(crate::session::Pending::Open);
     }
 
     pub fn open_path(&mut self, p: std::path::PathBuf) {
@@ -715,30 +784,37 @@ impl App {
                 self.load_workspace(ws);
                 crate::home::touch(self, &p);
                 self.path = Some(p);
+                self.mark_saved();
             }
             Err(e) => self.flash(format!("Could not open {}: {e}", p.display()), ToastKind::Error),
         }
     }
 
     pub fn save(&mut self, ask: bool) {
-        let path = if ask || self.path.is_none() { self.save_file_dialog("Part", &["json"], "part.json") } else { self.path.clone() };
-        if let Some(p) = path {
-            self.sync_ws();
-            match std::fs::write(&p, self.ws.to_json()) {
-                Ok(()) => {
-                    self.flash_info(format!("Saved {}", p.display()), Some(Duration::from_secs(2)));
-                    crate::home::touch(self, &p);
-                    self.path = Some(p);
-                }
-                Err(e) => self.flash(format!("Could not save: {e}"), ToastKind::Error),
+        match self.path.clone() {
+            Some(p) if !ask => self.save_to(p),
+            _ => {
+                let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part.json".into());
+                self.with_save_path("Save as", "Part", &["json"], &name, |a, p| a.save_to(p));
             }
+        }
+    }
+
+    pub fn save_to(&mut self, p: std::path::PathBuf) {
+        self.sync_ws();
+        match std::fs::write(&p, self.ws.to_json()) {
+            Ok(()) => {
+                self.flash_info(format!("Saved {}", p.display()), Some(Duration::from_secs(2)));
+                self.path = Some(p.clone());
+                self.saved_ok(&p);
+            }
+            Err(e) => self.flash(format!("Could not save {}: {e}", p.display()), ToastKind::Error),
         }
     }
 
     pub fn import_step(&mut self) {
         let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "zip", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG", "ZIP"];
-        let Some(p) = self.open_file_dialog("STEP, IGES, STL, OBJ, DXF, SVG, ZIP", &exts) else { return };
-        self.import_path(&p);
+        self.with_open_path("Import", "STEP, IGES, STL, OBJ, DXF, SVG, ZIP", &exts, |a, p| a.import_path(&p));
     }
 
     pub fn import_path(&mut self, p: &std::path::Path) {
@@ -781,7 +857,16 @@ impl App {
     }
 
     pub fn export_obj(&mut self) {
-        let Some(p) = self.save_file_dialog("OBJ", &["obj"], "part.obj") else { return };
+        let name = format!("{}.obj", self.export_stem());
+        self.with_save_path("Export OBJ", "OBJ", &["obj"], &name, |a, p| a.export_obj_to(p));
+    }
+
+    /// The document's file name without extension, for export file names.
+    fn export_stem(&self) -> String {
+        self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part".into())
+    }
+
+    fn export_obj_to(&mut self, p: std::path::PathBuf) {
         let mut out = String::from("# cad-app\n");
         let mut base = 1usize;
         for b in &self.result.bodies {
@@ -815,7 +900,10 @@ impl App {
             None => self.ws.studios.get(self.cur_studio).map(|s| s.name.clone()),
         }
         .unwrap_or_else(|| "model".into());
-        let Some(p) = self.save_file_dialog("Web page", &["html"], format!("{stem}.html")) else { return };
+        self.with_save_path("Export web viewer", "Web page", &["html"], &format!("{stem}.html"), move |a, p| a.export_web_to(asm, p));
+    }
+
+    fn export_web_to(&mut self, asm: Option<usize>, p: std::path::PathBuf) {
         let built = match asm {
             Some(i) => crate::web_asm::assembly_scene(self, i),
             None => {
@@ -838,10 +926,12 @@ impl App {
             "iges" => "igs",
             _ => "stl",
         };
-        let Some(p) = self.save_file_dialog(&ext.to_uppercase(), &[ext], format!("part.{ext}")) else { return };
         let format = if format == "stl" { format!("stl@{}", self.print.stl_tolerance) } else { format.to_string() };
-        self.kernel.export(&self.doc, &format, p.to_string_lossy().to_string());
-        self.flash_info(format!("Exporting {}…", p.display()), None);
+        let name = format!("{}.{ext}", self.export_stem());
+        self.with_save_path(&format!("Export {}", ext.to_uppercase()), &ext.to_uppercase(), &[ext], &name, move |a, p| {
+            a.kernel.export(&a.doc, &format, p.to_string_lossy().to_string());
+            a.flash_info(format!("Exporting {}…", p.display()), None);
+        });
     }
 
     /// Make an STL of the parts and hand it to orcaweb.
@@ -895,10 +985,12 @@ impl App {
     }
 
     pub fn screenshot(&mut self, ctx: &egui::Context) {
-        if let Some(p) = self.save_file_dialog("PNG", &["png"], "part.png") {
-            self.screenshot_pending = Some(p);
+        let ctx = ctx.clone();
+        let name = format!("{}.png", self.export_stem());
+        self.with_save_path("Save screenshot", "PNG", &["png"], &name, move |a, p| {
+            a.screenshot_pending = Some(p);
             ctx.send_viewport_cmd(egui::ViewportCommand::Screenshot(egui::UserData::default()));
-        }
+        });
     }
 
     fn handle_screenshot(&mut self, ctx: &egui::Context) {
@@ -950,7 +1042,8 @@ impl App {
                     self.asm.scene_dirty = true;
                     self.dwg.dirty = true;
                     self.errors = r.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
-                    // keep sketch frames in the document in sync (not an undoable edit)
+                    // keep sketch frames in the document in sync (not an undoable edit, nor an unsaved change)
+                    let clean = self.content_hash() == self.session.saved_hash;
                     for f in &mut self.doc.features {
                         if let (Op::Sketch { frame, .. }, Some(fr)) = (&mut f.op, r.frames.get(&f.id)) {
                             *frame = *fr;
@@ -958,10 +1051,14 @@ impl App {
                     }
                     // and the persistent names of picked faces and edges (neither)
                     self.doc.apply_ref_updates(&r.refs);
+                    // a clean document stays clean
+                    if clean && self.content_hash() != self.session.saved_hash {
+                        self.mark_saved();
+                    }
                     self.result = r;
                     self.print_cache.borrow_mut().clear();
                     self.scene_dirty = true;
-                    if self.first_fit && !self.result.bodies.is_empty() {
+                    if self.first_fit && (!self.result.bodies.is_empty() || self.doc.features.iter().any(|f| matches!(f.op, Op::Sketch { .. }) && !f.hidden)) {
                         self.first_fit = false;
                         self.fit_view();
                     }
@@ -1053,8 +1150,34 @@ impl App {
         }
         let (ctrl, shift) = key_mods(ctx);
         let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
+        if ctrl {
+            // each mode handles its own Ctrl combinations first (Ctrl+A in a sketch, …); the
+            // handlers ignore other keys while Ctrl is held
+            match self.tab {
+                crate::workspace::Tab::Assembly(_) => crate::asm_ui::shortcuts(self, ctx),
+                crate::workspace::Tab::Drawing(_) => crate::drawing_ui::shortcuts(self, ctx),
+                crate::workspace::Tab::Cam(_) => crate::cam_ui::shortcuts(self, ctx),
+                crate::workspace::Tab::Sim(_) => crate::fea_ui::shortcuts(self, ctx),
+                _ if self.sketch.is_some() => crate::sketcher::shortcuts(self, ctx),
+                _ => {
+                    if pressed(Key::A) && self.dialog.is_none() {
+                        // select every part
+                        self.picks = self.result.bodies.iter().filter(|b| !self.part_hidden(b.id)).map(|b| Ref::Body { body: b.id }).collect();
+                        self.scene_dirty = true;
+                    }
+                }
+            }
+        }
         if ctrl && pressed(Key::L) {
             crate::claude_ui::toggle(self);
+            return;
+        }
+        if ctrl && pressed(Key::N) {
+            self.guard(crate::session::Pending::New);
+            return;
+        }
+        if (!ctrl && pressed(Key::F1)) || ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"))) {
+            self.session.show_shortcuts = !self.session.show_shortcuts;
             return;
         }
         if ctrl && pressed(Key::Z) {
@@ -1201,7 +1324,12 @@ impl App {
             ui.menu_image_button(icons::image("menu", 18.0).tint(theme::text()), |ui| self.document_menu(ui)).response.on_hover_text("Document menu");
             let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
             let name = if self.phone && name.chars().count() > 18 { format!("{}…", name.chars().take(17).collect::<String>()) } else { name };
-            ui.label(RichText::new(name).family(theme::medium()).size(14.0).color(theme::text()));
+            let r = ui.label(RichText::new(name).family(theme::medium()).size(14.0).color(theme::text()));
+            if self.is_dirty() {
+                r.on_hover_text("Unsaved changes (Ctrl+S saves)");
+                ui.add_space(-4.0);
+                ui.label(RichText::new("•").size(16.0).color(theme::muted())).on_hover_text("Unsaved changes (Ctrl+S saves)");
+            }
             if !self.phone {
                 // branch badge
                 Frame::new().fill(theme::panel_2()).corner_radius(4).inner_margin(Margin::symmetric(6, 1)).show(ui, |ui| {
@@ -1250,16 +1378,38 @@ impl App {
     }
 
     fn document_menu(&mut self, ui: &mut Ui) {
-        ui.set_min_width(220.0);
+        ui.set_min_width(240.0);
         let mut action = None;
-        for (a, icon, l) in [("home", "home", "Home (recent documents)"), ("new", "file", "New part"), ("open", "file", "Open .json…"), ("json", "download", "Save .json (Ctrl+S)"), ("import", "import", "Import STEP, IGES, STL, OBJ…")]
-        {
-            if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
+        let item = |ui: &mut Ui, icon: &str, l: &str, keys: &str| {
+            let b = egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l).shortcut_text(RichText::new(keys).color(theme::muted()));
+            ui.add(b).clicked()
+        };
+        for (a, icon, l, keys) in [("home", "home", "Home (recent documents)", ""), ("new", "file", "New document", "Ctrl+N"), ("open", "folder", "Open…", "Ctrl+O")] {
+            if item(ui, icon, l, keys) {
                 action = Some(a);
                 ui.close();
             }
         }
-        ui.menu_image_text_button(icons::image("download", 15.0).tint(theme::text()), "Export", |ui| {
+        let recent: Vec<std::path::PathBuf> = self.home.recents.iter().take(10).map(|r| r.path.clone()).collect();
+        let mut open_recent = None;
+        ui.add_enabled_ui(!recent.is_empty(), |ui| {
+            ui.menu_image_text_button(icons::image("history", 15.0).tint(theme::text()), "Open recent", |ui| {
+                for p in &recent {
+                    let name = p.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+                    if ui.button(name).on_hover_text(p.display().to_string()).clicked() {
+                        open_recent = Some(p.clone());
+                        ui.close();
+                    }
+                }
+            });
+        });
+        for (a, icon, l, keys) in [("json", "save", "Save", "Ctrl+S"), ("saveas", "save", "Save as…", "Ctrl+Shift+S"), ("import", "importFile", "Import STEP, IGES, STL, OBJ…", "")] {
+            if item(ui, icon, l, keys) {
+                action = Some(a);
+                ui.close();
+            }
+        }
+        ui.menu_image_text_button(icons::image("export", 15.0).tint(theme::text()), "Export", |ui| {
             for (a, l) in [("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("web", "Web viewer (HTML)"), ("png", "Screenshot PNG")] {
                 if ui.button(l).clicked() {
                     action = Some(a);
@@ -1274,16 +1424,60 @@ impl App {
         ui.menu_image_text_button(icons::image("printer", 15.0).tint(theme::text()), "3D printing settings", |ui| self.print_settings_ui(ui));
         ui.menu_image_text_button(icons::image("view", 15.0).tint(theme::text()), "View", |ui| self.view_items(ui));
         ui.separator();
-        let (icon, l) = if self.dark { ("sun", "Light mode") } else { ("moon", "Dark mode") };
-        if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
-            self.set_dark(ui.ctx(), !self.dark);
+        ui.add_enabled_ui(self.can_undo(), |ui| {
+            if item(ui, "undo", &self.undo_label(), "Ctrl+Z") {
+                action = Some("undo");
+                ui.close();
+            }
+        });
+        ui.add_enabled_ui(self.can_redo(), |ui| {
+            if item(ui, "redo", "Redo", "Ctrl+Shift+Z") {
+                action = Some("redo");
+                ui.close();
+            }
+        });
+        ui.separator();
+        ui.menu_image_text_button(icons::image("settings", 15.0).tint(theme::text()), "Preferences", |ui| {
+            ui.set_min_width(220.0);
+            let (icon, l) = if self.dark { ("sun", "Light mode") } else { ("moon", "Dark mode") };
+            if ui.add(egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l)).clicked() {
+                self.set_dark(ui.ctx(), !self.dark);
+                ui.close();
+            }
+            ui.horizontal(|ui| {
+                ui.label("Interface zoom");
+                let mut z = ui.ctx().zoom_factor();
+                if ui.add(egui::DragValue::new(&mut z).range(0.5..=3.0).speed(0.01).fixed_decimals(2).suffix("×")).on_hover_text("Also Ctrl + and Ctrl −").changed() {
+                    ui.ctx().set_zoom_factor(z);
+                }
+            });
+            ui.horizontal(|ui| {
+                ui.label("Units");
+                self.units_combo(ui);
+            });
+        });
+        if item(ui, "keyboard", "Keyboard shortcuts", "F1") {
+            action = Some("keys");
             ui.close();
+        }
+        ui.separator();
+        if item(ui, "close", "Quit", "") {
+            action = Some("quit");
+            ui.close();
+        }
+        if let Some(p) = open_recent {
+            self.guard(crate::session::Pending::OpenPath(p));
         }
         match action {
             Some("home") => crate::home::show_home(self),
-            Some("new") => self.new_document(),
+            Some("new") => self.guard(crate::session::Pending::New),
             Some("open") => self.open_dialog(),
             Some("json") => self.save(false),
+            Some("saveas") => self.save(true),
+            Some("undo") => self.undo(),
+            Some("redo") => self.redo(),
+            Some("keys") => self.session.show_shortcuts = true,
+            Some("quit") => self.guard(crate::session::Pending::Close),
             Some("import") => self.import_step(),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
             Some("obj") => self.export_obj(),
@@ -1329,9 +1523,11 @@ impl App {
                 self.sidebar_open = !self.sidebar_open;
             }
             ui.add_space(4.0);
+            let undo_tip = format!("{} (Ctrl+Z)", self.undo_label());
             if ui
                 .add_enabled(self.can_undo(), egui::Button::image(icons::image("undo", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
-                .on_hover_text("Undo (Ctrl+Z)")
+                .on_hover_text(&undo_tip)
+                .on_disabled_hover_text("Undo (Ctrl+Z): nothing to undo yet")
                 .clicked()
             {
                 self.undo();
@@ -1339,6 +1535,7 @@ impl App {
             if ui
                 .add_enabled(self.can_redo(), egui::Button::image(icons::image("redo", 18.0).tint(theme::text())).min_size(egui::vec2(26.0, 26.0)))
                 .on_hover_text("Redo (Ctrl+Shift+Z)")
+                .on_disabled_hover_text("Redo (Ctrl+Shift+Z): nothing to redo")
                 .clicked()
             {
                 self.redo();
@@ -1462,41 +1659,90 @@ impl App {
         });
     }
 
-    pub fn section_ui(&mut self, ui: &mut Ui) {
-        let label = |s: &Option<Section>| match s {
-            None => "No section".to_string(),
-            Some(s) => format!("Section: {}{}", ["Top", "Front", "Right"][s.plane as usize], if s.flip { " (flipped)" } else { "" }),
-        };
+    /// A section through an origin plane, at the middle of the parts.
+    pub fn section_for(&self, plane: u8, flip: bool) -> Section {
+        let n = glam::DVec3::from(Section::origin_normal(plane));
+        let mut lo = glam::DVec3::splat(f64::INFINITY);
+        let mut hi = glam::DVec3::splat(f64::NEG_INFINITY);
+        if matches!(self.tab, crate::workspace::Tab::Studio(_)) {
+            for b in self.result.bodies.iter().filter(|b| !self.part_hidden(b.id)) {
+                lo = lo.min(b.bbox[0].into());
+                hi = hi.max(b.bbox[1].into());
+            }
+        }
+        let offset = if lo.x.is_finite() { n.dot((lo + hi) / 2.0) } else { 0.0 };
+        Section::origin(plane, flip, offset)
+    }
+
+    /// A section through the selected plane or flat face.
+    pub fn section_through_selection(&self) -> Option<Section> {
+        let fr = self.picks.iter().find_map(|r| self.frame_of(r))?;
+        let n = fr.normal();
+        Some(Section { plane: 3, flip: false, offset: n.dot(glam::DVec3::from(fr.origin)), normal: n.to_array() })
+    }
+
+    /// The section plane picker: origin planes (cut at the middle of the parts) or the selection.
+    pub fn section_choices(&mut self, ui: &mut Ui) {
         let mut sec = self.section;
-        egui::ComboBox::from_id_salt("section")
-            .selected_text(label(&sec))
-            .width(200.0)
-            .show_ui(ui, |ui| {
-                ui.selectable_value(&mut sec, None, "No section");
-                for p in 0..3u8 {
-                    for flip in [false, true] {
-                        let off = self.section.map(|s| s.offset).unwrap_or(0.0);
-                        let v = Some(Section { plane: p, flip, offset: off });
-                        let l = label(&v);
-                        if ui.selectable_label(sec.map(|s| s.plane == p && s.flip == flip).unwrap_or(false), l).clicked() {
-                            sec = v;
-                        }
-                    }
+        if ui.selectable_label(sec.is_none(), "No section").clicked() {
+            sec = None;
+        }
+        for (pl, name) in [(0u8, "Top"), (1, "Front"), (2, "Right")] {
+            for flip in [false, true] {
+                let cur = sec.map(|s| s.plane == pl && s.flip == flip).unwrap_or(false);
+                let l = if flip { format!("{name} (flipped)") } else { name.to_string() };
+                if ui.selectable_label(cur, l).clicked() {
+                    // keep the offset when only flipping
+                    sec = Some(match sec {
+                        Some(s) if s.plane == pl => Section { flip, ..s },
+                        _ => self.section_for(pl, flip),
+                    });
                 }
-            })
-            .response
-            .on_hover_text("Section view");
+            }
+        }
+        let through = self.section_through_selection();
+        let cur = sec.map(|s| s.plane == 3).unwrap_or(false);
+        let r = ui.add_enabled(through.is_some() || cur, egui::Button::selectable(cur, "Through the selected plane or face"));
+        let r = r.on_disabled_hover_text("Select a plane or flat face first");
+        if r.clicked() {
+            sec = through.or(sec);
+        }
         if sec != self.section {
             self.section = sec;
             self.scene_dirty = true;
+            self.asm.scene_dirty = true;
         }
-        if let Some(s) = &mut self.section {
-            let mut v = s.offset;
-            if ui.add(egui::DragValue::new(&mut v).speed(0.5)).on_hover_text("Section offset (mm)").changed() {
-                s.offset = v;
-                self.scene_dirty = true;
-            }
+    }
+
+    /// The section's offset (in document units) and flip, shown while a section is on.
+    pub fn section_offset_ui(&mut self, ui: &mut Ui) {
+        let units = self.doc.units;
+        let Some(s) = &mut self.section else { return };
+        let mut v = s.offset / units.scale();
+        let speed = 0.5 / units.scale();
+        let r = ui.add(egui::DragValue::new(&mut v).speed(speed).max_decimals(4).suffix(format!(" {}", units.label())));
+        if r.on_hover_text("Section offset along the plane's normal: drag or type").changed() {
+            s.offset = v * units.scale();
+            self.scene_dirty = true;
+            self.asm.scene_dirty = true;
         }
+        if ui.add(egui::Button::new("Flip").selected(s.flip)).on_hover_text("Keep the other side").clicked() {
+            s.flip = !s.flip;
+            self.scene_dirty = true;
+            self.asm.scene_dirty = true;
+        }
+    }
+
+    pub fn section_ui(&mut self, ui: &mut Ui) {
+        let label = self.section.map(|s| format!("Section: {}", s.label())).unwrap_or_else(|| "No section".into());
+        egui::ComboBox::from_id_salt("section")
+            .selected_text(label)
+            .width(170.0)
+            .close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside)
+            .show_ui(ui, |ui| self.section_choices(ui))
+            .response
+            .on_hover_text("Section view");
+        self.section_offset_ui(ui);
     }
 
     // ------------------------------------------------------------ sidebar
@@ -1692,8 +1938,14 @@ impl App {
             if let Some((rid, text)) = &mut self.renaming {
                 if *rid == id {
                     let r = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width()));
-                    r.request_focus();
-                    if r.lost_focus() {
+                    // Escape cancels; Enter or clicking elsewhere keeps the new name
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        self.renaming = None;
+                    } else if !r.lost_focus() {
+                        if !r.has_focus() {
+                            r.request_focus();
+                        }
+                    } else {
                         let t = text.trim().to_string();
                         let rid = *rid;
                         self.renaming = None;
@@ -1937,11 +2189,15 @@ impl App {
             if let Some((key, text)) = &mut self.renaming_part {
                 if *key == doc::body_key(id) {
                     let resp = ui.add(egui::TextEdit::singleline(text).desired_width(ui.available_width()));
-                    resp.request_focus();
-                    if resp.lost_focus() {
+                    // Escape cancels; Enter or clicking elsewhere keeps the new name
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        self.renaming_part = None;
+                    } else if resp.lost_focus() {
                         let t = text.trim().to_string();
                         self.renaming_part = None;
                         self.set_part(id, |p| p.name = (!t.is_empty()).then_some(t));
+                    } else if !resp.has_focus() {
+                        resp.request_focus();
                     }
                     continue;
                 }
@@ -2235,7 +2491,19 @@ impl App {
         }
         if active != self.doc.active_config {
             self.doc.active_config = active;
+            self.solve_sketches();
             self.changed();
+        }
+    }
+
+    /// Re-solve every sketch after variables or units change, so dimensions that use them move the geometry.
+    pub fn solve_sketches(&mut self) {
+        let (vars, _) = self.doc.var_values();
+        let env = crate::expr::Env { vars: &vars, units: self.doc.units };
+        for f in &mut self.doc.features {
+            if let Op::Sketch { sketch, .. } = &mut f.op {
+                sketch.solve(&env, &[]);
+            }
         }
     }
 
@@ -2251,8 +2519,14 @@ impl App {
                 if editing {
                     let (_, text) = self.editing_var.as_mut().unwrap();
                     let r = ui.add(egui::TextEdit::singleline(text).desired_width(90.0));
-                    r.request_focus();
-                    if r.lost_focus() {
+                    // Escape cancels; Enter, Tab or clicking elsewhere keeps the new value
+                    if ui.input(|i| i.key_pressed(Key::Escape)) {
+                        self.editing_var = None;
+                    } else if !r.lost_focus() {
+                        if !r.has_focus() {
+                            r.request_focus();
+                        }
+                    } else {
                         let t = text.clone();
                         self.editing_var = None;
                         self.checkpoint();
@@ -2264,6 +2538,7 @@ impl App {
                             }
                             _ => self.doc.variables[i].expr = t,
                         }
+                        self.solve_sketches();
                         self.changed();
                     }
                 } else {
@@ -2367,11 +2642,10 @@ impl App {
                 }
             })
             .response
-            .on_hover_text("Document units: plain numbers you type and all lengths shown use this unit");
+            .on_hover_text("Part Studio units: plain numbers you type and all lengths shown use this unit");
         if u != self.doc.units {
-            self.checkpoint();
-            self.doc.units = u;
-            self.changed();
+            // existing values keep their size (or the user chooses to rescale)
+            self.request_units(u);
         }
     }
 
@@ -2406,23 +2680,25 @@ impl App {
 
     fn tabs_ui(&mut self, ui: &mut Ui) {
         use crate::workspace::Tab;
-        let mut tabs: Vec<(Tab, String, &str)> = vec![];
-        for (i, s) in self.ws.studios.iter().enumerate() {
-            tabs.push((Tab::Studio(i), s.name.clone(), "partStudio"));
-        }
-        for (i, a) in self.ws.assemblies.iter().enumerate() {
-            tabs.push((Tab::Assembly(i), a.name.clone(), "assembly"));
-        }
-        for (i, d) in self.ws.drawings.iter().enumerate() {
-            tabs.push((Tab::Drawing(i), d.name.clone(), "drawing"));
-        }
-        for (i, c) in self.ws.cams.iter().enumerate() {
-            tabs.push((Tab::Cam(i), c.name.clone(), "cam"));
-        }
-        for (i, c) in self.ws.sims.iter().enumerate() {
-            tabs.push((Tab::Sim(i), c.name.clone(), "simulation"));
-        }
+        // in the order the user arranged them
+        let tabs: Vec<(Tab, String, &str)> = self
+            .ws
+            .tabs()
+            .into_iter()
+            .map(|t| match t {
+                Tab::Studio(i) => (t, self.ws.studios[i].name.clone(), "partStudio"),
+                Tab::Assembly(i) => (t, self.ws.assemblies[i].name.clone(), "assembly"),
+                Tab::Drawing(i) => (t, self.ws.drawings[i].name.clone(), "drawing"),
+                Tab::Cam(i) => (t, self.ws.cams[i].name.clone(), "cam"),
+                Tab::Sim(i) => (t, self.ws.sims[i].name.clone(), "simulation"),
+            })
+            .collect();
+        let n_tabs = tabs.len();
         let mut switch = None;
+        let mut drop_at: Option<(Tab, isize)> = None;
+        let drag_id = egui::Id::new("tab-drag");
+        let dragging: Option<Tab> = ui.ctx().data(|d| d.get_temp(drag_id));
+        let mut tab_rects: Vec<(Tab, egui::Rect)> = vec![];
         let mut action: Option<(&str, Tab)> = None;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
@@ -2473,12 +2749,18 @@ impl App {
                         }
                         let active = self.tab == t;
                         let r = tab_button(ui, icon, &name, active);
+                        tab_rects.push((t, r.rect));
                         if r.clicked() {
                             switch = Some(t);
                         }
                         if r.double_clicked() {
                             action = Some(("rename", t));
                         }
+                        // drag a tab sideways to move it
+                        if r.drag_started() {
+                            ui.ctx().data_mut(|d| d.insert_temp(drag_id, t));
+                        }
+                        let pos = tab_rects.len() - 1;
                         r.context_menu(|ui| {
                             if ui.button("Rename").clicked() {
                                 action = Some(("rename", t));
@@ -2488,11 +2770,38 @@ impl App {
                                 action = Some(("duplicate", t));
                                 ui.close();
                             }
+                            if pos > 0 && ui.button("Move left").clicked() {
+                                action = Some(("move-left", t));
+                                ui.close();
+                            }
+                            if pos + 1 < n_tabs && ui.button("Move right").clicked() {
+                                action = Some(("move-right", t));
+                                ui.close();
+                            }
                             if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
                                 action = Some(("delete", t));
                                 ui.close();
                             }
                         });
+                    }
+                    // a dragged tab: show where it goes, and move it there on release
+                    if let Some(dt) = dragging {
+                        if let Some(p) = ui.ctx().pointer_interact_pos() {
+                            let from = tab_rects.iter().position(|(t, _)| *t == dt);
+                            let to = tab_rects.iter().position(|(_, r)| p.x < r.center().x).unwrap_or(tab_rects.len());
+                            if let (Some(from), Some(x)) = (from, tab_rects.get(to).map(|(_, r)| r.left()).or(tab_rects.last().map(|(_, r)| r.right()))) {
+                                let y = tab_rects[0].1.y_range();
+                                ui.painter().vline(x, y, Stroke::new(2.0, theme::accent()));
+                                ui.ctx().set_cursor_icon(egui::CursorIcon::Grabbing);
+                                if ui.input(|i| i.pointer.any_released()) {
+                                    let by = if to > from { to as isize - from as isize - 1 } else { to as isize - from as isize };
+                                    drop_at = Some((dt, by));
+                                }
+                            }
+                        }
+                        if !ui.input(|i| i.pointer.any_down()) {
+                            ui.ctx().data_mut(|d| d.remove::<Tab>(drag_id));
+                        }
                     }
                 });
             });
@@ -2506,8 +2815,9 @@ impl App {
                 egui::containers::menu::MenuButton::new(RichText::new(versions).size(12.0)).config(keep_open).ui(ui, |ui| {
                     ui.set_min_width(260.0);
                     ui.horizontal(|ui| {
-                        ui.add(egui::TextEdit::singleline(&mut self.version_name).hint_text("Version name").desired_width(150.0));
-                        if ui.button("Create").clicked() {
+                        let r = ui.add(egui::TextEdit::singleline(&mut self.version_name).hint_text("Version name").desired_width(150.0));
+                        let enter = r.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+                        if ui.button("Create").clicked() || enter {
                             action = Some(("version", Tab::Studio(0)));
                             ui.close();
                         }
@@ -2520,7 +2830,7 @@ impl App {
                         ui.horizontal(|ui| {
                             ui.label(RichText::new(&v.name).strong());
                             ui.label(RichText::new(&v.created).color(theme::muted()).size(11.0));
-                            if ui.small_button("Restore").on_hover_text("Go back to this version (the current state stays in undo)").clicked() {
+                            if ui.small_button("Restore").on_hover_text("Go back to this version (Ctrl+Z returns to the current state)").clicked() {
                                 self.restore_version = Some(i);
                                 ui.close();
                             }
@@ -2537,15 +2847,41 @@ impl App {
         if let Some((a, t)) = action {
             self.tab_action(a, t);
         }
+        if let Some((t, by)) = drop_at {
+            if by != 0 {
+                self.ws.move_tab(t, by);
+            }
+        }
         if let Some(i) = self.restore_version.take() {
             self.sync_ws();
             let mut ws = self.ws.clone();
             match ws.restore(i) {
                 Ok(()) => {
+                    // the current state stays one Ctrl+Z away
+                    let name = self.ws.versions.get(i).map(|v| v.name.clone()).unwrap_or_default();
+                    self.ws_checkpoint(format!("restore version {name}"), None, false);
+                    // restoring may change the Part Studio list: keep histories only where they still fit
+                    let mut undo = std::mem::take(&mut self.studio_undo);
+                    undo.insert(self.cur_studio, (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo)));
+                    let tab = self.tab;
                     let path = self.path.clone();
+                    let (saved, fitted) = (self.session.saved_hash, std::mem::take(&mut self.session.fitted_asm));
                     self.load_workspace(ws);
+                    self.first_fit = false;
                     self.path = path;
-                    self.flash_info("Restored the version", Some(Duration::from_secs(2)));
+                    self.session.saved_hash = saved;
+                    self.session.fitted_asm = fitted;
+                    let n = self.ws.studios.len();
+                    undo.retain(|k, _| *k < n);
+                    let (u, r) = undo.remove(&self.cur_studio).unwrap_or_default();
+                    self.undo = u;
+                    self.redo = r;
+                    self.studio_undo = undo;
+                    if tab != self.tab && self.ws.tabs().contains(&tab) {
+                        self.switch_tab(tab);
+                    }
+                    self.ws_mark();
+                    self.flash_info(format!("Restored version {name} · Ctrl+Z goes back"), Some(Duration::from_secs(3)));
                 }
                 Err(e) => self.flash(format!("Could not restore: {e}"), ToastKind::Error),
             }
@@ -2567,7 +2903,8 @@ impl App {
             "rename-done" => {
                 if let Some((_, text)) = self.renaming_tab.take() {
                     let text = text.trim().to_string();
-                    if !text.is_empty() {
+                    if !text.is_empty() && name_of(&self.ws, t).as_deref() != Some(text.as_str()) {
+                        self.ws_checkpoint(format!("rename “{}”", name_of(&self.ws, t).unwrap_or_default()), None, false);
                         match t {
                             Tab::Studio(i) => self.ws.studios[i].name = text,
                             Tab::Assembly(i) => self.ws.assemblies[i].name = text,
@@ -2581,8 +2918,14 @@ impl App {
                             }
                             Tab::Sim(i) => self.ws.sims[i].name = text,
                         }
+                        self.ws_mark();
                     }
                 }
+            }
+            "move-left" | "move-right" => {
+                self.ws_checkpoint(format!("move “{}”", name_of(&self.ws, t).unwrap_or_default()), None, false);
+                self.ws.move_tab(t, if a == "move-left" { -1 } else { 1 });
+                self.ws_mark();
             }
             "version" => {
                 self.sync_ws();
@@ -2632,6 +2975,7 @@ impl App {
             }
             "duplicate" => {
                 self.sync_ws();
+                self.ws_checkpoint(format!("duplicate “{}”", name_of(&self.ws, t).unwrap_or_default()), None, matches!(t, Tab::Studio(_)));
                 match t {
                     Tab::Studio(i) => {
                         let mut s = self.ws.studios[i].clone();
@@ -2659,6 +3003,7 @@ impl App {
                         self.ws.sims.push(s);
                     }
                 }
+                self.ws_mark();
             }
             "delete" => {
                 let total = self.ws.studios.len() + self.ws.assemblies.len() + self.ws.drawings.len() + self.ws.cams.len() + self.ws.sims.len();
@@ -2666,7 +3011,13 @@ impl App {
                     self.flash("A document needs at least one Part Studio", ToastKind::Info);
                     return;
                 }
+                // ask first, listing what else it changes
+                self.session.confirm_delete = Some(t);
+            }
+            "delete-confirmed" => {
                 self.sync_ws();
+                let label = format!("delete “{}”", name_of(&self.ws, t).unwrap_or_default());
+                self.ws_checkpoint(label, if let Tab::Studio(i) = t { Some(i) } else { None }, false);
                 self.switch_tab(Tab::Studio(0));
                 match t {
                     Tab::Studio(i) => {
@@ -2709,6 +3060,15 @@ impl App {
                                 c.studio = fix(c.studio);
                             }
                         }
+                        // Derived features follow their studio; ones from the deleted one now fail
+                        for (k, st) in self.ws.studios.iter_mut().enumerate() {
+                            let d = if k == self.cur_studio { &mut self.doc } else { &mut st.doc };
+                            for f in &mut d.features {
+                                if let Op::Derived { studio, .. } = &mut f.op {
+                                    *studio = if *studio == i { usize::MAX } else { fix(*studio) };
+                                }
+                            }
+                        }
                         self.tab = Tab::Studio(self.cur_studio);
                     }
                     Tab::Assembly(i) => {
@@ -2733,6 +3093,16 @@ impl App {
                         self.fea = Default::default();
                     }
                 }
+                // mates to instances that went with the tab
+                let pruned: usize = self.ws.assemblies.iter_mut().map(crate::session::prune_orphans).sum();
+                if pruned > 0 {
+                    log::info!("removed {pruned} mates whose parts were deleted");
+                }
+                self.ws.forget_tab(t);
+                self.asm.scene_dirty = true;
+                self.dwg.dirty = true;
+                self.ws_mark();
+                self.flash_info("Deleted · Ctrl+Z brings it back", Some(Duration::from_secs(3)));
             }
             _ => {}
         }
@@ -2826,7 +3196,7 @@ impl eframe::App for App {
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
         for p in dropped {
             if p.extension().map(|e| e.eq_ignore_ascii_case("json")).unwrap_or(false) {
-                self.open_path(p);
+                self.guard(crate::session::Pending::OpenPath(p));
             } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) {
                 self.import_path(&p);
             } else if matches!(self.tab, crate::workspace::Tab::Assembly(_)) {
@@ -2839,17 +3209,29 @@ impl eframe::App for App {
             self.start_sketch();
         }
         self.pump_kernel();
+        self.session_frame(&ctx);
         if self.home.open {
             crate::home::ui(self, ui);
             // not the "loading the kernel" note
             if self.toast.as_ref().is_some_and(|t| t.until.is_some()) {
                 self.toast_ui(&ctx);
             }
-            ctx.send_viewport_cmd(egui::ViewportCommand::Title("cad-app".into()));
+            crate::session::windows(self, &ctx);
+            if ctx.input(|i| i.viewport().title.as_deref() != Some("cad-app")) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("cad-app".into()));
+            }
             return;
         }
         crate::palette::shortcut(self, &ctx);
         self.shortcuts(&ctx);
+        // frame an Assembly tab the first time it is shown, once its parts are built
+        if let crate::workspace::Tab::Assembly(i) = self.tab {
+            let built = (0..self.ws.studios.len()).all(|k| k == self.cur_studio || self.studio_results.contains_key(&k));
+            if built && !self.session.fitted_asm.contains(&i) {
+                self.session.fitted_asm.insert(i);
+                crate::asm_ui::fit(self);
+            }
+        }
 
         let header = Frame::new().fill(theme::header()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 3 });
         egui::Panel::top("header").frame(header).resizable(false).show_separator_line(false).show(ui, |ui| self.header(ui));
@@ -2916,8 +3298,12 @@ impl eframe::App for App {
             self.drawer(&ctx, central.response.rect);
         }
         self.toast_ui(&ctx);
-        let title = format!("cad-app · {}", self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into()));
-        ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        crate::session::windows(self, &ctx);
+        let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
+        let title = format!("cad-app · {}{name}", if self.is_dirty() { "• " } else { "" });
+        if ctx.input(|i| i.viewport().title.as_deref() != Some(title.as_str())) {
+            ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
+        }
     }
 }
 
@@ -3009,7 +3395,8 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
     let font = if active { egui::FontId::new(12.5, theme::medium()) } else { font };
     let g = ui.painter().layout_no_wrap(name.to_string(), font, col);
     let w = (g.size().x + 46.0).max(120.0);
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click());
+    // dragging moves the tab along the bar
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click_and_drag());
     let p = ui.painter();
     let body = rect.shrink2(egui::vec2(1.0, 0.0));
     if active {

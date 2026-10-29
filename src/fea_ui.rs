@@ -429,7 +429,8 @@ pub(crate) fn add_load(app: &mut App, k: LoadKind) {
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     use egui::Key;
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
-    if ctx.egui_wants_keyboard_input() {
+    // no Ctrl combinations here yet; Ctrl+letter is not the letter's tool
+    if ctx.egui_wants_keyboard_input() || crate::app::key_mods(ctx).0 {
         return;
     }
     if pressed(Key::Space) {
