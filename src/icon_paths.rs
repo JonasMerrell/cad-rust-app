@@ -21,6 +21,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("draft", "M6 20L9 4h6l3 16zM3 20h18"),
     ("split", "M4 4h16v16H4zM12 2v20"),
     ("import", "M12 3v12M7 10l5 5 5-5M5 21h14"),
+    ("library", "M8 3h8l2.5 3-2.5 3H8L5.5 6zM10 9v12h4V9M10 13l4-1M10 17l4-1"),
     ("spline", "M3 17c3-8 6-8 9-3s6 5 9-3M3 17h.01M12 14h.01M21 11h.01"),
     ("plane", "M3 9l9-5 9 5-9 5zM3 9v6l9 5 9-5V9"),
     ("desktop", "M3 4h18v12H3zM8 20h8M12 16v4"),

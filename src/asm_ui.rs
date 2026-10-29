@@ -61,9 +61,11 @@ pub struct AsmUi {
     pub explode: f32,
     /// Measure tool picks: world point and face normal (None for edges).
     pub measure: Option<Vec<(DVec3, Option<DVec3>)>>,
+    /// Standard parts and GrabCAD window.
+    pub lib: crate::stdparts_ui::Lib,
 }
 
-fn asm_index(app: &App) -> Option<usize> {
+pub fn asm_index(app: &App) -> Option<usize> {
     match app.tab {
         Tab::Assembly(i) => Some(i),
         _ => None,
@@ -192,6 +194,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     App::group(ui, |ui| {
         if app.tool_button(ui, "import", "Insert", "Insert parts from Part Studios", true, app.asm.insert_open, true).clicked() {
             app.asm.insert_open = !app.asm.insert_open;
+        }
+        if app.tool_button(ui, "library", "Library", "Standard parts (screws, nuts, bearings, motors…) and models downloaded from GrabCAD", true, app.asm.lib.open, true).clicked() {
+            crate::stdparts_ui::toggle(app);
         }
     });
     App::group(ui, |ui| {
@@ -461,7 +466,7 @@ fn insert_panel(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Option<usize>, name: String) {
+pub fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Option<usize>, name: String) {
     checkpoint(app);
     // place new instances beside what is already there
     let mut max_x = f64::NEG_INFINITY;
@@ -896,6 +901,7 @@ fn build_scene(app: &App) -> SceneData {
 }
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
+    crate::stdparts_ui::window(app, &ui.ctx().clone());
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     if app.viewport_rect != rect {

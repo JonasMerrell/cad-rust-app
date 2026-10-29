@@ -112,6 +112,10 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd("Setup sheet…", "Manufacture", "camSheet", None, "print operator html", Action::Run(crate::cam_ui::sheet_dialog)));
             v.push(cmd("Tool library", "Manufacture", "camTools", None, "tools import fusion", Action::Run(|a| a.cam.library_open = true)));
         }
+        Tab::Assembly(_) => {
+            v.push(cmd("Standard parts…", "Assembly", "library", None, "screw bolt nut washer bearing pin dowel motor stepper nema extrusion iso din content library", Action::Run(crate::stdparts_ui::open_standard)));
+            v.push(cmd("Insert from GrabCAD…", "Assembly", "import", None, "download step zip model library", Action::Run(crate::stdparts_ui::open_grabcad)));
+        }
         Tab::Sim(_) => {
             v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
             v.push(cmd("Roller support", "Simulation", "feaRoller", None, "fea constraint slide symmetry", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Roller))));

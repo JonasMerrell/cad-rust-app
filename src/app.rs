@@ -736,8 +736,8 @@ impl App {
     }
 
     pub fn import_step(&mut self) {
-        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG"];
-        let Some(p) = self.open_file_dialog("STEP, IGES, STL, OBJ, DXF, SVG", &exts) else { return };
+        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "zip", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG", "ZIP"];
+        let Some(p) = self.open_file_dialog("STEP, IGES, STL, OBJ, DXF, SVG, ZIP", &exts) else { return };
         self.import_path(&p);
     }
 
@@ -745,8 +745,26 @@ impl App {
         if crate::sketch_import::is_drawing(p) {
             return self.import_drawing(p);
         }
+        if p.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
+            // a download (GrabCAD and the like): every model file of its best format
+            match crate::grabcad::read_models(p) {
+                Ok(f) if !f.files.is_empty() => {
+                    self.checkpoint();
+                    for m in f.files {
+                        let op = Op::Import { name: m.name.clone(), step: String::new(), format: m.format.into(), data: crate::import::pack(&m.bytes), scale: "1".into(), merge: true };
+                        self.doc.insert(m.name, op);
+                    }
+                    self.first_fit = true;
+                    self.changed();
+                }
+                Ok(f) if !f.skipped.is_empty() => self.flash(format!("The ZIP only has native CAD files ({}). Download the STEP version instead.", f.skipped.join(", ")), ToastKind::Error),
+                Ok(_) => self.flash("The ZIP has no STEP, IGES, STL or OBJ files", ToastKind::Error),
+                Err(e) => self.flash(e, ToastKind::Error),
+            }
+            return;
+        }
         let Some(format) = crate::import::format_of(p) else {
-            self.flash("Import STEP, IGES, STL, OBJ, DXF or SVG files", ToastKind::Info);
+            self.flash("Import STEP, IGES, STL, OBJ, DXF, SVG or ZIP files", ToastKind::Info);
             return;
         };
         match std::fs::read(p) {
@@ -2786,6 +2804,8 @@ impl eframe::App for App {
                 self.open_path(p);
             } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) {
                 self.import_path(&p);
+            } else if matches!(self.tab, crate::workspace::Tab::Assembly(_)) {
+                crate::stdparts_ui::import_into_assembly(self, &p);
             }
         }
         if self.awaiting_sketch_plane && self.sketch.is_none() && self.picks.iter().any(|r| r.is_planar() || matches!(r, Ref::FeaturePlane { .. })) {
