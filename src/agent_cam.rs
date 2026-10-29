@@ -174,7 +174,8 @@ impl Session {
             "fixtures": c.fixtures, "probe": c.probe, "post_text": c.post_text,
             "soft_jaws": jaws, "jaws_of": c.jaws_of,
             "sketches": part.sketches.iter().map(|s| json!({"id": s.id, "name": s.name, "curves": s.paths.len(), "closed": s.paths.iter().filter(|p| p.1).count()})).collect::<Vec<_>>(),
-            "cycle_time_s": total.round(),
+            // an empty sum is -0.0
+            "cycle_time_s": round(total.round()),
         }))
     }
 
@@ -270,8 +271,9 @@ impl Session {
                 v
             }
             "import_tool_library" => {
-                let path = a.get("path").and_then(|p| p.as_str()).ok_or("give path")?;
-                let r = crate::cam_tool_import::import_file(std::path::Path::new(path))?;
+                let path = self.input_path(a.get("path").and_then(|p| p.as_str()).ok_or("give path")?);
+                let path = path.as_str();
+                let r = crate::cam_tool_import::import_file(std::path::Path::new(path)).map_err(|e| if e.contains(path) { e } else { format!("can't import {path}: {e}") })?;
                 let new = crate::cam_tool_import::add_to_library(&r.tools);
                 let mut added = vec![];
                 if a.get("cam").is_some() {
@@ -451,7 +453,7 @@ impl Session {
                 if a.get("render").and_then(|r| r.as_bool()).unwrap_or(false) || a.get("path").is_some() {
                     let png = self.render_sim(&sim, a)?;
                     if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                        std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                        super::write_out(p, &png)?;
                         v["saved"] = json!(p);
                     }
                     return Ok((v, Some(png)));
@@ -525,7 +527,7 @@ impl Session {
                 let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(700).clamp(64, 4096) as u32;
                 let png = super::raster_scene(&items, &lines, view, None, w, h)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"cam": ci, "saved": a.get("path")}), Some(png)));
             }
@@ -616,7 +618,8 @@ impl Session {
                     }
                     v["print_studio"] = json!(si);
                     if let Some(path) = a.get("export_step").and_then(|p| p.as_str()) {
-                        self.kernel.export_blocking(&doc, "step", path.to_string())?;
+                        super::make_parent(path)?;
+                        self.kernel.export_blocking(&doc, "step", path.to_string()).map_err(|e| format!("can't write {path}: {e}"))?;
                         v["exported"] = json!(path);
                     }
                 }
@@ -653,8 +656,8 @@ impl Session {
                 let c = &self.ws.cams[ci];
                 let png = crate::cam_sheet::picture(c, &part, 640, 480);
                 let text = crate::cam_sheet::html(c, &part, &paths, png.as_deref());
-                std::fs::write(&path, &text).map_err(|e| e.to_string())?;
-                json!({"exported": path, "bytes": text.len(), "tools": c.tools.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "cycle_time_s": paths.iter().map(|p| p.time).sum::<f64>().round()})
+                super::write_out(&path, &text)?;
+                json!({"exported": path, "bytes": text.len(), "tools": c.tools.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "cycle_time_s": round(paths.iter().map(|p| p.time).sum::<f64>().round())})
             }
             "export_gcode" => {
                 let ci = self.cam_idx(a)?;
@@ -668,10 +671,10 @@ impl Session {
                 let (part, paths) = self.cam_build(ci)?;
                 let c = &self.ws.cams[ci];
                 let text = crate::cam_ui::gcode_for(c, &part, &paths);
-                std::fs::write(&path, &text).map_err(|e| e.to_string())?;
+                super::write_out(&path, &text)?;
                 let warnings: Vec<String> =
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
-                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": paths.iter().map(|p| p.time).sum::<f64>().round(), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
+                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(paths.iter().map(|p| p.time).sum::<f64>().round()), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
             }
             _ => return self.fea_call(name, a),
         };

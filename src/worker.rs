@@ -24,6 +24,8 @@ pub enum Request {
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
     Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<kernel::ProjReq> },
+    /// Mass properties, point classification or ray casting on a Part Studio's solids (agent tools).
+    Query { id: u64, doc: Document, query: serde_json::Value },
 }
 
 #[derive(Serialize, Deserialize, Debug)]
@@ -34,6 +36,7 @@ pub enum Reply {
     Exported { id: u64, error: Option<String> },
     Projected { id: u64, tag: usize, key: String, views: Vec<kernel::ProjView> },
     Interference { id: u64, pairs: Vec<(usize, usize, f64)> },
+    Queried { id: u64, result: Result<serde_json::Value, String> },
 }
 
 /// Entry point of the worker process.
@@ -70,6 +73,10 @@ pub fn worker_main() {
                 let views = kernel::project(&doc, &views);
                 send(&Reply::Projected { id, tag, key, views });
             }
+            Request::Query { id, doc, query } => {
+                let result = crate::agent::query::run(&doc, &query);
+                send(&Reply::Queried { id, result });
+            }
         }
     }
 }
@@ -90,6 +97,7 @@ pub enum Outcome {
     Projected(usize, String, Vec<kernel::ProjView>),
     /// Overlapping instance pairs (indices into the request) and volumes.
     Interference(Vec<(usize, usize, f64)>),
+    Queried(Result<serde_json::Value, String>),
 }
 
 enum Ev {
@@ -112,6 +120,8 @@ pub struct KernelClient {
     /// Waiting rebuilds, newest per tag.
     queued: Vec<(usize, Document)>,
     export: Option<(u64, String)>,
+    /// The geometry query in flight.
+    querying: Option<u64>,
     pub crashes: u32,
     /// Features that crashed the worker: (part studio, feature, fingerprint of the feature and
     /// everything before it). They stay skipped until that changes, so later rebuilds don't
@@ -134,7 +144,7 @@ impl KernelClient {
     }
 
     fn with_ctx(ctx: Option<egui::Context>) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, querying: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
         k.spawn();
         k
     }
@@ -293,6 +303,7 @@ impl KernelClient {
                 }
                 Ev::Reply(Reply::Projected { tag, key, views, .. }) => out.push(Outcome::Projected(tag, key, views)),
                 Ev::Reply(Reply::Interference { pairs, .. }) => out.push(Outcome::Interference(pairs)),
+                Ev::Reply(Reply::Queried { result, .. }) => out.push(Outcome::Queried(result)),
                 Ev::Reply(Reply::Exported { id, error }) => {
                     if let Some((eid, path)) = self.export.take() {
                         if eid == id {
@@ -308,6 +319,9 @@ impl KernelClient {
                     }
                     if let Some((_, path)) = self.export.take() {
                         out.push(Outcome::Exported(Some("the kernel crashed while exporting".into()), path));
+                    }
+                    if self.querying.take().is_some() {
+                        out.push(Outcome::Queried(Err("the kernel crashed during the query".into())));
                     }
                     let retry = self.inflight.take();
                     if self.crashes > 50 {
@@ -392,6 +406,20 @@ impl KernelClient {
             Outcome::Interference(p) => Some(p),
             _ => None,
         })
+    }
+
+    /// A geometry query on `doc`'s solids (see `agent::query::run`), waited for.
+    pub fn query_blocking(&mut self, doc: &Document, query: serde_json::Value) -> Result<serde_json::Value, String> {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.querying = Some(id);
+        self.send(&Request::Query { id, doc: doc.clone(), query });
+        let r = self.wait_for(|o| match o {
+            Outcome::Queried(r) => Some(r),
+            _ => None,
+        });
+        self.querying = None;
+        r?
     }
 
     pub fn project_blocking<V: Into<kernel::ProjReq>>(&mut self, tag: usize, key: &str, doc: &Document, views: Vec<V>) -> Result<Vec<kernel::ProjView>, String> {

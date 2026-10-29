@@ -1,6 +1,6 @@
 [
   {"tool": "new_document", "args": {"units": "mm"}},
-  {"tool": "import_file", "args": {"path": "examples/zerotorque/Head.step", "name": "Head"}},
+  {"tool": "import_file", "args": {"path": "Head.step", "name": "Head"}},
   {"tool": "set_part", "args": {"body": [1, 0], "name": "Head", "material": "Aluminium 6061"}},
   {"tool": "create_sketch", "args": {"plane": "top", "name": "Sight lines"}},
   {"tool": "sketch_add", "args": {"sketch_id": 2, "items": [

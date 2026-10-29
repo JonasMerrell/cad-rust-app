@@ -1,13 +1,13 @@
 [
   {"tool": "new_document", "args": {"units": "mm"}},
-  {"tool": "import_file", "args": {"path": "examples/zerotorque/Plug_70_2.step", "name": "Plug"}},
+  {"tool": "import_file", "args": {"path": "Plug_70_2.step", "name": "Plug"}},
   {"tool": "set_part", "args": {"body": [1, 0], "name": "Plug 70/2", "material": "Aluminium 7075"}},
 
   {"tool": "create_simulation", "args": {"name": "Plug, hollow", "analysis": "modal", "modes": 10, "mesh_size": 1.5}},
   {"tool": "solve_simulation", "args": {"simulation": 0}},
-  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 7, "path": "zt-plug-hollow-mode1.png"}},
+  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 7, "path": "zt-plug-hollow-mode7.png"}},
 
-  {"tool": "import_file", "args": {"path": "examples/zerotorque/PlugCore_70_2.step", "name": "Core"}},
+  {"tool": "import_file", "args": {"path": "PlugCore_70_2.step", "name": "Core"}},
   {"tool": "set_part", "args": {"body": [2, 0], "name": "Foam core", "material": "Urethane foam"}},
   {"tool": "create_simulation", "args": {"name": "Plug with foam core", "analysis": "modal", "modes": 10, "mesh_size": 1.5}},
   {"tool": "solve_simulation", "args": {"simulation": 1}},

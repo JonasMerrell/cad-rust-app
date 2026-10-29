@@ -46,7 +46,7 @@ jobs:
           mkdir -p dist/cad-app
           cp target/release/cad-rust-app dist/cad-app/cad-app
           strip dist/cad-app/cad-app
-          cp AGENTS.md dist/cad-app/
+          cp AGENTS.md SCRIPTING.md .mcp.json dist/cad-app/
           cp -r examples dist/cad-app/
           tar -C dist -cJf cad-app-${{ matrix.name }}.tar.xz cad-app
       - name: Package (Windows)
@@ -55,7 +55,7 @@ jobs:
         run: |
           New-Item -ItemType Directory -Force dist/cad-app | Out-Null
           Copy-Item target/release/cad-rust-app.exe dist/cad-app/cad-app.exe
-          Copy-Item AGENTS.md dist/cad-app/
+          Copy-Item AGENTS.md, SCRIPTING.md, .mcp.json dist/cad-app/
           Copy-Item -Recurse examples dist/cad-app/
           Compress-Archive -Path dist/cad-app -DestinationPath cad-app-${{ matrix.name }}.zip
       - name: Trim the OpenCascade cache

@@ -509,8 +509,10 @@ impl Chat {
                     text.truncate(cut);
                     text.push_str(" …(truncated; ask for less, e.g. filter list_geometry)");
                 }
-                send(FromWorker::ToolDone { ok: true, summary: summarize(&v), image: img.clone() });
-                (text, img, false)
+                // a feature that doesn't build is an error Claude should see as one
+                let failed = crate::agent::failed(&v);
+                send(FromWorker::ToolDone { ok: !failed, summary: summarize(&v), image: img.clone() });
+                (text, img, failed)
             }
             Err(e) => {
                 send(FromWorker::ToolDone { ok: false, summary: short(&e, 200), image: None });
