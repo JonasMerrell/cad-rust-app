@@ -554,7 +554,12 @@ fn subpath(segs: &mut Vec<Seg>, closed: bool, d: &mut Drawing) {
     if curved && closed && segs.iter().all(|s| matches!(s, Seg::Cubic(_))) {
         let pts: Vec<DVec2> = segs.iter().flat_map(|s| if let Seg::Cubic(c) = s { (0..8).map(|i| cubic_at(c, i as f64 / 8.0)).collect() } else { vec![] }).collect();
         if let Some(it) = fit_ellipse(&pts) {
-            d.items.push(it);
+            // the pieces' end points lie exactly on the curve (the Béziers between only approximate it)
+            let ends: Vec<DVec2> = segs.iter().filter_map(|s| if let Seg::Cubic(c) = s { Some(c[0]) } else { None }).collect();
+            d.items.push(match it {
+                Item::Circle { c, .. } => Item::Circle { c, r: ends.iter().map(|p| p.distance(c)).sum::<f64>() / ends.len() as f64 },
+                other => other,
+            });
             return;
         }
     }
@@ -841,7 +846,7 @@ mod tests {
         let Item::Poly { closed, .. } = polys[0] else { panic!() };
         assert!(*closed);
         let circle = d.items.iter().find_map(|i| if let Item::Circle { c, r } = i { Some((*c, *r)) } else { None }).expect("the circle stays a circle");
-        assert!((circle.0 - DVec2::new(25.0, 10.0)).length() < 1e-3 && (circle.1 - 5.0).abs() < 1e-3, "{circle:?}");
+        assert!((circle.0 - DVec2::new(25.0, 10.0)).length() < 1e-3 && (circle.1 - 5.0).abs() < 1e-6, "{circle:?}");
     }
 
     #[test]

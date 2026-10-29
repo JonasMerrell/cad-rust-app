@@ -190,8 +190,9 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
             for p in &sketch.points {
-                let d = (to_screen(frame.to_world(p.v())) - s).length();
-                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
+                let w = frame.to_world(p.v());
+                let d = (to_screen(w) - s).length();
+                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) && (app.xray || !occluded(app, w)) {
                     best = Some((d, Ref::SketchPoint { sketch: f.id, point: p.id }));
                 }
             }
@@ -235,25 +236,29 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     if let Some((_, r)) = best {
         return Some(r);
     }
-    // sketch curves
-    let mut best: Option<(f32, Ref)> = None;
+    // sketch curves, again skipping the ones behind the part
+    let mut near: Vec<(f32, DVec3, Ref)> = vec![];
     for f in &app.doc.features {
         if f.hidden || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
             for c in &sketch.curves {
-                let pts: Vec<Vec2> = sketch.tessellate(c, 2.0).iter().map(|p| to_screen(frame.to_world(*p))).collect();
-                for w in pts.windows(2) {
+                let world: Vec<DVec3> = sketch.tessellate(c, 2.0).iter().map(|p| frame.to_world(*p)).collect();
+                let pts: Vec<Vec2> = world.iter().map(|p| to_screen(*p)).collect();
+                for (k, w) in pts.windows(2).enumerate() {
                     let d = seg_px(w[0], w[1]);
-                    if d < px * 0.7 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
-                        best = Some((d, Ref::SketchCurve { sketch: f.id, curve: c.id }));
+                    if d < px * 0.7 {
+                        let dd = w[1] - w[0];
+                        let t = if dd.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(dd) / dd.length_squared()).clamp(0.0, 1.0) };
+                        near.push((d, world[k] + (world[k + 1] - world[k]) * t as f64, Ref::SketchCurve { sketch: f.id, curve: c.id }));
                     }
                 }
             }
         }
     }
-    if let Some((_, r)) = best {
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
         return Some(r);
     }
     // faces, regions and planes by depth along the view ray
