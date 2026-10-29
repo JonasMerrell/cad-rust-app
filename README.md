@@ -24,6 +24,11 @@ with a wgpu viewport and the OpenCascade (OCCT 7.8) kernel.
     cargo build --release        # first build compiles OpenCascade (~20 min)
     ./target/release/cad-rust-app [part.json]
 
+Built from source the program is `cad-rust-app`; the release archives ship it as
+`cad-app` (with `AGENTS.md`, `SCRIPTING.md`, `.mcp.json` and `examples/`), and
+the agent and scripting docs use that name. `--help` lists the command line
+modes and `--version` prints the version.
+
 The modelling kernel runs in a child process (`--kernel-worker`) so a failing
 OpenCascade operation can't crash the editor; the feature that crashed is
 marked with an error and the rest of the part still rebuilds.
@@ -59,6 +64,8 @@ marked with an error and the rest of the part still rebuilds.
 | `src/fea_solve.rs` | linear elastic solver: static, modal (Lanczos) and transient (Newmark) |
 | `src/fea_ui.rs` | Simulation tab |
 | `src/agent.rs` | headless tool interface: MCP server, `run` scripts, and the tools the Claude panel uses |
+| `src/agent_schema.rs` | the tools' argument schemas and the check that holds calls to them |
+| `src/agent_query.rs` | mass properties, point classification and ray casting for the agent tools (run in the kernel worker) |
 | `src/claude.rs` | Claude Messages API client and the tool loop that runs on a background thread |
 | `src/claude_ui.rs` | Claude chat panel |
 | `src/script_api.rs` | headless scripting API (shapes, topology, queries, files) |

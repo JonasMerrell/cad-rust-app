@@ -1085,6 +1085,8 @@ impl App {
                     None => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
                     Some(e) => self.flash(format!("Export failed: {e}"), ToastKind::Error),
                 },
+                // geometry queries are the agent tools'
+                Outcome::Queried(_) => {}
             }
         }
         let sent = self.send_result.lock().ok().and_then(|mut s| s.take());

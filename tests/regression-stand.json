@@ -9,6 +9,6 @@
   {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [0, 40, 10]}], "radius": 4}}},
   {"tool": "add_feature", "args": {"kind": "fillet", "params": {"edges": [{"kind": "edge", "point": [55, -40, 0]}], "radius": 50}}},
   {"tool": "describe", "args": {}},
-  {"tool": "render", "args": {"view": "iso_front_left", "path": "shots/regression.png"}},
-  {"tool": "export", "args": {"format": "stl", "path": "/tmp/claude-1000/stand.stl"}}
+  {"tool": "render", "args": {"view": "iso_front_left", "path": "regression.png"}},
+  {"tool": "export", "args": {"format": "stl", "path": "stand.stl"}}
 ]

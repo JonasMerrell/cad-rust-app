@@ -1,8 +1,11 @@
 # Scripting cad-app
 
 `cad-app script file.rhai [args…]` runs a [Rhai](https://rhai.rs) script with no window, using the
-same OpenCascade kernel as the editor. Arguments are in the `ARGS` array, `print` writes to stdout,
-and the script's last value is printed as JSON. A failed operation throws an error with OCCT's
+same OpenCascade kernel as the editor (built from source the program is `cad-rust-app`; the release
+archives call it `cad-app`). Arguments are in the `ARGS` array, `print` writes to stdout,
+and the script's last value is printed as JSON. OpenCascade's own messages (such as the STEP
+writer's statistics) go to stderr, so stdout can be piped to `jq`. File paths are relative to the
+working directory, and file errors name the path. A failed operation throws an error with OCCT's
 message, which `try { … } catch (e) { … }` can catch; an uncaught error exits with code 1. Fillets,
 chamfers, shells and booleans also throw when the result is not a valid solid or has no volume (an
 inside-out result is turned right way out). Results
@@ -11,7 +14,8 @@ are deterministic: the same script gives the same numbers on every run.
 Custom features (`define_custom_feature`) get the same API.
 
 Units are millimetres and degrees. Vectors can be `vec3(x, y, z)` values or `[x, y, z]` arrays, and
-`[x, y]` means z = 0.
+`[x, y]` means z = 0. Rhai's own `sin`, `cos` and `tan` take radians: `deg(30)` converts degrees to
+radians for them.
 
 ```rhai
 let body = extrude(rounded_rect(vec3(0, 0, 0), 60, 40, 5), vec3(0, 0, 12));
@@ -37,7 +41,8 @@ export_step(body, "body.step");
 |---|---|
 | `block(lo, hi)` | box between two corners |
 | `cylinder(base, axis, r, h)`, `cone(base, axis, r1, r2, h)`, `sphere_at(c, r)` | primitives |
-| `cube(w, d, h)`, `cylinder(r, h)`, `sphere(r)`, `torus(R, r)`, `prism(pts2, h)`, `revolve(pts_rz, deg)` | primitives at the origin |
+| `cube(w, d, h)`, `cylinder(r, h)`, `sphere(r)`, `torus(R, r)`, `prism(pts2, h)`, `revolve(pts_rz, deg)` | primitives at the origin (`cube` from the origin to `[w, d, h]`) |
+| `cube_centered(w, d, h)` | a box centred on the origin |
 | `wire(points, closed)`, `arc(a, b, c)`, `join([wires or edges])` | wires |
 | `polygon(points)`, `circle(c, r)`, `circle(c, normal, r)`, `rounded_rect(center, w, h, r)`, `face(wire)`, `face(outer, [holes])` | planar faces |
 | `offset2d(face, d)`, `offset2d(face, d, arcs)` | 2D offset (OCCT MakeOffset): out for d > 0, in for d < 0, arc joins by default; an array of faces |
@@ -45,6 +50,7 @@ export_step(body, "body.step");
 | `extrude(face, v)`, `loft(profiles, ruled)`, `revolve(face, origin, axis, deg)` | solids from profiles (loft takes wires or faces) |
 | `fuse(shapes)`, `fuse(shapes, fuzzy)`, `s.cut(tools)`, `s.cut(tools, fuzzy)`, `s.common(tools[, fuzzy])` | booleans with many tools at once, run in parallel; `fuzzy` (mm) treats gaps smaller than it as touching |
 | `a + b`, `a - b`, `a & b` | two-shape booleans (these also merge coplanar faces) |
+| `union(a, b)`, `subtract(a, b)`, `intersect(a, b)` | the same booleans as `a + b`, `a - b` and `a & b`, as functions |
 | `s.unify()` | remove splitter: merge coplanar faces and collinear edges |
 | `s.translate(v)`, `s.rotate(point, axis, deg)`, `s.mirror(point, normal)`, `s.transform(mat3, t)`, `s.copy()` | placement |
 | `s.move(x, y, z)`, `s.rotate_x/y/z(deg)`, `s.place(point, normal)`, `s.scale(f)` | placement about the origin |

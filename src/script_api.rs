@@ -840,14 +840,14 @@ pub fn to_json(d: &Dynamic) -> serde_json::Value {
 fn register_files(e: &mut Engine) {
     e.register_fn("parse_json", |s: &str| -> Res<Dynamic> { Ok(from_json(&serde_json::from_str(s).map_err(|e| format!("JSON: {e}"))?)) });
     e.register_fn("to_json", |d: Dynamic| -> String { serde_json::to_string(&to_json(&d)).unwrap_or_default() });
-    e.register_fn("read_text", |p: &str| -> Res<String> { std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}").into()) });
-    e.register_fn("write_text", |p: &str, s: &str| -> Res<()> { std::fs::write(p, s).map_err(|e| format!("{p}: {e}").into()) });
+    e.register_fn("read_text", |p: &str| -> Res<String> { std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}").into()) });
+    e.register_fn("write_text", |p: &str, s: &str| -> Res<()> { std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into()) });
     e.register_fn("read_json", |p: &str| -> Res<Dynamic> {
-        let t = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+        let t = std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}"))?;
         Ok(from_json(&serde_json::from_str(&t).map_err(|e| format!("{p}: {e}"))?))
     });
     e.register_fn("read_yaml", |p: &str| -> Res<Dynamic> {
-        let t = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+        let t = std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}"))?;
         let v: serde_json::Value = serde_yaml::from_str(&t).map_err(|e| format!("{p}: {e}"))?;
         Ok(from_json(&v))
     });
@@ -857,26 +857,26 @@ fn register_files(e: &mut Engine) {
     });
     e.register_fn("write_json", |p: &str, d: Dynamic| -> Res<()> {
         let s = serde_json::to_string_pretty(&to_json(&d)).unwrap_or_default();
-        std::fs::write(p, s).map_err(|e| format!("{p}: {e}").into())
+        std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into())
     });
     // STEP of one shape or several (each a separate body), STL of one shape
     e.register_fn("export_step", |x: Dynamic, p: &str| -> Res<()> {
         let v = shape_list(&x)?;
-        Shape::write_all_step(v.iter().map(|s| &**s), p).map_err(|e| format!("{p}: {e:?}").into())
+        Shape::write_all_step(v.iter().map(|s| &**s), p).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
     e.register_fn("export_stl", |x: Dynamic, p: &str| -> Res<()> {
         let v = shape_list(&x)?;
         let r: Vec<&Shape> = v.iter().map(|s| &**s).collect();
         let c = if r.len() == 1 { kdup(r[0]) } else { occ_err(occ::compound(&r))? };
-        c.write_stl_with_tolerance(p, 0.01).map_err(|e| format!("{p}: {e:?}").into())
+        c.write_stl_with_tolerance(p, 0.01).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
     e.register_fn("export_stl", |x: Dynamic, p: &str, deflection: Dynamic| -> Res<()> {
         let v = shape_list(&x)?;
         let r: Vec<&Shape> = v.iter().map(|s| &**s).collect();
         let c = if r.len() == 1 { kdup(r[0]) } else { occ_err(occ::compound(&r))? };
-        c.write_stl_with_tolerance(p, num(&deflection)?).map_err(|e| format!("{p}: {e:?}").into())
+        c.write_stl_with_tolerance(p, num(&deflection)?).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
-    e.register_fn("import_step", |p: &str| -> Res<S> { Ok(wrap(Shape::read_step(p).map_err(|e| format!("{p}: {e:?}"))?)) });
+    e.register_fn("import_step", |p: &str| -> Res<S> { Ok(wrap(Shape::read_step(p).map_err(|e| format!("can't open {p}: {e:?}"))?)) });
     e.register_fn("time", || -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) });
 }
 
@@ -896,7 +896,7 @@ pub fn register(e: &mut Engine) {
 /// Run a script file with no window: `args` become the ARGS array, `print` goes to stdout, and the
 /// script's final value is printed as JSON. Errors (including OCCT's) come back with the line.
 pub fn run_file(path: &str, args: &[String]) -> Result<serde_json::Value, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let src = std::fs::read_to_string(path).map_err(|e| format!("can't open {path}: {e}"))?;
     run_source(&src, args, Some(std::path::Path::new(path)))
 }
 

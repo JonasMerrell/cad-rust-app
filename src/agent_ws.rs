@@ -289,7 +289,7 @@ impl Session {
         let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
         let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(800).clamp(64, 4096) as u32;
         let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(600).clamp(64, 4096) as u32;
-        let dir = a.get("direction").and_then(arr3).map(|d| d.to_array());
+        let dir = super::direction_arg(a)?;
         super::raster_scene(&items, &[], view, dir, w, h)
     }
 
@@ -716,6 +716,8 @@ impl Session {
                     selection: a.get("selection").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     source: a.get("source").and_then(|v| v.as_str()).ok_or("give source")?.to_string(),
                 };
+                // a syntax error shows now, with its line, not when the feature is first built
+                rhai::Engine::new().compile(&def.source).map_err(|e| format!("{}: syntax error in the source: {e}", def.name))?;
                 match self.doc.custom_features.iter_mut().find(|d| d.name == def.name) {
                     Some(d) => *d = def,
                     None => self.doc.custom_features.push(def),
@@ -928,7 +930,8 @@ impl Session {
                     }
                 };
                 let joints = scene.nodes.iter().filter(|n| n.joint.is_some()).count();
-                let w = crate::web_export::write(&scene, &meshes, &path, inline)?;
+                super::make_parent(&path.to_string_lossy())?;
+                let w = crate::web_export::write(&scene, &meshes, &path, inline).map_err(|e| format!("can't write {}: {e}", path.display()))?;
                 json!({"exported": path, "bytes": w.bytes, "parts": scene.parts.len(), "meshes": w.meshes, "triangles": w.triangles, "joints": joints, "notes": notes})
             }
             "render_assembly" => {
@@ -936,7 +939,7 @@ impl Session {
                 self.sync();
                 let png = self.render_assembly(ai, a)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"assembly": ai, "saved": a.get("path")}), Some(png)));
             }
@@ -974,7 +977,7 @@ impl Session {
                 let di = dwg_idx(a, self)?;
                 let png = self.export_drawing_tab(di, "png", a)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"drawing": di, "saved": a.get("path")}), Some(png)));
             }

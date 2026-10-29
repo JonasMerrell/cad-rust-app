@@ -43,5 +43,5 @@
   {"tool": "render_drawing", "args": {"drawing": 0, "path": "dwg1.png"}},
   {"tool": "render_drawing", "args": {"drawing": 0, "sheet": 2, "path": "dwg2.png"}},
   {"tool": "export_drawing", "args": {"drawing": 0, "path": "dwg.pdf"}},
-  {"tool": "save_document", "args": {"path": "asmdoc.json"}}
+  {"tool": "save_document", "args": {"path": "assembly-drawing-doc.json"}}
 ]

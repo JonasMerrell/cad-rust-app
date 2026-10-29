@@ -24,6 +24,10 @@ mod cam;
 mod ws;
 #[path = "agent_fea.rs"]
 mod fea;
+#[path = "agent_query.rs"]
+pub(crate) mod query;
+#[path = "agent_schema.rs"]
+mod schema;
 
 pub struct Session {
     /// The active Part Studio (its copy in `ws` is stale until `sync`).
@@ -37,6 +41,11 @@ pub struct Session {
     /// Built results of the other Part Studios, and drawing projections.
     others: HashMap<usize, RebuildResult>,
     proj: HashMap<(usize, String), crate::kernel::ProjView>,
+    /// Relative input files that aren't in the working directory are looked for here
+    /// (the script's folder for `run`).
+    pub base_dir: Option<std::path::PathBuf>,
+    /// Rebuilds so far, to tell whether a failed call needs one to undo it.
+    rebuilds: u64,
 }
 
 type R<T> = Result<T, String>;
@@ -52,6 +61,8 @@ impl Session {
             cur: 0,
             others: HashMap::new(),
             proj: HashMap::new(),
+            base_dir: None,
+            rebuilds: 0,
         }
     }
 
@@ -71,6 +82,7 @@ impl Session {
     }
 
     fn rebuild(&mut self) -> R<()> {
+        self.rebuilds += 1;
         // solve every sketch first, as the editor does
         let (vars, _) = self.doc.var_values();
         let units = self.doc.units;
@@ -130,7 +142,51 @@ impl Session {
     }
 
     /// Run one tool. Returns JSON and optionally a PNG image.
+    ///
+    /// The arguments are checked against the tool's schema first. A modelling call is atomic: when
+    /// it fails the Part Studio is left as it was, and when it leaves a feature failing the result
+    /// has `ok: false` and `new_errors` (and with `rollback: true` the change is undone).
     pub fn call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
+        let empty = json!({});
+        let a = if a.is_null() { &empty } else { a };
+        check_args(name, a)?;
+        if !schema::MODELLING_TOOLS.contains(&name) {
+            return self.call_tool(name, a);
+        }
+        let (cur, doc, rebuilds) = (self.cur, self.doc.clone(), self.rebuilds);
+        let old: Vec<(FeatId, String)> = self.result.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
+        let undo = |s: &mut Session| -> R<()> {
+            s.doc = doc.clone();
+            if s.rebuilds != rebuilds { s.rebuild() } else { Ok(()) }
+        };
+        let (mut v, img) = match self.call_tool(name, a) {
+            Ok(r) => r,
+            Err(e) => {
+                if self.cur == cur {
+                    undo(self)?;
+                }
+                return Err(e);
+            }
+        };
+        let new: Vec<Value> = self
+            .result
+            .features
+            .iter()
+            .filter_map(|f| f.error.as_ref().filter(|e| !old.iter().any(|o| o.0 == f.id && &o.1 == *e)).map(|e| json!({"feature": f.id, "name": self.doc.feature(f.id).map(|x| x.name.clone()), "error": e})))
+            .collect();
+        if !new.is_empty() && self.cur == cur {
+            if a.get("rollback").and_then(|r| r.as_bool()).unwrap_or(false) {
+                undo(self)?;
+                v = self.status();
+                v["rolled_back"] = json!(true);
+            }
+            v["ok"] = json!(false);
+            v["new_errors"] = json!(new);
+        }
+        Ok((v, img))
+    }
+
+    fn call_tool(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
         let v = match name {
             "new_document" => {
                 let units = a.get("units").and_then(|u| u.as_str()).unwrap_or("mm");
@@ -143,9 +199,9 @@ impl Session {
                 json!({"ok": true})
             }
             "open_document" => {
-                let path = str_arg(a, "path")?;
-                let text = std::fs::read_to_string(&path).map_err(|e| e.to_string())?;
-                let ws = crate::workspace::Workspace::from_json(&text)?;
+                let path = self.input_path(&str_arg(a, "path")?);
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("can't open {path}: {e}"))?;
+                let ws = crate::workspace::Workspace::from_json(&text).map_err(|e| format!("can't open {path}: {e}"))?;
                 self.doc = ws.studios.first().map(|s| s.doc.clone()).unwrap_or_default();
                 self.ws = ws;
                 self.cur = 0;
@@ -156,7 +212,7 @@ impl Session {
             "save_document" => {
                 let path = a.get("path").and_then(|p| p.as_str()).map(String::from).or(self.path.clone()).ok_or("give a path")?;
                 self.sync();
-                std::fs::write(&path, self.ws.to_json()).map_err(|e| e.to_string())?;
+                write_out(&path, self.ws.to_json())?;
                 self.path = Some(path.clone());
                 json!({"saved": path})
             }
@@ -169,16 +225,28 @@ impl Session {
                     .doc
                     .features
                     .iter()
-                    .map(|f| json!({"id": f.id, "name": f.name, "kind": f.op.kind(), "suppressed": f.suppressed, "params": serde_json::to_value(&f.op).unwrap_or_default()}))
+                    .map(|f| json!({"id": f.id, "name": f.name, "kind": f.op.kind(), "suppressed": f.suppressed, "params": described_params(&f.op)}))
                     .collect::<Vec<_>>());
                 v
             }
             "set_variable" => {
                 let name = str_arg(a, "name")?;
                 let expr = val_str(a.get("expr").ok_or("give expr")?);
+                check_var_name(&name)?;
+                let before = self.doc.var_values().1;
                 match self.doc.variables.iter_mut().find(|v| v.name == name) {
-                    Some(v) => v.expr = expr,
-                    None => self.doc.variables.push(crate::doc::Variable { name, expr }),
+                    Some(v) => v.expr = expr.clone(),
+                    None => self.doc.variables.push(crate::doc::Variable { name: name.clone(), expr: expr.clone() }),
+                }
+                // the value and every variable that uses it must still evaluate
+                let after = self.doc.var_values().1;
+                for (i, e) in after.iter().enumerate() {
+                    let Some(e) = e else { continue };
+                    if before.get(i).map(|b| b.as_ref() == Some(e)).unwrap_or(false) {
+                        continue; // broken before this change
+                    }
+                    let v = &self.doc.variables[i];
+                    return Err(if v.name == name { format!("{name} = {expr}: {e}") } else { format!("{name} = {expr} breaks {} = {}: {e}", v.name, v.expr) });
                 }
                 self.rebuild()?;
                 self.status()
@@ -221,9 +289,11 @@ impl Session {
                 let sid = id_arg(a, "sketch_id")?;
                 let list = a.get("constraints").and_then(|i| i.as_array()).ok_or("give constraints")?.clone();
                 let mut applied = vec![];
-                for c in &list {
-                    let k = parse_constraint(c)?;
-                    if let Constraint::PointOnLine { .. } = k {}
+                let (vars, _) = self.doc.var_values();
+                let env = crate::expr::Env { vars: &vars, units: self.doc.units };
+                for (i, c) in list.iter().enumerate() {
+                    let k = parse_constraint(c).map_err(|e| format!("constraints[{i}]: {e}"))?;
+                    check_constraint(self.sketch(sid)?.0, c, &k, &env).map_err(|e| format!("constraints[{i}] ({}): {e}", c.get("type").and_then(|t| t.as_str()).unwrap_or("?")))?;
                     let sk = self.sketch_mut(sid)?;
                     // coincident points are merged like in the editor
                     if c.get("type").and_then(|t| t.as_str()) == Some("coincident") {
@@ -247,6 +317,7 @@ impl Session {
             "add_feature" => {
                 let kind = str_arg(a, "kind")?;
                 let mut op = build_op(&kind, a.get("params").unwrap_or(&json!({})), self)?;
+                check_values(&op, &self.doc)?;
                 if let Op::Custom { name, select, .. } = &mut op {
                     let def = self.doc.custom_features.iter().find(|d| d.name == *name).ok_or_else(|| format!("no custom feature named {name:?}; define it with define_custom_feature"))?;
                     *select = def.selection.clone();
@@ -268,6 +339,7 @@ impl Session {
                 let mut cur = serde_json::to_value(&f.op).map_err(|e| e.to_string())?;
                 merge(&mut cur, a.get("params").unwrap_or(&json!({})), self)?;
                 let op: Op = serde_json::from_value(cur).map_err(|e| format!("bad params: {e}"))?;
+                check_values(&op, &self.doc)?;
                 if let Some(f) = self.doc.feature_mut(id) {
                     f.op = op;
                     if let Some(s) = a.get("suppressed").and_then(|s| s.as_bool()) {
@@ -285,9 +357,39 @@ impl Session {
                 self.status()
             }
             "list_geometry" => self.geometry(a),
+            "feature_defaults" => match a.get("kind").and_then(|k| k.as_str()) {
+                Some(kind) => {
+                    let op = Op::new_default(kind).ok_or_else(|| format!("unknown feature kind {kind}{}", schema::did_you_mean(kind, schema::FEATURE_KINDS)))?;
+                    let mut params = serde_json::to_value(&op).map_err(|e| e.to_string())?;
+                    if let Some(o) = params.as_object_mut() {
+                        o.remove("type");
+                    }
+                    json!({"kind": kind, "params": params, "note": "Numbers are expressions in document units (angles in degrees). Refs: see add_feature."})
+                }
+                None => json!({"kinds": schema::FEATURE_KINDS.to_vec()}),
+            },
+            "mass_properties" => self.mass_properties(a)?,
+            "ray_cast" => {
+                let mut q = json!({"ray": {"origins": a.get("origins").cloned().unwrap_or_default(), "direction": a.get("direction").cloned().unwrap_or_default()}});
+                if let Some(b) = a.get("bodies") {
+                    q["bodies"] = b.clone();
+                }
+                let r = self.kernel.query_blocking(&self.doc, q)?;
+                round_json(r)
+            }
+            "classify_points" => {
+                let mut q = json!({"classify": a.get("points").cloned().unwrap_or_default()});
+                for k in ["bodies", "tolerance"] {
+                    if let Some(x) = a.get(k) {
+                        q[k] = x.clone();
+                    }
+                }
+                let r = self.kernel.query_blocking(&self.doc, q)?;
+                round_json(r)
+            }
             "add_decal" => {
-                let path = str_arg(a, "image")?;
-                let bytes = std::fs::read(&path).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let path = self.input_path(&str_arg(a, "image")?);
+                let bytes = std::fs::read(&path).map_err(|e| format!("can't open {path}: {e}"))?;
                 image::load_from_memory(&bytes).map_err(|_| "the image must be a PNG or JPEG")?;
                 let face = a.get("face").ok_or("give face: a planar face ref {point, normal}")?;
                 let at = face.get("point").and_then(pt3).ok_or("face.point")?;
@@ -438,8 +540,8 @@ impl Session {
                 json!({"slice_page": page, "stl_bytes": bytes.len()})
             }
             "import_file" if crate::sketch_import::is_drawing(std::path::Path::new(&str_arg(a, "path")?)) => {
-                let path = str_arg(a, "path")?;
-                let d = crate::sketch_import::read(std::path::Path::new(&path))?;
+                let path = self.input_path(&str_arg(a, "path")?);
+                let d = crate::sketch_import::read(std::path::Path::new(&path)).map_err(|e| if e.contains(&path) { e } else { format!("can't open {path}: {e}") })?;
                 let scale = a.get("scale").and_then(|v| v.as_f64()).unwrap_or(1.0);
                 let at = match a.get("at") {
                     Some(v) => pt2(v)?,
@@ -465,10 +567,10 @@ impl Session {
                 json!({"sketch_id": sid, "curves": n, "skipped": skipped, "sketch": self.sketch_summary(sid)?})
             }
             "import_file" => {
-                let path = str_arg(a, "path")?;
+                let path = self.input_path(&str_arg(a, "path")?);
                 let p = std::path::Path::new(&path);
-                let format = crate::import::format_of(p).ok_or("import .step, .stp, .iges, .igs, .stl or .obj files")?;
-                let bytes = std::fs::read(p).map_err(|e| format!("cannot read {path}: {e}"))?;
+                let format = crate::import::format_of(p).ok_or("import .step, .stp, .iges, .igs, .stl, .obj, .dxf or .svg files")?;
+                let bytes = std::fs::read(p).map_err(|e| format!("can't open {path}: {e}"))?;
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into()));
                 let scale = a.get("scale").map(val_str).unwrap_or_else(|| "1".into());
                 let merge = a.get("merge_faces").and_then(|m| m.as_bool()).unwrap_or(true);
@@ -483,9 +585,12 @@ impl Session {
                 let path = str_arg(a, "path")?;
                 let ascii = a.get("ascii").and_then(|v| v.as_bool()).unwrap_or(false);
                 match format.as_str() {
-                    "stl" if !ascii => std::fs::write(&path, stl_binary(&self.result)).map_err(|e| e.to_string())?,
-                    "step" | "stl" | "iges" => self.kernel.export_blocking(&self.doc, &format, path.clone())?,
-                    "obj" => std::fs::write(&path, obj(&self.result)).map_err(|e| e.to_string())?,
+                    "stl" if !ascii => write_out(&path, stl_binary(&self.result))?,
+                    "step" | "stl" | "iges" => {
+                        make_parent(&path)?;
+                        self.kernel.export_blocking(&self.doc, &format, path.clone()).map_err(|e| format!("can't write {path}: {e}"))?
+                    }
+                    "obj" => write_out(&path, obj(&self.result))?,
                     _ => return Err("format must be step, stl, iges or obj".into()),
                 }
                 json!({"exported": path})
@@ -494,11 +599,11 @@ impl Session {
                 let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
                 let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(800).clamp(64, 4096) as u32;
                 let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(600).clamp(64, 4096) as u32;
-                let dir = a.get("direction").and_then(|d| d.as_array()).map(|d| [d[0].as_f64().unwrap_or(1.0), d.get(1).and_then(|x| x.as_f64()).unwrap_or(-1.0), d.get(2).and_then(|x| x.as_f64()).unwrap_or(1.0)]);
+                let dir = direction_arg(a)?;
                 let sketches = a.get("sketches").and_then(|s| s.as_str()).unwrap_or("unused");
                 let png = render_png(&self.doc, &self.result, view, dir, sketches, w, h)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    write_out(p, &png)?;
                 }
                 return Ok((json!({"view": view, "width": w, "height": h, "saved": a.get("path")}), Some(png)));
             }
@@ -509,7 +614,7 @@ impl Session {
                     Some(i) => self.export_drawing_tab(i as usize, &format, a)?,
                     None => self.drawing(&format, a)?,
                 };
-                std::fs::write(&path, data).map_err(|e| e.to_string())?;
+                write_out(&path, data)?;
                 json!({"exported": path})
             }
             _ => return self.ws_call(name, a),
@@ -517,11 +622,101 @@ impl Session {
         Ok((v, None))
     }
 
+    /// An input file: as given, or else next to the script being run.
+    pub(crate) fn input_path(&self, p: &str) -> String {
+        let path = std::path::Path::new(p);
+        if path.is_relative() && !path.exists() {
+            if let Some(q) = self.base_dir.as_ref().map(|d| d.join(path)).filter(|q| q.exists()) {
+                return q.to_string_lossy().into_owned();
+            }
+        }
+        p.to_string()
+    }
+
+    /// Mass, centre of gravity and inertia of the parts, from their materials (or `material` /
+    /// `density` for all of them).
+    fn mass_properties(&mut self, a: &Value) -> R<Value> {
+        let density_of = |name: &str| crate::doc::MATERIALS.iter().find(|m| m.0 == name).map(|m| m.1);
+        // (density g/cm³, material name: None when a density is given)
+        let all: Option<(f64, Option<String>)> = match (a.get("density").and_then(|d| d.as_f64()), a.get("material").and_then(|m| m.as_str())) {
+            (Some(d), _) => Some((d, None)),
+            (None, Some(m)) => Some((density_of(m).ok_or_else(|| format!("no material {m}"))?, Some(m.to_string()))),
+            _ => None,
+        };
+        let want: Option<Vec<crate::doc::BodyId>> =
+            a.get("bodies").and_then(|b| b.as_array()).map(|b| b.iter().filter_map(|x| Some((x.get(0)?.as_u64()?, x.get(1)?.as_u64()? as u32))).collect());
+        let mut list = vec![];
+        let mut info = vec![];
+        for b in self.result.bodies.iter().filter(|b| !b.surface && want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true)) {
+            let part = self.doc.parts.get(&crate::doc::body_key(b.id));
+            let (d, mat) = match &all {
+                Some(x) => x.clone(),
+                None => match part.and_then(|p| p.material.clone()) {
+                    Some(m) => (density_of(&m).unwrap_or(1.0), Some(m)),
+                    None => (1.0, Some(String::new())),
+                },
+            };
+            let name = part.and_then(|p| p.name.clone()).unwrap_or_else(|| b.name.clone());
+            list.push(json!({"body": [b.id.0, b.id.1], "density": d * 1e-3}));
+            info.push((name, mat, d));
+        }
+        if let Some(w) = &want {
+            if let Some(id) = w.iter().find(|id| !self.result.bodies.iter().any(|b| b.id == **id)) {
+                return Err(format!("no part {id:?}"));
+            }
+        }
+        let r = self.kernel.query_blocking(&self.doc, json!({"mass": list}))?;
+        let mut parts = vec![];
+        let (mut total, mut moment) = (0.0, DVec3::ZERO);
+        let rows = |v: &Value| -> glam::DMat3 {
+            let r = |i: usize| DVec3::from(pt3(&v[i]).unwrap_or_default());
+            glam::DMat3::from_cols(r(0), r(1), r(2)).transpose()
+        };
+        let mut items = vec![];
+        for (m, (name, mat, d)) in r["mass"].as_array().into_iter().flatten().zip(&info) {
+            let (mass, cg) = (m["mass"].as_f64().unwrap_or(0.0), pt3(&m["cg"]).unwrap_or_default());
+            total += mass;
+            moment += cg * mass;
+            items.push((mass, cg, rows(&m["inertia"])));
+            let mut p = json!({"body": m["body"], "name": name, "volume_mm3": round(m["volume"].as_f64().unwrap_or(0.0)), "density_g_cm3": d, "mass_g": round(mass), "cg_mm": cg.to_array().map(round), "inertia_g_mm2": mat_json(rows(&m["inertia"]))});
+            match mat.as_deref() {
+                Some("") => p["note"] = json!("no material set: density 1 g/cm³ (set_part material, or pass material or density)"),
+                Some(m) => p["material"] = json!(m),
+                None => {}
+            }
+            parts.push(p);
+        }
+        let mut v = json!({"parts": parts, "units": "mm, g; inertia about each centre of gravity, axes x y z"});
+        if items.len() > 1 && total > 0.0 {
+            // the parts together, inertia about their common centre of gravity (parallel axis theorem)
+            let cg = moment / total;
+            let mut it = glam::DMat3::ZERO;
+            for (m, c, i) in &items {
+                let d = *c - cg;
+                it += *i + (glam::DMat3::IDENTITY * d.length_squared() - glam::DMat3::from_cols(d * d.x, d * d.y, d * d.z)) * *m;
+            }
+            v["total"] = json!({"mass_g": round(total), "cg_mm": cg.to_array().map(round), "inertia_g_mm2": mat_json(it)});
+        }
+        Ok(v)
+    }
+
     fn sketch_item(&mut self, sid: FeatId, it: &Value) -> R<Value> {
         let ty = it.get("type").and_then(|t| t.as_str()).ok_or("each item needs a type")?.to_string();
+        let keys = SKETCH_ITEMS.iter().find(|x| x.0 == ty).map(|x| x.1).ok_or_else(|| format!("unknown sketch item {ty}{}", schema::did_you_mean(&ty, SKETCH_ITEMS.iter().map(|x| x.0))))?;
+        for k in it.as_object().into_iter().flat_map(|o| o.keys()) {
+            if k != "type" && k != "construction" && !keys.contains(&k.as_str()) {
+                return Err(format!("{ty} takes {}; unknown key '{k}'{}", keys.join(", "), schema::did_you_mean(k, keys.iter().copied())));
+            }
+        }
         let construction = it.get("construction").and_then(|c| c.as_bool()).unwrap_or(false);
         let p = |k: &str| -> R<DVec2> { pt2(it.get(k).ok_or(format!("{ty} needs {k}"))?) };
-        let num = |k: &str| -> R<f64> { it.get(k).and_then(|v| v.as_f64()).ok_or(format!("{ty} needs a number {k}")) };
+        let num = |k: &str| -> R<f64> { it.get(k).and_then(|v| v.as_f64()).filter(|v| v.is_finite()).ok_or(format!("{ty} needs a number {k}")) };
+        // sizes are positive: a negative radius is a mistake, not a mirror image
+        let size = |k: &str| -> R<f64> { num(k).and_then(|v| if v > 0.0 { Ok(v) } else { Err(format!("{ty} {k} must be more than 0 (got {v})")) }) };
+        let pts = |k: &str| -> R<Vec<DVec2>> {
+            let v: Vec<DVec2> = it.get(k).and_then(|v| v.as_array()).ok_or(format!("{ty} needs {k}"))?.iter().map(pt2).collect::<R<_>>()?;
+            if v.len() < 2 { Err(format!("{ty} needs at least 2 {k}")) } else { Ok(v) }
+        };
         let sk = self.sketch_mut(sid)?;
         let out = match ty.as_str() {
             "point" => json!({"point": sk.add_point(p("at")?)}),
@@ -530,7 +725,7 @@ impl Session {
                 json!({"line": sk.add_curve(Geom::Line { a, b }, construction), "points": [a, b]})
             }
             "polyline" | "polygon_points" => {
-                let pts: Vec<DVec2> = it.get("points").and_then(|v| v.as_array()).ok_or("polyline needs points")?.iter().map(pt2).collect::<R<_>>()?;
+                let pts = pts("points")?;
                 let closed = it.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
                 let ids: Vec<Id> = pts.iter().map(|q| sk.add_point(*q)).collect();
                 let n = if closed { ids.len() } else { ids.len() - 1 };
@@ -555,37 +750,42 @@ impl Session {
                 json!({"lines": lines, "points": ids})
             }
             "circle" => {
-                let c = sk.add_point(p("center")?);
-                json!({"circle": sk.add_curve(Geom::Circle { c, r: num("radius")? }, construction), "center": c})
+                let c = p("center")?;
+                let r = size("radius")?;
+                let c = sk.add_point(c);
+                json!({"circle": sk.add_curve(Geom::Circle { c, r }, construction), "center": c})
             }
             "arc" => {
                 let (c, a, b) = (sk.add_point(p("center")?), sk.add_point(p("start")?), sk.add_point(p("end")?));
                 json!({"arc": sk.add_curve(Geom::Arc { c, a, b }, construction), "points": {"center": c, "start": a, "end": b}})
             }
             "ellipse" => {
+                size("minor_radius")?;
                 let (c, a) = (sk.add_point(p("center")?), sk.add_point(p("major_end")?));
-                json!({"ellipse": sk.add_curve(Geom::Ellipse { c, a, rmin: num("minor_radius")? }, construction)})
+                json!({"ellipse": sk.add_curve(Geom::Ellipse { c, a, rmin: size("minor_radius")? }, construction)})
             }
             "spline" => {
-                let pts: Vec<DVec2> = it.get("points").and_then(|v| v.as_array()).ok_or("spline needs points")?.iter().map(pt2).collect::<R<_>>()?;
+                let pts = pts("points")?;
                 let ids: Vec<Id> = pts.iter().map(|q| sk.add_point(*q)).collect();
                 let closed = it.get("closed").and_then(|c| c.as_bool()).unwrap_or(false);
                 json!({"spline": sk.add_curve(Geom::Spline { pts: ids.clone(), closed }, construction), "points": ids})
             }
             "polygon" => {
-                let (c, r, n) = (p("center")?, num("radius")?, it.get("sides").and_then(|v| v.as_u64()).unwrap_or(6).max(3) as usize);
+                let (c, r, n) = (p("center")?, size("radius")?, it.get("sides").and_then(|v| v.as_u64()).unwrap_or(6).max(3) as usize);
                 let ids: Vec<Id> = (0..n).map(|i| sk.add_point(c + DVec2::from_angle(i as f64 / n as f64 * std::f64::consts::TAU) * r)).collect();
                 let lines: Vec<Id> = (0..n).map(|i| sk.add_curve(Geom::Line { a: ids[i], b: ids[(i + 1) % n] }, construction)).collect();
                 json!({"lines": lines, "points": ids})
             }
             "text" => {
-                let anchor = sk.add_point(p("at")?);
+                let (at, height) = (p("at")?, size("height")?);
+                let anchor = sk.add_point(at);
                 let text = it.get("text").and_then(|t| t.as_str()).ok_or("text needs text")?.to_string();
-                sk.texts.push(crate::sketch::TextItem { anchor, text, height: num("height")?, curves: vec![] });
+                sk.texts.push(crate::sketch::TextItem { anchor, text, height, curves: vec![] });
                 sk.refresh_texts();
                 json!({"anchor_point": anchor, "outlines": sk.texts.last().map(|t| t.curves.clone()).unwrap_or_default()})
             }
             "elliptical_arc" => {
+                size("minor_radius")?;
                 let (c, a) = (sk.add_point(p("center")?), sk.add_point(p("major_end")?));
                 let (t0, t1) = (num("start_angle")?.to_radians(), num("end_angle")?.to_radians());
                 json!({"elliptical_arc": sk.add_curve(Geom::EllipticalArc { c, a, rmin: num("minor_radius")?, t0, t1 }, construction)})
@@ -722,8 +922,177 @@ impl Session {
 // ---------------------------------------------------------------- argument helpers
 
 fn round(v: f64) -> f64 {
-    (v * 1e4).round() / 1e4
+    // + 0.0 turns -0.0 into 0
+    (v * 1e4).round() / 1e4 + 0.0
 }
+
+/// Numbers in a query result rounded like the other results.
+fn round_json(v: Value) -> Value {
+    match v {
+        Value::Number(n) if n.is_f64() => json!(round(n.as_f64().unwrap_or(0.0))),
+        Value::Array(a) => Value::Array(a.into_iter().map(round_json).collect()),
+        Value::Object(o) => Value::Object(o.into_iter().map(|(k, x)| (k, round_json(x))).collect()),
+        other => other,
+    }
+}
+
+fn mat_json(m: glam::DMat3) -> Value {
+    json!([m.row(0).to_array().map(round), m.row(1).to_array().map(round), m.row(2).to_array().map(round)])
+}
+
+/// Check a call's arguments against the tool's schema.
+fn check_args(name: &str, a: &Value) -> R<()> {
+    static SCHEMAS: std::sync::OnceLock<HashMap<String, Value>> = std::sync::OnceLock::new();
+    let schemas = SCHEMAS.get_or_init(|| {
+        tools().as_array().into_iter().flatten().map(|t| (t["name"].as_str().unwrap_or("").to_string(), t["inputSchema"].clone())).collect()
+    });
+    let schema = schemas.get(name).ok_or_else(|| format!("unknown tool {name}{}", schema::did_you_mean(name, schemas.keys().map(|k| k.as_str()))))?;
+    if !a.is_object() {
+        return Err("arguments must be an object".into());
+    }
+    schema::validate(schema, a, "").map_err(|e| format!("{name}: {e}"))
+}
+
+/// Create the folder of an output file.
+pub(crate) fn make_parent(path: &str) -> R<()> {
+    match std::path::Path::new(path).parent() {
+        Some(d) if !d.as_os_str().is_empty() => std::fs::create_dir_all(d).map_err(|e| format!("can't write {path}: can't create {}: {e}", d.display())),
+        _ => Ok(()),
+    }
+}
+
+/// Write an output file, creating its folder; errors name the path.
+pub(crate) fn write_out(path: &str, data: impl AsRef<[u8]>) -> R<()> {
+    make_parent(path)?;
+    std::fs::write(path, data).map_err(|e| format!("can't write {path}: {e}"))
+}
+
+/// `direction` [x, y, z] for renders: not zero.
+pub(crate) fn direction_arg(a: &Value) -> R<Option<[f64; 3]>> {
+    let Some(d) = a.get("direction") else { return Ok(None) };
+    let v = pt3(d).ok_or("direction: [x, y, z]")?;
+    if v.length() < 1e-12 {
+        return Err("direction: [x, y, z], not zero".into());
+    }
+    Ok(Some(v.to_array()))
+}
+
+/// A feature's params for describe: imported files are summarized (size and hash), not inlined.
+fn described_params(op: &Op) -> Value {
+    let mut v = serde_json::to_value(op).unwrap_or_default();
+    if let Op::Import { .. } = op {
+        for k in ["data", "step"] {
+            if let Some(s) = v.get(k).and_then(|x| x.as_str()).filter(|s| !s.is_empty()) {
+                // FNV-1a, to tell files apart
+                let h = s.bytes().fold(0xcbf29ce484222325u64, |h, b| (h ^ b as u64).wrapping_mul(0x100000001b3));
+                v[k] = json!(format!("<{} bytes, not shown; fnv1a64 {h:016x}>", s.len()));
+            }
+        }
+    }
+    v
+}
+
+fn check_var_name(name: &str) -> R<()> {
+    let ok = name.chars().next().map(|c| c.is_ascii_alphabetic() || c == '_').unwrap_or(false) && name.chars().all(|c| c.is_ascii_alphanumeric() || c == '_');
+    if !ok {
+        return Err(format!("variable name {name:?}: a letter or _, then letters, digits or _"));
+    }
+    // units and constants would be read as such in expressions
+    if ["mm", "cm", "m", "in", "inch", "ft", "deg", "rad", "pi", "PI", "e"].contains(&name) {
+        return Err(format!("variable name {name:?} is a unit or constant in expressions; pick another"));
+    }
+    Ok(())
+}
+
+/// A constraint's keys, the points and curves it names, and its dimension's value.
+fn check_constraint(sk: &Sketch, c: &Value, k: &Constraint, env: &crate::expr::Env) -> R<()> {
+    let parsed = serde_json::to_value(k).unwrap_or_default();
+    let mut keys: Vec<&str> = parsed.as_object().into_iter().flat_map(|o| o.keys().map(|k| k.as_str())).collect();
+    keys.extend(["type", "value"]);
+    if k.dim().is_some() {
+        keys.push("driven");
+    }
+    if c.get("type").and_then(|t| t.as_str()) == Some("coincident") {
+        keys.extend(["a", "b"]);
+    }
+    for key in c.as_object().into_iter().flat_map(|o| o.keys()) {
+        if !keys.contains(&key.as_str()) {
+            return Err(format!("unknown key '{key}'{}; it takes {}", schema::did_you_mean(key, keys.iter().copied()), keys.join(", ")));
+        }
+    }
+    for f in ["p", "l", "c", "a", "b", "q", "m"] {
+        let Some(id) = parsed.get(f).and_then(|x| x.as_u64()).map(|x| x as Id) else { continue };
+        let (point, curve) = (sk.point(id).is_some(), sk.curves.iter().any(|c| c.id == id));
+        let coincident = c.get("type").and_then(|t| t.as_str()) == Some("coincident");
+        let (ok, what) = match f {
+            "p" | "q" => (point, "point"),
+            "l" if coincident => (point || curve, "point or curve"),
+            "l" | "c" | "m" => (curve, "curve"),
+            _ => (point || curve, "point or curve"),
+        };
+        if !ok {
+            return Err(format!("{f}: no {what} {id} in this sketch (sketch_info lists the ids)"));
+        }
+    }
+    if let Some(d) = k.dim() {
+        let kind = if k.is_angle() { crate::expr::Kind::Angle } else { crate::expr::Kind::Length };
+        let v = crate::expr::eval(&d.expr, kind, env).map_err(|e| format!("value {:?}: {e}", d.expr))?;
+        if matches!(k, Constraint::Length { .. } | Constraint::Radius { .. } | Constraint::Diameter { .. }) && v <= 0.0 {
+            return Err(format!("value {:?} must be more than 0", d.expr));
+        }
+    }
+    Ok(())
+}
+
+/// Sizes and counts that only make sense positive, checked when their expressions evaluate (an
+/// expression that doesn't is reported by the rebuild as the feature's error).
+fn check_values(op: &Op, doc: &Document) -> R<()> {
+    use crate::expr::Kind;
+    let fields: &[(&str, Kind)] = match op {
+        Op::Fillet { variable, .. } => {
+            if *variable {
+                &[("radius", Kind::Length), ("end_radius", Kind::Length)]
+            } else {
+                &[("radius", Kind::Length)]
+            }
+        }
+        Op::Chamfer { .. } => &[("distance", Kind::Length)],
+        Op::Hole { .. } => &[("diameter", Kind::Length)],
+        Op::Helix { .. } => &[("radius", Kind::Length), ("pitch", Kind::Length), ("turns", Kind::Count)],
+        Op::LinearPattern { .. } => &[("count", Kind::Count), ("count2", Kind::Count)],
+        Op::CircularPattern { .. } | Op::CurvePattern { .. } => &[("count", Kind::Count)],
+        _ => &[],
+    };
+    let (vars, _) = doc.var_values();
+    let env = crate::expr::Env { vars: &vars, units: doc.units };
+    let v = serde_json::to_value(op).unwrap_or_default();
+    for (f, kind) in fields {
+        let Some(src) = v.get(*f).and_then(|x| x.as_str()) else { continue };
+        if let Ok(x) = crate::expr::eval(src, *kind, &env) {
+            if x <= 0.0 || (*kind == Kind::Count && x < 1.0) {
+                return Err(format!("{} {f} must be more than 0 (got {src})", op.kind()));
+            }
+        }
+    }
+    Ok(())
+}
+
+/// Sketch item types and the keys each takes (besides type and construction).
+const SKETCH_ITEMS: [(&str, &[&str]); 13] = [
+    ("point", &["at"]),
+    ("line", &["from", "to"]),
+    ("polyline", &["points", "closed"]),
+    ("rect", &["corner1", "corner2"]),
+    ("center_rect", &["center", "corner"]),
+    ("circle", &["center", "radius"]),
+    ("arc", &["center", "start", "end"]),
+    ("ellipse", &["center", "major_end", "minor_radius"]),
+    ("elliptical_arc", &["center", "major_end", "minor_radius", "start_angle", "end_angle"]),
+    ("spline", &["points", "closed"]),
+    ("polygon", &["center", "radius", "sides"]),
+    ("text", &["at", "text", "height"]),
+    ("polygon_points", &["points", "closed"]),
+];
 
 pub(crate) fn str_arg(a: &Value, k: &str) -> R<String> {
     a.get(k).and_then(|v| v.as_str()).map(String::from).ok_or(format!("give {k}"))
@@ -775,8 +1144,12 @@ fn parse_constraint(c: &Value) -> R<Constraint> {
             o.insert("p".into(), a);
             o.insert("l".into(), b);
         }
+        let driven = o.remove("driven");
         if let Some(v) = o.remove("value") {
             o.insert("dim".into(), json!({"expr": val_str(&v), "offset": [0.0, 0.0]}));
+        }
+        if let (Some(d), Some(dim)) = (driven, o.get_mut("dim").and_then(|d| d.as_object_mut())) {
+            dim.insert("driven".into(), d);
         }
     }
     let k: Constraint = serde_json::from_value(c.clone()).map_err(|e| format!("bad constraint {c}: {e}"))?;
@@ -789,6 +1162,13 @@ fn parse_constraint(c: &Value) -> R<Constraint> {
 /// every region of that sketch.
 fn merge(base: &mut Value, params: &Value, s: &Session) -> R<()> {
     let (Some(b), Some(p)) = (base.as_object_mut(), params.as_object()) else { return Err("params must be an object".into()) };
+    let kind = b.get("type").and_then(|t| t.as_str()).unwrap_or("feature").to_string();
+    for k in p.keys() {
+        if k == "type" || !b.contains_key(k) {
+            let names: Vec<&str> = b.keys().map(|k| k.as_str()).filter(|k| *k != "type").collect();
+            return Err(format!("{kind} has no param '{k}'{}; it takes {}", schema::did_you_mean(k, names.iter().copied()), names.join(", ")));
+        }
+    }
     for (k, v) in p {
         let v = expand_refs(v, s)?;
         match (b.get(k), &v) {
@@ -1086,13 +1466,14 @@ pub(crate) fn tools() -> Value {
         {"name": "new_document", "description": "Start a new empty Part Studio. Units: mm (default), cm, m, in, ft.", "inputSchema": obj(json!({"units": {"type": "string"}}), &[])},
         {"name": "open_document", "description": "Open a .json document; its first Part Studio becomes active (see describe for the other tabs).", "inputSchema": obj(json!({"path": {"type": "string"}}), &["path"])},
         {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the cad-app GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
-        {"name": "describe", "description": "Features (with their full params), variables, parts (volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
+        {"name": "describe", "description": "Features (with their full params; imported files show only their size and a hash), variables, parts (name, volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},
         {"name": "create_sketch", "description": "New sketch on 'top' (XY), 'front' (XZ, normal -Y), 'right' (YZ), or a ref such as a planar face ref from list_geometry or {\"kind\":\"feature_plane\",\"feature\":id}. Returns sketch_id and the plane frame (sketch x/y axes in 3D).", "inputSchema": obj(json!({"plane": {}, "name": {"type": "string"}}), &[])},
         {"name": "sketch_add", "description": "Add geometry to a sketch; coordinates are [x, y] in mm in the sketch plane. Item types: point{at}, line{from,to}, polyline{points,closed}, rect{corner1,corner2}, center_rect{center,corner}, circle{center,radius}, arc{center,start,end} (counter-clockwise), ellipse{center,major_end,minor_radius}, elliptical_arc{center,major_end,minor_radius,start_angle,end_angle} (degrees, from the major axis), spline{points,closed}, polygon{center,radius,sides}, text{at,text,height}. Any item may set construction:true. Points at the same position (within 1 µm), also across items and with existing points, are merged into one. Returns created ids and the sketch summary with regions.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "items": {"type": "array"}}), &["sketch_id", "items"])},
-        {"name": "sketch_constrain", "description": "Add constraints by point/curve ids. Types: coincident{a,b} (points, or point a on curve b), horizontal{l}, vertical{l}, horizontal_pts{a,b}, vertical_pts{a,b}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, midpoint{p,l}, symmetric{a,b,l}, fix{p,x,y}; dimensions take value (number or expression): distance{a,b}, axis_distance{a,b,axis:0|1}, point_line_distance{p,l}, length{l}, radius{c}, diameter{c}, angle{a,b} (degrees).", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "constraints": {"type": "array"}}), &["sketch_id", "constraints"])},
+        {"name": "sketch_constrain", "description": "Add constraints by point/curve ids. Types: coincident{a,b} (points, or point a on curve b), horizontal{l}, vertical{l}, horizontal_pts{a,b}, vertical_pts{a,b}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, midpoint{p,l}, symmetric{a,b,l}, fix{p,x,y}; dimensions take value (number or expression): distance{a,b}, axis_distance{a,b,axis:0|1}, point_line_distance{p,l}, length{l}, radius{c}, diameter{c}, angle{a,b} (degrees); driven:true makes a dimension a reference that only measures. equal_distance{p,l,q,m}: point p as far from line l as point q from line m.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "constraints": {"type": "array"}}), &["sketch_id", "constraints"])},
         {"name": "sketch_info", "description": "Points, curves, degrees of freedom and closed regions (with ready-made region refs) of a sketch.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}}), &["sketch_id"])},
-        {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, curvePattern {kind:'part'|'feature', bodies, path:[curve refs], count, align}, pointPattern {kind, bodies, points:[sketch_point refs], first point = where the original is}, mirror, boolean, split, transform, deleteBody, sheetMetal, heal {bodies, tolerance}, custom. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
+        {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, curvePattern {kind:'part'|'feature', bodies, path:[curve refs], count, align}, pointPattern {kind, bodies, points:[sketch_point refs], first point = where the original is}, mirror, boolean, split, transform, deleteBody, sheetMetal, heal {bodies, tolerance}, custom. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}. feature_defaults gives any kind's params and defaults; unknown param names are rejected. A feature that fails to build stays in the history (as in the editor) and the result has ok:false and new_errors; rollback:true undoes the call instead.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
+        {"name": "feature_defaults", "description": "A feature kind's params with their default values, the shape add_feature params and edit_feature take; without kind, the list of kinds.", "inputSchema": obj(json!({"kind": {"type": "string"}}), &[])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},
@@ -1104,7 +1485,10 @@ pub(crate) fn tools() -> Value {
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
-        {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}}), &["path"])},
+        {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}, "width": {"type": "integer"}}), &["path"])},
+        {"name": "mass_properties", "description": "Exact mass properties of the active Part Studio's parts: volume, mass, centre of gravity and inertia tensor about the centre of gravity (g·mm²), from each part's material (set_part) or a material or density (g/cm³) for all; with several parts also their total. bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "material": {"type": "string"}, "density": {"type": "number"}}), &[])},
+        {"name": "ray_cast", "description": "Cast rays from origins along direction through the active Part Studio's parts (or bodies): every surface crossing with its distance, point and part, nearest first.", "inputSchema": obj(json!({"origins": {"type": "array"}, "direction": {"type": "array"}, "bodies": {"type": "array"}}), &["origins", "direction"])},
+        {"name": "classify_points", "description": "Whether each point is in, on (within tolerance) or out of the active Part Studio's parts (or bodies), and which part.", "inputSchema": obj(json!({"points": {"type": "array"}, "tolerance": {"type": "number"}, "bodies": {"type": "array"}}), &["points"])},
         {"name": "define_custom_feature", "description": "Define (or replace) a scripted custom feature in the active Part Studio, then use it with add_feature kind 'custom', params {name, values: {param: expression}, refs: [point or face refs], op: new|add|remove|intersect}. The source is Rhai: parameters are variables (lengths mm, angles degrees, counts integers, bools); `points` and `normals` are arrays of [x,y,z] from refs. Shapes: cube(w,d,h), cube_centered(w,d,h), cylinder(r,h), cone(r1,r2,h), sphere(r), torus(R,r), prism([[x,y],...], h), revolve([[r,z],...], deg). Methods: .move(x,y,z), .rotate_x/y/z(deg), .rotate([ax,ay,az], deg), .mirror([nx,ny,nz]), .scale(f), .fillet(r), .chamfer(d), .place(point, normal), .volume(). a + b joins, a - b cuts, a & b intersects. Return a shape or an array of shapes. params: [{name, kind: length|angle|number|count|bool, default}]; selection: '' | 'points' | 'faces'.", "inputSchema": obj(json!({"name": {"type": "string"}, "params": {"type": "array"}, "selection": {"type": "string"}, "source": {"type": "string"}}), &["name", "source"])},
         {"name": "new_part_studio", "description": "Add another Part Studio to the document and make it active (sketches/features go there). Parts from different studios can be combined in assemblies; describe lists all studios, assemblies and drawings.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
         {"name": "switch_part_studio", "description": "Make another Part Studio (by index) the active one.", "inputSchema": obj(json!({"index": {"type": "integer"}}), &["index"])},
@@ -1129,12 +1513,22 @@ pub(crate) fn tools() -> Value {
     .map(|mut v| {
         v.extend(cam::tools());
         v.extend(fea::tools());
+        schema::complete(&mut v);
         Value::Array(v)
     })
     .unwrap_or_default()
 }
 
 // ---------------------------------------------------------------- MCP server
+
+/// MCP protocol versions this server speaks, newest first.
+const PROTOCOL_VERSIONS: [&str; 3] = ["2025-06-18", "2025-03-26", "2024-11-05"];
+
+/// Whether a tool result reports a failure that the call itself survived (a feature that
+/// doesn't build).
+pub fn failed(v: &Value) -> bool {
+    v.get("ok") == Some(&json!(false)) && v.get("new_errors").is_some()
+}
 
 pub fn mcp_main() {
     // `--bridge ADDR --token T`: the cad-app chat panel started this server through Claude Code,
@@ -1169,16 +1563,33 @@ pub fn mcp_main() {
         if line.trim().is_empty() {
             continue;
         }
-        let Ok(msg) = serde_json::from_str::<Value>(&line) else { continue };
+        let msg = match serde_json::from_str::<Value>(&line) {
+            Ok(m) if m.is_object() => m,
+            Ok(_) => {
+                let _ = writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32600, "message": "invalid request: expected a JSON-RPC object"}}));
+                let _ = out.flush();
+                continue;
+            }
+            Err(e) => {
+                let _ = writeln!(out, "{}", json!({"jsonrpc": "2.0", "id": null, "error": {"code": -32700, "message": format!("parse error: {e}")}}));
+                let _ = out.flush();
+                continue;
+            }
+        };
         let id = msg.get("id").cloned();
         let method = msg.get("method").and_then(|m| m.as_str()).unwrap_or("");
         let result: Option<Value> = match method {
-            "initialize" => Some(json!({
-                "protocolVersion": msg["params"].get("protocolVersion").cloned().unwrap_or(json!("2025-06-18")),
-                "capabilities": {"tools": {}},
-                "serverInfo": {"name": "cad-app", "version": env!("CARGO_PKG_VERSION")},
-                "instructions": "Parametric CAD (OpenCascade). Typical flow: create_sketch → sketch_add (+ sketch_constrain) → add_feature extrude with profiles [{sketch: id}] → list_geometry to get face/edge refs → more features → render to check → export / save_document. Lengths are mm."
-            })),
+            "initialize" => {
+                // answer with the client's version when we speak it, else our newest
+                let asked = msg["params"].get("protocolVersion").and_then(|v| v.as_str()).unwrap_or("");
+                let version = PROTOCOL_VERSIONS.iter().find(|v| **v == asked).unwrap_or(&PROTOCOL_VERSIONS[0]);
+                Some(json!({
+                    "protocolVersion": version,
+                    "capabilities": {"tools": {}},
+                    "serverInfo": {"name": "cad-app", "version": env!("CARGO_PKG_VERSION")},
+                    "instructions": "Parametric CAD (OpenCascade). Typical flow: create_sketch → sketch_add (+ sketch_constrain) → add_feature extrude with profiles [{sketch: id}] → list_geometry to get face/edge refs → more features → render to check → export / save_document. Lengths are mm. feature_defaults shows a feature kind's params. A call that leaves a feature failing returns isError with ok:false and new_errors (rollback:true undoes it)."
+                }))
+            }
             "ping" => Some(json!({})),
             "tools/list" if bridged => {
                 // the window's document is opened and saved by the user
@@ -1196,11 +1607,12 @@ pub fn mcp_main() {
                 let args = msg["params"].get("arguments").cloned().unwrap_or(json!({}));
                 Some(match s.as_mut().unwrap().call(name, &args) {
                     Ok((v, img)) => {
-                        let mut content = vec![json!({"type": "text", "text": serde_json::to_string_pretty(&v).unwrap_or_default()})];
+                        // compact JSON: pretty-printing triples the tokens
+                        let mut content = vec![json!({"type": "text", "text": v.to_string()})];
                         if let Some(png) = img {
                             content.push(json!({"type": "image", "mimeType": "image/png", "data": b64(&png)}));
                         }
-                        json!({"content": content})
+                        json!({"content": content, "isError": failed(&v)})
                     }
                     Err(e) => json!({"content": [{"type": "text", "text": e}], "isError": true}),
                 })
@@ -1218,36 +1630,63 @@ pub fn mcp_main() {
     }
 }
 
-/// `cad-app run script.json`: a JSON array of {"tool": name, "args": {...}} steps.
-pub fn run_script(path: &str) -> i32 {
+/// `cad-app run script.json`: a JSON array of {"tool": name, "args": {...}} steps. Relative input
+/// files are also looked for next to the script; outputs go to the working directory. A step that
+/// fails (including a feature that doesn't build) makes the exit status 1; `stop_on_error` stops there.
+pub fn run_script(path: &str, stop_on_error: bool) -> i32 {
     let text = match std::fs::read_to_string(path) {
         Ok(t) => t,
         Err(e) => {
-            eprintln!("cannot read {path}: {e}");
+            eprintln!("can't open {path}: {e}");
             return 2;
         }
     };
     let steps: Vec<Value> = match serde_json::from_str(&text) {
         Ok(Value::Array(a)) => a,
-        _ => {
-            eprintln!("the script must be a JSON array of {{\"tool\": ..., \"args\": {{...}}}}");
+        Ok(_) => {
+            eprintln!("{path}: the script must be a JSON array of {{\"tool\": ..., \"args\": {{...}}}}");
+            return 2;
+        }
+        Err(e) => {
+            eprintln!("{path}: not valid JSON: {e}");
             return 2;
         }
     };
     let mut s = Session::new();
-    let mut failed = 0;
+    s.base_dir = std::path::Path::new(path).parent().map(|p| p.to_path_buf());
+    let mut failed_steps = 0;
     for (i, st) in steps.iter().enumerate() {
         let name = st.get("tool").and_then(|t| t.as_str()).unwrap_or("");
         let args = st.get("args").cloned().unwrap_or(json!({}));
-        match s.call(name, &args) {
-            Ok((v, _)) => println!("{}", json!({"step": i, "tool": name, "result": v})),
+        let ok = match s.call(name, &args) {
+            Ok((v, _)) if failed(&v) => {
+                let first = v["new_errors"][0].clone();
+                println!("{}", json!({"step": i, "tool": name, "error": format!("{}: {}", first["name"].as_str().unwrap_or("feature"), first["error"].as_str().unwrap_or("failed")), "result": v}));
+                false
+            }
+            Ok((v, _)) => {
+                println!("{}", json!({"step": i, "tool": name, "result": v}));
+                true
+            }
             Err(e) => {
-                failed += 1;
                 println!("{}", json!({"step": i, "tool": name, "error": e}));
+                false
+            }
+        };
+        if !ok {
+            failed_steps += 1;
+            if stop_on_error {
+                eprintln!("stopped at step {i} ({name})");
+                break;
             }
         }
     }
-    if failed > 0 { 1 } else { 0 }
+    if failed_steps > 0 {
+        eprintln!("{failed_steps} of {} steps failed", steps.len());
+        1
+    } else {
+        0
+    }
 }
 
 fn b64(data: &[u8]) -> String {

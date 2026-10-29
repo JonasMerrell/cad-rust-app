@@ -1,6 +1,6 @@
 [
   {"tool": "new_document", "args": {"units": "mm"}},
-  {"tool": "import_file", "args": {"path": "examples/zerotorque/Plug_70_2.step", "name": "Plug"}},
+  {"tool": "import_file", "args": {"path": "Plug_70_2.step", "name": "Plug"}},
   {"tool": "set_part", "args": {"body": [1, 0], "name": "Plug 70/2", "material": "Aluminium 7075"}},
 
   {"tool": "create_cam", "args": {"name": "Plug top", "orient": "top", "origin": "stock_top_center",

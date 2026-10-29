@@ -270,8 +270,65 @@ impl Session {
         }
         let mut st = s.clone();
         st.mesh_size = Some(s.mesh_size.unwrap_or_else(|| input.auto_size()));
-        let o = fea::run(&st, &input, None, &|_, _| {}, &|| false)?;
+        // long solves report how far they are on stderr (stdout carries the results)
+        let start = std::time::Instant::now();
+        let last = std::cell::RefCell::new((String::new(), -1));
+        let progress = |stage: &str, f: f32| {
+            let step = (f * 10.0).floor() as i32;
+            let mut l = last.borrow_mut();
+            if l.0 != stage || l.1 != step {
+                eprintln!("{}: {stage} {}% ({:.0} s)", s.name, (f * 100.0).round(), start.elapsed().as_secs_f64());
+                *l = (stage.to_string(), step);
+            }
+        };
+        let o = fea::run(&st, &input, None, &progress, &|| false)?;
         Ok((st, o))
+    }
+
+    /// Supports' and loads' faces must be on the study's parts: a face ref that matches no face is
+    /// named here instead of failing at solve time.
+    fn check_faces(&mut self, s: &Study) -> R<()> {
+        if s.studio >= self.ws.studios.len() {
+            return Err(format!("no Part Studio {}", s.studio));
+        }
+        self.ensure_built(s.studio)?;
+        let input = fea::input(self.bodies(s.studio), self.studio_doc(s.studio), &s.bodies);
+        if input.tris.is_empty() {
+            return Ok(());
+        }
+        let resolve = |what: &str, faces: &[FacePick]| -> R<Vec<u32>> {
+            faces
+                .iter()
+                .enumerate()
+                .map(|(i, f)| {
+                    input.resolve(f).ok_or_else(|| {
+                        format!("{what}: faces[{i}] at [{}, {}, {}] is not on a face of the parts in Part Studio {} (list_geometry gives face refs)", round(f.point[0]), round(f.point[1]), round(f.point[2]), s.studio)
+                    })
+                })
+                .collect()
+        };
+        for sp in s.supports.iter().filter(|x| !x.suppressed) {
+            let what = format!("support {:?}", sp.name);
+            if sp.faces.is_empty() {
+                return Err(format!("{what} has no faces: give faces [{{point, normal}}] from list_geometry"));
+            }
+            resolve(&what, &sp.faces)?;
+        }
+        for l in s.loads.iter().filter(|x| !x.suppressed && x.kind != LoadKind::Gravity) {
+            let what = format!("load {:?}", l.name);
+            if l.faces.is_empty() {
+                return Err(format!("{what} has no faces: give faces [{{point, normal}}] from list_geometry"));
+            }
+            let ids = resolve(&what, &l.faces)?;
+            if let (Some(at), Some(r)) = (l.at, l.radius) {
+                let at = DVec3::from(at);
+                let near = input.tris.iter().zip(&input.face).any(|(t, f)| ids.contains(f) && crate::fea_mesh::closest_on_tri(at, t[0], t[1], t[2]).distance(at) <= r);
+                if !near {
+                    return Err(format!("{what}: none of its faces comes within radius {r} mm of at [{}, {}, {}]", round(at.x), round(at.y), round(at.z)));
+                }
+            }
+        }
+        Ok(())
     }
 
     pub(super) fn fea_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
@@ -281,9 +338,7 @@ impl Session {
                 let n = self.ws.sims.len() + 1;
                 let mut s = Study { name: format!("Simulation {n}"), studio: self.cur, ..Default::default() };
                 apply(&mut s, a)?;
-                if s.studio >= self.ws.studios.len() {
-                    return Err(format!("no Part Studio {}", s.studio));
-                }
+                self.check_faces(&s)?;
                 self.ws.sims.push(s.clone());
                 json!({"simulation": self.ws.sims.len() - 1, "study": s, "hint": "run solve_simulation for results"})
             }
@@ -291,6 +346,7 @@ impl Session {
                 let si = self.sim_idx(a)?;
                 let mut s = self.ws.sims[si].clone();
                 apply(&mut s, a)?;
+                self.check_faces(&s)?;
                 self.ws.sims[si] = s.clone();
                 json!({"simulation": si, "study": s})
             }
@@ -310,7 +366,7 @@ impl Session {
                 let (_, o) = self.sim_solve(si)?;
                 let png = self.render_outcome(&o, a)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"simulation": si, "saved": a.get("path")}), Some(png)));
             }
@@ -412,7 +468,7 @@ impl Session {
         let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
         let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(900).clamp(64, 4096) as u32;
         let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(700).clamp(64, 4096) as u32;
-        let dir = a.get("direction").and_then(|d| d.as_array()).and_then(|d| Some([d.first()?.as_f64()?, d.get(1)?.as_f64()?, d.get(2)?.as_f64()?]));
+        let dir = super::direction_arg(a)?;
         let png = super::raster_scene(&items, &[], view, dir, w, h)?;
         // what the picture shows, its colour scale and how much the shape is exaggerated
         let (name, unit) = match field {
@@ -548,7 +604,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Oak, Pine; \"\" = the part's material, steel when unset), mesh_size (element size mm, null = auto), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
         json!({"name": "edit_simulation", "description": "Change a Simulation tab (same fields as create_simulation; supports and loads replace the whole lists).", "inputSchema": obj(fields, &["simulation"])}),
-        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
+        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
         json!({"name": "render_simulation", "description": "PNG of a Simulation tab's result as a colour map (blue low → red high) on the exaggerated deformed shape: field stress (von Mises, default), max_principal, min_principal, displacement, or safety (red where the factor of safety is low); the picture carries a title, a colour scale and the deformation scale; mode (modal, 1-based), time (transient s; default the moment of largest displacement), deform (× the automatic exaggeration, 0 = undeformed), view/direction/width/height/path as in render.", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["simulation"])}),
     ]
 }

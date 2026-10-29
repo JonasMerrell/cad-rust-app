@@ -61,10 +61,20 @@ mod web_export;
 mod worker;
 mod workspace;
 
+/// Command line help; `prog` is the name the program was started as (cad-app in the release
+/// archives, cad-rust-app when built from source).
+fn usage(prog: &str) -> String {
+    format!(
+        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} --version | --help",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    let prog = args.first().and_then(|a| std::path::Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "cad-app".into());
     #[cfg(windows)]
-    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h")) {
+    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h") | Some("--version") | Some("-V")) || args.get(1).map(|a| a.starts_with('-') && a != "--kernel-worker").unwrap_or(false) {
         // print to the terminal that started us (the MCP server talks over pipes and needs no console)
         unsafe {
             windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
@@ -76,15 +86,21 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Some("run") => {
-            let Some(path) = args.get(2) else {
-                eprintln!("usage: cad-app run script.json");
+            let stop = args[2..].iter().any(|a| a == "--stop-on-error");
+            let rest: Vec<&String> = args[2..].iter().filter(|a| *a != "--stop-on-error").collect();
+            let (Some(path), 1) = (rest.first(), rest.len()) else {
+                eprintln!("usage: {prog} run [--stop-on-error] script.json");
                 std::process::exit(2);
             };
-            std::process::exit(agent::run_script(path));
+            if path.starts_with('-') {
+                eprintln!("unknown option {path}\nusage: {prog} run [--stop-on-error] script.json");
+                std::process::exit(2);
+            }
+            std::process::exit(agent::run_script(path, stop));
         }
         Some("script") => {
             let Some(path) = args.get(2) else {
-                eprintln!("usage: cad-app script file.rhai [args…]");
+                eprintln!("usage: {prog} script file.rhai [args…]");
                 std::process::exit(2);
             };
             // stdout carries the script's prints and result: keep OpenCascade's chatter off it
@@ -102,9 +118,23 @@ fn main() -> eframe::Result {
                 }
             }
         }
-        Some("--help") | Some("-h") => {
-            println!("cad-app [part.json]        open the editor\ncad-app mcp                Model Context Protocol server on stdio (for AI agents)\ncad-app run script.json    run a JSON list of tool calls (see AGENTS.md)\ncad-app script file.rhai   run a Rhai script with no window (see SCRIPTING.md)");
+        Some("--help") | Some("-h") | Some("help") => {
+            println!("{}", usage(&prog));
             return Ok(());
+        }
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("{prog} {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--kernel-worker") => {}
+        // (-psn_… is what older macOS Finder passes)
+        Some(a) if a.starts_with('-') && !a.starts_with("-psn") => {
+            eprintln!("unknown option {a}\n\n{}", usage(&prog));
+            std::process::exit(2);
+        }
+        Some(a) if args.len() > 2 => {
+            eprintln!("unexpected arguments after {a}\n\n{}", usage(&prog));
+            std::process::exit(2);
         }
         _ => {}
     }
