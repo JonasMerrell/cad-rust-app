@@ -65,6 +65,81 @@ fn apply(s: &mut Study, a: &Value) -> R<()> {
         Some(v) => s.mesh_size = Some(v.as_f64().filter(|x| *x > 0.0).ok_or("mesh_size: element size in mm (null for auto)")?),
         None => {}
     }
+    if let Some(m) = a.get("mode").and_then(|v| v.as_str()) {
+        s.mode = match m {
+            "simple" => fea::SimMode::Simple,
+            "advanced" => fea::SimMode::Advanced,
+            _ => return Err("mode: simple or advanced".into()),
+        };
+        if s.mode == fea::SimMode::Advanced {
+            s.analysis = Analysis::Static;
+        }
+    }
+    if let Some(list) = a.get("bcs") {
+        let list = list.as_array().ok_or("bcs: a list")?;
+        s.advanced.bcs.clear();
+        for x in list {
+            let kind = x.get("type").and_then(|v| v.as_str()).ok_or("bcs: each needs a type")?;
+            let bc: crate::fea_adv::BcType = serde_json::from_value(x.clone()).map_err(|e| format!("bcs ({kind}): {e}"))?;
+            let id = s.add_adv_bc(kind).ok_or_else(|| format!("bcs: no type {kind}"))?;
+            let b = s.advanced.bc_mut(id).unwrap();
+            b.bc = bc;
+            if x.get("faces").is_some() {
+                b.faces = faces_arg(x)?;
+            }
+            if let Some(n) = x.get("name").and_then(|v| v.as_str()) {
+                b.name = n.into();
+            }
+        }
+    }
+    if let Some(list) = a.get("periodic") {
+        let list = list.as_array().ok_or("periodic: a list")?;
+        s.advanced.periodic.clear();
+        for x in list {
+            let id = s.add_periodic();
+            let p = s.advanced.periodic_mut(id).unwrap();
+            let side = |k: &str| -> R<Vec<FacePick>> { x.get(k).map(|f| serde_json::from_value(f.clone()).map_err(|_| format!("periodic {k}: [face refs {{point, normal}}]"))).unwrap_or(Ok(vec![])) };
+            p.a = side("a")?;
+            p.b = side("b")?;
+            if let Some(o) = x.get("offset").filter(|v| !v.is_null()) {
+                p.offset = Some(serde_json::from_value(o.clone()).map_err(|_| "periodic offset: [x, y, z]")?);
+            }
+            if let Some(j) = x.get("jump") {
+                p.jump = serde_json::from_value(j.clone()).map_err(|_| "periodic jump: [x, y, z]")?;
+            }
+            if let Some(n) = x.get("name").and_then(|v| v.as_str()) {
+                p.name = n.into();
+            }
+        }
+    }
+    match a.get("gravity") {
+        Some(Value::Null) => s.advanced.gravity = None,
+        Some(v) => s.advanced.gravity = Some(serde_json::from_value(v.clone()).map_err(|_| "gravity: [x, y, z] in g (null for none)")?),
+        None => {}
+    }
+    if let Some(v) = a.get("solver").and_then(|v| v.as_str()) {
+        s.advanced.solver = match v {
+            "iterative" => crate::fea_adv::SolverKind::Iterative,
+            "direct" => crate::fea_adv::SolverKind::Direct,
+            _ => return Err("solver: iterative or direct".into()),
+        };
+    }
+    if let Some(r) = a.get("refine") {
+        s.refine = r.as_bool().ok_or("refine: true or false")?;
+    }
+    if let Some(list) = a.get("mesh_controls") {
+        let list = list.as_array().ok_or("mesh_controls: a list")?;
+        s.mesh_controls.clear();
+        for x in list {
+            let size = x.get("size").and_then(|v| v.as_f64()).filter(|v| *v > 0.0).ok_or("mesh_controls: each needs size (element size in mm)")?;
+            let id = s.add_mesh_control(size);
+            let c = s.mesh_control_mut(id).unwrap();
+            c.faces = faces_arg(x)?;
+            if let Some(n) = x.get("name").and_then(|v| v.as_str()) {
+                c.name = n.into();
+            }
+        }
+    }
     if let Some(n) = a.get("modes").and_then(|v| v.as_u64()) {
         s.modes = (n as usize).clamp(1, 50);
     }
@@ -170,7 +245,7 @@ fn summary(s: &Study, o: &Outcome) -> Value {
         "material": o.material,
         "material_props": {"E_mpa": o.mat.e, "poisson": o.mat.nu, "density_g_cm3": o.mat.rho * 1e9, "yield_mpa": o.mat.yield_mpa, "loss_factor": o.mat.eta},
         "mass_kg": sig(o.mass * 1e3),
-        "mesh": {"nodes": m.nodes.len(), "elements": m.tets.len(), "element": "10-node tetrahedron", "element_size_mm": round(if m.size > 0.0 { m.size } else { s.mesh_size.unwrap_or(0.0) }), "smallest_dihedral_deg": round(m.min_dihedral)},
+        "mesh": {"nodes": m.nodes.len(), "elements": m.tets.len(), "element": "10-node tetrahedron", "element_size_mm": round(if m.size > 0.0 { m.size } else { s.mesh_size.unwrap_or(0.0) }), "smallest_element_mm": round(if m.smallest > 0.0 { m.smallest } else { m.size }), "smallest_dihedral_deg": round(m.min_dihedral)},
         "warnings": o.warnings,
         "units": "mm, N, MPa, s",
     });
@@ -198,7 +273,7 @@ fn summary(s: &Study, o: &Outcome) -> Value {
             v["reactions"] = json!(
                 reactions
                     .iter()
-                    .map(|(id, r)| json!({"support": s.supports.iter().find(|x| x.id == *id).map(|x| x.name.clone()), "force_n": v3(*r), "magnitude_n": sig(r.length())}))
+                    .map(|(id, r)| json!({"support": s.supports.iter().find(|x| x.id == *id).map(|x| x.name.as_str()).or_else(|| s.advanced.name_of(*id)), "force_n": v3(*r), "magnitude_n": sig(r.length())}))
                     .collect::<Vec<_>>()
             );
         }
@@ -269,7 +344,7 @@ impl Session {
             return Err(format!("Part Studio {} has no parts to analyse", s.studio));
         }
         let mut st = s.clone();
-        st.mesh_size = Some(s.mesh_size.unwrap_or_else(|| input.auto_size()));
+        st.mesh_size = Some(s.element_size(&input));
         // long solves report how far they are on stderr (stdout carries the results)
         let start = std::time::Instant::now();
         let last = std::cell::RefCell::new((String::new(), -1));
@@ -598,11 +673,11 @@ pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     let fields = json!({
         "simulation": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"},
-        "analysis": {"type": "string"}, "material": {"type": "string"}, "loss_factors": {"type": "object"}, "mesh_size": {}, "modes": {"type": "integer"},
+        "analysis": {"type": "string"}, "material": {"type": "string"}, "loss_factors": {"type": "object"}, "mesh_size": {}, "refine": {"type": "boolean"}, "mesh_controls": {"type": "array"}, "mode": {"type": "string"}, "bcs": {"type": "array"}, "periodic": {"type": "array"}, "gravity": {}, "solver": {"type": "string"}, "modes": {"type": "integer"},
         "transient": {"type": "object"}, "supports": {"type": "array"}, "loads": {"type": "array"}
     });
     vec![
-        json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Oak, Pine; \"\" = the part's material, steel when unset), mesh_size (element size mm, null = auto), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
+        json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Oak, Pine; \"\" = the part's material, steel when unset), mesh_size (element size mm, null = auto), refine (default true: smaller elements at small holes and fillets, about a third of their radius, grading back to mesh_size), mesh_controls [{faces, size (element size mm on those faces), name}] (finer mesh where you expect the peak stress), mode (simple (default): supports and loads below; advanced: a static study with crackh3d's boundary conditions and solver, set with bcs, periodic, gravity and solver, and supports/loads ignored), bcs (advanced) [{type: fixed | displacement {u: [x|null, y|null, z|null] mm} | symmetry | pressure {p MPa} | traction {t: [x,y,z] MPa} | force {f: [x,y,z] N total} | spring {k: [x,y,z] N/mm³ per area} | remote_rigid {point, force, moment N·mm, u: [..|null], rot: [..|null] rad (null = free)} | remote_distributing {point, force, moment} | point_force {at: [x,y,z], f}, faces, name}], periodic (advanced) [{a: [face refs] (leads), b: [face refs] (follows), offset ([x,y,z] from A to B, default from face centres), jump ([x,y,z] mm: u_B - u_A, e.g. mean strain × offset), name}], gravity (advanced: [x,y,z] in g or null), solver (advanced: iterative (CG+AMG, default) | direct), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
         json!({"name": "edit_simulation", "description": "Change a Simulation tab (same fields as create_simulation; supports and loads replace the whole lists).", "inputSchema": obj(fields, &["simulation"])}),
         json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
         json!({"name": "render_simulation", "description": "PNG of a Simulation tab's result as a colour map (blue low → red high) on the exaggerated deformed shape: field stress (von Mises, default), max_principal, min_principal, displacement, or safety (red where the factor of safety is low); the picture carries a title, a colour scale and the deformation scale; mode (modal, 1-based), time (transient s; default the moment of largest displacement), deform (× the automatic exaggeration, 0 = undeformed), view/direction/width/height/path as in render.", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["simulation"])}),

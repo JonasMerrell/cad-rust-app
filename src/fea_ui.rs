@@ -20,6 +20,9 @@ use crate::render::{MeshVertex, SceneData, ViewportCallback};
 use crate::theme::{self, vp};
 use crate::workspace::Tab;
 
+#[path = "fea_adv_ui.rs"]
+mod adv;
+
 /// What the colours show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub enum Field {
@@ -99,6 +102,8 @@ pub struct FeaUi {
     /// A mesh too big to make without asking: (mesh key, estimated unknowns), and the key the user allowed.
     big: Option<(u64, f64)>,
     allowed_big: Option<u64>,
+    /// Picking a periodic pair's side B (else side A).
+    side_b: bool,
 }
 
 impl Default for FeaUi {
@@ -138,6 +143,7 @@ impl Default for FeaUi {
             show_max: Default::default(),
             big: Default::default(),
             allowed_big: Default::default(),
+            side_b: false,
         }
     }
 }
@@ -239,6 +245,8 @@ fn mesh_key(s: &Study, input: &Input, size: f64) -> u64 {
     hash_input(input, &mut h);
     fea::mixed(s, input).hash(&mut h);
     size.to_bits().hash(&mut h);
+    s.refine.hash(&mut h);
+    serde_json::to_string(&s.mesh_controls).unwrap_or_default().hash(&mut h);
     h.finish()
 }
 
@@ -321,11 +329,11 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
         app.fea.scene_dirty = true;
         return;
     }
-    let size = s.mesh_size.unwrap_or_else(|| input.auto_size());
+    let size = s.element_size(&input);
     let mk = mesh_key(&s, &input, size);
     let cached = app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk).map(|m| m.1.clone());
     // a mesh big enough to run out of memory waits until the user says to go ahead
-    let unknowns = 3.0 * input.estimate_nodes(size);
+    let unknowns = 3.0 * fea::estimate_nodes(&s, &input, size);
     if cached.is_none() && unknowns > BIG_MESH && app.fea.allowed_big != Some(mk) {
         app.fea.key = key;
         app.fea.outcome = None;
@@ -383,6 +391,9 @@ const BIG_MESH: f64 = 500_000.0;
 /// Whether a study has what its analysis needs before it is worth meshing: static needs a support and a
 /// load, transient a load; modal works on its own (free-free).
 fn ready(s: &Study) -> bool {
+    if s.mode == fea::SimMode::Advanced {
+        return s.advanced.bcs.iter().any(|b| !b.suppressed && b.bc.holds() && !b.faces.is_empty());
+    }
     let held = s.supports.iter().any(|x| !x.suppressed && !x.faces.is_empty());
     let loaded = s.loads.iter().any(|x| !x.suppressed && (x.kind == LoadKind::Gravity || !x.faces.is_empty()));
     match s.analysis {
@@ -429,7 +440,11 @@ fn modes(app: &App) -> usize {
 // ---------------------------------------------------------------- toolbar
 
 pub fn toolbar(app: &mut App, ui: &mut Ui) {
+    let simple = study(app).is_none_or(|s| s.mode == fea::SimMode::Simple);
     App::group(ui, |ui| {
+        if !simple {
+            return;
+        }
         for (k, tip) in [(SupportKind::Fixed, "Hold faces so they cannot move"), (SupportKind::Roller, "Let faces slide but not move off their surface (also for symmetry planes)")]
         {
             if app.tool_button(ui, k.icon(), k.label(), tip, k == SupportKind::Fixed, false, true).clicked() {
@@ -438,6 +453,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        if !simple {
+            return;
+        }
         for (k, tip) in
             [(LoadKind::Force, "A force spread over faces"), (LoadKind::Pressure, "A pressure pushing on faces"), (LoadKind::Gravity, "The part's own weight, or any acceleration")]
         {
@@ -512,6 +530,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             edit(app, |s| {
                 s.supports.retain(|x| x.id != id);
                 s.loads.retain(|x| x.id != id);
+                s.mesh_controls.retain(|x| x.id != id);
+                s.advanced.bcs.retain(|x| x.id != id);
+                s.advanced.periodic.retain(|x| x.id != id);
             });
         }
     }
@@ -540,9 +561,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     };
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         section(ui, "Study", |ui| study_ui(app, ui));
-        section(ui, "Supports", |ui| items_ui(app, ui, true));
-        section(ui, "Loads", |ui| items_ui(app, ui, false));
-        if let Some(id) = app.fea.sel {
+        let advanced = study(app).is_some_and(|s| s.mode == fea::SimMode::Advanced);
+        if advanced {
+            adv::sections(app, ui);
+        } else {
+            section(ui, "Supports", |ui| items_ui(app, ui, true));
+            section(ui, "Loads", |ui| items_ui(app, ui, false));
+        }
+        if let Some(id) = app.fea.sel.filter(|_| !advanced) {
             let s = study(app);
             if s.map(|s| s.supports.iter().any(|x| x.id == id)).unwrap_or(false) {
                 section(ui, "Support", |ui| support_ui(app, ui, id));
@@ -550,12 +576,15 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 section(ui, "Load", |ui| load_ui(app, ui, id));
             }
         }
-        match study(app).map(|s| s.analysis) {
+        match study(app).filter(|s| s.mode == fea::SimMode::Simple).map(|s| s.analysis) {
             Some(Analysis::Modal) => section(ui, "Modes", |ui| modal_settings(app, ui)),
             Some(Analysis::Transient) => section(ui, "Time history", |ui| transient_settings(app, ui)),
             _ => {}
         }
         section(ui, "Mesh", |ui| mesh_ui(app, ui));
+        if let Some(id) = app.fea.sel.filter(|id| study(app).is_some_and(|s| s.mesh_controls.iter().any(|x| x.id == *id))) {
+            section(ui, "Mesh control", |ui| mesh_control_ui(app, ui, id));
+        }
         section(ui, "Results", |ui| results_ui(app, ui));
     });
     if study(app).map(|c| *c != before).unwrap_or(false) {
@@ -612,6 +641,20 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
             });
         });
     }
+    let mut mode = s.mode;
+    row(ui, "Mode", |ui| {
+        ui.radio_value(&mut mode, fea::SimMode::Simple, "Simple").on_hover_text("Supports and loads; static, modal and transient analyses");
+        ui.radio_value(&mut mode, fea::SimMode::Advanced, "Advanced")
+            .on_hover_text("crackh3d's boundary conditions (displacement, symmetry, traction, springs, remote points, …), periodic pairs and its solver; static only");
+    });
+    if mode != s.mode {
+        s.mode = mode;
+        if mode == fea::SimMode::Advanced {
+            s.analysis = Analysis::Static;
+        }
+    }
+    let advanced = s.mode == fea::SimMode::Advanced;
+    if !advanced {
     row(ui, "Analysis", |ui| {
         egui::ComboBox::from_id_salt("fea-analysis").width(160.0).selected_text(s.analysis.label()).show_ui(ui, |ui| {
             for a in Analysis::ALL {
@@ -624,6 +667,7 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+    }
     row(ui, "Material", |ui| {
         let from_part = format!("From part ({})", part_material.clone().unwrap_or_else(|| "Steel".into()));
         let text = if s.material.is_empty() { from_part.clone() } else { s.material.clone() };
@@ -651,6 +695,9 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
                 s.loss_factors.insert(name.clone(), v);
             }
         }
+    }
+    if advanced {
+        adv::study_rows(app, ui);
     }
     if let Some(i) = need_build {
         crate::cam_ui::ensure_built(app, i);
@@ -907,7 +954,7 @@ fn transient_settings(app: &mut App, ui: &mut Ui) {
 
 fn mesh_ui(app: &mut App, ui: &mut Ui) {
     let Some(s) = study(app).cloned() else { return };
-    let auto = study_input(app, &s).auto_size();
+    let auto = study_input(app, &s).auto_size(s.refine);
     let mut size = s.mesh_size;
     row(ui, "Element size", |ui| {
         let mut on = size.is_some();
@@ -928,19 +975,85 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
             m.mesh_size = size;
         }
     }
+    let mut refine = s.refine;
+    if ui
+        .checkbox(&mut refine, "Refine at holes and fillets")
+        .on_hover_text("Smaller elements on small holes and fillets, where the stress peaks, growing back to the element size away from them")
+        .changed()
+    {
+        edit(app, |m| m.refine = refine);
+    }
+    // mesh controls: smaller elements on chosen faces
+    let mut action: Option<(&str, u64)> = None;
+    for c in &s.mesh_controls {
+        let sel = app.fea.sel == Some(c.id);
+        ui.horizontal(|ui| {
+            let mut text = RichText::new(&c.name).size(12.5);
+            if c.suppressed {
+                text = text.color(theme::muted()).strikethrough();
+            }
+            let r = ui.add(egui::Button::selectable(sel, text).truncate());
+            if r.clicked() {
+                action = Some(("select", c.id));
+            }
+            r.context_menu(|ui| {
+                if ui.button(if c.suppressed { "Unsuppress" } else { "Suppress" }).clicked() {
+                    action = Some(("suppress", c.id));
+                    ui.close();
+                }
+                if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
+                    action = Some(("delete", c.id));
+                    ui.close();
+                }
+            });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                ui.label(RichText::new(format!("{} mm · {}", trim(c.size), faces_text(c.faces.len()))).color(theme::muted()).size(11.5));
+            });
+        });
+    }
+    if ui.small_button("Add mesh control").on_hover_text("A smaller element size on faces you pick, such as a fillet where the stress peaks").clicked() {
+        let mut id = 0;
+        let h = size.unwrap_or(auto);
+        edit(app, |m| id = m.add_mesh_control(fea::nice(h / 4.0)));
+        app.fea.sel = Some(id);
+        app.fea.show_results = false;
+        app.fea.scene_dirty = true;
+    }
+    match action {
+        Some(("select", id)) => {
+            app.fea.sel = if app.fea.sel == Some(id) { None } else { Some(id) };
+            app.fea.show_results = app.fea.sel.is_none();
+            app.fea.scene_dirty = true;
+        }
+        Some(("suppress", id)) => edit(app, |m| {
+            if let Some(c) = m.mesh_control_mut(id) {
+                c.suppressed = !c.suppressed;
+            }
+        }),
+        Some((_, id)) => {
+            edit(app, |m| m.mesh_controls.retain(|c| c.id != id));
+            if app.fea.sel == Some(id) {
+                app.fea.sel = None;
+            }
+        }
+        None => {}
+    }
     let input = study_input(app, &s);
     let want = size.unwrap_or(auto);
     match app.fea.outcome.as_ref().filter(|o| (o.mesh.size - input.used_size(want)).abs() <= 1e-9 * want.max(1.0)) {
         Some(o) => {
             let m = &o.mesh;
             ui.label(RichText::new(format!("{} nodes · {} elements (10-node)", m.nodes.len(), m.tets.len())).color(theme::muted()).size(12.0));
+            if m.smallest > 0.0 && m.smallest < 0.99 * m.size {
+                ui.label(RichText::new(format!("Refined down to {} mm", trim(fea::nice(m.smallest)))).color(theme::muted()).size(12.0));
+            }
             if m.min_dihedral < 8.0 {
                 ui.label(RichText::new(format!("Some elements are flat (smallest angle {:.0}°); try another element size", m.min_dihedral)).color(theme::error_soft()).size(12.0));
             }
         }
         None if !input.tris.is_empty() => {
             // before meshing: how big the mesh will be
-            let nodes = input.estimate_nodes(want);
+            let nodes = fea::estimate_nodes(&s, &input, want);
             let col = if 3.0 * nodes > BIG_MESH { theme::error_soft() } else { theme::muted() };
             ui.label(RichText::new(format!("About {} nodes · {} unknowns", fmt_count(nodes), fmt_count(3.0 * nodes))).color(col).size(12.0));
         }
@@ -951,6 +1064,19 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new(format!("{} mm is too small for parts this big: {} mm is used", trim(want), trim(used))).color(theme::error_soft()).size(12.0));
     }
     ui.label(RichText::new("Smaller elements are more accurate but slower. Thin walls want at least two elements across.").color(theme::muted()).size(11.5));
+}
+
+fn mesh_control_ui(app: &mut App, ui: &mut Ui, id: u64) {
+    let Some(si) = index(app) else { return };
+    let Some(c) = app.ws.sims[si].mesh_control_mut(id) else { return };
+    row(ui, "Name", |ui| {
+        ui.text_edit_singleline(&mut c.name);
+    });
+    row(ui, "Element size", |ui| {
+        ui.add(egui::DragValue::new(&mut c.size).range(0.01..=10000.0).speed(0.02).suffix(" mm").max_decimals(3))
+            .on_hover_text("Element size on the faces; it grows back to the study's element size away from them");
+    });
+    faces_row(app, ui, id);
 }
 
 fn results_ui(app: &mut App, ui: &mut Ui) {
@@ -1077,10 +1203,10 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
             });
             if let Some(s) = study(app) {
                 for (id, r) in reactions {
-                    if let Some(sp) = s.supports.iter().find(|x| x.id == *id) {
+                    if let Some(name) = s.supports.iter().find(|x| x.id == *id).map(|x| x.name.as_str()).or_else(|| s.advanced.name_of(*id)) {
                         // round-off (below a micronewton) shows as 0
                         let r = r.map(|v| if v.abs() < 1e-6 { 0.0 } else { v });
-                        row(ui, &format!("{} reaction", sp.name), |ui| {
+                        row(ui, &format!("{name} reaction"), |ui| {
                             ui.vertical(|ui| {
                                 ui.label(RichText::new(format!("{} N", sig(r.length()))).strong().size(12.5).color(vcol));
                                 ui.label(RichText::new(format!("x {} · y {} · z {}", sig(r.x), sig(r.y), sig(r.z))).color(theme::muted()).size(11.5));
@@ -1351,6 +1477,9 @@ fn body_faces(bodies: &[BodyMesh], doc: Option<&crate::doc::Document>, s: &Study
     out
 }
 
+/// Marks side B of a periodic pair in `FeaUi::picks`.
+const SIDE_B: u64 = 1 << 63;
+
 fn update_picks(app: &mut App) {
     let Some(s) = study(app).cloned() else { return };
     let input = study_input(app, &s);
@@ -1359,7 +1488,15 @@ fn update_picks(app: &mut App) {
         return;
     }
     app.fea.picks_key = key;
-    let ids = s.supports.iter().map(|x| (x.id, &x.faces)).chain(s.loads.iter().map(|x| (x.id, &x.faces)));
+    let ids = s
+        .supports
+        .iter()
+        .map(|x| (x.id, &x.faces))
+        .chain(s.loads.iter().map(|x| (x.id, &x.faces)))
+        .chain(s.mesh_controls.iter().map(|x| (x.id, &x.faces)))
+        .chain(s.advanced.bcs.iter().map(|x| (x.id, &x.faces)))
+        // a periodic pair's side A under its id, side B under the id with the top bit set
+        .chain(s.advanced.periodic.iter().flat_map(|x| [(x.id, &x.a), (x.id | SIDE_B, &x.b)]));
     app.fea.picks = ids.map(|(id, f)| (id, f.iter().filter_map(|p| input.resolve(p)).collect())).collect();
 }
 
@@ -1395,8 +1532,26 @@ fn build_scene(app: &mut App) -> SceneData {
             tint.insert(f, load_col);
         }
     }
+    if s.mode == fea::SimMode::Advanced {
+        tint.clear();
+        for b in s.advanced.bcs.iter().filter(|x| !x.suppressed) {
+            for f in face_of_item(b.id) {
+                tint.insert(f, if b.bc.holds() { support_col } else { load_col });
+            }
+        }
+        let (side_a, side_b) = (Color32::from_rgb(0x2f, 0x9e, 0x5b), Color32::from_rgb(0xd8, 0x8a, 0x2a));
+        for p in s.advanced.periodic.iter().filter(|x| !x.suppressed) {
+            for f in face_of_item(p.id) {
+                tint.insert(f, side_a);
+            }
+            for f in face_of_item(p.id | SIDE_B) {
+                tint.insert(f, side_b);
+            }
+        }
+    }
     if let Some(id) = app.fea.sel {
-        for f in face_of_item(id) {
+        let periodic = s.advanced.periodic.iter().any(|p| p.id == id);
+        for f in face_of_item(if periodic && app.fea.side_b { id | SIDE_B } else { id }) {
             tint.insert(f, sel_col);
         }
     }
@@ -1692,7 +1847,17 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let local = resp.hover_pos().map(|p| Vec2::new(p.x - rect.left(), p.y - rect.top()));
     // picking faces for the selected support or load
     let picking =
-        app.fea.sel.filter(|id| study(app).map(|s| s.supports.iter().any(|x| x.id == *id) || s.loads.iter().any(|x| x.id == *id && x.kind != LoadKind::Gravity)).unwrap_or(false));
+        app.fea.sel.filter(|id| {
+            study(app)
+                .map(|s| {
+                    s.supports.iter().any(|x| x.id == *id)
+                        || s.loads.iter().any(|x| x.id == *id && x.kind != LoadKind::Gravity)
+                        || s.mesh_controls.iter().any(|x| x.id == *id)
+                        || s.advanced.bcs.iter().any(|x| x.id == *id && x.bc.on_faces())
+                        || s.advanced.periodic.iter().any(|x| x.id == *id)
+                })
+                .unwrap_or(false)
+        });
     if let (Some(id), Some(s)) = (picking, study(app).cloned()) {
         let h = local.and_then(|l| hit(app, &s, l));
         let hf = h.as_ref().map(|x| x.1);
@@ -1703,8 +1868,13 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         if resp.clicked() {
             if let Some((pick, gf)) = h {
                 let input = study_input(app, &s);
+                let side_b = app.fea.side_b;
                 edit(app, |st| {
-                    if let Some(f) = st.faces_mut(id) {
+                    let f = match st.advanced.periodic_mut(id) {
+                        Some(p) => Some(if side_b { &mut p.b } else { &mut p.a }),
+                        None => st.faces_mut(id),
+                    };
+                    if let Some(f) = f {
                         if let Some(k) = f.iter().position(|p| input.resolve(p) == Some(gf)) {
                             f.remove(k);
                         } else {

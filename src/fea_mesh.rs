@@ -332,6 +332,8 @@ pub struct Mesh {
     pub body: Vec<u32>,
     /// The element size used (mm): the one asked for, unless that was too small for the parts' size.
     pub size: f64,
+    /// The smallest element size asked for where the mesh is refined (`size` when it is not).
+    pub smallest: f64,
 }
 
 pub const TET_EDGES: [(usize, usize); 6] = [(0, 1), (1, 2), (2, 0), (0, 3), (1, 3), (2, 3)];
@@ -386,19 +388,21 @@ pub fn min_dihedral(p: [DVec3; 4]) -> f64 {
     m
 }
 
-/// Mesh the inside of `surf` with elements about `size` across.
-pub fn mesh(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+/// Mesh the inside of `surf` with elements about `size` across, finer where `sizing` asks.
+pub fn mesh(surf: &Surface, size: f64, sizing: &Sizing, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
     let lat = lattice(surf, size)?;
-    stuff(surf, &lat, None, cancel)
+    let bg = background(surf, &lat, sizing, cancel)?;
+    stuff(surf, &lat, &bg, None, cancel)
 }
 
 /// Mesh each part on its own, on one shared lattice, and join the meshes where the parts touch:
 /// the nodes on a shared face coincide, so the parts are bonded there and each element keeps its part.
-pub fn mesh_parts(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+pub fn mesh_parts(surf: &Surface, size: f64, sizing: &Sizing, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
     let lat = lattice(surf, size)?;
+    let bg = background(surf, &lat, sizing, cancel)?;
     let mut parts = vec![];
     for b in 0..surf.bodies as u32 {
-        match stuff(surf, &lat, Some(b), cancel) {
+        match stuff(surf, &lat, &bg, Some(b), cancel) {
             Ok(m) => parts.push((b, m)),
             Err(e) if e.starts_with("The mesh is empty") => {}
             Err(e) => return Err(e),
@@ -409,8 +413,11 @@ pub fn mesh_parts(surf: &Surface, size: f64, cancel: &dyn Fn() -> bool) -> Resul
     }
     // the parts' meshes come from one lattice, so they meet node for node; only the points on the
     // surface differ a little, by up to a few times the inside test's nudge (`Surface::eps`)
-    let mut m = weld(parts, (surf.eps.length() * 100.0).max(lat.hs.min_element() * 1e-6).min(lat.hs.min_element() * 0.01));
+    // the welding tolerance is a small part of the smallest element
+    let hmin = lat.hs.min_element() * bg.smallest / lat.size;
+    let mut m = weld(parts, (surf.eps.length() * 100.0).max(hmin * 1e-6).min(hmin * 0.01));
     m.size = lat.size;
+    m.smallest = bg.smallest.min(lat.size);
     Ok(m)
 }
 
@@ -424,7 +431,8 @@ pub fn mesh_sized(surf: &Surface, sizes: &[f64], cancel: &dyn Fn() -> bool) -> R
         let Some((lo, hi)) = surf.body_bounds(b) else { continue };
         let size = sizes.get(b as usize).copied().or(sizes.last().copied()).unwrap_or(10.0);
         let lat = lattice_box(lo, hi, size).map_err(|e| format!("part {b}: {e}"))?;
-        let m = match stuff(surf, &lat, Some(b), cancel) {
+        let bg = background(surf, &lat, &Sizing::default(), cancel)?;
+        let m = match stuff(surf, &lat, &bg, Some(b), cancel) {
             Ok(m) => m,
             Err(e) if e.starts_with("The mesh is empty") => return Err(format!("part {b}: element size {size} mm is larger than the part")),
             Err(e) => return Err(e),
@@ -432,6 +440,7 @@ pub fn mesh_sized(surf: &Surface, sizes: &[f64], cancel: &dyn Fn() -> bool) -> R
         let off = out.nodes.len() as u32;
         out.min_dihedral = out.min_dihedral.min(m.min_dihedral);
         out.size = out.size.max(m.size);
+        out.smallest = if out.smallest > 0.0 { out.smallest.min(m.smallest) } else { m.smallest };
         out.nodes.extend(m.nodes);
         out.tets.extend(m.tets.iter().map(|t| t.map(|v| v + off)));
         out.body.extend(std::iter::repeat_n(b, m.tets.len()));
@@ -528,7 +537,7 @@ fn weld(parts: Vec<(u32, Mesh)>, tol: f64) -> Mesh {
     let mut grid: HashMap<[i64; 3], Vec<u32>> = HashMap::new();
     let cell = tol * 4.0;
     let key = |p: DVec3| [(p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64];
-    let mut out = Mesh { nodes: vec![], tets: vec![], faces: vec![], min_dihedral: 180.0, body: vec![], size: 0.0 };
+    let mut out = Mesh { min_dihedral: 180.0, ..Default::default() };
     let mut faces: Vec<([u32; 6], u32)> = vec![];
     for (b, m) in parts {
         let map: Vec<u32> = m
@@ -574,6 +583,288 @@ fn weld(parts: Vec<(u32, Mesh)>, tol: f64) -> Mesh {
 }
 
 /// The background lattice: cells about `size` across fitted to the parts' bounding box.
+/// How much the wanted element size grows per mm away from a refined face.
+pub const GRADING: f64 = 0.5;
+
+/// Where the mesh should be finer than the lattice: points on faces with the element size wanted there.
+/// Away from them the size grows by `GRADING` per mm until it reaches the lattice's.
+#[derive(Clone, Debug, Default)]
+pub struct Sizing {
+    pub points: Vec<(DVec3, f64)>,
+    /// Area of each patch added and its size, for estimating the node count.
+    pub patches: Vec<(f64, f64)>,
+}
+
+impl Sizing {
+    /// Ask for elements about `size` across on triangles `tris` (sampled about every `size`, but no more
+    /// than some 200 000 points in all).
+    pub fn add_tris<'a>(&mut self, tris: impl Iterator<Item = &'a [DVec3; 3]> + Clone, size: f64) {
+        if !(size > 0.0) {
+            return;
+        }
+        let area: f64 = tris.clone().map(|t| (t[1] - t[0]).cross(t[2] - t[0]).length() / 2.0).sum();
+        self.patches.push((area, size));
+        let step = size.max((area / 200_000.0).sqrt());
+        for t in tris {
+            let long = t[0].distance(t[1]).max(t[1].distance(t[2])).max(t[2].distance(t[0]));
+            let n = ((long / step).ceil() as usize).clamp(1, 1000);
+            for i in 0..=n {
+                for j in 0..=n - i {
+                    let (u, v) = (i as f64 / n as f64, j as f64 / n as f64);
+                    self.points.push((t[0] + (t[1] - t[0]) * u + (t[2] - t[0]) * v, size));
+                }
+            }
+        }
+    }
+}
+
+/// The wanted element size at a point: the lattice size `h`, or smaller near `Sizing` points.
+struct SizeField {
+    cell: f64,
+    h: f64,
+    bins: HashMap<[i64; 3], Vec<(DVec3, f64)>>,
+}
+
+impl SizeField {
+    fn new(sizing: &Sizing, h: f64, floor: f64) -> SizeField {
+        let cell = h.max(1e-9);
+        let mut bins: HashMap<[i64; 3], Vec<(DVec3, f64)>> = HashMap::new();
+        for (p, s) in &sizing.points {
+            if *s < h {
+                bins.entry(Self::key(cell, *p)).or_default().push((*p, s.max(floor)));
+            }
+        }
+        SizeField { cell, h, bins }
+    }
+
+    fn key(cell: f64, p: DVec3) -> [i64; 3] {
+        [(p.x / cell).floor() as i64, (p.y / cell).floor() as i64, (p.z / cell).floor() as i64]
+    }
+
+    fn at(&self, p: DVec3) -> f64 {
+        if self.bins.is_empty() {
+            return self.h;
+        }
+        // points further than h / GRADING away cannot ask for less than h
+        let r = (1.0 / GRADING).ceil() as i64;
+        let k = Self::key(self.cell, p);
+        let mut best = self.h;
+        for dx in -r..=r {
+            for dy in -r..=r {
+                for dz in -r..=r {
+                    if let Some(v) = self.bins.get(&[k[0] + dx, k[1] + dy, k[2] + dz]) {
+                        for (q, s) in v {
+                            best = best.min(s + GRADING * q.distance(p));
+                        }
+                    }
+                }
+            }
+        }
+        best
+    }
+}
+
+/// Lattice tetrahedra that reach inside the parts, bisected (longest edge first, Rivara) where the size
+/// field wants smaller elements. Vertices keep the lattice numbering (corners, then cell centres); the
+/// bisection's new vertices follow.
+struct Background {
+    pos: Vec<DVec3>,
+    tets: Vec<[u32; 4]>,
+    /// Whether each vertex is inside any part.
+    inside: Vec<bool>,
+    /// Smallest element size asked for (the lattice size when nothing is refined).
+    smallest: f64,
+}
+
+fn background(surf: &Surface, lat: &Lattice, sizing: &Sizing, cancel: &dyn Fn() -> bool) -> Result<Background, String> {
+    let (origin, hs, nc) = (lat.origin, lat.hs, lat.nc);
+    let total_cells = nc[0] * nc[1] * nc[2];
+    let nbk = [nc[0] + 1, nc[1] + 1, nc[2] + 1];
+    let nblack = nbk[0] * nbk[1] * nbk[2];
+    let black = |i: usize, j: usize, k: usize| i + nbk[0] * (j + nbk[1] * k);
+    let red = |i: usize, j: usize, k: usize| nblack + i + nc[0] * (j + nc[1] * k);
+    let mut pos = Vec::with_capacity(nblack + total_cells);
+    for k in 0..nbk[2] {
+        for j in 0..nbk[1] {
+            for i in 0..nbk[0] {
+                pos.push(origin + DVec3::new(i as f64, j as f64, k as f64) * hs);
+            }
+        }
+    }
+    for k in 0..nc[2] {
+        for j in 0..nc[1] {
+            for i in 0..nc[0] {
+                pos.push(origin + (DVec3::new(i as f64, j as f64, k as f64) + 0.5) * hs);
+            }
+        }
+    }
+    let mut inside: Vec<bool> = pos.iter().map(|p| surf.inside_of(*p, None)).collect();
+    if cancel() {
+        return Err("cancelled".into());
+    }
+    let h = hs.max_element();
+    // refine no finer than a sixteenth of the lattice (four halvings)
+    let field = SizeField::new(sizing, h, h / 16.0);
+    let refine = !field.bins.is_empty();
+    let mut target: Vec<f64> = if refine { pos.iter().map(|p| field.at(*p)).collect() } else { vec![] };
+    // lattice tetrahedra: two adjacent cell centres and the four corners of the face between them
+    let mut tets: Vec<[u32; 4]> = vec![];
+    for k in 0..nc[2] {
+        for j in 0..nc[1] {
+            for i in 0..nc[0] {
+                let c0 = red(i, j, k);
+                for a in 0..3 {
+                    let (i1, j1, k1) = match a {
+                        0 => (i + 1, j, k),
+                        1 => (i, j + 1, k),
+                        _ => (i, j, k + 1),
+                    };
+                    if i1 >= nc[0] || j1 >= nc[1] || k1 >= nc[2] {
+                        continue;
+                    }
+                    let c1 = red(i1, j1, k1);
+                    let q = match a {
+                        0 => [black(i1, j, k), black(i1, j + 1, k), black(i1, j + 1, k + 1), black(i1, j, k + 1)],
+                        1 => [black(i, j1, k), black(i, j1, k + 1), black(i + 1, j1, k + 1), black(i + 1, j1, k)],
+                        _ => [black(i, j, k1), black(i + 1, j, k1), black(i + 1, j + 1, k1), black(i, j + 1, k1)],
+                    };
+                    for m in 0..4 {
+                        let t = [c0, c1, q[m], q[(m + 1) % 4]].map(|x| x as u32);
+                        // skip tets far from the inside (but keep the ones being refined: a small
+                        // feature may only show up on the finer vertices)
+                        if t.iter().any(|v| inside[*v as usize]) || (refine && t.iter().any(|v| target[*v as usize] < 0.8 * h)) {
+                            tets.push(t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+    let mut smallest = h;
+    if refine {
+        let mut b = Bisection::new(pos, tets, h);
+        let mut work: Vec<u32> = (0..b.tets.len() as u32).collect();
+        let mut n = 0usize;
+        while let Some(t) = work.pop() {
+            n += 1;
+            if n % 4096 == 0 && cancel() {
+                return Err("cancelled".into());
+            }
+            if !b.alive[t as usize] {
+                continue;
+            }
+            let tv = b.tets[t as usize];
+            let want = tv.iter().map(|v| target[*v as usize]).fold(f64::INFINITY, f64::min);
+            let (e, len2) = b.longest(&tv);
+            if len2.sqrt() <= 1.2 * want {
+                continue;
+            }
+            smallest = smallest.min(want);
+            b.split(e);
+            // size and inside test of the new vertices
+            while target.len() < b.pos.len() {
+                let p = b.pos[target.len()];
+                target.push(field.at(p));
+                inside.push(surf.inside_of(p, None));
+            }
+            work.append(&mut b.born);
+            if b.tets.len() > 20_000_000 {
+                return Err("The mesh refinement is too fine for parts this big; use a larger refinement size".into());
+            }
+        }
+        pos = b.pos;
+        tets = b.tets.into_iter().zip(b.alive).filter(|(t, a)| *a && t.iter().any(|v| inside[*v as usize])).map(|(t, _)| t).collect();
+    }
+    Ok(Background { pos, tets, inside, smallest })
+}
+
+/// Conforming longest-edge bisection of a tetrahedral mesh (Rivara): an edge is split only once it is the
+/// longest edge of every element around it, which keeps the mesh free of hanging vertices and its elements'
+/// shapes to a few classes.
+struct Bisection {
+    pos: Vec<DVec3>,
+    tets: Vec<[u32; 4]>,
+    alive: Vec<bool>,
+    around: HashMap<(u32, u32), Vec<u32>>,
+    /// Elements made since this was last emptied.
+    born: Vec<u32>,
+    /// Squared lengths are compared in steps of 1e-9 h², so edges of (nearly) one length tie and the vertex
+    /// numbers decide, the same way for every element.
+    unit: f64,
+}
+
+impl Bisection {
+    fn new(pos: Vec<DVec3>, tets: Vec<[u32; 4]>, h: f64) -> Bisection {
+        let mut around: HashMap<(u32, u32), Vec<u32>> = HashMap::new();
+        for (i, t) in tets.iter().enumerate() {
+            for (a, b) in TET_EDGES {
+                around.entry(Self::key(t[a], t[b])).or_default().push(i as u32);
+            }
+        }
+        let alive = vec![true; tets.len()];
+        Bisection { pos, tets, alive, around, born: vec![], unit: h * h * 1e-9 }
+    }
+
+    fn key(a: u32, b: u32) -> (u32, u32) {
+        if a < b { (a, b) } else { (b, a) }
+    }
+
+    /// The element's longest edge and its squared length.
+    fn longest(&self, t: &[u32; 4]) -> ((u32, u32), f64) {
+        TET_EDGES
+            .iter()
+            .map(|(a, b)| {
+                let e = Self::key(t[*a], t[*b]);
+                let l = self.pos[e.0 as usize].distance_squared(self.pos[e.1 as usize]);
+                ((l / self.unit).round() as i64, e, l)
+            })
+            .max_by_key(|x| (x.0, x.1))
+            .map(|x| (x.1, x.2))
+            .unwrap()
+    }
+
+    /// Split edge `e` and every element on it, first splitting (recursively) the elements on it whose
+    /// longest edge is another one.
+    fn split(&mut self, e: (u32, u32)) {
+        loop {
+            let ts = self.around.get(&e).cloned().unwrap_or_default();
+            match ts.iter().find(|t| self.longest(&self.tets[**t as usize]).0 != e) {
+                Some(t) => {
+                    let other = self.longest(&self.tets[*t as usize]).0;
+                    self.split(other);
+                }
+                None => break,
+            }
+        }
+        let Some(ts) = self.around.remove(&e) else { return };
+        let m = self.pos.len() as u32;
+        self.pos.push((self.pos[e.0 as usize] + self.pos[e.1 as usize]) * 0.5);
+        for t in ts {
+            let tv = self.tets[t as usize];
+            self.alive[t as usize] = false;
+            for (a, b) in TET_EDGES {
+                let k = Self::key(tv[a], tv[b]);
+                if k != e {
+                    if let Some(v) = self.around.get_mut(&k) {
+                        v.retain(|x| *x != t);
+                    }
+                }
+            }
+            // replacing an end of the split edge by its midpoint keeps the orientation
+            for end in [e.0, e.1] {
+                let c = tv.map(|v| if v == end { m } else { v });
+                let i = self.tets.len() as u32;
+                self.tets.push(c);
+                self.alive.push(true);
+                for (a, b) in TET_EDGES {
+                    self.around.entry(Self::key(c[a], c[b])).or_default().push(i);
+                }
+                self.born.push(i);
+            }
+        }
+    }
+}
+
 struct Lattice {
     origin: DVec3,
     hs: DVec3,
@@ -604,67 +895,19 @@ fn lattice_box(blo: DVec3, bhi: DVec3, size: f64) -> Result<Lattice, String> {
     Ok(Lattice { origin: blo - hs, hs, nc, size })
 }
 
-/// Isosurface stuffing of the inside of part `only` (or of all the parts) on the lattice.
-fn stuff(surf: &Surface, lat: &Lattice, only: Option<u32>, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
-    let (origin, hs, nc) = (lat.origin, lat.hs, lat.nc);
-    let total_cells = nc[0] * nc[1] * nc[2];
-    let nbk = [nc[0] + 1, nc[1] + 1, nc[2] + 1];
-    let nblack = nbk[0] * nbk[1] * nbk[2];
-    let black = |i: usize, j: usize, k: usize| i + nbk[0] * (j + nbk[1] * k);
-    let red = |i: usize, j: usize, k: usize| nblack + i + nc[0] * (j + nc[1] * k);
-    let nlat = nblack + total_cells;
-    let mut pos = Vec::with_capacity(nlat);
-    for k in 0..nbk[2] {
-        for j in 0..nbk[1] {
-            for i in 0..nbk[0] {
-                pos.push(origin + DVec3::new(i as f64, j as f64, k as f64) * hs);
-            }
-        }
-    }
-    for k in 0..nc[2] {
-        for j in 0..nc[1] {
-            for i in 0..nc[0] {
-                pos.push(origin + (DVec3::new(i as f64, j as f64, k as f64) + 0.5) * hs);
-            }
-        }
-    }
-    // sign of every lattice vertex: 1 inside, -1 outside, 0 on the surface (after warping)
-    let mut sign: Vec<i8> = pos.iter().map(|p| if surf.inside_of(*p, only) { 1 } else { -1 }).collect();
+/// Isosurface stuffing of the inside of part `only` (or of all the parts) on the background mesh.
+fn stuff(surf: &Surface, lat: &Lattice, bg: &Background, only: Option<u32>, cancel: &dyn Fn() -> bool) -> Result<Mesh, String> {
+    let hs = lat.hs;
+    let mut pos = bg.pos.clone();
+    // sign of every vertex: 1 inside, -1 outside, 0 on the surface (after warping)
+    let mut sign: Vec<i8> = match only {
+        None => bg.inside.iter().map(|x| if *x { 1 } else { -1 }).collect(),
+        Some(_) => pos.iter().map(|p| if surf.inside_of(*p, only) { 1 } else { -1 }).collect(),
+    };
     if cancel() {
         return Err("cancelled".into());
     }
-    // lattice tetrahedra: two adjacent cell centres and the four corners of the face between them
-    let mut tets: Vec<[u32; 4]> = vec![];
-    for k in 0..nc[2] {
-        for j in 0..nc[1] {
-            for i in 0..nc[0] {
-                let c0 = red(i, j, k);
-                for a in 0..3 {
-                    let (i1, j1, k1) = match a {
-                        0 => (i + 1, j, k),
-                        1 => (i, j + 1, k),
-                        _ => (i, j, k + 1),
-                    };
-                    if i1 >= nc[0] || j1 >= nc[1] || k1 >= nc[2] {
-                        continue;
-                    }
-                    let c1 = red(i1, j1, k1);
-                    let q = match a {
-                        0 => [black(i1, j, k), black(i1, j + 1, k), black(i1, j + 1, k + 1), black(i1, j, k + 1)],
-                        1 => [black(i, j1, k), black(i, j1, k + 1), black(i + 1, j1, k + 1), black(i + 1, j1, k)],
-                        _ => [black(i, j, k1), black(i + 1, j, k1), black(i + 1, j + 1, k1), black(i, j + 1, k1)],
-                    };
-                    for m in 0..4 {
-                        let t = [c0, c1, q[m], q[(m + 1) % 4]].map(|x| x as u32);
-                        // skip tets far from the inside
-                        if t.iter().any(|v| sign[*v as usize] > 0) {
-                            tets.push(t);
-                        }
-                    }
-                }
-            }
-        }
-    }
+    let tets: Vec<[u32; 4]> = bg.tets.iter().filter(|t| t.iter().any(|v| sign[*v as usize] > 0)).copied().collect();
     // cut points on edges between inside and outside vertices (by bisection on the inside test)
     let mut cuts: HashMap<(u32, u32), DVec3> = HashMap::new();
     let key = |a: u32, b: u32| if a < b { (a, b) } else { (b, a) };
@@ -707,8 +950,10 @@ fn stuff(surf: &Surface, lat: &Lattice, only: Option<u32>, cancel: &dyn Fn() -> 
             }
             let Some(c) = cuts.get(k) else { continue };
             let len = pos[v as usize].distance(pos[o as usize]);
-            // red-black edges are the short ones
-            let is_short = (v as usize >= nblack) != (o as usize >= nblack);
+            // the lattice's long edges (corner to corner, centre to centre) run along an axis; the short ones
+            // (corner to centre) don't
+            let d = (pos[v as usize] - pos[o as usize]).abs();
+            let is_short = d.x + d.y + d.z - d.max_element() > 1e-6 * len;
             let alpha = if is_short { short } else { long };
             let d = c.distance(pos[v as usize]);
             if d < alpha * len && best.map(|b| d < b.0).unwrap_or(true) {
@@ -802,6 +1047,7 @@ fn stuff(surf: &Surface, lat: &Lattice, only: Option<u32>, cancel: &dyn Fn() -> 
     let min_dihedral = corners_tets.iter().map(|t| min_dihedral(t.map(|v| nodes[v as usize]))).fold(180.0, f64::min);
     let mut m = quadratic(surf, nodes, corners_tets, min_dihedral);
     m.size = lat.size;
+    m.smallest = bg.smallest.min(lat.size);
     Ok(m)
 }
 
@@ -1039,5 +1285,5 @@ fn quadratic(surf: &Surface, mut nodes: Vec<DVec3>, tets: Vec<[u32; 4]>, min_dih
             ([f[0], f[1], f[2], m(f[0], f[1]), m(f[1], f[2]), m(f[2], f[0])], face)
         })
         .collect();
-    Mesh { nodes, tets: out, faces, min_dihedral, body: vec![], size: 0.0 }
+    Mesh { nodes, tets: out, faces, min_dihedral, ..Default::default() }
 }
