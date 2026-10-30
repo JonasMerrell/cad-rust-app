@@ -70,6 +70,7 @@ mod sketch_import;
 mod session;
 mod sketcher;
 mod stdparts;
+mod stock_size;
 mod stdparts_ui;
 mod text;
 mod theme;

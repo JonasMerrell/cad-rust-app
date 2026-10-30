@@ -59,6 +59,9 @@ pub struct TitleBlock {
     /// Material (the part's material when empty).
     #[serde(default)]
     pub material: String,
+    /// Raw stock under the material (the part's stock size when empty; "none" leaves it out).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub stock: String,
     #[serde(default)]
     pub revision: String,
     #[serde(default)]

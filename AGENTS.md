@@ -74,6 +74,7 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 | `printability` / `send_to_slicer` | overhang and thin-wall check; stage the parts as STL in the orcaweb slicer |
 | `set_part` / `set_parts` / `add_decal` | part name, colour, material, finish, hidden (one part, or a list with one rebuild); the names show in `describe` and every result; images on faces |
 | `feature_defaults` | a feature kind's params with their defaults (no kind: the list of kinds) |
+| `stock_size` | the raw stock each part is machined from: smallest standard plate, flat/square bar or round bar with allowances (set_part `stock` changes how) |
 | `mass_properties` | exact volume, mass, centre of gravity and inertia tensor of each part (from its material, or a material/density for all) and of all of them together |
 | `ray_cast` / `classify_points` | surface crossings along rays; whether points are in, on or out of the parts |
 | `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |

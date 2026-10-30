@@ -698,6 +698,9 @@ pub struct PartProps {
     /// Surface finish: "matte", "satin", "glossy", "metal" or "glass".
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub finish: Option<String>,
+    /// How its raw stock is worked out (shape, size standard, allowances); `None` = the defaults.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stock: Option<crate::stock_size::StockPref>,
 }
 
 /// (name, density g/cm³)
