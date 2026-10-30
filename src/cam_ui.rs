@@ -759,15 +759,24 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                     num(ui, "Under the head", &mut m.seat, " mm", 0.0..=200.0, 0.1);
                 }
                 num(ui, "Grip depth", &mut sj.grip, " mm", 0.5..=200.0, 0.1);
-                if !(sj.printed && sj.one_piece) {
+                if sj.printed && sj.one_piece {
+                    num(ui, "Slit", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
+                    num(ui, "Slit stops above base", &mut sj.web, " mm", 0.0..=200.0, 0.1);
+                    num(ui, "Slit end rounds", &mut sj.flare, " mm", 0.0..=50.0, 0.1);
+                } else {
                     num(ui, "Gap", &mut sj.gap, " mm", 0.0..=100.0, 0.1);
                 }
                 if ui.checkbox(&mut sj.printed, "3D printed").on_hover_text("Print the jaws instead of machining them: no reliefs for a cutter, and they go to a Part Studio to export as STEP").changed() {
                     sj.clearance = if sj.printed { 0.15 } else { 0.05 };
                 }
                 if sj.printed {
-                    ui.checkbox(&mut sj.one_piece, "One block")
-                        .on_hover_text("Print one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and is squeezed round the part");
+                    if ui
+                        .checkbox(&mut sj.one_piece, "One block")
+                        .on_hover_text("Print one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and is squeezed round the part, with a slit down the middle so it closes on it")
+                        .changed()
+                    {
+                        sj.gap = if sj.one_piece { 1.0 } else { 4.0 };
+                    }
                 }
                 num(ui, "Clearance", &mut sj.clearance, " mm", 0.0..=2.0, 0.01);
                 if !sj.printed {

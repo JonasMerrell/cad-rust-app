@@ -1137,9 +1137,12 @@ pub struct SoftJaws {
     /// jaws go to a Part Studio to export (STEP) rather than to a machining setup.
     pub printed: bool,
     /// 3D printed as one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and
-    /// is squeezed round the part (the gap is filled in).
+    /// is squeezed round the part. The gap is a slit down the middle, open at the ends with `flare` radius
+    /// rounds, that stops `web` above the bottom so the halves stay joined (0: two halves).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub one_piece: bool,
+    pub web: f64,
+    pub flare: f64,
     /// How the jaws bolt into the vise: screw holes, and the vise steel around them (None: plain blanks).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount: Option<JawMount>,
@@ -1230,7 +1233,7 @@ pub fn jaw_mount(name: &str) -> Option<(JawMount, f64, f64)> {
 
 impl Default for SoftJaws {
     fn default() -> Self {
-        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false, one_piece: false, mount: None }
+        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false, one_piece: false, web: 1.5, flare: 5.0, mount: None }
     }
 }
 
