@@ -3,7 +3,7 @@
 `parts.rhai` builds a desktop robot arm with the scripting API: base yaw, shoulder, elbow, wrist pitch
 and wrist roll, plus a gear-coupled two-finger gripper.
 
-    mkdir out && cad-rust-app script examples/robot-arm/parts.rhai out
+    mkdir out && rcad script examples/robot-arm/parts.rhai out
 
 It writes one STEP per part in that part's own frame (the machined parts lie flat, ready for a
 Manufacture tab), `robot-arm-assembly.step`, `Shoulder-yoke-assembly.step` (yoke base and both cheeks,

@@ -1,8 +1,8 @@
-# Scripting cad-app
+# Scripting rCAD
 
-`cad-app script file.rhai [args…]` runs a [Rhai](https://rhai.rs) script with no window, using the
-same OpenCascade kernel as the editor (built from source the program is `cad-rust-app`; the release
-archives call it `cad-app`). Arguments are in the `ARGS` array, `print` writes to stdout,
+`rcad script file.rhai [args…]` runs a [Rhai](https://rhai.rs) script with no window, using the
+same OpenCascade kernel as the editor (built from source the program is `target/release/rcad`).
+Arguments are in the `ARGS` array, `print` writes to stdout,
 and the script's last value is printed as JSON. OpenCascade's own messages (such as the STEP
 writer's statistics) go to stderr, so stdout can be piped to `jq`. File paths are relative to the
 working directory, and file errors name the path. A failed operation throws an error with OCCT's

@@ -1,4 +1,4 @@
-// Extra OpenCascade operations for cad-rust-app. Every function catches OCCT
+// Extra OpenCascade operations for rCAD. Every function catches OCCT
 // exceptions and returns a null shape instead (cxx can't translate
 // Standard_Failure, and an uncaught one aborts the process). The message of
 // the last failure is available from ex_last_error().

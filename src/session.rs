@@ -803,7 +803,7 @@ fn recover_prompt(app: &mut App, ctx: &egui::Context) {
     egui::Modal::new(egui::Id::new("recover")).show(ctx, |ui| {
         modal_frame(ui, "Recover unsaved work?");
         let name = orig.as_ref().map(|p| file_name(p)).unwrap_or_else(|| "an untitled document".into());
-        ui.label(format!("cad-app closed without saving changes to {name}. An autosave from {when} is available."));
+        ui.label(format!("rCAD closed without saving changes to {name}. An autosave from {when} is available."));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
             if ui.add(egui::Button::new(RichText::new("Recover").color(egui::Color32::WHITE)).fill(theme::accent())).clicked() {

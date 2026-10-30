@@ -1,7 +1,7 @@
 //! Agent interface: the same modelling tools as the GUI, driven by JSON.
 //!
-//! * `cad-app mcp` runs a Model Context Protocol server on stdio.
-//! * `cad-app run script.json` runs a list of tool calls and prints the results.
+//! * `rcad mcp` runs a Model Context Protocol server on stdio.
+//! * `rcad run script.json` runs a list of tool calls and prints the results.
 //!
 //! Both work headless and keep one Part Studio document in memory; every
 //! change rebuilds the model in the kernel worker and reports errors.
@@ -1416,7 +1416,7 @@ fn merge_coincident(sk: &mut Sketch) -> Vec<(Id, Id)> {
 fn stl_binary(r: &RebuildResult) -> Vec<u8> {
     let n: usize = r.bodies.iter().map(|b| b.indices.len() / 3).sum();
     let mut out = vec![0u8; 80];
-    out[..24].copy_from_slice(b"cad-app binary STL     \0");
+    out[..24].copy_from_slice(b"rCAD binary STL        \0");
     out.extend((n as u32).to_le_bytes());
     for b in &r.bodies {
         for t in b.indices.chunks(3) {
@@ -1488,7 +1488,7 @@ pub(crate) fn tools() -> Value {
     json!([
         {"name": "new_document", "description": "Start a new empty Part Studio. Units: mm (default), cm, m, in, ft.", "inputSchema": obj(json!({"units": {"type": "string"}}), &[])},
         {"name": "open_document", "description": "Open a .json document; its first Part Studio becomes active (see describe for the other tabs).", "inputSchema": obj(json!({"path": {"type": "string"}}), &["path"])},
-        {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the cad-app GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
+        {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the rCAD GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
         {"name": "describe", "description": "Features (with their full params; imported files show only their size and a hash), variables, parts (name, volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},
         {"name": "create_sketch", "description": "New sketch on 'top' (XY), 'front' (XZ, normal -Y), 'right' (YZ), or a ref such as a planar face ref from list_geometry or {\"kind\":\"feature_plane\",\"feature\":id}. Returns sketch_id and the plane frame (sketch x/y axes in 3D).", "inputSchema": obj(json!({"plane": {}, "name": {"type": "string"}}), &[])},
@@ -1556,7 +1556,7 @@ pub fn failed(v: &Value) -> bool {
 }
 
 pub fn mcp_main() {
-    // `--bridge ADDR --token T`: the cad-app chat panel started this server through Claude Code,
+    // `--bridge ADDR --token T`: the rCAD chat panel started this server through Claude Code,
     // and tool calls go to the document open in that window
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
@@ -1565,7 +1565,7 @@ pub fn mcp_main() {
     let mut forward = |name: &str, args: &Value| -> R<Value> {
         let (addr, token) = bridge.as_ref().unwrap();
         if link.is_none() {
-            let c = std::net::TcpStream::connect(addr).map_err(|e| format!("the cad-app window is not reachable: {e}"))?;
+            let c = std::net::TcpStream::connect(addr).map_err(|e| format!("the rCAD window is not reachable: {e}"))?;
             let r = std::io::BufReader::new(c.try_clone().map_err(|e| e.to_string())?);
             link = Some((c, r));
         }
@@ -1575,7 +1575,7 @@ pub fn mcp_main() {
         let got = sent.and_then(|_| r.read_line(&mut line));
         if got.is_err() || line.is_empty() {
             link = None;
-            return Err("lost the connection to the cad-app window".into());
+            return Err("lost the connection to the rCAD window".into());
         }
         serde_json::from_str(&line).map_err(|e| e.to_string())
     };
@@ -1611,7 +1611,7 @@ pub fn mcp_main() {
                 Some(json!({
                     "protocolVersion": version,
                     "capabilities": {"tools": {}},
-                    "serverInfo": {"name": "cad-app", "version": env!("CARGO_PKG_VERSION")},
+                    "serverInfo": {"name": "rcad", "version": env!("CARGO_PKG_VERSION")},
                     "instructions": "Parametric CAD (OpenCascade). Typical flow: create_sketch → sketch_add (+ sketch_constrain) → add_feature extrude with profiles [{sketch: id}] → list_geometry to get face/edge refs → more features → render to check → export / save_document. Lengths are mm. feature_defaults shows a feature kind's params. A call that leaves a feature failing returns isError with ok:false and new_errors (rollback:true undoes it)."
                 }))
             }
@@ -1655,7 +1655,7 @@ pub fn mcp_main() {
     }
 }
 
-/// `cad-app run script.json`: a JSON array of {"tool": name, "args": {...}} steps. Relative input
+/// `rcad run script.json`: a JSON array of {"tool": name, "args": {...}} steps. Relative input
 /// files are also looked for next to the script; outputs go to the working directory. A step that
 /// fails (including a feature that doesn't build) makes the exit status 1; `stop_on_error` stops there.
 pub fn run_script(path: &str, stop_on_error: bool) -> i32 {

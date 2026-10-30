@@ -10,4 +10,4 @@ exec podman run -d --name ${CADGUI:-cadgui} \
   localhost/cad-gui bash -c '
     Xvfb :1 -screen 0 1600x1040x24 -nolisten tcp >/tmp/xvfb.log 2>&1 &
     sleep 1; openbox >/tmp/openbox.log 2>&1 &
-    sleep 1; exec '"$ROOT"'/target/release/cad-rust-app "$@" >'"$ROOT"'/shots/app.log 2>&1' _ "$@"
+    sleep 1; exec '"$ROOT"'/target/release/rcad "$@" >'"$ROOT"'/shots/app.log 2>&1' _ "$@"

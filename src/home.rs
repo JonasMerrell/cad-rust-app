@@ -262,7 +262,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 8.0;
             ui.add(icons::image("logo", 20.0).tint(theme::accent()));
-            ui.label(RichText::new("cad-app").family(theme::medium()).size(15.0).color(theme::text()));
+            ui.label(RichText::new("rCAD").family(theme::medium()).size(15.0).color(theme::text()));
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (icon, tip) = if app.dark { ("sun", "Switch to light mode") } else { ("moon", "Switch to dark mode") };
                 if ui.add(egui::Button::image(icons::image(icon, 17.0).tint(theme::text()))).on_hover_text(tip).clicked() {

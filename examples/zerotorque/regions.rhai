@@ -1,5 +1,5 @@
 // ZeroTorque's 2D region-helper tests, reproduced with the scripting API:
-//   cad-rust-app script examples/zerotorque/regions.rhai
+//   rcad script examples/zerotorque/regions.rhai
 // Each check prints PASS or FAIL; the script fails (exit code 1) if any fails.
 
 let failed = 0;

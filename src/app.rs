@@ -884,7 +884,7 @@ impl App {
     }
 
     fn export_obj_to(&mut self, p: std::path::PathBuf) {
-        let mut out = String::from("# cad-app\n");
+        let mut out = String::from("# rCAD\n");
         let mut base = 1usize;
         for b in &self.result.bodies {
             out.push_str(&format!("o {}\n", self.part_name(b.id).replace(' ', "_")));
@@ -958,7 +958,7 @@ impl App {
             return;
         }
         let name = self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part".into());
-        let tmp = std::env::temp_dir().join(format!("cad-app-send-{}.stl", std::process::id()));
+        let tmp = std::env::temp_dir().join(format!("rcad-send-{}.stl", std::process::id()));
         let path = tmp.to_string_lossy().to_string();
         self.pending_send = Some((path.clone(), name));
         self.kernel.export(&self.doc, &format!("stl@{}", self.print.stl_tolerance), path);
@@ -1340,7 +1340,7 @@ impl App {
                 crate::home::show_home(self);
             }
             if !self.phone {
-                ui.label(RichText::new("cad-app").family(theme::medium()).size(15.0).color(theme::text()));
+                ui.label(RichText::new("rCAD").family(theme::medium()).size(15.0).color(theme::text()));
                 let (r, _) = ui.allocate_exact_size(egui::vec2(1.0, 18.0), Sense::hover());
                 ui.painter().vline(r.center().x, r.y_range(), Stroke::new(1.0, theme::border()));
             }
@@ -3275,8 +3275,8 @@ impl eframe::App for App {
                 self.toast_ui(&ctx);
             }
             crate::session::windows(self, &ctx);
-            if ctx.input(|i| i.viewport().title.as_deref() != Some("cad-app")) {
-                ctx.send_viewport_cmd(egui::ViewportCommand::Title("cad-app".into()));
+            if ctx.input(|i| i.viewport().title.as_deref() != Some("rCAD")) {
+                ctx.send_viewport_cmd(egui::ViewportCommand::Title("rCAD".into()));
             }
             return;
         }
@@ -3371,7 +3371,7 @@ impl eframe::App for App {
         self.toast_ui(&ctx);
         crate::session::windows(self, &ctx);
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
-        let title = format!("cad-app · {}{name}", if self.is_dirty() { "• " } else { "" });
+        let title = format!("rCAD · {}{name}", if self.is_dirty() { "• " } else { "" });
         if ctx.input(|i| i.viewport().title.as_deref() != Some(title.as_str())) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }

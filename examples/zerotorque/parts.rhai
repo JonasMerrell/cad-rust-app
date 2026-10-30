@@ -1,6 +1,6 @@
 // Stand-in ZeroTorque parts (a mallet head, a hosel plug with a foam core), built with the
 // scripting API and exported as STEP for the CAM and FEA examples:
-//   cad-rust-app script examples/zerotorque/parts.rhai [output folder]
+//   rcad script examples/zerotorque/parts.rhai [output folder]
 // Units mm. Head: X toe-heel, Y face (y = 0) to back, Z sole (z = 0) up.
 
 let out = if ARGS.len() > 0 { ARGS[0] + "/" } else { "" };

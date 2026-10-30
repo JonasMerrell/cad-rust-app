@@ -2,7 +2,7 @@
 members = [".", "python", "crates/crackh3d-fe"]
 
 [package]
-name = "cad-rust-app"
+name = "rcad"
 version = "0.4.0"
 edition = "2024"
 license = "AGPL-3.0-only"

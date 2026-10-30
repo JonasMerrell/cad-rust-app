@@ -250,7 +250,7 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
         );
     }
     let _ = write!(s, "<tr><th></th><th>Total</th><th></th><th></th><th></th><th></th><th></th><th class=\"n\">{}</th><th></th></tr></table>", time(total));
-    s.push_str("<p class=\"muted\">Heights are in work coordinates, relative to the work zero. Made by cad-rust-app.</p></body></html>\n");
+    s.push_str("<p class=\"muted\">Heights are in work coordinates, relative to the work zero. Made by rCAD.</p></body></html>\n");
     s
 }
 
