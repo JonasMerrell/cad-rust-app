@@ -52,7 +52,7 @@ build the part from features with a rollback bar, configurations, materials and 
   chamfer, shell, hole (simple, counterbore, countersink, ISO sizes), draft, thicken, rib, move face,
   delete face, helix, planes (offset, angle, 3 points, normal to curve, mid plane), linear and circular
   patterns and mirror of parts or features, boolean, split, transform/copy, delete body, sheet metal
-  (bent profile or plate, K-factor flat pattern DXF), and STEP/IGES import.
+  (bent profile or plate, K-factor flat pattern DXF), and STEP/Parasolid (.x_t)/IGES import.
 - **Around them:** variables and configurations, rollback bar, suppress and hide, part names,
   colours, materials and mass properties, raw stock sizes (the smallest standard plate, bar or
   round bar a part fits in, shown in the BOM, the title block and as a CAM stock preset),
@@ -261,6 +261,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/doc.rs` | document model (features, references, variables), JSON format |
 | `src/kernel.rs` | feature evaluation on OpenCascade, meshing |
 | `src/import.rs` | STEP and IGES import |
+| `src/parasolid.rs` | Parasolid text (.x_t) reader, turned into STEP on import |
 | `src/worker.rs` | kernel worker process protocol |
 | `src/expr.rs` | expressions and units |
 | `src/assembly.rs`, `src/asm_ui.rs` | assemblies, the mate solver and the Assembly tab |

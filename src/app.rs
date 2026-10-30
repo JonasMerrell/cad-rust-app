@@ -847,8 +847,8 @@ impl App {
     }
 
     pub fn import_step(&mut self) {
-        let exts = ["step", "stp", "igs", "iges", "stl", "obj", "dxf", "svg", "zip", "STEP", "STP", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG", "ZIP"];
-        self.with_open_path("Import", "STEP, IGES, STL, OBJ, DXF, SVG, ZIP", &exts, |a, p| a.import_path(&p));
+        let exts = ["step", "stp", "x_t", "igs", "iges", "stl", "obj", "dxf", "svg", "zip", "STEP", "STP", "X_T", "IGS", "IGES", "STL", "OBJ", "DXF", "SVG", "ZIP"];
+        self.with_open_path("Import", "STEP, Parasolid, IGES, STL, OBJ, DXF, SVG, ZIP", &exts, |a, p| a.import_path(&p));
     }
 
     pub fn import_path(&mut self, p: &std::path::Path) {
@@ -868,25 +868,25 @@ impl App {
                     self.changed();
                 }
                 Ok(f) if !f.skipped.is_empty() => self.flash(format!("The ZIP only has native CAD files ({}). Download the STEP version instead.", f.skipped.join(", ")), ToastKind::Error),
-                Ok(_) => self.flash("The ZIP has no STEP, IGES, STL or OBJ files", ToastKind::Error),
+                Ok(_) => self.flash("The ZIP has no STEP, Parasolid, IGES, STL or OBJ files", ToastKind::Error),
                 Err(e) => self.flash(e, ToastKind::Error),
             }
             return;
         }
         let Some(format) = crate::import::format_of(p) else {
-            self.flash("Import STEP, IGES, STL, OBJ, DXF, SVG or ZIP files", ToastKind::Info);
+            self.flash("Import STEP, Parasolid (.x_t), IGES, STL, OBJ, DXF, SVG or ZIP files", ToastKind::Info);
             return;
         };
-        match std::fs::read(p) {
-            Ok(bytes) => {
+        let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into());
+        match std::fs::read(p).map_err(|e| format!("Could not read {}: {e}", p.display())).and_then(|b| crate::import::storable(format, b, &name)) {
+            Ok((format, bytes)) => {
                 self.checkpoint();
-                let name = p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into());
                 let op = Op::Import { name: name.clone(), step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale: "1".into(), merge: true };
                 self.doc.insert(name, op);
                 self.first_fit = true;
                 self.changed();
             }
-            Err(e) => self.flash(format!("Could not read {}: {e}", p.display()), ToastKind::Error),
+            Err(e) => self.flash(e, ToastKind::Error),
         }
     }
 

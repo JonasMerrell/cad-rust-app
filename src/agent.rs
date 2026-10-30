@@ -578,9 +578,10 @@ impl Session {
             "import_file" => {
                 let path = self.input_path(&str_arg(a, "path")?);
                 let p = std::path::Path::new(&path);
-                let format = crate::import::format_of(p).ok_or("import .step, .stp, .iges, .igs, .stl, .obj, .dxf or .svg files")?;
+                let format = crate::import::format_of(p).ok_or("import .step, .stp, .x_t, .iges, .igs, .stl, .obj, .dxf or .svg files")?;
                 let bytes = std::fs::read(p).map_err(|e| format!("can't open {path}: {e}"))?;
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| p.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or("Import".into()));
+                let (format, bytes) = crate::import::storable(format, bytes, &name)?;
                 let scale = a.get("scale").map(val_str).unwrap_or_else(|| "1".into());
                 let merge = a.get("merge_faces").and_then(|m| m.as_bool()).unwrap_or(true);
                 let id = self.doc.insert(name.clone(), Op::Import { name, step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale, merge });

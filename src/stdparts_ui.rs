@@ -105,7 +105,7 @@ fn rebuild(app: &mut App, si: usize) {
     }
 }
 
-/// Import a downloaded model (STEP, IGES, STL, OBJ or a ZIP of them) into a new Part Studio and
+/// Import a downloaded model (STEP, Parasolid, IGES, STL, OBJ or a ZIP of them) into a new Part Studio and
 /// insert it into the open assembly: one part as an instance, several as a sub-assembly.
 pub fn import_into_assembly(app: &mut App, path: &std::path::Path) {
     let Some(asm) = crate::asm_ui::asm_index(app) else { return };
@@ -115,7 +115,7 @@ pub fn import_into_assembly(app: &mut App, path: &std::path::Path) {
     };
     if found.files.is_empty() {
         let msg = if found.skipped.is_empty() {
-            format!("{} has no STEP, IGES, STL or OBJ files", path.display())
+            format!("{} has no STEP, Parasolid, IGES, STL or OBJ files", path.display())
         } else {
             format!(
                 "{} only has native CAD files ({}). Download the STEP version instead.",
@@ -266,8 +266,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         insert_standard(app, &STANDARDS[i], size, len);
     }
     if choose {
-        let exts = ["zip", "step", "stp", "igs", "iges", "stl", "obj", "ZIP", "STEP", "STP", "IGS", "IGES", "STL", "OBJ"];
-        import = app.open_file_dialog("ZIP, STEP, IGES, STL, OBJ", &exts);
+        let exts = ["zip", "step", "stp", "x_t", "igs", "iges", "stl", "obj", "ZIP", "STEP", "STP", "X_T", "IGS", "IGES", "STL", "OBJ"];
+        import = app.open_file_dialog("ZIP, STEP, Parasolid, IGES, STL, OBJ", &exts);
     }
     if let Some(p) = import {
         import_into_assembly(app, &p);

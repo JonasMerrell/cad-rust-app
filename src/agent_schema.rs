@@ -282,7 +282,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("edit_feature", "suppressed") => t("boolean", "suppress or unsuppress the feature"),
         ("delete_feature", "id") => json!({"type": "integer", "minimum": 1, "description": "feature id"}),
         ("feature_defaults", "kind") => en(&FEATURE_KINDS, "a feature kind; leave out to list the kinds"),
-        ("import_file", "path") => t("string", "file to import (.step, .stp, .iges, .igs, .stl, .obj, .dxf, .svg); relative paths are also looked for next to a `run` script"),
+        ("import_file", "path") => t("string", "file to import (.step, .stp, .x_t Parasolid, .iges, .igs, .stl, .obj, .dxf, .svg); relative paths are also looked for next to a `run` script"),
         ("import_file", "scale") => json!({"type": ["number", "string"], "exclusiveMinimum": 0, "description": "scale factor, e.g. 25.4 for a file in inches (default 1)"}),
         ("import_file", "merge_faces") => t("boolean", "meshes: join coplanar triangles into flat faces (default true)"),
         ("import_file", "name") => t("string", "feature (or new sketch) name; default the file name"),
