@@ -19,6 +19,10 @@ pub struct MachineUi {
     importing: Option<(usize, Receiver<Result<MachineModel, String>>)>,
     /// The machine being checked or edited in the window.
     pub editing: Option<MachineModel>,
+    /// Parts being read to add onto the table: (group name, receiver).
+    adding: Option<(String, Receiver<Result<Vec<cam_machine::StepPart>, String>>)>,
+    /// How far to move each group (by name) in the window.
+    moves: std::collections::HashMap<String, [f64; 3]>,
     /// Draw the machine in the simulation (on unless turned off).
     pub hide: bool,
     /// Keep the work still and move the whole machine around it, instead of the base staying put.
@@ -112,6 +116,21 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         }
     }
     let Some(mut m) = app.cam.machine.editing.take() else { return };
+    if let Some((g, rx)) = &app.cam.machine.adding {
+        if let Ok(r) = rx.try_recv() {
+            let g = g.clone();
+            app.cam.machine.adding = None;
+            match r {
+                Ok(parts) => {
+                    let n = parts.len();
+                    m.add_on_table(&g, parts, glam::DVec3::ZERO);
+                    app.flash_info(format!("Added {n} parts of {g} on the middle of the table: move them where they stand, then Save"), Some(std::time::Duration::from_secs(4)));
+                }
+                Err(e) => app.flash(format!("Could not read the parts: {e}"), ToastKind::Error),
+            }
+        }
+    }
+    let mut add_step = false;
     let mut open = true;
     let mut save = false;
     let mut close = false;
@@ -183,6 +202,9 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                     groups.push(g);
                 }
             }
+            let mut gone: Option<String> = None;
+            let mut shift: Option<(String, [f64; 3])> = None;
+            let moves = &mut app.cam.machine.moves;
             egui::ScrollArea::vertical().max_height(260.0).id_salt("cam-machine-parts").show(ui, |ui| {
                 for g in &groups {
                     let ids: Vec<usize> = (0..m.parts.len()).filter(|&i| m.parts[i].name.split('/').next() == Some(g.as_str())).collect();
@@ -201,6 +223,20 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                             }
                         }
                         ui.label(RichText::new(cam_machine::clean(g)).size(12.5));
+                        if ui.small_button("✕").on_hover_text("Take these parts off the machine (something it doesn't have)").clicked() {
+                            gone = Some(g.clone());
+                        }
+                    });
+                    egui::CollapsingHeader::new(RichText::new("Move").size(11.5).color(theme::muted())).id_salt(("cam-machine-move", g)).show(ui, |ui| {
+                        let d = moves.entry(g.clone()).or_insert([0.0; 3]);
+                        ui.horizontal(|ui| {
+                            for v in d.iter_mut() {
+                                ui.add(egui::DragValue::new(v).speed(0.5).max_decimals(2).suffix(" mm"));
+                            }
+                            if ui.small_button("Move").on_hover_text("Move these parts by X/Y/Z (model coordinates)").clicked() {
+                                shift = Some((g.clone(), *d));
+                            }
+                        });
                     });
                     if ids.len() > 1 {
                         egui::CollapsingHeader::new(RichText::new(format!("{} parts", ids.len())).size(11.5).color(theme::muted())).id_salt(("cam-machine-sub", g)).show(ui, |ui| {
@@ -220,8 +256,21 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                     }
                 }
             });
+            if let Some(g) = gone {
+                let full = m.parts.iter().find(|p| p.name.split('/').next() == Some(g.as_str())).map(|p| p.name.split('/').next().unwrap_or("").to_string()).unwrap_or(g);
+                m.remove(&full);
+            }
+            if let Some((g, d)) = shift {
+                m.shift_group(&g, glam::DVec3::from(d));
+                app.cam.machine.moves.remove(&g);
+            }
             ui.add_space(6.0);
             ui.horizontal(|ui| {
+                if app.cam.machine.adding.is_some() {
+                    ui.spinner();
+                } else if ui.button("Add parts from STEP…").on_hover_text("Put something that stands on the table (a vise, a tool setter, a fixture plate) on the machine; it rides with the table").clicked() {
+                    add_step = true;
+                }
                 if ui.button("Save").on_hover_text("Keep these settings for the machine (every setup that uses it)").clicked() {
                     save = true;
                 }
@@ -230,6 +279,18 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 }
             });
         });
+    if add_step {
+        if let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp", "STEP", "STP"]).pick_file() {
+            let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Fixture".into());
+            let (tx, rx) = channel();
+            let ctx = ctx.clone();
+            std::thread::spawn(move || {
+                let _ = tx.send(cam_machine::read_step(&path));
+                ctx.request_repaint();
+            });
+            app.cam.machine.adding = Some((name, rx));
+        }
+    }
     if save {
         match cam_machine::save(&m) {
             Ok(_) => {

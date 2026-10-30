@@ -297,6 +297,39 @@ pub fn guess(name: &str, parts: Vec<(String, [u8; 3], Vec<[Vec3; 3]>)>) -> Machi
 }
 
 impl MachineModel {
+    /// Remove the parts of a top-level assembly ("4-5 Axis Assembly v22:1"), or one part by its full name.
+    /// Returns how many went.
+    pub fn remove(&mut self, name: &str) -> usize {
+        let n = self.parts.len();
+        self.parts.retain(|p| !(p.name == name || p.name.starts_with(&format!("{name}/")) || clean(p.name.split('/').next().unwrap_or("")) == name));
+        n - self.parts.len()
+    }
+
+    /// Add more parts riding on the table (a vise, a fixture plate, a rotary table), from their own model:
+    /// `at` is where the middle of their bottom goes, from the table point (model coordinates). Their names
+    /// get `group` in front, so they can be moved or removed together.
+    pub fn add_on_table(&mut self, group: &str, parts: Vec<(String, [u8; 3], Vec<[Vec3; 3]>)>, at: DVec3) {
+        let (lo, hi) = parts.iter().map(|p| bounds(&p.2)).fold((DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)), |a, b| (a.0.min(b.0), a.1.max(b.1)));
+        if !lo.is_finite() {
+            return;
+        }
+        let base = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z);
+        let d = (DVec3::from(self.table) + at - base).as_vec3();
+        for (n, c, tris) in parts {
+            let moved: Vec<[Vec3; 3]> = tris.iter().map(|t| t.map(|p| p + d)).collect();
+            self.parts.push(MachinePart { name: format!("{group}/{n}"), carrier: self.table_on, color: c, mesh: pack_tris(&moved) });
+        }
+    }
+
+    /// Move a top-level assembly's parts by `d` (model coordinates).
+    pub fn shift_group(&mut self, group: &str, d: DVec3) {
+        let d = d.as_vec3();
+        for p in self.parts.iter_mut().filter(|p| p.name.split('/').next() == Some(group)) {
+            let t: Vec<[Vec3; 3]> = unpack_tris(&p.mesh).iter().map(|t| t.map(|q| q + d)).collect();
+            p.mesh = pack_tris(&t);
+        }
+    }
+
     /// The carriers from `c` down to the base: [c, what c rides on, …].
     pub fn chain(&self, c: Carrier) -> Vec<Carrier> {
         let mut v = vec![];
@@ -450,6 +483,14 @@ pub fn update_cached(name: &str, l: Arc<Loaded>) {
 /// Read a STEP assembly's parts with the OpenCascade worker (a child process, so a bad file can't take the
 /// app down) and make a first guess at the machine.
 pub fn import_step(path: &std::path::Path, name: &str) -> Result<MachineModel, String> {
+    Ok(guess(name, read_step(path)?))
+}
+
+/// A part read from a file: name path, colour, triangles.
+pub type StepPart = (String, [u8; 3], Vec<[Vec3; 3]>);
+
+/// A STEP assembly's leaf parts, read in a child process.
+pub fn read_step(path: &std::path::Path) -> Result<Vec<StepPart>, String> {
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let out = std::env::temp_dir().join(format!("rcad-machine-{}.bin", std::process::id()));
     let st = std::process::Command::new(exe)
@@ -466,8 +507,7 @@ pub fn import_step(path: &std::path::Path, name: &str) -> Result<MachineModel, S
         let err = String::from_utf8_lossy(&st.stderr).trim().to_string();
         return Err(if err.is_empty() { "the STEP reader stopped".into() } else { err });
     }
-    let parts = decode_parts(&bytes.map_err(|e| e.to_string())?)?;
-    Ok(guess(name, parts))
+    decode_parts(&bytes.map_err(|e| e.to_string())?)
 }
 
 /// Entry point of `--step-parts in.step out.bin`: the leaves of a STEP assembly, meshed, written as JSON
@@ -1019,6 +1059,30 @@ pub fn holder_length(t: &crate::cam::Tool) -> f64 {
     40.0
 }
 
+/// A closed cylinder standing on z = 0 (for things given by their size, such as a tool setter).
+pub fn cylinder(diameter: f64, height: f64) -> Vec<[Vec3; 3]> {
+    let (r, h) = ((diameter / 2.0) as f32, height as f32);
+    let n = 32;
+    let p = |k: usize, z: f32| {
+        let a = k as f32 / n as f32 * std::f32::consts::TAU;
+        Vec3::new(a.cos() * r, a.sin() * r, z)
+    };
+    let (b, t) = (Vec3::ZERO, Vec3::new(0.0, 0.0, h));
+    let mut v = vec![];
+    for k in 0..n {
+        let (a0, a1, c0, c1) = (p(k, 0.0), p(k + 1, 0.0), p(k, h), p(k + 1, h));
+        v.extend([[a0, a1, c1], [a0, c1, c0], [b, a1, a0], [t, c0, c1]]);
+    }
+    v
+}
+
+/// A closed box standing on z = 0, centred on the origin.
+pub fn cuboid(size: [f64; 3]) -> Vec<[Vec3; 3]> {
+    let (x, y, z) = ((size[0] / 2.0) as f32, (size[1] / 2.0) as f32, size[2] as f32);
+    let c = |k: usize| Vec3::new([-x, x][k & 1], [-y, y][(k >> 1) & 1], [0.0, z][(k >> 2) & 1]);
+    [[0, 2, 1], [1, 2, 3], [4, 5, 6], [5, 7, 6], [0, 1, 4], [1, 5, 4], [2, 6, 3], [3, 6, 7], [0, 4, 2], [2, 4, 6], [1, 3, 5], [3, 7, 5]].iter().map(|f| [c(f[0]), c(f[1]), c(f[2])]).collect()
+}
+
 /// A text for a hit: "Z axis (spindle nose) hits the stock".
 pub fn describe(m: &MachineModel, h: &Hit) -> String {
     let part = |i: usize| {
@@ -1132,6 +1196,19 @@ mod tests {
         // the spindle nose down into the table in front of the stock
         let h = p.check(DVec3::new(0.0, -100.0, -75.0), 30.0, &[], &work);
         assert!(h.iter().any(|h| h.mover == Some(7) && h.what == Obstacle::Part(4)), "{h:?}");
+    }
+
+    #[test]
+    fn removes_and_adds_parts_on_the_table() {
+        let mut m = test_machine();
+        assert_eq!(m.remove("Base"), 3);
+        m.add_on_table("Vise", vec![("Body".into(), [1, 2, 3], cuboid([100.0, 100.0, 5.0], [140.0, 300.0, 50.0]))], DVec3::new(10.0, 0.0, 0.0));
+        let p = m.parts.last().unwrap();
+        assert_eq!((p.name.as_str(), p.carrier), ("Vise/Body", Carrier::Y));
+        let (lo, hi) = bounds(&unpack_tris(&p.mesh));
+        assert_eq!((lo, hi), (DVec3::new(-10.0, -150.0, 10.0), DVec3::new(30.0, 50.0, 55.0)));
+        m.shift_group("Vise", DVec3::new(0.0, 0.0, 1.0));
+        assert_eq!(bounds(&unpack_tris(&m.parts.last().unwrap().mesh)).0.z, 11.0);
     }
 
     #[test]

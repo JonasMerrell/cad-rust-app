@@ -484,6 +484,15 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_machine", "spindle") => xyz("where the tool comes out, model coordinates"),
         ("cam_machine", "table") => xyz("the table point setups are placed from, model coordinates"),
         ("cam_machine", "holders") => t("boolean", "tool holders hang below the spindle point"),
+        ("cam_machine", "remove") => arr(t("string", "part or assembly name"), "take these parts off the machine"),
+        ("cam_machine", "add") => arr(
+            obj(
+                json!({"name": t("string", "name (replaces parts of that name)"), "step": t("string", "STEP file of it"), "cylinder": json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[diameter, height]"}), "box": xyz("[x, y, z] size"), "at": xyz("where the middle of its bottom goes, from the table point")}),
+                &["name"],
+                "something standing on the table",
+            ),
+            "add things that ride on the table",
+        ),
         ("cam_machine", "on_table") => xyz("with cam: where the setup sits from the table point"),
         ("cam_template", "save") => t("string", "save the operations as a template of this name"),
         ("cam_template", "apply") => t("string", "add this template's operations"),
