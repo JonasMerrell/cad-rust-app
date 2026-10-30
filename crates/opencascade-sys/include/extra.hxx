@@ -1956,3 +1956,127 @@ inline rust::Vec<double> ex_common_volumes(const TopTools_ListOfShape &a, const 
     out.push_back(v);
   return out;
 }
+
+#include <STEPCAFControl_Reader.hxx>
+#include <XCAFDoc_Location.hxx>
+#include <TDF_LabelSequence.hxx>
+
+/// Read a STEP assembly as its leaf shapes, each placed where the assembly puts it and meshed (`deflection`
+/// mm). `names` gets each leaf's path ("Base v5:1/Rail:2", instance names from the top down). Returns per
+/// leaf: r g b (0–1; -1 when it has no colour), the triangle count n, then 9n coordinates.
+inline rust::Vec<double> ex_step_parts(rust::Str path, double deflection, rust::Vec<rust::String> &names) {
+  rust::Vec<double> out;
+  try {
+    OCC_CATCH_SIGNALS
+    Handle(TDocStd_Document) doc = new TDocStd_Document("XmlXCAF");
+    STEPCAFControl_Reader r;
+    r.SetNameMode(Standard_True);
+    r.SetColorMode(Standard_True);
+    if (r.ReadFile(std::string(path).c_str()) != IFSelect_RetDone) {
+      ex_err_slot() = "could not read the STEP file";
+      return out;
+    }
+    if (!r.Transfer(doc)) {
+      ex_err_slot() = "could not read the STEP file's shapes";
+      return out;
+    }
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    auto name_of = [](const TDF_Label &l) {
+      Handle(TDataStd_Name) n;
+      if (l.FindAttribute(TDataStd_Name::GetID(), n)) {
+        TCollection_AsciiString a(n->Get(), '_');
+        return std::string(a.ToCString());
+      }
+      return std::string();
+    };
+    auto colour_of = [&](const TDF_Label &l, const TopoDS_Shape &s, Quantity_Color &c) {
+      return ct->GetColor(l, XCAFDoc_ColorGen, c) || ct->GetColor(l, XCAFDoc_ColorSurf, c) || ct->GetColor(s, XCAFDoc_ColorGen, c) ||
+             ct->GetColor(s, XCAFDoc_ColorSurf, c);
+    };
+    std::function<void(const TDF_Label &, const TopLoc_Location &, const std::string &, bool, Quantity_Color)> walk =
+        [&](const TDF_Label &l, const TopLoc_Location &loc, const std::string &prefix, bool has_col, Quantity_Color col) {
+          TDF_Label target = l;
+          TopLoc_Location here = loc;
+          if (XCAFDoc_ShapeTool::IsReference(l)) {
+            XCAFDoc_ShapeTool::GetReferredShape(l, target);
+            here = loc * XCAFDoc_ShapeTool::GetLocation(l);
+          }
+          std::string nm = name_of(l);
+          if (nm.empty())
+            nm = name_of(target);
+          std::string full = prefix.empty() ? nm : prefix + "/" + nm;
+          Quantity_Color c;
+          if (colour_of(l, XCAFDoc_ShapeTool::GetShape(l), c) || colour_of(target, XCAFDoc_ShapeTool::GetShape(target), c)) {
+            has_col = true;
+            col = c;
+          }
+          if (XCAFDoc_ShapeTool::IsAssembly(target)) {
+            TDF_LabelSequence ch;
+            XCAFDoc_ShapeTool::GetComponents(target, ch);
+            for (int i = 1; i <= ch.Length(); i++)
+              walk(ch.Value(i), here, full, has_col, col);
+            return;
+          }
+          TopoDS_Shape s = XCAFDoc_ShapeTool::GetShape(target);
+          if (s.IsNull())
+            return;
+          s = s.Located(here * s.Location());
+          BRepMesh_IncrementalMesh m(s, deflection, Standard_False, 0.5, Standard_True);
+          std::vector<double> tris;
+          for (TopExp_Explorer e(s, TopAbs_FACE); e.More(); e.Next()) {
+            const TopoDS_Face &f = TopoDS::Face(e.Current());
+            TopLoc_Location fl;
+            Handle(Poly_Triangulation) t = BRep_Tool::Triangulation(f, fl);
+            if (t.IsNull())
+              continue;
+            gp_Trsf tr = fl.Transformation();
+            bool rev = f.Orientation() == TopAbs_REVERSED;
+            for (int i = 1; i <= t->NbTriangles(); i++) {
+              int a, b, cc;
+              t->Triangle(i).Get(a, b, cc);
+              if (rev)
+                std::swap(b, cc);
+              for (int k : {a, b, cc}) {
+                gp_Pnt p = t->Node(k).Transformed(tr);
+                tris.push_back(p.X());
+                tris.push_back(p.Y());
+                tris.push_back(p.Z());
+              }
+            }
+          }
+          if (tris.empty())
+            return;
+          names.push_back(rust::String(full));
+          out.push_back(has_col ? col.Red() : -1.0);
+          out.push_back(has_col ? col.Green() : -1.0);
+          out.push_back(has_col ? col.Blue() : -1.0);
+          out.push_back((double)(tris.size() / 9));
+          for (double v : tris)
+            out.push_back(v);
+        };
+    TDF_LabelSequence roots;
+    st->GetFreeShapes(roots);
+    for (int i = 1; i <= roots.Length(); i++) {
+      TDF_Label l = roots.Value(i);
+      // the top assembly's own name is the file's, not a part of it
+      if (XCAFDoc_ShapeTool::IsAssembly(l) && roots.Length() == 1) {
+        TDF_LabelSequence ch;
+        XCAFDoc_ShapeTool::GetComponents(l, ch);
+        for (int k = 1; k <= ch.Length(); k++)
+          walk(ch.Value(k), TopLoc_Location(), "", false, Quantity_Color());
+      } else {
+        walk(l, TopLoc_Location(), "", false, Quantity_Color());
+      }
+    }
+    if (names.empty())
+      ex_err_slot() = "the STEP file has no shapes";
+    return out;
+  } catch (const Standard_Failure &e) {
+    ex_err_slot() = std::string("STEP: ") + e.GetMessageString();
+  } catch (...) {
+    ex_err_slot() = "STEP import failed";
+  }
+  names.clear();
+  return rust::Vec<double>();
+}

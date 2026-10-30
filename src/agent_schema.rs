@@ -424,7 +424,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"})}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),
@@ -472,6 +472,19 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("simulate_cam" | "render_cam" | "render_simulation" | "solve_simulation", "width") => width(900),
         ("simulate_cam" | "render_cam" | "render_simulation" | "solve_simulation", "height") => height(700),
         ("render_cam", "operation") => t("integer", "only this operation id"),
+        ("create_cam" | "edit_cam", "on_table") => xyz("where the setup sits on the machine model's table, from its table point, mm"),
+        ("cam_machine", "cam") => common("cam").unwrap(),
+        ("cam_machine", "import") => t("string", "STEP assembly of the machine to read"),
+        ("cam_machine", "name") => t("string", "machine name, or a path to a machine .json file"),
+        ("cam_machine", "carriers") => json!({"type": "object", "properties": {}, "additionalProperties": en(&["base", "x", "y", "z"], "what carries it"), "description": "part or assembly name → base, x, y or z"}),
+        ("cam_machine", "rides") => json!({"type": "array", "items": en(&["base", "x", "y", "z"], "carrier"), "minItems": 3, "maxItems": 3, "description": "what the X, Y and Z axes ride on"}),
+        ("cam_machine", "spindle_on") => en(&["base", "x", "y", "z"], "what carries the spindle"),
+        ("cam_machine", "table_on") => en(&["base", "x", "y", "z"], "what carries the work"),
+        ("cam_machine", "travel") => json!({"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 3, "maxItems": 3, "description": "[[min, max] for X, Y, Z], mm from the modelled position"}),
+        ("cam_machine", "spindle") => xyz("where the tool comes out, model coordinates"),
+        ("cam_machine", "table") => xyz("the table point setups are placed from, model coordinates"),
+        ("cam_machine", "holders") => t("boolean", "tool holders hang below the spindle point"),
+        ("cam_machine", "on_table") => xyz("with cam: where the setup sits from the table point"),
         ("cam_template", "save") => t("string", "save the operations as a template of this name"),
         ("cam_template", "apply") => t("string", "add this template's operations"),
         ("cam_template", "delete") => t("string", "delete this template"),
