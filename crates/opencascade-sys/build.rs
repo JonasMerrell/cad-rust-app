@@ -102,7 +102,9 @@ fn main() {
 
     let mut build = cxx_build::bridges(rust_bridges);
 
-    if is_windows_gnu {
+    // OCCT itself is built with OCC_CONVERT_SIGNALS everywhere but MSVC: match it, so
+    // OCC_CATCH_SIGNALS turns a crash inside OCCT into an exception (see ex_catch_signals)
+    if is_windows_gnu || !target.to_lowercase().contains("msvc") {
         build.define("OCC_CONVERT_SIGNALS", "TRUE");
     }
 

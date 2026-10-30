@@ -475,6 +475,8 @@ fn write_step(nodes: Vec<(Option<PyRef<Shape>>, i32, String, Option<V3>)>, path:
 
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
+    // a crash inside OCCT raises OCCError instead of killing Python
+    opencascade_sys::extra::ex_catch_signals();
     m.add("OCCError", m.py().get_type::<OCCError>())?;
     m.add_class::<Shape>()?;
     m.add_class::<render::Mesh>()?;
