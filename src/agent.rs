@@ -375,6 +375,7 @@ impl Session {
                 None => json!({"kinds": schema::FEATURE_KINDS.to_vec()}),
             },
             "mass_properties" => self.mass_properties(a)?,
+            "stock_size" => self.stock_size(a)?,
             "ray_cast" => {
                 let mut q = json!({"ray": {"origins": a.get("origins").cloned().unwrap_or_default(), "direction": a.get("direction").cloned().unwrap_or_default()}});
                 if let Some(b) = a.get("bodies") {
@@ -447,6 +448,7 @@ impl Session {
                 if let Some(h) = a.get("hidden").and_then(|v| v.as_bool()) {
                     p.hidden = h;
                 }
+                apply_stock(&mut p, a)?;
                 self.doc.parts.insert(key, p);
                 self.rebuild()?;
                 self.status()
@@ -487,6 +489,7 @@ impl Session {
                     if let Some(h) = a.get("hidden").and_then(|v| v.as_bool()) {
                         p.hidden = h;
                     }
+                    apply_stock(&mut p, a)?;
                     self.doc.parts.insert(key, p);
                 }
                 self.rebuild()?;
@@ -637,6 +640,41 @@ impl Session {
             }
         }
         p.to_string()
+    }
+
+    /// The raw stock each part is machined from: the smallest standard plate, bar or round bar with allowances.
+    fn stock_size(&mut self, a: &Value) -> R<Value> {
+        let want: Option<Vec<crate::doc::BodyId>> =
+            a.get("bodies").and_then(|b| b.as_array()).map(|b| b.iter().filter_map(|x| Some((x.get(0)?.as_u64()?, x.get(1)?.as_u64()? as u32))).collect());
+        if let Some(id) = want.iter().flatten().find(|id| !self.result.bodies.iter().any(|b| b.id == **id)) {
+            return Err(format!("no part {id:?}"));
+        }
+        let mut parts = vec![];
+        for b in self.result.bodies.iter().filter(|b| !b.surface && want.as_ref().map(|w| w.contains(&b.id)).unwrap_or(true)) {
+            let mut props = self.doc.parts.get(&crate::doc::body_key(b.id)).cloned().unwrap_or_default();
+            // a one-off setting for this answer, not saved on the part
+            apply_stock(&mut props, a)?;
+            let Some(st) = crate::stock_size::for_part(b, &props, self.doc.units) else { continue };
+            let r1 = |v: f64| (v * 10.0).round() / 10.0;
+            let mut p = json!({
+                "body": [b.id.0, b.id.1],
+                "name": props.name.clone().unwrap_or_else(|| b.name.clone()),
+                "stock": st.label(),
+                "shape": st.kind,
+                "size_mm": st.dims.map(r1),
+                "part_size_mm": st.part.map(r1),
+                "axes": st.axes.map(|v| v.to_array().map(|x| (x * 1000.0).round() / 1000.0)),
+                "machined_away_percent": (100.0 * (1.0 - b.volume / st.volume().max(1e-9))).round(),
+            });
+            if let Some(d) = props.material.as_deref().and_then(|m| crate::doc::MATERIALS.iter().find(|x| x.0 == m)).map(|x| x.1) {
+                p["stock_mass_g"] = json!(r1(st.volume() / 1000.0 * d));
+            }
+            if let Some(c) = props.stock.as_ref().map(|s| s.custom.trim()).filter(|c| !c.is_empty()) {
+                p["own_size"] = json!(c);
+            }
+            parts.push(p);
+        }
+        Ok(json!({"parts": parts, "note": "size_mm is thickness, width, length (round bar: diameter, diameter, length) along axes; sizes are standard stock with the part's allowances"}))
     }
 
     /// Mass, centre of gravity and inertia of the parts, from their materials (or `material` /
@@ -1502,13 +1540,14 @@ pub(crate) fn tools() -> Value {
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
-        {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Aluminium 7075, Steel, Stainless steel 303, Tungsten alloy, Urethane foam, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass) or hidden.", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}}), &["body"])},
-        {"name": "set_parts", "description": "set_part for many parts at once, with one rebuild: parts is a list of {body, name, color, material, finish, hidden}.", "inputSchema": obj(json!({"parts": {"type": "array"}}), &["parts"])},
+        {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, Aluminium 6061, Aluminium 7075, Steel, Stainless steel 303, Tungsten alloy, Urethane foam, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass), hidden, or stock {shape: auto|plate|round, standard: auto|metric|imperial (nearest standard size up) or box (bounding box plus allowances), side and face allowances mm, custom: the stock really used} for its raw stock size (stock_size, BOM).", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}, "stock": {"type": "object"}}), &["body"])},
+        {"name": "set_parts", "description": "set_part for many parts at once, with one rebuild: parts is a list of {body, name, color, material, finish, hidden, stock}.", "inputSchema": obj(json!({"parts": {"type": "array"}}), &["parts"])},
         {"name": "add_decal", "description": "Lay a PNG/JPEG image on a flat face (a label or logo), centred on face.point. width in mm (height keeps the image's proportions), angle turns it about the face normal. Shown in the editor; not exported.", "inputSchema": obj(json!({"image": {"type": "string"}, "face": {"type": "object"}, "width": {"type": "number"}, "angle": {"type": "number"}}), &["image", "face"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
         {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
         {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}, "width": {"type": "integer"}}), &["path"])},
+        {"name": "stock_size", "description": "The raw stock each part of the active Part Studio is machined from: the smallest standard plate, flat or square bar, or round bar (metric or imperial sizes) that holds it with a machining allowance, boxed square to the part's own faces; with its size, directions, stock mass and how much is machined away. stock {shape, standard, side, face} tries other settings without saving them (set_part stock saves them on a part). bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "stock": {"type": "object"}}), &[])},
         {"name": "mass_properties", "description": "Exact mass properties of the active Part Studio's parts: volume, mass, centre of gravity and inertia tensor about the centre of gravity (g·mm²), from each part's material (set_part) or a material or density (g/cm³) for all; with several parts also their total. bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "material": {"type": "string"}, "density": {"type": "number"}}), &[])},
         {"name": "ray_cast", "description": "Cast rays from origins along direction through the active Part Studio's parts (or bodies): every surface crossing with its distance, point and part, nearest first.", "inputSchema": obj(json!({"origins": {"type": "array"}, "direction": {"type": "array"}, "bodies": {"type": "array"}}), &["origins", "direction"])},
         {"name": "classify_points", "description": "Whether each point is in, on (within tolerance) or out of the active Part Studio's parts (or bodies), and which part.", "inputSchema": obj(json!({"points": {"type": "array"}, "tolerance": {"type": "number"}, "bodies": {"type": "array"}}), &["points"])},
@@ -1527,7 +1566,7 @@ pub(crate) fn tools() -> Value {
         {"name": "export_web", "description": "Save an interactive 3D page (.html, opens in a browser): with assembly, its slider, cylindrical and revolute mates move within their limits (sliders, dragging parts, arrow keys), gear and rack relations follow, explode steps drive an explode slider; without, the parts of a Part Studio (studio, default the active one). Also section planes, ghosting by material and part details. inline:false writes a .json and .bin beside the page (serve them over http).", "inputSchema": obj(json!({"path": {"type": "string"}, "assembly": {"type": "integer"}, "studio": {"type": "integer"}, "inline": {"type": "boolean"}}), &["path"])},
         {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render; fit_box for a close-up). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}, "fit_box": {"type": "array", "description": "[[x, y, z], [x, y, z]] mm: frame this box instead of the whole assembly (a close-up)"}}), &["assembly"])},
         {"name": "create_drawing", "description": "Add a Drawing tab (sheet A4/A3/A2/A1/Letter/Tabloid, default A3) with front, top, right and iso views of a Part Studio (standard_views:false for an empty sheet). Returns its index and drawing_info.", "inputSchema": obj(json!({"name": {"type": "string"}, "sheet": {"type": "string"}, "studio": {"type": "integer"}, "standard_views": {"type": "boolean"}}), &[])},
-        {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, body (one part of the studio, default all), or assembly (instances at their poses), balloons (assembly views), dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, through (section cut offset mm from the model centre), letter, position:[x,y] sheet mm, scale, hidden_lines, sheet}; section{view, at (view coord of the cut), line: horizontal|vertical, letter, scale, position} adds a lettered section A-A with a cutting line on the parent view; detail{view, center:[x,y] view coords, radius, position, scale, letter}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× ', suffix, tolerance: number (±) or {plus, minus} or {limits:true, plus, minus}} - dimensions attach to model edges and follow model changes; auto_dimensions{view} (overall size, hole positions from the lower-left corner, hole callouts like 2× Ø10 THRU ⌴Ø16 ↧5; regenerated when the model changes); title{part, part_no, material, revision, date, drawn_by, tolerance, projection: first|third, decimals}; note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
+        {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, body (one part of the studio, default all), or assembly (instances at their poses), balloons (assembly views), dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, through (section cut offset mm from the model centre), letter, position:[x,y] sheet mm, scale, hidden_lines, sheet}; section{view, at (view coord of the cut), line: horizontal|vertical, letter, scale, position} adds a lettered section A-A with a cutting line on the parent view; detail{view, center:[x,y] view coords, radius, position, scale, letter}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× ', suffix, tolerance: number (±) or {plus, minus} or {limits:true, plus, minus}} - dimensions attach to model edges and follow model changes; auto_dimensions{view} (overall size, hole positions from the lower-left corner, hole callouts like 2× Ø10 THRU ⌴Ø16 ↧5; regenerated when the model changes); title{part, part_no, material, stock (raw stock under the material; default the part's stock size, none leaves it out), revision, date, drawn_by, tolerance, projection: first|third, decimals}; note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
         {"name": "drawing_info", "description": "A drawing's views (with dimensionable points, straight lines and circles in view coordinates), dimensions, notes and GD&T.", "inputSchema": obj(json!({"drawing": {"type": "integer"}}), &["drawing"])},
         {"name": "render_drawing", "description": "PNG of one drawing sheet (sheet: 1-based, width px) to check the layout.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "sheet": {"type": "integer"}, "width": {"type": "integer"}, "path": {"type": "string"}}), &["drawing"])}
     ])
@@ -1729,3 +1768,29 @@ fn b64(data: &[u8]) -> String {
 
 #[allow(dead_code)]
 fn unused(_: Map<String, Value>) {}
+
+/// `stock` {shape, standard, side, face, custom} in a set_part call: how the part's raw stock is worked out (null clears it).
+fn apply_stock(p: &mut crate::doc::PartProps, a: &Value) -> R<()> {
+    let Some(v) = a.get("stock") else { return Ok(()) };
+    if v.is_null() {
+        p.stock = None;
+        return Ok(());
+    }
+    let o = v.as_object().ok_or("stock: {shape, standard, side, face, custom}")?;
+    let mut base = serde_json::to_value(p.stock.clone().unwrap_or_default()).map_err(|e| e.to_string())?;
+    for (k, x) in o {
+        base[k] = x.clone();
+    }
+    let s: crate::stock_size::StockPref = serde_json::from_value(base).map_err(|e| format!("stock: {e}"))?;
+    if !crate::stock_size::SHAPES.iter().any(|x| x.0 == s.shape) {
+        return Err("stock shape: auto, plate or round".into());
+    }
+    if !crate::stock_size::STANDARDS.iter().any(|x| x.0 == s.standard) {
+        return Err("stock standard: auto, metric, imperial or box".into());
+    }
+    if s.side < 0.0 || s.face < 0.0 {
+        return Err("stock allowances can't be negative".into());
+    }
+    p.stock = (s != crate::stock_size::StockPref::default()).then_some(s);
+    Ok(())
+}

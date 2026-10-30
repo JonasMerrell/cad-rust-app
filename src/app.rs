@@ -2478,6 +2478,92 @@ impl App {
             row(ui, "Inertia", "set a material".into());
         }
         row(ui, "Size", format!("{} × {} × {} {}", units.fmt(size.x), units.fmt(size.y), units.fmt(size.z), units.label()));
+        if let [b] = bodies[..] {
+            let id = b.id;
+            self.stock_ui(ui, id);
+        }
+    }
+
+    /// The raw stock a part is machined from: the suggestion, what it weighs, and how it is worked out.
+    fn stock_ui(&mut self, ui: &mut Ui, id: doc::BodyId) {
+        use crate::stock_size as ss;
+        let props = self.part_props(id);
+        let mut pref = props.stock.clone().unwrap_or_default();
+        let Some(mesh) = self.result.bodies.iter().find(|b| b.id == id) else { return };
+        let volume = mesh.volume;
+        let Some(st) = ss::for_part(mesh, &props, self.doc.units) else { return };
+        let row = |ui: &mut Ui, k: &str, v: String| {
+            ui.horizontal_wrapped(|ui| {
+                ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new(k).color(theme::muted()).size(12.0)));
+                ui.add(egui::Label::new(RichText::new(v).size(12.0)).wrap());
+            });
+        };
+        let custom = pref.custom.trim().to_string();
+        if custom.is_empty() {
+            row(ui, "Stock", st.label());
+            let density = props.material.as_deref().and_then(|m| doc::MATERIALS.iter().find(|x| x.0 == m)).map(|x| x.1);
+            let waste = 100.0 * (1.0 - volume / st.volume().max(1e-9));
+            match density {
+                Some(d) => row(ui, "", format!("{} g, {}% waste", crate::expr::trim(st.volume() / 1000.0 * d, 1), waste.round())),
+                None => row(ui, "", format!("{}% waste", waste.round())),
+            }
+        } else {
+            row(ui, "Stock", custom.clone());
+            row(ui, "", format!("suggested {}", st.label()));
+        }
+        let before = pref.clone();
+        let mut start = false;
+        egui::CollapsingHeader::new(RichText::new("Stock settings").size(12.0)).id_salt(("stock", id)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new("Shape").color(theme::muted()).size(12.0)));
+                let cur = ss::SHAPES.iter().find(|s| s.0 == pref.shape).map(|s| s.1).unwrap_or("Least material");
+                egui::ComboBox::from_id_salt(("stock-shape", id)).selected_text(cur).show_ui(ui, |ui| {
+                    for (k, l) in ss::SHAPES {
+                        ui.selectable_value(&mut pref.shape, k.to_string(), l);
+                    }
+                });
+            });
+            ui.horizontal(|ui| {
+                ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new("Size").color(theme::muted()).size(12.0)));
+                let cur = ss::STANDARDS.iter().find(|s| s.0 == pref.standard).map(|s| s.1).unwrap_or("Standard (from units)");
+                egui::ComboBox::from_id_salt(("stock-std", id)).selected_text(cur).show_ui(ui, |ui| {
+                    for (k, l) in ss::STANDARDS {
+                        ui.selectable_value(&mut pref.standard, k.to_string(), l);
+                    }
+                });
+            });
+            let mut num = |ui: &mut Ui, label: &str, v: &mut f64, tip: &str| {
+                ui.horizontal(|ui| {
+                    ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new(label).color(theme::muted()).size(12.0)));
+                    let r = ui.add(egui::DragValue::new(v).range(0.0..=50.0).speed(0.05).max_decimals(2).suffix(" mm")).on_hover_text(tip);
+                    start |= r.drag_started() || r.gained_focus();
+                });
+            };
+            num(ui, "Side allowance", &mut pref.side, "Extra on each side of the width and length (each end of a bar), to clean up the sawn edges");
+            num(ui, "Face allowance", &mut pref.face, "Extra on each face of the thickness, to face it flat; 0 uses the plate as it comes");
+            ui.horizontal(|ui| {
+                ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new("Own size").color(theme::muted()).size(12.0)));
+                let r = ui.add(egui::TextEdit::singleline(&mut pref.custom).hint_text("use the suggestion").desired_width(160.0))
+                    .on_hover_text("The stock you will really use, shown in the BOM instead of the suggestion");
+                start |= r.gained_focus();
+            });
+        });
+        // undo steps: once when a drag or edit starts, or for a pick from a list
+        let changed = pref != before;
+        if start || (changed && !ui.ctx().egui_is_using_pointer() && !ui.ctx().egui_wants_keyboard_input()) {
+            self.checkpoint();
+        }
+        if changed {
+            let key = doc::body_key(id);
+            let mut p = props;
+            p.stock = (pref != ss::StockPref::default()).then_some(pref);
+            if p == doc::PartProps::default() {
+                self.doc.parts.remove(&key);
+            } else {
+                self.doc.parts.insert(key, p);
+            }
+            self.scene_dirty = true;
+        }
     }
 
     pub fn pick_from_tree(&mut self, r: Ref, add: bool) {

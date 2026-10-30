@@ -1,0 +1,19 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_sketch", "args": {"plane": "top"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [80, 36]}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 8}}},
+  {"tool": "create_sketch", "args": {"plane": "right"}},
+  {"tool": "sketch_add", "args": {"sketch_id": 3, "items": [{"type": "circle", "center": [80, 40], "radius": 11}]}},
+  {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 3}], "depth": 50, "op": "new"}}},
+  {"tool": "set_parts", "args": {"parts": [{"body": [2, 0], "name": "Bracket", "material": "Aluminium 6061"}, {"body": [4, 0], "name": "Pin", "material": "Stainless steel 303"}]}},
+  {"tool": "stock_size", "args": {}},
+  {"tool": "stock_size", "args": {"bodies": [[2, 0]], "stock": {"standard": "imperial", "face": 0}}},
+  {"tool": "set_part", "args": {"body": [4, 0], "stock": {"custom": "Round bar Ø1 in × 2.25 in"}}},
+  {"tool": "stock_size", "args": {"bodies": [[4, 0]]}},
+  {"tool": "create_cam", "args": {"name": "Bracket", "bodies": [[2, 0]], "stock": {"standard_size": true, "material": "Aluminium"}}},
+  {"tool": "create_assembly", "args": {"name": "Bracket and pin"}},
+  {"tool": "assembly_insert", "args": {"assembly": 0, "studio": 0, "body": [2, 0]}},
+  {"tool": "assembly_insert", "args": {"assembly": 0, "studio": 0, "body": [4, 0], "position": [0, 0, 40]}},
+  {"tool": "assembly_info", "args": {"assembly": 0}}
+]

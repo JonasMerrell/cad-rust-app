@@ -100,6 +100,34 @@ impl Session {
         Ok(i)
     }
 
+    /// Size the setup's stock to the smallest standard plate or bar its part fits in (stock {standard_size: true}).
+    fn cam_standard_stock(&mut self, ci: usize) -> R<()> {
+        self.sync();
+        let c = self.ws.cams[ci].clone();
+        self.ensure_built(c.studio)?;
+        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
+        let input = crate::cam_jaws::input_for(&self.ws.cams, ci, input)?;
+        if input.tris.is_empty() {
+            return Err(format!("Part Studio {} has no parts to machine", c.studio));
+        }
+        let part = Part::from_input(&input, &c);
+        let doc = self.studio_doc(c.studio);
+        let solids: Vec<crate::doc::BodyId> = self.bodies(c.studio).iter().filter(|b| !b.surface).map(|b| b.id).collect();
+        let one = match &c.bodies[..] {
+            [b] => Some(*b),
+            [] if solids.len() == 1 => Some(solids[0]),
+            _ => None,
+        };
+        let pref = one.and_then(|b| doc?.parts.get(&crate::doc::body_key(b))?.stock.clone()).unwrap_or_default();
+        let imperial = crate::stock_size::imperial_for(&pref, doc.map(|d| d.units).unwrap_or_default());
+        let e = part.hi - part.lo;
+        let (size, below) = crate::stock_size::for_setup([e.x, e.y, e.z], &pref, imperial);
+        let st = &mut self.ws.cams[ci].stock;
+        st.size = Some(size);
+        st.bottom = below;
+        Ok(())
+    }
+
     /// The setup's parts and toolpaths.
     fn cam_build(&mut self, ci: usize) -> R<(Part, Vec<Toolpath>)> {
         self.cam_build_from(ci).map(|(p, t, _)| (p, t))
@@ -230,6 +258,9 @@ impl Session {
                     self.ws.cams.pop();
                     return Err(e);
                 }
+                if wants_standard_stock(a) {
+                    self.cam_standard_stock(ci)?;
+                }
                 let saved = save_machine_arg(&self.ws.cams[ci], a)?;
                 let mut v = self.cam_info(ci)?;
                 v["cam"] = json!(ci);
@@ -262,6 +293,9 @@ impl Session {
                 if let Err(e) = cam_paths::setup_chain(&self.ws.cams, ci) {
                     self.ws.cams[ci] = old;
                     return Err(e);
+                }
+                if wants_standard_stock(a) {
+                    self.cam_standard_stock(ci)?;
                 }
                 let saved = save_machine_arg(&self.ws.cams[ci], a)?;
                 let mut v = self.cam_info(ci)?;
@@ -732,7 +766,7 @@ impl Session {
 pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     vec![
-        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), tilt [about X, about Y] (degrees, 3+2 positioning after orient: an angle block, a tilting vise or a compound-angle bore), axis [x, y, z] (instead of orient and tilt: the part direction that points up at the spindle, e.g. a bore's axis), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, min_rpm (slowest useful spindle speed, e.g. 12000 for a high-speed spindle that loses torque below it: suggested speeds stay above it and slower tools get a warning), rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer (default false), spin_up (seconds to wait after M3, default 5 for a VFD spindle)}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 and an operator message at tool changes), coolant (auto (default: flood for metal stock, off for wood, plastic and foam), off, flood, mist: for the tools that don't set their own), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine), save_machine (true: also keep this setup's machine settings (post, spindle, machine, coolant, probing, custom G-code) in ~/.config/cad-rust-app/machine.json as the user's machine). The machine settings not given come from the document's last setup, else from the saved machine. Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}}), &[])}),
+        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), tilt [about X, about Y] (degrees, 3+2 positioning after orient: an angle block, a tilting vise or a compound-angle bore), axis [x, y, z] (instead of orient and tilt: the part direction that points up at the spindle, e.g. a bore's axis), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), standard_size (true: size it from the part's stock settings: the smallest standard plate or bar, or its bounding box plus allowances), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, min_rpm (slowest useful spindle speed, e.g. 12000 for a high-speed spindle that loses torque below it: suggested speeds stay above it and slower tools get a warning), rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer (default false), spin_up (seconds to wait after M3, default 5 for a VFD spindle)}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 and an operator message at tool changes), coolant (auto (default: flood for metal stock, off for wood, plastic and foam), off, flood, mist: for the tools that don't set their own), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine), save_machine (true: also keep this setup's machine settings (post, spindle, machine, coolant, probing, custom G-code) in ~/.config/cad-rust-app/machine.json as the user's machine). The machine settings not given come from the document's last setup, else from the saved machine. Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}}), &[])}),
         json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "machine": {}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}}), &["cam"])}),
         json!({"name": "import_tool_library", "description": "Import a tool library file into the user's library (My tools): a Fusion 360 tool library (.json export or .tools) or a tools.json from this app. Tools keep their geometry, holder, tool number and the first feeds-and-speeds preset; entries of the same name are replaced; holders, probes and unsupported types are skipped. With cam, also add every imported tool to that Manufacture tab. Returns the imported tools.", "inputSchema": obj(json!({"path": {"type": "string"}, "cam": {"type": "integer"}}), &["path"])}),
         json!({"name": "cam_tool_library", "description": "List the tool library (the user's tools and built-in presets): flat, ball, bull, tapered_ball, chamfer, engrave, slot, thread_mill, face_mill, drill, spot_drill, center_drill, tap, reamer. Filter by kind and/or search words (e.g. '6 flat', 'M5').", "inputSchema": obj(json!({"kind": {"type": "string"}, "search": {"type": "string"}}), &[])}),
@@ -746,4 +780,8 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, a picture of the part on the machine, the tools (number, size, holder, speeds and feeds) and the operations in order (tool, Z range, stepdown/stepover, time, warnings).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
     ]
+}
+
+fn wants_standard_stock(a: &Value) -> bool {
+    a.get("stock").and_then(|s| s.get("standard_size")).and_then(|v| v.as_bool()).unwrap_or(false)
 }

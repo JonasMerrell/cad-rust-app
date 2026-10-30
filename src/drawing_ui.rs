@@ -822,22 +822,24 @@ fn curve_prims(out: &mut Vec<Prim>, v: &DrawView, p: &ProjView, pls: &[Vec<[f64;
     }
 }
 
-/// The name and material of what a sheet shows, for the title block.
-fn shown_part(app: &dyn DocCtx, v: Option<&DrawView>) -> (String, String) {
+/// The name, material and raw stock of what a sheet shows, for the title block.
+fn shown_part(app: &dyn DocCtx, v: Option<&DrawView>) -> (String, String, String) {
     let Some(v) = v else { return Default::default() };
     if let Some(ai) = v.assembly {
-        return (app.ws().assemblies.get(ai).map(|a| a.name.clone()).unwrap_or_default(), String::new());
+        return (app.ws().assemblies.get(ai).map(|a| a.name.clone()).unwrap_or_default(), String::new(), String::new());
     }
     let bodies = app.bodies(v.studio);
     let studio = app.ws().studios.get(v.studio).map(|s| s.name.clone()).unwrap_or_default();
     let body = v.body.or_else(|| (bodies.len() == 1).then(|| bodies[0].id));
-    let Some(b) = body else { return (studio, String::new()) };
+    let Some(b) = body else { return (studio, String::new(), String::new()) };
     let props = app.studio_doc(v.studio).and_then(|d| d.parts.get(&crate::doc::body_key(b))).cloned().unwrap_or_default();
     let name = props.name.clone().unwrap_or_else(|| {
         let mesh = bodies.iter().find(|m| m.id == b).map(|m| m.name.clone()).unwrap_or_default();
         if v.body.is_some() && bodies.len() > 1 { format!("{studio} / {mesh}") } else { studio.clone() }
     });
-    (name, props.material.unwrap_or_default())
+    let doc = app.studio_doc(v.studio);
+    let stock = crate::stock_size::bom_text(bodies.iter().find(|m| m.id == b), &props, doc.map(|d| d.units).unwrap_or_default());
+    (name, props.material.unwrap_or_default(), stock)
 }
 
 /// Text that may span lines ('\n') and hold the counterbore ⌴, countersink ⌵ and depth ↧
@@ -1261,7 +1263,7 @@ fn balloon_prims(app: &dyn DocCtx, v: &DrawView, p: &ProjView, out: &mut Vec<Pri
         let from = c + (at - c).normalize_or_zero() * r;
         out.push(Prim::Line { a: from.into(), b: at.into(), w: 0.25, dashed: false, color: INK });
         out.push(Prim::Arc { c: at.into(), r: 0.5, a0: 0.0, a1: std::f64::consts::TAU, w: 0.5, dashed: false, color: INK });
-        out.push(Prim::Text { at: [c.x, c.y - 1.5], size: 4.0, text: row.0.to_string(), anchor: 1, color: INK });
+        out.push(Prim::Text { at: [c.x, c.y - 1.5], size: 4.0, text: row.item.to_string(), anchor: 1, color: INK });
     }
 }
 
@@ -1272,10 +1274,15 @@ fn title_block(app: &dyn DocCtx, d: &Drawing, sheet: usize, on_sheet: &[&DrawVie
     let main = on_sheet.iter().copied().find(|v| v.detail.is_none()).or_else(|| d.views.iter().find(|v| v.detail.is_none()));
     let units = main.map(|v| units_of(app, v.studio)).unwrap_or_default();
     let scale = main.map(|v| fmt_scale(v.scale)).unwrap_or_default();
-    let (part, material) = shown_part(app, main);
+    let (part, material, stock) = shown_part(app, main);
     let t = &d.title;
     let part = if t.part.is_empty() { part } else { t.part.clone() };
     let material = if t.material.is_empty() { material } else { t.material.clone() };
+    let stock = match t.stock.trim() {
+        "" => stock,
+        s if s.eq_ignore_ascii_case("none") => String::new(),
+        s => s.to_string(),
+    };
     // outline and rows
     for (a, b) in [([x0, y0], [x0, y1]), ([x0, y1], [x1, y1]), ([x0, y0 + 12.0], [x1, y0 + 12.0]), ([x0, y0 + 24.0], [x1 - 24.0, y0 + 24.0])] {
         line(out, a, b, 0.35);
@@ -1294,7 +1301,14 @@ fn title_block(app: &dyn DocCtx, d: &Drawing, sheet: usize, on_sheet: &[&DrawVie
     // middle row
     let mut x = x0;
     for (wd, label, value) in [(64.0, "PART", part.as_str()), (38.0, "PART NO.", t.part_no.as_str()), (44.0, "MATERIAL", material.as_str())] {
-        cell(out, x, y0 + 12.0, label, value, if value.chars().count() as f64 * 1.9 > wd { 2.6 } else { 3.2 });
+        if label == "MATERIAL" && !stock.is_empty() {
+            // the stock in small type under the material
+            cell(out, x, y0 + 12.0, label, "", 3.0);
+            out.push(Prim::Text { at: [x + 1.5, y0 + 17.4], size: if value.chars().count() as f64 * 1.8 > wd { 2.5 } else { 3.0 }, text: value.into(), anchor: 0, color: INK });
+            out.push(Prim::Text { at: [x + 1.5, y0 + 13.6], size: if stock.chars().count() as f64 * 1.3 > wd { 1.8 } else { 2.2 }, text: stock.clone(), anchor: 0, color: INK });
+        } else {
+            cell(out, x, y0 + 12.0, label, value, if value.chars().count() as f64 * 1.9 > wd { 2.6 } else { 3.2 });
+        }
         x += wd;
         line(out, [x, y0 + 12.0], [x, y0 + 24.0], 0.25);
     }
@@ -1579,7 +1593,8 @@ fn gdt_symbol(out: &mut Vec<Prim>, kind: &str, c: DVec2) {
 
 fn bom_prims(app: &dyn DocCtx, a: &crate::assembly::Assembly, pos: [f64; 2], out: &mut Vec<Prim>) {
     let rows = crate::asm_ui::bom(app, a);
-    let cols = [12.0, 60.0, 14.0, 34.0];
+    // the stock column only when some part is cut from stock
+    let cols: &[f64] = if rows.iter().any(|r| !r.stock.is_empty()) { &[12.0, 60.0, 14.0, 34.0, 56.0] } else { &[12.0, 60.0, 14.0, 34.0] };
     let rh = 6.0;
     let w: f64 = cols.iter().sum();
     let n = rows.len() + 1;
@@ -1593,16 +1608,16 @@ fn bom_prims(app: &dyn DocCtx, a: &crate::assembly::Assembly, pos: [f64; 2], out
         out.push(Prim::Line { a: [x, y0], b: [x, y0 - n as f64 * rh], w: 0.25, dashed: false, color: INK });
         x += c;
     }
-    let cells = |i: usize, vals: [String; 4], out: &mut Vec<Prim>| {
+    let cells = |i: usize, vals: Vec<String>, out: &mut Vec<Prim>| {
         let mut x = x0;
-        for (k, v) in vals.into_iter().enumerate() {
+        for (k, v) in vals.into_iter().take(cols.len()).enumerate() {
             out.push(Prim::Text { at: [x + 1.5, y0 - (i as f64 + 1.0) * rh + 1.7], size: 3.0, text: v, anchor: 0, color: INK });
             x += cols[k];
         }
     };
-    cells(0, ["ITEM".into(), "PART".into(), "QTY".into(), "MATERIAL".into()], out);
-    for (i, (item, name, q, m, _)) in rows.iter().enumerate() {
-        cells(i + 1, [item.to_string(), name.clone(), q.to_string(), m.clone()], out);
+    cells(0, ["ITEM", "PART", "QTY", "MATERIAL", "STOCK"].map(String::from).to_vec(), out);
+    for (i, r) in rows.iter().enumerate() {
+        cells(i + 1, vec![r.item.to_string(), r.name.clone(), r.qty.to_string(), r.material.clone(), r.stock.clone()], out);
     }
 }
 
@@ -2194,6 +2209,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 changed |= field(ui, "Part", &mut t.part, "from the view");
                 changed |= field(ui, "Part no.", &mut t.part_no, "");
                 changed |= field(ui, "Material", &mut t.material, "from the part");
+                changed |= field(ui, "Stock", &mut t.stock, "from the part (none: leave out)");
                 changed |= field(ui, "Revision", &mut t.revision, "A");
                 changed |= field(ui, "Date", &mut t.date, "2026-10-28");
                 changed |= field(ui, "Drawn by", &mut t.drawn_by, "");
