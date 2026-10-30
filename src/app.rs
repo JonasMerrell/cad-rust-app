@@ -1320,13 +1320,15 @@ impl App {
         r.on_hover_text(tip)
     }
 
+    /// A run of toolbar buttons on its own rounded chip.
     pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-        ui.add_space(3.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 26.0), Sense::hover());
-        ui.painter().vline(rect.center().x, rect.y_range().shrink(5.0), Stroke::new(1.0, theme::border()));
-        ui.add_space(3.0);
-        ui.spacing_mut().item_spacing.x = 1.0;
-        add(ui);
+        ui.add_space(5.0);
+        Frame::new().fill(theme::panel_2()).corner_radius(10).inner_margin(Margin::symmetric(3, 1)).show(ui, |ui| {
+            ui.horizontal(|ui| {
+                ui.spacing_mut().item_spacing.x = 1.0;
+                add(ui);
+            });
+        });
         ui.spacing_mut().item_spacing.x = 1.0;
     }
 
@@ -3285,28 +3287,31 @@ impl eframe::App for App {
             }
         }
 
-        let header = Frame::new().fill(theme::header()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 3 });
+        // panels are cards on a canvas; the header and the tab bar sit on the canvas itself
+        ui.painter().rect_filled(ui.max_rect(), 0.0, theme::canvas());
+        let header = Frame::new().fill(theme::canvas()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 0 });
         egui::Panel::top("header").frame(header).resizable(false).show_separator_line(false).show(ui, |ui| self.header(ui));
-        let bar = Frame::new().fill(theme::panel()).inner_margin(Margin { left: 8, right: 8, top: 2, bottom: 4 });
-        egui::Panel::top("toolbar").frame(bar).resizable(false).show(ui, |ui| self.toolbar(ui));
+        let bar = theme::card(theme::panel(), Margin { left: 8, right: 8, top: 4, bottom: 4 });
+        egui::Panel::top("toolbar").frame(bar).resizable(false).show_separator_line(false).show(ui, |ui| self.toolbar(ui));
         egui::Panel::bottom("tabs")
-            .frame(Frame::new().fill(theme::tabbar()).inner_margin(Margin { left: 4, right: 8, top: 0, bottom: 0 }))
+            .frame(Frame::new().fill(theme::canvas()).inner_margin(Margin { left: 4, right: 8, top: 0, bottom: 4 }))
             .resizable(false)
+            .show_separator_line(false)
             .show(ui, |ui| self.tabs_ui(ui));
         if self.phone {
             egui::Panel::bottom("dock").frame(Frame::new().fill(theme::panel()).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
         }
         if !self.phone && matches!(self.tab, crate::workspace::Tab::Studio(_)) {
-            let rail = Frame::new().fill(theme::tabbar());
-            egui::Panel::left("rail").frame(rail).resizable(false).exact_size(42.0).show(ui, |ui| self.rail(ui));
+            let rail = Frame::new().fill(theme::canvas());
+            egui::Panel::left("rail").frame(rail).resizable(false).show_separator_line(false).exact_size(42.0).show(ui, |ui| self.rail(ui));
         }
         if self.sidebar_open && !self.phone {
-            let side = Frame::new().fill(theme::panel());
+            let side = theme::card(theme::panel(), Margin::ZERO);
             // one width for every tab: the panel keeps what the user dragged it to
             let switched = self.side_tab != Some(self.tab);
             self.side_tab = Some(self.tab);
             let _ = switched;
-            let panel = egui::Panel::left("sidebar").frame(side).resizable(false).exact_size(self.side_w);
+            let panel = egui::Panel::left("sidebar").frame(side).resizable(false).show_separator_line(false).exact_size(self.side_w);
             let r = panel.show(ui, |ui| {
                 // content may not widen the panel
                 ui.set_max_width(ui.available_width());
@@ -3330,7 +3335,11 @@ impl eframe::App for App {
             }
         }
         crate::claude_ui::panel(self, ui);
-        let central = egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
+        // the viewport is a card too: inset from the canvas edges, corners rounded below
+        let gap = if self.phone { 0 } else { theme::CARD_GAP };
+        let side_card = self.sidebar_open && !self.phone;
+        let cframe = Frame::new().outer_margin(Margin { left: if side_card { 0 } else { gap }, right: gap, top: 0, bottom: gap });
+        let central = egui::CentralPanel::no_frame().frame(cframe).show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
             crate::workspace::Tab::Cam(_) => crate::cam_ui::viewport(self, ui),
@@ -3344,6 +3353,10 @@ impl eframe::App for App {
                 crate::script_ui::window(self, ui.ctx());
             }
         });
+        if gap > 0 {
+            let r = central.response.rect;
+            theme::round_corners(&ui.painter_at(r), r, theme::CARD_RADIUS as f32);
+        }
         if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {
             self.hint_ui(&ctx, central.response.rect);
         }
@@ -3404,13 +3417,13 @@ fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl 
 }
 
 fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
-    let h = 26.0;
+    let h = 28.0;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
     let p = ui.painter();
     if picked {
-        p.rect_filled(rect, CornerRadius::same(5), theme::sel_fill());
+        p.rect_filled(rect, CornerRadius::same(8), theme::sel_fill());
     } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(5), theme::panel_2());
+        p.rect_filled(rect, CornerRadius::same(8), theme::panel_2());
     }
     let alpha = if rolled { 0.4 } else { 1.0 };
     let col = |c: Color32| c.gamma_multiply(alpha);
@@ -3452,12 +3465,15 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
     // dragging moves the tab along the bar
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click_and_drag());
     let p = ui.painter();
-    let body = rect.shrink2(egui::vec2(1.0, 0.0));
+    // a pill on the canvas; the active one is a raised card
+    let pill = rect.shrink2(egui::vec2(3.0, 4.0));
     if active {
-        p.rect_filled(body, CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 }, theme::panel());
-        p.hline(body.shrink2(egui::vec2(6.0, 0.0)).x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
+        let mut sh = theme::card_shadow();
+        sh.blur = 6;
+        p.add(sh.as_shape(pill, CornerRadius::same(12)));
+        p.rect_filled(pill, CornerRadius::same(12), theme::panel());
     } else if resp.hovered() {
-        p.rect_filled(body.shrink2(egui::vec2(0.0, 3.0)), CornerRadius::same(6), theme::panel_2());
+        p.rect_filled(pill, CornerRadius::same(12), theme::lerp(theme::canvas(), theme::panel(), 0.5));
     }
     let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(15.0, 15.0));
     icons::image(icon, 15.0).tint(if active { theme::accent() } else { col }).paint_at(ui, ir);
@@ -3467,9 +3483,9 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
 
 /// A collapsible group header row with a chevron ("Default geometry", "Parts (n)").
 fn disclosure_row(ui: &mut Ui, label: &str, open: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 28.0), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(5), theme::panel_2());
+        ui.painter().rect_filled(rect, CornerRadius::same(8), theme::panel_2());
     }
     let ir = egui::Rect::from_center_size(egui::pos2(rect.min.x + 12.0, rect.center().y), egui::vec2(14.0, 14.0));
     icons::image(if open { "chevronDown" } else { "chevronRight" }, 14.0).tint(theme::muted()).paint_at(ui, ir);
