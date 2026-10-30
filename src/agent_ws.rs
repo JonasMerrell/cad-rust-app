@@ -245,7 +245,16 @@ impl Session {
             })
             .collect();
         let mates: Vec<Value> = a.mates.iter().map(|m| json!({"id": m.id, "name": m.name, "kind": format!("{:?}", m.kind).to_lowercase(), "a": m.a.map(|c| c.inst), "b": m.b.map(|c| c.inst), "offset": m.offset, "rotation": m.rotation, "flip": m.flip, "suppressed": m.suppressed})).collect();
-        let bom: Vec<Value> = crate::asm_ui::bom(self, a).into_iter().map(|(i, n, q, m, mass)| json!({"item": i, "part": n, "qty": q, "material": m, "mass_g": mass.map(round)})).collect();
+        let bom: Vec<Value> = crate::asm_ui::bom(self, a)
+            .into_iter()
+            .map(|r| {
+                let mut v = json!({"item": r.item, "part": r.name, "qty": r.qty, "material": r.material, "mass_g": r.mass.map(round)});
+                if !r.stock.is_empty() {
+                    v["stock"] = json!(r.stock);
+                }
+                v
+            })
+            .collect();
         let mut v = json!({"name": a.name, "instances": insts, "mates": mates, "bom": bom, "explode_steps": a.explode_steps, "failed_mates": failed});
         if interference {
             let mut items = vec![];
@@ -635,7 +644,7 @@ impl Session {
             "title" => {
                 d.next_id -= 1;
                 let t = &mut d.title;
-                for (k, f) in [("part", &mut t.part), ("part_no", &mut t.part_no), ("material", &mut t.material), ("revision", &mut t.revision), ("date", &mut t.date), ("drawn_by", &mut t.drawn_by), ("tolerance", &mut t.tolerance)] {
+                for (k, f) in [("part", &mut t.part), ("part_no", &mut t.part_no), ("material", &mut t.material), ("stock", &mut t.stock), ("revision", &mut t.revision), ("date", &mut t.date), ("drawn_by", &mut t.drawn_by), ("tolerance", &mut t.tolerance)] {
                     if let Some(v) = it.get(k).and_then(|v| v.as_str()) {
                         *f = v.to_string();
                     }

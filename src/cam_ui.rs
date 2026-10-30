@@ -503,6 +503,18 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let mut print_jaws = false;
     let mut goto: Option<String> = None;
     let mut save_machine = None;
+    // the stock settings of the part being machined (one part: its own; several: the defaults)
+    let (stock_pref, imperial) = {
+        let doc = app.studio_doc(studio);
+        let one = match &app.ws.cams[ci].bodies[..] {
+            [b] => Some(*b),
+            [] if bodies.len() == 1 => Some(bodies[0].0),
+            _ => None,
+        };
+        let pref = one.and_then(|b| doc?.parts.get(&crate::doc::body_key(b))?.stock.clone()).unwrap_or_default();
+        let imperial = crate::stock_size::imperial_for(&pref, doc.map(|d| d.units).unwrap_or_default());
+        (pref, imperial)
+    };
     {
         let c = &mut app.ws.cams[ci];
         let jaw_tab = !c.jaws_of.is_empty();
@@ -611,6 +623,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 None
             };
         }
+        let mut standard = false;
         match &mut c.stock.size {
             Some(s) => {
                 row(ui, "Size X/Y/Z", |ui| {
@@ -619,12 +632,24 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                     }
                 });
                 num(ui, "Below part", &mut c.stock.bottom, " mm", 0.0..=1000.0, 0.1);
+                row(ui, "", |ui| {
+                    standard = ui
+                        .add_enabled(app.cam.part.is_some(), egui::Button::new("Standard stock size"))
+                        .on_hover_text("The smallest standard plate or bar the part fits in, with the part's stock allowances, faced evenly top and bottom")
+                        .clicked();
+                });
             }
             None => {
                 num(ui, "Sides", &mut c.stock.side, " mm", 0.0..=1000.0, 0.1);
                 num(ui, "Top", &mut c.stock.top, " mm", 0.0..=1000.0, 0.1);
                 num(ui, "Bottom", &mut c.stock.bottom, " mm", 0.0..=1000.0, 0.1);
             }
+        }
+        if let (true, Some(p)) = (standard, app.cam.part.as_ref()) {
+            let e = p.hi - p.lo;
+            let (size, below) = crate::stock_size::for_setup([e.x, e.y, e.z], &stock_pref, imperial);
+            c.stock.size = Some(size);
+            c.stock.bottom = below;
         }
         }
         row(ui, "Material", |ui| {

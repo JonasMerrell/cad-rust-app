@@ -54,7 +54,9 @@ build the part from features with a rollback bar, configurations, materials and 
   patterns and mirror of parts or features, boolean, split, transform/copy, delete body, sheet metal
   (bent profile or plate, K-factor flat pattern DXF), and STEP/IGES import.
 - **Around them:** variables and configurations, rollback bar, suppress and hide, part names,
-  colours, materials and mass properties, measure, section view and X-ray.
+  colours, materials and mass properties, raw stock sizes (the smallest standard plate, bar or
+  round bar a part fits in, shown in the BOM, the title block and as a CAM stock preset),
+  measure, section view and X-ray.
 - **Command search** like Fusion 360: press S (or / or Ctrl+K while sketching) to find and run any
   command by name.
 
@@ -264,6 +266,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/assembly.rs`, `src/asm_ui.rs` | assemblies, the mate solver and the Assembly tab |
 | `src/drawing.rs`, `src/drawing_ui.rs`, `src/drawing_export.rs` | drawings, the Drawing tab and PDF/DXF/SVG export |
 | `src/web_export.rs`, `src/web_asm.rs` | interactive web page export |
+| `src/stock_size.rs` | raw stock for a part: smallest box or cylinder around it, rounded up to standard metric or imperial plate and bar sizes |
 | `src/stdparts.rs`, `src/stdparts_ui.rs` | standard parts library (dimension tables as custom feature scripts) and its window |
 | `src/grabcad.rs` | GrabCAD search link, ZIP reading, recent downloads |
 | `src/cam.rs` | CAM model: tools, presets, operations, setups |

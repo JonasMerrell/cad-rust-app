@@ -300,9 +300,20 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("set_part" | "set_parts", "material") => en(&materials(), "material (gives mass in the BOM and mass_properties)"),
         ("set_part" | "set_parts", "finish") => en(&["default", "matte", "satin", "glossy", "metal", "glass", ""], "surface finish"),
         ("set_part" | "set_parts", "name") => t("string", "part name (shown by describe, the BOM and exports)"),
+        ("set_part" | "set_parts" | "stock_size", "stock") => obj(
+            json!({
+                "shape": en(&["auto", "plate", "round"], "auto: whichever stock wastes least; plate: plate, flat or square bar; round: round bar"),
+                "standard": en(&["auto", "metric", "imperial", "box"], "round up to standard stock sizes (auto: imperial when the document is in inches), or box: just the bounding box plus the allowances"),
+                "side": json!({"type": "number", "minimum": 0, "description": "allowance on each side of the width and length, mm (default 1)"}),
+                "face": json!({"type": "number", "minimum": 0, "description": "allowance on each face of the thickness, mm (default 0.5; 0 uses the plate as it comes)"}),
+                "custom": t("string", "the stock really used, shown in the BOM instead of the suggestion (\"\" for the suggestion)"),
+            }),
+            &[],
+            "how the raw stock is worked out",
+        ),
         ("set_parts", "parts") => arr(
             obj(
-                json!({"body": common("body").unwrap(), "name": t("string", "part name"), "color": specific("set_part", "color").unwrap(), "material": specific("set_part", "material").unwrap(), "finish": specific("set_part", "finish").unwrap(), "hidden": t("boolean", "hide the part")}),
+                json!({"body": common("body").unwrap(), "name": t("string", "part name"), "color": specific("set_part", "color").unwrap(), "material": specific("set_part", "material").unwrap(), "finish": specific("set_part", "finish").unwrap(), "hidden": t("boolean", "hide the part"), "stock": specific("set_part", "stock").unwrap()}),
                 &["body"],
                 "one part's settings",
             ),
@@ -406,7 +417,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
                     obj(json!({"plus": t("number", "upper deviation"), "minus": t("number", "lower deviation"), "upper": t("number", "same as plus"), "lower": t("number", "same as minus"), "limits": t("boolean", "show limit sizes")}), &[], "dimension: deviations")
                 ], "description": "tolerance"}),
                 "text": t("string", "note text"), "datums": t("string", "GD&T datums, e.g. 'A B'"), "leader": xy("leader end, sheet mm"),
-                "part": t("string", "title block: part name"), "part_no": t("string", "title block: part number"), "material": t("string", "title block: material"),
+                "part": t("string", "title block: part name"), "part_no": t("string", "title block: part number"), "material": t("string", "title block: material"), "stock": t("string", "title block: raw stock under the material (default the part's stock size; none leaves it out)"),
                 "revision": t("string", "title block: revision"), "date": t("string", "title block: date"), "drawn_by": t("string", "title block: drawn by"),
                 "projection": en(&["first", "third"], "title block: projection angle"), "decimals": json!({"type": ["integer", "null"], "minimum": 0, "maximum": 6, "description": "title: decimals shown on dimensions (null = automatic)"}),
                 "name": t("string", "title: the drawing's name")
@@ -418,7 +429,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "tilt") => xy("3+2 tilt [about X, about Y], degrees"),
         ("create_cam" | "edit_cam", "axis") => xyz("part direction to point at the spindle (instead of orient and tilt)"),
         ("create_cam" | "edit_cam", "stock") => fields(
-            json!({"side": t("number", "margin around the part, mm"), "top": t("number", "margin above, mm"), "bottom": t("number", "margin below, mm"), "size": json!({"type": ["array", "null"], "items": {"type": "number"}, "minItems": 3, "maxItems": 3, "description": "fixed size [x, y, z] instead of margins"}), "material": t("string", "stock material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)")}),
+            json!({"side": t("number", "margin around the part, mm"), "top": t("number", "margin above, mm"), "bottom": t("number", "margin below, mm"), "size": json!({"type": ["array", "null"], "items": {"type": "number"}, "minItems": 3, "maxItems": 3, "description": "fixed size [x, y, z] instead of margins"}), "material": t("string", "stock material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)"), "standard_size": t("boolean", "set size to the smallest standard plate or bar the part fits in, with the part's stock allowances (set_part stock), faced evenly top and bottom")}),
             &[],
             "stock margins or size, and material",
         ),

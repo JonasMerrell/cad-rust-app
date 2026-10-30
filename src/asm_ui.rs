@@ -817,17 +817,29 @@ fn mates(app: &mut App, ui: &mut Ui) {
     }
 }
 
-/// (item, part name, quantity, material, mass each in g)
-pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<(usize, String, usize, String, Option<f64>)> {
-    let mut rows: Vec<((usize, crate::doc::BodyId), String, usize, String, Option<f64>)> = vec![];
+/// A bill of materials line.
+pub struct BomRow {
+    pub item: usize,
+    pub name: String,
+    pub qty: usize,
+    pub material: String,
+    /// Mass each, g.
+    pub mass: Option<f64>,
+    /// Raw stock each, like "Flat bar 10 × 40 × 85 mm" ("" for parts not cut from stock).
+    pub stock: String,
+}
+
+pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<BomRow> {
+    let mut rows: Vec<((usize, crate::doc::BodyId), BomRow)> = vec![];
     for leaf in a.instances.iter().flat_map(|x| assembly::leaves(&app.ws().assemblies, x).into_iter().map(move |l| (x, l))) {
         let (x, l) = leaf;
         let key = (l.studio, l.body);
         if let Some(r) = rows.iter_mut().find(|r| r.0 == key) {
-            r.2 += 1;
+            r.1.qty += 1;
             continue;
         }
-        let props = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).cloned().unwrap_or_default();
+        let doc = app.studio_doc(l.studio);
+        let props = doc.and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).cloned().unwrap_or_default();
         let mesh = app.bodies(l.studio).iter().find(|b| b.id == l.body);
         // parts from different Part Studios all start out as "Part 1": say which studio
         let studio_name = app.ws().studios.get(l.studio).map(|s| s.name.clone()).filter(|_| app.ws().studios.len() > 1);
@@ -840,9 +852,12 @@ pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<(usize, Str
             (Some(d), Some(m)) => Some(m.volume / 1000.0 * d),
             _ => None,
         };
-        rows.push((key, name, 1, props.material.unwrap_or_default(), mass));
+        // bought parts (screws, bearings) are not cut from stock
+        let bought = app.ws().studios.get(l.studio).is_some_and(|s| s.name == crate::stdparts::STUDIO);
+        let stock = if bought { String::new() } else { crate::stock_size::bom_text(mesh, &props, doc.map(|d| d.units).unwrap_or_default()) };
+        rows.push((key, BomRow { item: 0, name, qty: 1, material: props.material.unwrap_or_default(), mass, stock }));
     }
-    rows.into_iter().enumerate().map(|(i, r)| (i + 1, r.1, r.2, r.3, r.4)).collect()
+    rows.into_iter().enumerate().map(|(i, r)| BomRow { item: i + 1, ..r.1 }).collect()
 }
 
 const DIRS: [(&str, [f64; 3]); 6] = [("+X", [1.0, 0.0, 0.0]), ("−X", [-1.0, 0.0, 0.0]), ("+Y", [0.0, 1.0, 0.0]), ("−Y", [0.0, -1.0, 0.0]), ("+Z", [0.0, 0.0, 1.0]), ("−Z", [0.0, 0.0, -1.0])];
@@ -917,27 +932,32 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new("Empty").color(theme::muted()).size(12.0));
         return;
     }
-    egui::Grid::new("bom").num_columns(4).striped(true).spacing([8.0, 3.0]).show(ui, |ui| {
-        for h in ["#", "Part", "Qty", "Material"] {
+    let any_stock = rows.iter().any(|r| !r.stock.is_empty());
+    egui::Grid::new("bom").num_columns(if any_stock { 5 } else { 4 }).striped(true).spacing([8.0, 3.0]).show(ui, |ui| {
+        for h in ["#", "Part", "Qty", "Material", "Stock"].into_iter().take(if any_stock { 5 } else { 4 }) {
             ui.label(RichText::new(h).color(theme::muted()).size(11.5));
         }
         ui.end_row();
-        for (i, n, q, m, _) in &rows {
-            ui.label(RichText::new(i.to_string()).size(12.0));
-            ui.label(RichText::new(n).size(12.0));
-            ui.label(RichText::new(q.to_string()).size(12.0));
-            ui.label(RichText::new(if m.is_empty() { "—" } else { m }).size(12.0));
+        for r in &rows {
+            ui.label(RichText::new(r.item.to_string()).size(12.0));
+            ui.label(RichText::new(&r.name).size(12.0));
+            ui.label(RichText::new(r.qty.to_string()).size(12.0));
+            ui.label(RichText::new(if r.material.is_empty() { "—" } else { &r.material }).size(12.0));
+            if any_stock {
+                ui.label(RichText::new(if r.stock.is_empty() { "—" } else { &r.stock }).size(12.0));
+            }
             ui.end_row();
         }
     });
-    let total: f64 = rows.iter().filter_map(|r| r.4.map(|m| m * r.2 as f64)).sum();
+    let total: f64 = rows.iter().filter_map(|r| r.mass.map(|m| m * r.qty as f64)).sum();
     if total > 0.0 {
         ui.label(RichText::new(format!("Total mass {} g", crate::expr::trim(total, 1))).color(theme::muted()).size(12.0));
     }
     if ui.button("Export CSV…").clicked() {
-        let mut csv = String::from("Item,Part,Quantity,Material,Mass each (g)\n");
-        for (i, n, q, m, mass) in &rows {
-            csv.push_str(&format!("{i},\"{}\",{q},{m},{}\n", n.replace('"', "'"), mass.map(|v| format!("{v:.2}")).unwrap_or_default()));
+        let mut csv = String::from("Item,Part,Quantity,Material,Mass each (g),Stock\n");
+        for r in &rows {
+            let q = |t: &str| t.replace('"', "'");
+            csv.push_str(&format!("{},\"{}\",{},{},{},\"{}\"\n", r.item, q(&r.name), r.qty, r.material, r.mass.map(|v| format!("{v:.2}")).unwrap_or_default(), q(&r.stock)));
         }
         if let Some(p) = app.save_file_dialog("CSV", &["csv"], "bom.csv") {
             match std::fs::write(&p, csv) {
