@@ -13,6 +13,7 @@ builds of these sources; any RP2040 `.uf2` or `.elf` runs the same way.
 | `hello` | `printf` with integers, floats and doubles on UART0 every 100 ms |
 | `multicore` | core 1 doubles numbers core 0 sends it through the FIFO, toggling GP17 |
 | `irq` | a GPIO edge interrupt on GP14 toggles GP18; a 500 µs repeating timer toggles GP19 |
+| `arm` | homes an arm: runs a motor (GP15) until a limit switch (GP14) closes, printing the angle a potentiometer on GP26 reads; then sweeps a servo on GP16 from 1 ms to 2 ms pulses |
 
 To rebuild (with `arm-none-eabi-gcc`, CMake and the Pico SDK 2.x):
 
