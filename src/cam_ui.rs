@@ -723,7 +723,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                         if r.changed() {
                             m.holes = text.split(',').filter_map(|v| v.trim().parse().ok()).collect();
                         }
-                        ui.data_mut(|d| if r.has_focus() { d.insert_temp(id, text); } else { d.remove::<String>(id); });
+                        let focused = r.has_focus();
+                        ui.data_mut(|d| if focused { d.insert_temp(id, text); } else { d.remove::<String>(id); });
                     });
                     num(ui, "Holes from grip face", &mut m.inset, " mm", 0.0..=200.0, 0.1);
                     row(ui, "Drill / c'bore Ø", |ui| {
