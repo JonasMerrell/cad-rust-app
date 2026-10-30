@@ -264,7 +264,31 @@ impl Session {
         Ok(v)
     }
 
-    fn render_assembly(&mut self, ai: usize, a: &Value) -> R<Vec<u8>> {
+    /// The box an assembly's visible parts fill as it stands.
+    pub(super) fn assembly_bounds(&mut self, ai: usize) -> R<(DVec3, DVec3)> {
+        self.build_for_assembly(ai)?;
+        let asm = &self.ws.assemblies[ai];
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for x in asm.instances.iter().filter(|x| !x.hidden) {
+            for l in assembly::leaves(&self.ws.assemblies, x) {
+                if let Some(b) = self.mesh(l.studio, l.body) {
+                    let pose = x.pose.compose(&l.pose);
+                    for c in 0..8 {
+                        let p = pose.apply(DVec3::new(b.bbox[c & 1][0], b.bbox[(c >> 1) & 1][1], b.bbox[(c >> 2) & 1][2]));
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                    }
+                }
+            }
+        }
+        Ok((lo, hi))
+    }
+
+    pub(super) fn render_assembly(&mut self, ai: usize, a: &Value) -> R<Vec<u8>> {
+        self.render_assembly_in(ai, a, None)
+    }
+
+    pub(super) fn render_assembly_in(&mut self, ai: usize, a: &Value, fit: Option<(DVec3, DVec3)>) -> R<Vec<u8>> {
         self.build_for_assembly(ai)?;
         let asm = &self.ws.assemblies[ai];
         let explode = a.get("explode").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -296,7 +320,7 @@ impl Session {
         let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(800).clamp(64, 4096) as u32;
         let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(600).clamp(64, 4096) as u32;
         let dir = super::direction_arg(a)?;
-        super::raster_scene(&items, &[], view, dir, w, h)
+        super::raster_scene_in(&items, &[], view, dir, w, h, fit)
     }
 
     /// Fetch the projections a drawing needs, then let its dimensions follow the model.
@@ -943,7 +967,18 @@ impl Session {
             "render_assembly" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();
-                let png = self.render_assembly(ai, a)?;
+                let fit = match a.get("fit_box").and_then(|v| v.as_array()) {
+                    Some(b) => {
+                        let c: Vec<Vec<f64>> = b.iter().map(|p| p.as_array().map(|p| p.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default()).collect();
+                        let [lo, hi] = &c[..] else { return Err("fit_box: [[x, y, z], [x, y, z]]".into()) };
+                        if lo.len() != 3 || hi.len() != 3 {
+                            return Err("fit_box: [[x, y, z], [x, y, z]]".into());
+                        }
+                        Some((DVec3::new(lo[0], lo[1], lo[2]), DVec3::new(hi[0], hi[1], hi[2])))
+                    }
+                    None => None,
+                };
+                let png = self.render_assembly_in(ai, a, fit)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
                     super::write_out(p, &png)?;
                 }

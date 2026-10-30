@@ -499,6 +499,7 @@ pub fn tools() -> Vec<Value> {
             "min_track": num("narrowest allowed track (0.15)"),
             "min_drill": num("smallest allowed drill (0.3)"),
             "min_annular": num("smallest allowed annular ring (0.13)"),
+            "power_nets": {"type": "array", "items": {"type": "string"}, "description": "more nets that get the power track width, by name (M1_* matches a prefix): motor phases and other high-current outputs"},
         }, "additionalProperties": false, "description": "design rules, mm; only the ones given change"},
     });
     let part_fields = |extra: Value| {

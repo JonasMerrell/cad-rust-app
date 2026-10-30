@@ -333,6 +333,7 @@ fn mech_ui(app: &mut App, ui: &mut Ui, pi: usize) {
         let k = p.sim.links.iter().position(|l| l.part.eq_ignore_ascii_case(&r));
         let desc = match role {
             Role::Motor => crate::circuit_mech::motor_model(&value).name,
+            Role::Stepper => crate::circuit_mech::stepper_model(&value).name,
             Role::Servo => crate::circuit_mech::servo_model(&value).name,
             _ => role.label().to_string(),
         };
@@ -384,7 +385,7 @@ fn mech_ui(app: &mut App, ui: &mut Ui, pi: usize) {
         let unit = if slide { " mm" } else { "°" };
         let l = &mut p.sim.links[k];
         match role {
-            Role::Motor => {
+            Role::Motor | Role::Stepper => {
                 if slide {
                     row(ui, "Lead", |ui| {
                         ui.add(egui::DragValue::new(&mut l.ratio).range(0.01..=1000.0).speed(0.1).suffix(" mm/turn"));

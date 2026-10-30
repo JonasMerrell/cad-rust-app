@@ -289,6 +289,10 @@ pub enum Model {
     Pot(f64),
     /// Pins A, B, VCC, GND.
     Encoder([String; 4]),
+    /// Pins A+, A−, B+, B−.
+    Stepper(crate::circuit_mech::Stepper, [String; 4]),
+    /// A STEP/DIR driver module; its pins by `circuit_mech::DRV_PINS` role (None: not on it).
+    StepDriver(crate::circuit_mech::Driver, Vec<Option<String>>),
     /// Left out of the circuit, with the reason.
     Open(String),
 }
@@ -592,6 +596,21 @@ pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
             let Some(r) = r else { return Err(format!("{}: an encoder needs 4 pins (A, B, VCC, GND)", part.reference)) };
             Model::Encoder([r[0].clone(), r[1].clone(), r[2].clone(), r[3].clone()])
         }
+        "STEPPER" => {
+            let r = roles(part, &pins, &[&["A+", "A1", "1A", "OA1", "A"], &["A-", "A2", "1B", "OA2"], &["B+", "B1", "2A", "OB1", "B"], &["B-", "B2", "2B", "OB2"]], &["1", "2", "3", "4"]);
+            let Some(r) = r else { return Err(format!("{}: a stepper needs 4 pins (A+, A-, B+, B-)", part.reference)) };
+            Model::Stepper(crate::circuit_mech::stepper_model(&part.value), [r[0].clone(), r[1].clone(), r[2].clone(), r[3].clone()])
+        }
+        "STEPDRV" => {
+            let d = crate::circuit_mech::driver_model(&part.value);
+            let names: Vec<String> = part.pin_names.iter().map(|n| norm(n)).collect();
+            let r: Vec<Option<String>> = crate::circuit_mech::DRV_PINS.iter().map(|aliases| names.iter().position(|n| aliases.iter().any(|a| n == a)).and_then(|k| pins.get(k).cloned())).collect();
+            let missing: Vec<&str> = [0, 1, 9, 10, 11, 12, 13, 14].iter().filter(|k| r[**k].is_none()).map(|k| crate::circuit_mech::DRV_PINS[*k][0]).collect();
+            if !missing.is_empty() {
+                return Err(format!("{} {}: give its pin names; it has no {}", part.reference, part.value, missing.join(", ")));
+            }
+            Model::StepDriver(d, r)
+        }
         "J" => Model::Open("connector (power comes from the simulation sources)".into()),
         "Y" => Model::Open("crystal (not simulated)".into()),
         _ if crate::circuit_mcu::is_pico(&part.symbol, &part.value, pins.len()) => Model::Pico,
@@ -644,6 +663,8 @@ pub fn describe(m: &Model) -> String {
         Model::Servo(s, _) => s.name.clone(),
         Model::Pot(r) => format!("potentiometer {}", si(*r, "Ω")),
         Model::Encoder(_) => "quadrature encoder".into(),
+        Model::Stepper(s, _) => s.name.clone(),
+        Model::StepDriver(d, _) => d.name.clone(),
         Model::Open(why) => why.clone(),
     }
 }
@@ -701,6 +722,8 @@ pub struct Built {
     pub mcus: Vec<crate::circuit_mcu::PicoSim>,
     /// Motors, servos and sensors.
     pub mech: Vec<crate::circuit_mech::MechSim>,
+    /// Stepper driver modules.
+    pub drivers: Vec<crate::circuit_mech::DriverSim>,
 }
 
 /// A supply voltage guessed from a power net's name: +5V 5, 3V3 3.3, -12V -12, VCC/VDD 5.
@@ -772,6 +795,7 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
     let mut parts = vec![];
     let mut mcus = vec![];
     let mut mech = vec![];
+    let mut drivers = vec![];
     // the next `Dev::Emf`/`Dev::G` value and `Dev::Pin` indices
     let nval = |c: &Circuit| c.elems.iter().filter(|e| matches!(e.dev, Dev::Emf(_) | Dev::G(_))).count();
     let npin = |c: &Circuit| c.elems.iter().filter(|e| matches!(e.dev, Dev::Pin(_))).count();
@@ -891,6 +915,69 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
                     add(&mut c, &mut pins, Dev::Pin(k + 1), &[T::P(b), T::P(vcc), T::P(gnd)]);
                     add(&mut c, &mut pins, Dev::R(1.0 / 5000.0), &[T::P(vcc), T::P(gnd)]);
                     mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Encoder { pins: [k, k + 1] } });
+                }
+            }
+            Model::Stepper(st, r) => {
+                // the two windings; the driver they are wired to pushes their current
+                let ix: Vec<usize> = r.iter().filter_map(|n| pin_ix(&pins, n)).collect();
+                if let [ap, am, bp, bm] = ix[..] {
+                    add(&mut c, &mut pins, Dev::R(1.0 / st.ohms), &[T::P(ap), T::P(am)]);
+                    add(&mut c, &mut pins, Dev::R(1.0 / st.ohms), &[T::P(bp), T::P(bm)]);
+                    let coils = [pins[ap].node, pins[am].node, pins[bp].node, pins[bm].node];
+                    mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Stepper { stepper: st.clone(), coils } });
+                }
+            }
+            Model::StepDriver(d, r) => {
+                use crate::circuit_mech::drv;
+                let ixs: Vec<Option<usize>> = r.iter().map(|n| n.as_deref().and_then(|n| pin_ix(&pins, n))).collect();
+                let at = |k: usize| ixs[k];
+                if let (Some(gnd), Some(vm)) = (at(drv::GND), at(drv::VMOT)) {
+                    let g = |ohms: f64| Dev::R(1.0 / ohms);
+                    // logic inputs pulled down on the chip; RST and SLP pulled up on the module
+                    for k in [drv::STEP, drv::DIR, drv::EN, drv::MS1, drv::MS2, drv::MS3] {
+                        if let Some(p) = at(k) {
+                            add(&mut c, &mut pins, g(100e3), &[T::P(p), T::P(gnd)]);
+                        }
+                    }
+                    let vdd = at(drv::VDD);
+                    for k in [drv::RST, drv::SLP] {
+                        if let (Some(p), Some(v)) = (at(k), vdd) {
+                            add(&mut c, &mut pins, g(1e6), &[T::P(p), T::P(v)]);
+                        }
+                    }
+                    if let Some(v) = vdd {
+                        add(&mut c, &mut pins, g(660.0), &[T::P(v), T::P(gnd)]);
+                    }
+                    // quiescent draw, and what the windings take (set as the run goes)
+                    add(&mut c, &mut pins, g(5000.0), &[T::P(vm), T::P(gnd)]);
+                    let v0 = nval(&c);
+                    add(&mut c, &mut pins, Dev::G(v0), &[T::P(vm), T::P(gnd)]);
+                    let outs = [at(drv::A1), at(drv::B1), at(drv::A2), at(drv::B2)];
+                    if let [Some(o1a), Some(o1b), Some(o2a), Some(o2b)] = outs {
+                        add(&mut c, &mut pins, Dev::Emf(v0 + 1), &[T::P(o1a), T::P(o1b)]);
+                        add(&mut c, &mut pins, Dev::Emf(v0 + 2), &[T::P(o2a), T::P(o2b)]);
+                        add(&mut c, &mut pins, g(1e6), &[T::P(o1b), T::P(gnd)]);
+                        add(&mut c, &mut pins, g(1e6), &[T::P(o2b), T::P(gnd)]);
+                        let node = |k: Option<usize>| k.map(|k| pins[k].node);
+                        // a pin left open on the module (not on any net)
+                        let open = |pins: &[PinSim], k: usize| c.nodes[pins[k].node].starts_with(&format!("{}.", part.reference));
+                        let linked = |k: usize| at(k).filter(|p| !open(&pins, *p)).map(|p| pins[p].node);
+                        drivers.push(crate::circuit_mech::DriverSim {
+                            reference: part.reference.clone(),
+                            driver: d.clone(),
+                            step: node(at(drv::STEP)).unwrap_or(0),
+                            dir: node(at(drv::DIR)).unwrap_or(0),
+                            en: node(at(drv::EN)),
+                            ms: [node(at(drv::MS1)), node(at(drv::MS2)), node(at(drv::MS3))],
+                            rst: linked(drv::RST),
+                            slp: linked(drv::SLP),
+                            vdd: node(vdd),
+                            gnd: pins[gnd].node,
+                            vmot: pins[vm].node,
+                            out: [pins[o1a].node, pins[o1b].node, pins[o2a].node, pins[o2b].node],
+                            vals: [v0 + 1, v0 + 2, v0],
+                        });
+                    }
                 }
             }
             Model::D(d, rs, cj, _) => {
@@ -1017,10 +1104,10 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
     }
     for l in &setup.links {
         if !mech.iter().any(|m| m.reference.eq_ignore_ascii_case(&l.part)) {
-            notes.push(format!("{} is linked to a mate but is not a motor, servo, potentiometer, switch or encoder", l.part));
+            notes.push(format!("{} is linked to a mate but is not a motor, stepper, servo, potentiometer, switch or encoder", l.part));
         }
     }
-    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus, mech })
+    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus, mech, drivers })
 }
 
 /// A transient stop time from the circuit: five of its longest RC time constants, or periods.
@@ -1244,7 +1331,7 @@ pub fn run_with(p: &Pcb, a: &Analysis, asms: &[crate::assembly::Assembly]) -> Re
     }
     let mut sim = Sim::new(&b.c);
     let mut out = SimOut { kind: a.kind, ground: b.ground.clone(), notes: b.notes.clone(), ..Default::default() };
-    let mut mech = MechExt::new(&b.mech, &p.sim.links, asms, b.c.nodes.len() - 1, sim.vals.len(), sim.pins.len(), &mut out.notes);
+    let mut mech = MechExt::new(&b.mech, &b.drivers, &p.sim.links, asms, b.c.nodes.len() - 1, sim.vals.len(), sim.pins.len(), &mut out.notes);
     // sensors read where the mechanism stands
     sim.vals = mech.values();
     mech.fill_pins(&mut sim.pins);
@@ -1275,6 +1362,7 @@ pub fn run_with(p: &Pcb, a: &Analysis, asms: &[crate::assembly::Assembly]) -> Re
             out.mcus = ext.finish();
             let mut extra = vec![];
             if !b.mech.is_empty() {
+                out.notes.extend(mech.report());
                 let (parts, mates) = mech.finish();
                 for pt in &parts {
                     if pt.pos.len() == tr.t.len() {

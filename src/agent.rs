@@ -1271,6 +1271,20 @@ pub fn render_png(doc: &Document, r: &RebuildResult, view: &str, direction: Opti
 
 /// Shade posed meshes (and draw 3D polylines on top) into a PNG.
 pub fn raster_scene(items: &[(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])], sketch_lines: &[Vec<DVec3>], view: &str, direction: Option<[f64; 3]>, w: u32, h: u32) -> R<Vec<u8>> {
+    raster_scene_in(items, sketch_lines, view, direction, w, h, None)
+}
+
+/// `raster_scene` with the camera framing `fit` (lo, hi) instead of what it shows: frames of an
+/// animation keep one camera.
+pub fn raster_scene_in(
+    items: &[(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])],
+    sketch_lines: &[Vec<DVec3>],
+    view: &str,
+    direction: Option<[f64; 3]>,
+    w: u32,
+    h: u32,
+    fit: Option<(DVec3, DVec3)>,
+) -> R<Vec<u8>> {
     use crate::camera::{Camera, StdView};
     let mut cam = Camera { size: glam::Vec2::new(w as f32, h as f32), ..Default::default() };
     let iso = |x: f32, y: f32, z: f32| glam::Vec3::new(x, y, z).normalize();
@@ -1318,6 +1332,9 @@ pub fn raster_scene(items: &[(&crate::kernel::BodyMesh, crate::assembly::Pose, [
     if !lo.x.is_finite() {
         lo = DVec3::ZERO;
         hi = DVec3::splat(50.0);
+    }
+    if let Some(f) = fit {
+        (lo, hi) = f;
     }
     cam.fit(lo.as_vec3(), hi.as_vec3());
     let (wu, hu) = (w as usize, h as usize);
@@ -1508,7 +1525,7 @@ pub(crate) fn tools() -> Value {
         {"name": "assembly_explode", "description": "Set the exploded view steps: [{instances:[ids], direction:[x,y,z], distance: mm}], applied in order.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "steps": {"type": "array"}}), &["assembly", "steps"])},
         {"name": "assembly_info", "description": "Instances (poses, world bounding boxes), mates, bill of materials and explode steps. interference:true also lists overlapping instances with their overlap volume.", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "interference": {"type": "boolean"}}), &["assembly"])},
         {"name": "export_web", "description": "Save an interactive 3D page (.html, opens in a browser): with assembly, its slider, cylindrical and revolute mates move within their limits (sliders, dragging parts, arrow keys), gear and rack relations follow, explode steps drive an explode slider; without, the parts of a Part Studio (studio, default the active one). Also section planes, ghosting by material and part details. inline:false writes a .json and .bin beside the page (serve them over http).", "inputSchema": obj(json!({"path": {"type": "string"}, "assembly": {"type": "integer"}, "studio": {"type": "integer"}, "inline": {"type": "boolean"}}), &["path"])},
-        {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["assembly"])},
+        {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render; fit_box for a close-up). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}, "fit_box": {"type": "array", "description": "[[x, y, z], [x, y, z]] mm: frame this box instead of the whole assembly (a close-up)"}}), &["assembly"])},
         {"name": "create_drawing", "description": "Add a Drawing tab (sheet A4/A3/A2/A1/Letter/Tabloid, default A3) with front, top, right and iso views of a Part Studio (standard_views:false for an empty sheet). Returns its index and drawing_info.", "inputSchema": obj(json!({"name": {"type": "string"}, "sheet": {"type": "string"}, "studio": {"type": "integer"}, "standard_views": {"type": "boolean"}}), &[])},
         {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, body (one part of the studio, default all), or assembly (instances at their poses), balloons (assembly views), dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, through (section cut offset mm from the model centre), letter, position:[x,y] sheet mm, scale, hidden_lines, sheet}; section{view, at (view coord of the cut), line: horizontal|vertical, letter, scale, position} adds a lettered section A-A with a cutting line on the parent view; detail{view, center:[x,y] view coords, radius, position, scale, letter}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× ', suffix, tolerance: number (±) or {plus, minus} or {limits:true, plus, minus}} - dimensions attach to model edges and follow model changes; auto_dimensions{view} (overall size, hole positions from the lower-left corner, hole callouts like 2× Ø10 THRU ⌴Ø16 ↧5; regenerated when the model changes); title{part, part_no, material, revision, date, drawn_by, tolerance, projection: first|third, decimals}; note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
         {"name": "drawing_info", "description": "A drawing's views (with dimensionable points, straight lines and circles in view coordinates), dimensions, notes and GD&T.", "inputSchema": obj(json!({"drawing": {"type": "integer"}}), &["drawing"])},

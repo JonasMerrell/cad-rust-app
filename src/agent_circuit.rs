@@ -205,6 +205,46 @@ impl Session {
                                 }
                                 o
                             }).collect::<Vec<_>>());
+                            // render the linked assembly through the run, frame by frame
+                            if let Some(fr) = a.get("frames").filter(|f| f.is_object()) {
+                                let mut asms: Vec<usize> = out.mates.iter().map(|m| m.assembly).collect();
+                                asms.dedup();
+                                let ai = fr.get("assembly").and_then(|v| v.as_u64()).map(|v| v as usize).or(asms.first().copied()).ok_or("frames: nothing moved an assembly")?;
+                                let path = fr.get("path").and_then(|v| v.as_str()).ok_or("frames: give path (a file name prefix, e.g. frames/arm)")?;
+                                let t_end = *out.x.last().unwrap_or(&0.0);
+                                let times: Vec<f64> = match fr.get("times").and_then(|v| v.as_array()) {
+                                    Some(ts) => ts.iter().filter_map(|x| x.as_f64()).collect(),
+                                    None => {
+                                        let n = fr.get("count").and_then(|v| v.as_u64()).unwrap_or(30).clamp(1, 2000) as usize;
+                                        (0..n).map(|k| t_end * k as f64 / (n.max(2) - 1) as f64).collect()
+                                    }
+                                };
+                                self.sync();
+                                let pose_at = |s: &mut Self, t: f64| {
+                                    let k = out.x.partition_point(|v| *v <= t).saturating_sub(1).min(out.x.len() - 1);
+                                    let f = if k + 1 < out.x.len() && out.x[k + 1] > out.x[k] { ((t - out.x[k]) / (out.x[k + 1] - out.x[k])).clamp(0.0, 1.0) } else { 0.0 };
+                                    for aj in &asms {
+                                        let drives: Vec<_> = out.mates.iter().filter(|m| m.assembly == *aj).map(|m| m.drive(k, f)).collect();
+                                        s.solve_driven(*aj, &drives);
+                                    }
+                                };
+                                // one camera for every frame: framing all the poses
+                                let (mut lo, mut hi) = (glam::DVec3::splat(f64::INFINITY), glam::DVec3::splat(f64::NEG_INFINITY));
+                                for t in &times {
+                                    pose_at(self, *t);
+                                    let (l, h) = self.assembly_bounds(ai)?;
+                                    (lo, hi) = (lo.min(l), hi.max(h));
+                                }
+                                let mut saved = vec![];
+                                for (i, t) in times.iter().enumerate() {
+                                    pose_at(self, *t);
+                                    let png = self.render_assembly_in(ai, fr, lo.x.is_finite().then_some((lo, hi)))?;
+                                    let file = format!("{path}-{i:04}.png");
+                                    crate::agent::write_out(&file, &png)?;
+                                    saved.push(json!({"t": sig4(*t), "path": file}));
+                                }
+                                v["frames"] = json!(saved);
+                            }
                             // pose the assemblies as they were at a time of the run
                             if let Some(t) = a.get("pose_assembly_at").and_then(|v| v.as_f64()) {
                                 let k = out.x.partition_point(|v| *v <= t).saturating_sub(1).min(out.x.len() - 1);
@@ -293,7 +333,7 @@ impl Session {
         for (k, l) in list.iter().enumerate() {
             let part = l.get("part").and_then(|v| v.as_str()).ok_or_else(|| format!("links[{k}]: give part (M1, SV1, RV1, SW1, ENC1)"))?;
             let x = p.parts.iter().find(|x| x.reference.eq_ignore_ascii_case(part)).ok_or_else(|| format!("links[{k}]: no part {part}"))?;
-            let role = crate::circuit_mech::role(&x.symbol).ok_or_else(|| format!("links[{k}]: {part} is not a motor (M), servo (SERVO), potentiometer (RV), switch (SW) or encoder (ENC)"))?;
+            let role = crate::circuit_mech::role(&x.symbol).ok_or_else(|| format!("links[{k}]: {part} is not a motor (M), stepper (STEPPER), servo (SERVO), potentiometer (RV), switch (SW) or encoder (ENC)"))?;
             let ai = l.get("assembly").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
             let asm = self.ws.assemblies.get(ai).ok_or_else(|| format!("links[{k}]: no assembly {ai}"))?;
             let mate = match l.get("mate") {
@@ -412,18 +452,28 @@ pub fn tools() -> Vec<Value> {
         "usb": {"type": "boolean", "description": "powered from USB: 5 V on VBUS (default true)"},
         "uart_in": {"type": "string", "description": "text arriving on UART0 RX (GP1) at the start"},
     }, "required": ["part"], "additionalProperties": false}});
-    setup["links"] = json!({"type": "array", "description": "replace the links from schematic parts to assembly mates: a DC motor (symbol M) or servo (SERVO) turns or slides its mate during transients; a potentiometer (RV), limit switch (SW) or encoder (ENC) reads its mate back into the circuit. Gear, rack and screw relations carry the motion on and mate limits stop it", "items": {"type": "object", "properties": {
+    setup["links"] = json!({"type": "array", "description": "replace the links from schematic parts to assembly mates: a DC motor (symbol M), stepper motor (STEPPER, driven by the STEPDRV module its windings are wired to) or servo (SERVO) turns or slides its mate during transients; a potentiometer (RV), limit switch (SW) or encoder (ENC) reads its mate back into the circuit. Gear, rack and screw relations carry the motion on and mate limits stop it", "items": {"type": "object", "properties": {
         "part": {"type": "string", "description": "the part's reference (M1, SV1, RV1, SW1, ENC1)"},
         "assembly": {"type": "integer", "minimum": 0, "description": "assembly tab index (default 0)"},
         "mate": {"type": ["string", "integer"], "description": "a revolute, slider or cylindrical mate: its name or id"},
-        "ratio": {"type": "number", "description": "motor on a revolute mate: gear ratio, motor turns per mate turn (on top of a 1:N gearbox in its value; default 1); on a slider: lead, mm per turn (default 8); encoder: counts per turn or per mm (default 20 / 1)"},
+        "ratio": {"type": "number", "description": "motor or stepper on a revolute mate: gear ratio, motor turns per mate turn (on top of a 1:N gearbox in its value; default 1); on a slider: lead, mm per turn (default 8); encoder: counts per turn or per mm (default 20 / 1)"},
         "range": {"type": "array", "items": {"type": "number"}, "description": "[a, b], degrees or mm: servo, the mate angle at 1 ms and 2 ms pulses (default [-90, 90]); potentiometer, the mate at the pin 1 and pin 3 ends (default the mate's limits or ±135°); limit switch, closed while the mate is between these (default just below the upper limit and beyond)"},
-        "inertia": {"type": "number", "description": "motor load inertia at the mate, kg·m² (kg on a slider)"},
-        "load": {"type": "number", "description": "motor load friction at the mate, N·m (N on a slider): holds it until the motor beats it"},
+        "inertia": {"type": "number", "description": "motor or stepper load inertia at the mate, kg·m² (kg on a slider)"},
+        "load": {"type": "number", "description": "motor or stepper load at the mate, N·m (N on a slider): friction that holds it until the motor beats it; a stepper must also hold it, or it stalls (use the worst gravity torque there)"},
         "reverse": {"type": "boolean", "description": "turn the mate the other way"},
     }, "required": ["part", "mate"], "additionalProperties": false}});
     let mut sim = analysis;
     sim["pcb"] = pcb;
+    sim["frames"] = json!({"type": "object", "description": "after a transient, render the linked assembly as the run moved it: PNGs <path>-0000.png, -0001.png, … for an animation", "properties": {
+        "path": {"type": "string", "description": "file name prefix, e.g. frames/arm"},
+        "count": {"type": "integer", "description": "frames spread evenly over the run (default 30)"},
+        "times": {"type": "array", "items": {"type": "number"}, "description": "or these times (s)"},
+        "assembly": {"type": "integer", "description": "which assembly (default the first one moved)"},
+        "view": {"type": "string", "description": "as in render_assembly"},
+        "direction": {"type": "array", "items": {"type": "number"}, "description": "as in render_assembly"},
+        "width": {"type": "integer", "description": "frame width px (default 800)"},
+        "height": {"type": "integer", "description": "frame height px (default 600)"},
+    }, "required": ["path"], "additionalProperties": false});
     sim["pose_assembly_at"] = json!({"type": "number", "description": "after a transient, leave the linked assemblies posed as the motors and servos had them at this time (s), e.g. to render_assembly it"});
     sim["analysis"] = json!({"type": "string", "enum": ["op", "tran", "ac"], "description": "op: DC operating point; tran: transient; ac: small-signal sweep about the operating point (default the last one run, else tran)"});
     sim["probes"] = strs("signals to report and plot (default the setup's, else the net voltages)");
@@ -434,7 +484,7 @@ pub fn tools() -> Vec<Value> {
     sim["width"] = json!({"type": "integer", "description": "plot width px (default 1000)"});
     sim["csv"] = json!({"type": "string", "description": "write the probed waveforms as CSV here"});
     vec![
-        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators, Raspberry Pi Pico boards running firmware, DC motors (M: value like 6V 10000rpm 1A 1:48, or TT/N20/130/775), SG90/MG996R servos, potentiometers (RV), encoders (ENC); connectors, crystals and other ICs are left open), the links of motors, servos and sensors to assembly mates, the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
-        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, variable-step BDF2 transient, AC about the operating point; Pico boards run their firmware during transients, so transients default to at least 1 s with them). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. Picos report their serial (UART) output with times, notes and pin states. Parts linked to assembly mates report how far they moved or read (probe POS(M1) in degrees or mm and RPM(M1)) and which mates moved; pose_assembly_at leaves the assembly where they had it at that time. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
+        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators, Raspberry Pi Pico boards running firmware, DC motors (M: value like 6V 10000rpm 1A 1:48, or TT/N20/130/775), stepper motors (STEPPER: NEMA14/17/23 with holding torque, rated current, ohm, mH, step angle and gearbox, like NEMA17 0.45Nm 1.5A 1:27) on STEPDRV driver modules (A4988, DRV8825 or TMC2209 with a current limit like 1.2A; they count STEP pulses at the microstep size their MS pins set, honour DIR, EN, SLP and RST, push sine-cosine winding currents and draw them from VMOT), SG90/MG996R servos, potentiometers (RV), encoders (ENC); connectors, crystals and other ICs are left open), the links of motors, servos and sensors to assembly mates, the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
+        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, variable-step BDF2 transient, AC about the operating point; Pico boards run their firmware during transients, so transients default to at least 1 s with them). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. Picos report their serial (UART) output with times, notes and pin states. Parts linked to assembly mates report how far they moved or read (probe POS(M1) in degrees or mm and RPM(M1)) and which mates moved; steppers note their steps and the share of their torque they used, or when they stalled and how many steps they lost; pose_assembly_at leaves the assembly where they had it at that time. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
     ]
 }
