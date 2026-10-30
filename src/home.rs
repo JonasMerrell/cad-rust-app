@@ -89,7 +89,7 @@ pub fn touch(app: &mut App, p: &Path) {
     h.thumb_waiting = false;
 }
 
-fn forget(app: &mut App, p: &Path) {
+pub(crate) fn forget(app: &mut App, p: &Path) {
     app.home.recents.retain(|r| r.path != p);
     save(&app.home.recents);
     if let Some(t) = thumb_path(p) {
@@ -189,7 +189,7 @@ fn texture(h: &mut HomeUi, ctx: &egui::Context, doc: &Path) -> Option<egui::Text
 }
 
 /// "Just now", "5 min ago", "Yesterday", "12 Oct", "3 Mar 2025".
-fn when(t: SystemTime) -> String {
+pub(crate) fn when(t: SystemTime) -> String {
     let secs = t.duration_since(UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
     let ago = now().saturating_sub(secs);
     match ago {
@@ -235,6 +235,8 @@ fn folder(p: &Path) -> String {
 
 enum Action {
     New,
+    NewProject,
+    ImportProject,
     Open,
     OpenPath(PathBuf),
     Forget(PathBuf),
@@ -296,6 +298,12 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
                             if action_button(ui, "folder", "Open…", false).on_hover_text("Ctrl+O").clicked() {
                                 action = Some(Action::Open);
                             }
+                            if action_button(ui, "download", "Import project…", false).on_hover_text("Unpack a project exported as a ZIP").clicked() {
+                                action = Some(Action::ImportProject);
+                            }
+                            if action_button(ui, "folder", "New project…", false).on_hover_text("A document in a folder of its own, tracked with git").clicked() {
+                                action = Some(Action::NewProject);
+                            }
                             if action_button(ui, "plus", "New document", true).on_hover_text("Ctrl+N").clicked() {
                                 action = Some(Action::New);
                             }
@@ -333,6 +341,8 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
     match action {
         // ask about unsaved changes first; the start screen closes once the document is replaced
         Some(Action::New) => app.guard(crate::session::Pending::New),
+        Some(Action::NewProject) => crate::vcs_ui::new_project(app),
+        Some(Action::ImportProject) => crate::vcs_ui::import_project(app),
         Some(Action::Open) => app.guard(crate::session::Pending::Open),
         Some(Action::OpenPath(p)) => app.guard(crate::session::Pending::OpenPath(p)),
         Some(Action::Forget(p)) => forget(app, &p),
@@ -409,6 +419,7 @@ fn grid(app: &mut App, ui: &mut Ui, list: &[Recent], width: f32, action: &mut Op
                 );
                 let modified = std::fs::metadata(&r.path).and_then(|m| m.modified()).ok();
                 let sub = match modified {
+                    Some(m) if crate::vcs::is_tracked_cached(&r.path) => format!("git · {} · {}", when(m), folder(&r.path)),
                     Some(m) => format!("{} · {}", when(m), folder(&r.path)),
                     None => "File not found".into(),
                 };

@@ -167,6 +167,7 @@ pub struct App {
     pub script_editor: Option<crate::script_ui::ScriptEditor>,
     /// The Claude chat panel.
     pub claude: crate::claude_ui::ClaudeUi,
+    pub vcs: crate::vcs_ui::VcsUi,
     /// The start screen with recent documents.
     pub home: crate::home::HomeUi,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
@@ -267,6 +268,7 @@ impl App {
             dark,
             script_editor: None,
             claude: Default::default(),
+            vcs: Default::default(),
             home: Default::default(),
             awaiting_sketch_plane: false,
             was_narrow: None,
@@ -796,6 +798,19 @@ impl App {
     }
 
     pub fn open_path(&mut self, p: std::path::PathBuf) {
+        if p.extension().is_some_and(|e| e.eq_ignore_ascii_case("zip")) {
+            // an exported project: unpack it into the projects folder and open its document
+            match crate::project::import(&p, &crate::project::default_dir()) {
+                Ok(doc) => {
+                    self.open_path(doc.clone());
+                    if self.path.as_deref() == Some(doc.as_path()) {
+                        self.flash_info(format!("Imported the project into {}", doc.parent().map(|d| d.display().to_string()).unwrap_or_default()), Some(Duration::from_secs(4)));
+                    }
+                }
+                Err(e) => self.flash(format!("Could not import {}: {e}", p.display()), ToastKind::Error),
+            }
+            return;
+        }
         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| crate::workspace::Workspace::from_json(&s)) {
             Ok(ws) => {
                 self.load_workspace(ws);
@@ -821,7 +836,9 @@ impl App {
         self.sync_ws();
         match std::fs::write(&p, self.ws.to_json()) {
             Ok(()) => {
-                self.flash_info(format!("Saved {}", p.display()), Some(Duration::from_secs(2)));
+                let committed = crate::vcs_ui::after_save(self, &p);
+                let secs = if committed.is_empty() { 2 } else { 4 };
+                self.flash_info(format!("Saved {}{committed}", p.display()), Some(Duration::from_secs(secs)));
                 self.path = Some(p.clone());
                 self.saved_ok(&p);
             }
@@ -1354,10 +1371,8 @@ impl App {
                 ui.label(RichText::new("•").size(16.0).color(theme::muted())).on_hover_text("Unsaved changes (Ctrl+S saves)");
             }
             if !self.phone {
-                // branch badge
-                Frame::new().fill(theme::panel_2()).corner_radius(4).inner_margin(Margin::symmetric(6, 1)).show(ui, |ui| {
-                    ui.label(RichText::new("Main").size(11.0).color(theme::muted()));
-                });
+                // branch badge: the git branch, or a way to start tracking
+                crate::vcs_ui::badge(self, ui);
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 let (icon, tip) = if self.dark { ("sun", "Switch to light mode") } else { ("moon", "Switch to dark mode") };
@@ -1407,7 +1422,7 @@ impl App {
             let b = egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l).shortcut_text(RichText::new(keys).color(theme::muted()));
             ui.add(b).clicked()
         };
-        for (a, icon, l, keys) in [("home", "home", "Home (recent documents)", ""), ("new", "file", "New document", "Ctrl+N"), ("open", "folder", "Open…", "Ctrl+O")] {
+        for (a, icon, l, keys) in [("home", "home", "Home (recent documents)", ""), ("new", "file", "New document", "Ctrl+N"), ("project", "folder", "New project…", ""), ("open", "folder", "Open…", "Ctrl+O")] {
             if item(ui, icon, l, keys) {
                 action = Some(a);
                 ui.close();
@@ -1426,7 +1441,7 @@ impl App {
                 }
             });
         });
-        for (a, icon, l, keys) in [("json", "save", "Save", "Ctrl+S"), ("saveas", "save", "Save as…", "Ctrl+Shift+S"), ("import", "importFile", "Import STEP, IGES, STL, OBJ…", "")] {
+        for (a, icon, l, keys) in [("json", "save", "Save", "Ctrl+S"), ("saveas", "save", "Save as…", "Ctrl+Shift+S"), ("git", "branch", "Version control (git)…", ""), ("export-project", "export", "Export project (ZIP)…", ""), ("import-project", "download", "Import project (ZIP)…", ""), ("import", "importFile", "Import STEP, IGES, STL, OBJ…", "")] {
             if item(ui, icon, l, keys) {
                 action = Some(a);
                 ui.close();
@@ -1500,6 +1515,10 @@ impl App {
             Some("undo") => self.undo(),
             Some("redo") => self.redo(),
             Some("keys") => self.session.show_shortcuts = true,
+            Some("git") => crate::vcs_ui::toggle(self),
+            Some("project") => crate::vcs_ui::new_project(self),
+            Some("export-project") => crate::vcs_ui::export_project(self),
+            Some("import-project") => crate::vcs_ui::import_project(self),
             Some("quit") => self.guard(crate::session::Pending::Close),
             Some("import") => self.import_step(),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
@@ -2895,35 +2914,41 @@ impl App {
             let mut ws = self.ws.clone();
             match ws.restore(i) {
                 Ok(()) => {
-                    // the current state stays one Ctrl+Z away
                     let name = self.ws.versions.get(i).map(|v| v.name.clone()).unwrap_or_default();
-                    self.ws_checkpoint(format!("restore version {name}"), None, false);
-                    // restoring may change the Part Studio list: keep histories only where they still fit
-                    let mut undo = std::mem::take(&mut self.studio_undo);
-                    undo.insert(self.cur_studio, (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo)));
-                    let tab = self.tab;
-                    let path = self.path.clone();
-                    let (saved, fitted) = (self.session.saved_hash, std::mem::take(&mut self.session.fitted_asm));
-                    self.load_workspace(ws);
-                    self.first_fit = false;
-                    self.path = path;
-                    self.session.saved_hash = saved;
-                    self.session.fitted_asm = fitted;
-                    let n = self.ws.studios.len();
-                    undo.retain(|k, _| *k < n);
-                    let (u, r) = undo.remove(&self.cur_studio).unwrap_or_default();
-                    self.undo = u;
-                    self.redo = r;
-                    self.studio_undo = undo;
-                    if tab != self.tab && self.ws.tabs().contains(&tab) {
-                        self.switch_tab(tab);
-                    }
-                    self.ws_mark();
+                    self.replace_workspace(ws, format!("restore version {name}"));
                     self.flash_info(format!("Restored version {name} · Ctrl+Z goes back"), Some(Duration::from_secs(3)));
                 }
                 Err(e) => self.flash(format!("Could not restore: {e}"), ToastKind::Error),
             }
         }
+    }
+
+    /// Show `ws` in place of the open workspace (an earlier version of it), as one undoable step:
+    /// the current state stays one Ctrl+Z away, and the document counts as changed.
+    pub fn replace_workspace(&mut self, ws: crate::workspace::Workspace, label: String) {
+        self.sync_ws();
+        self.ws_checkpoint(label, None, false);
+        // restoring may change the Part Studio list: keep histories only where they still fit
+        let mut undo = std::mem::take(&mut self.studio_undo);
+        undo.insert(self.cur_studio, (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo)));
+        let tab = self.tab;
+        let path = self.path.clone();
+        let (saved, fitted) = (self.session.saved_hash, std::mem::take(&mut self.session.fitted_asm));
+        self.load_workspace(ws);
+        self.first_fit = false;
+        self.path = path;
+        self.session.saved_hash = saved;
+        self.session.fitted_asm = fitted;
+        let n = self.ws.studios.len();
+        undo.retain(|k, _| *k < n);
+        let (u, r) = undo.remove(&self.cur_studio).unwrap_or_default();
+        self.undo = u;
+        self.redo = r;
+        self.studio_undo = undo;
+        if tab != self.tab && self.ws.tabs().contains(&tab) {
+            self.switch_tab(tab);
+        }
+        self.ws_mark();
     }
 
     pub(crate) fn tab_action(&mut self, a: &str, t: crate::workspace::Tab) {
@@ -3274,6 +3299,7 @@ impl eframe::App for App {
             if self.toast.as_ref().is_some_and(|t| t.until.is_some()) {
                 self.toast_ui(&ctx);
             }
+            crate::vcs_ui::frame(self, &ctx);
             crate::session::windows(self, &ctx);
             if ctx.input(|i| i.viewport().title.as_deref() != Some("rCAD")) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title("rCAD".into()));
@@ -3365,6 +3391,7 @@ impl eframe::App for App {
             self.hint_ui(&ctx, central.response.rect);
         }
         crate::palette::window(self, &ctx);
+        crate::vcs_ui::frame(self, &ctx);
         if self.phone && self.sidebar_open {
             self.drawer(&ctx, central.response.rect);
         }
