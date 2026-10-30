@@ -3543,6 +3543,7 @@ dependencies = [
  "base64",
  "bytemuck",
  "crackh3d-fe",
+ "crc32fast",
  "cxx",
  "earcutr",
  "eframe",

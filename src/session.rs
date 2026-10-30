@@ -24,6 +24,8 @@ pub enum Pending {
     New,
     Open,
     OpenPath(PathBuf),
+    /// A new document saved at this path in a new project folder, tracked with git if true.
+    NewProject(PathBuf, bool),
 }
 
 /// What a picked path is for.
@@ -380,13 +382,26 @@ impl App {
             }
             Pending::Open => self.with_open_path("Open", "Part", &["json"], |a, p| a.open_from_home(p)),
             Pending::OpenPath(p) => self.open_from_home(p),
+            Pending::NewProject(p, git) => {
+                self.new_document();
+                self.home.open = false;
+                self.save_to(p.clone());
+                if git && self.path.as_deref() == Some(p.as_path()) {
+                    let who = crate::vcs::Identity::guess(None);
+                    if let Err(e) = crate::vcs::init(&p, &who) {
+                        self.flash(format!("Could not start tracking with git: {e}"), ToastKind::Error);
+                    }
+                }
+            }
         }
     }
 
     /// Open `p`, leaving the start screen unless the file could not be read.
     fn open_from_home(&mut self, p: PathBuf) {
+        let before = self.path.clone();
         self.open_path(p.clone());
-        if self.path.as_deref() == Some(p.as_path()) {
+        // (a project ZIP opens the document unpacked from it)
+        if self.path.as_deref() == Some(p.as_path()) || (self.path.is_some() && self.path != before) {
             self.home.open = false;
         }
     }
@@ -623,7 +638,7 @@ fn doc_name(app: &App) -> String {
 fn save_prompt(app: &mut App, ctx: &egui::Context, p: Pending) {
     let what = match p {
         Pending::Close => "closing",
-        Pending::New => "starting a new document",
+        Pending::New | Pending::NewProject(..) => "starting a new document",
         Pending::Open | Pending::OpenPath(_) => "opening another document",
     };
     let mut choice = None;

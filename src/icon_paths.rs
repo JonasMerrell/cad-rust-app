@@ -75,6 +75,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("export", "M18 14v6H4V6h6M11 13l9-9M14 4h6v6"),
     ("importFile", "M18 14v6H4V6h6M20 4l-9 9M11 7v6h6"),
     ("folder", "M3 6h6l2 2h10v11H3z"),
+    ("branch", "M6 3v12M18 3a3 3 0 1 1 0 6a3 3 0 1 1 0-6M6 15a3 3 0 1 1 0 6a3 3 0 1 1 0-6M18 9a9 9 0 0 1-9 9"),
     ("history", "M3 12a9 9 0 1 0 3-6.7M3 4v5h5M12 7v5l3 3"),
     ("settings", "M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0-6 0M12 2v3M12 19v3M2 12h3M19 12h3M4.9 4.9l2.1 2.1M17 17l2.1 2.1M4.9 19.1L7 17M17 7l2.1-2.1"),
     ("keyboard", "M3 6h18v12H3zM7 10h.01M11 10h.01M15 10h.01M7 14h10"),
