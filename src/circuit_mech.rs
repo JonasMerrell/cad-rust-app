@@ -1,10 +1,12 @@
-//! Circuit parts that move the design: DC motors and hobby servos turn or slide the mates of an
-//! assembly, and potentiometers, limit switches and encoders read those mates back into the
-//! circuit, so firmware on a Pico can run a mechanism in closed loop.
+//! Circuit parts that move the design: DC motors, stepper motors and hobby servos turn or slide
+//! the mates of an assembly, and potentiometers, limit switches and encoders read those mates
+//! back into the circuit, so firmware on a Pico can run a mechanism in closed loop.
 //!
 //! Each linked part names an assembly mate. During a transient the mechanics run alongside the
 //! circuit (`MechExt`, an `Ext`): a motor's current gives torque, its speed gives back EMF; a
-//! servo times the pulses on its signal pin. The mate values spread through the assembly's
+//! servo times the pulses on its signal pin; a stepper follows the STEP pulses its driver module
+//! counts, as long as the torque its current and speed allow covers its load (else it stalls and
+//! loses steps). The mate values spread through the assembly's
 //! gear, rack and screw relations, and stop at mate limits. What every mate did is kept, so the
 //! assembly can play the motion back.
 
@@ -21,8 +23,8 @@ pub struct Link {
     /// Assembly tab (index) and mate id.
     pub assembly: usize,
     pub mate: u64,
-    /// Motor on a revolute mate: gear ratio (motor turns per mate turn, on top of a gearbox in
-    /// its value); on a slider: lead, mm per turn. Encoder: counts per turn (or per mm).
+    /// Motor or stepper on a revolute mate: gear ratio (motor turns per mate turn, on top of a
+    /// gearbox in its value); on a slider: lead, mm per turn. Encoder: counts per turn (or per mm).
     #[serde(default = "one")]
     pub ratio: f64,
     /// Servo: the mate angle at 1 ms and 2 ms pulses. Potentiometer: the mate's travel from one
@@ -54,6 +56,7 @@ impl Default for Link {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Role {
     Motor,
+    Stepper,
     Servo,
     Pot,
     Switch,
@@ -64,6 +67,7 @@ impl Role {
     pub fn label(self) -> &'static str {
         match self {
             Role::Motor => "DC motor",
+            Role::Stepper => "stepper motor",
             Role::Servo => "servo",
             Role::Pot => "potentiometer",
             Role::Switch => "limit switch",
@@ -72,7 +76,7 @@ impl Role {
     }
     /// Drives its mate (rather than reading it).
     pub fn drives(self) -> bool {
-        matches!(self, Role::Motor | Role::Servo)
+        matches!(self, Role::Motor | Role::Stepper | Role::Servo)
     }
 }
 
@@ -80,6 +84,7 @@ impl Role {
 pub fn role(symbol: &str) -> Option<Role> {
     match symbol {
         "M" => Some(Role::Motor),
+        "STEPPER" => Some(Role::Stepper),
         "SERVO" => Some(Role::Servo),
         "RV" => Some(Role::Pot),
         "SW" => Some(Role::Switch),
@@ -92,7 +97,7 @@ pub fn role(symbol: &str) -> Option<Role> {
 pub fn new_link(part: &str, role: Role, assembly: usize, mate: u64, slide: bool, limits: Option<[f64; 2]>) -> Link {
     let mut l = Link { part: part.into(), assembly, mate, ..Default::default() };
     match role {
-        Role::Motor if slide => l.ratio = 8.0,
+        Role::Motor | Role::Stepper if slide => l.ratio = 8.0,
         Role::Encoder => l.ratio = if slide { 1.0 } else { 20.0 },
         Role::Servo => l.range = Some([-90.0, 90.0]),
         Role::Pot => l.range = Some(limits.unwrap_or(if slide { [0.0, 50.0] } else { [-135.0, 135.0] })),
@@ -221,6 +226,201 @@ pub fn servo_model(value: &str) -> Servo {
     }
 }
 
+/// A two-phase hybrid stepper: holding torque at its rated current (both windings on), winding
+/// resistance and inductance, step angle, rotor inertia and a gearbox.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Stepper {
+    pub torque: f64,
+    pub amps: f64,
+    pub ohms: f64,
+    pub henry: f64,
+    pub step_deg: f64,
+    pub rotor: f64,
+    /// Gearbox ratio (motor turns per output turn).
+    pub gear: f64,
+    pub name: String,
+}
+
+impl Stepper {
+    /// Rotor teeth: a full step is a quarter of an electrical turn.
+    pub fn pole_pairs(&self) -> f64 {
+        90.0 / self.step_deg
+    }
+    /// Back-EMF constant per winding (V·s/rad).
+    pub fn ke(&self) -> f64 {
+        self.torque / (std::f64::consts::SQRT_2 * self.amps)
+    }
+    /// Torque with `i` amps peak in the windings (sine–cosine microstepping).
+    pub fn torque_at(&self, i: f64) -> f64 {
+        self.ke() * i
+    }
+    /// The peak winding current a `vmot` supply can push at `w` rad/s: the back EMF and the
+    /// windings' reactance eat into it as the motor speeds up.
+    pub fn i_max(&self, vmot: f64, w: f64) -> f64 {
+        let x = self.pole_pairs() * w.abs() * self.henry;
+        (vmot - self.ke() * w.abs()).max(0.0) / (self.ohms * self.ohms + x * x).sqrt()
+    }
+    /// Gearbox efficiency.
+    pub fn eff(&self) -> f64 {
+        if self.gear > 1.0 { 0.8 } else { 1.0 }
+    }
+}
+
+/// A stepper from its value: "NEMA17 0.45Nm 1.5A 1:27", or a frame size (NEMA14, NEMA17, NEMA23)
+/// with the holding torque (Nm, Ncm), rated current (A), resistance (ohm), inductance (mH),
+/// step angle (0.9deg) and gearbox (1:27) where they differ from that frame's typical motor.
+pub fn stepper_model(value: &str) -> Stepper {
+    let u = value.to_ascii_uppercase();
+    // a 17HS4401-like NEMA17 by default
+    let mut m = Stepper { torque: 0.4, amps: 1.7, ohms: 1.5, henry: 2.8e-3, step_deg: 1.8, rotor: 54e-7, gear: 1.0, name: String::new() };
+    let mut frame = "NEMA17";
+    if u.contains("NEMA23") || u.contains("NEMA 23") {
+        (m.torque, m.amps, m.ohms, m.henry, m.rotor, frame) = (1.26, 2.8, 0.9, 2.5e-3, 300e-7, "NEMA23");
+    } else if u.contains("NEMA14") || u.contains("NEMA 14") {
+        (m.torque, m.amps, m.ohms, m.henry, m.rotor, frame) = (0.14, 0.8, 4.5, 6e-3, 20e-7, "NEMA14");
+    }
+    let num = |s: &str| s.parse::<f64>().ok().filter(|v| *v > 0.0);
+    for tok in u.split(|c: char| c.is_whitespace() || c == ',') {
+        if let Some((a, b)) = tok.split_once(':') {
+            if let (Some(a), Some(b)) = (num(a), num(b)) {
+                m.gear = a.max(b) / a.min(b);
+            }
+        } else if let Some(v) = tok.strip_suffix("NCM").and_then(num) {
+            m.torque = v / 100.0;
+        } else if let Some(v) = tok.strip_suffix("NM").or_else(|| tok.strip_suffix("N·M")).and_then(num) {
+            m.torque = v;
+        } else if let Some(v) = tok.strip_suffix("MH").and_then(num) {
+            m.henry = v * 1e-3;
+        } else if let Some(v) = tok.strip_suffix("OHM").or_else(|| tok.strip_suffix("Ω")).and_then(num) {
+            m.ohms = v;
+        } else if let Some(v) = tok.strip_suffix("DEG").or_else(|| tok.strip_suffix('°')).and_then(num) {
+            m.step_deg = v;
+        } else if let Some(v) = tok.strip_suffix('A').and_then(num) {
+            m.amps = v;
+        }
+    }
+    m.name = format!("{frame} stepper, {} N·m at {} A, {}°/step", crate::expr::trim(m.torque, 3), crate::expr::trim(m.amps, 2), crate::expr::trim(m.step_deg, 2));
+    if m.gear != 1.0 {
+        m.name.push_str(&format!(", 1:{}", crate::expr::trim(m.gear, 2)));
+    }
+    m
+}
+
+/// Stepper driver chips, by how they set the microstep size.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Chip {
+    A4988,
+    Drv8825,
+    Tmc2209,
+}
+
+/// A STEP/DIR driver module: its chip and current limit (peak amps per winding).
+#[derive(Clone, Debug, PartialEq)]
+pub struct Driver {
+    pub chip: Chip,
+    pub amps: f64,
+    /// VMOT range.
+    pub vmin: f64,
+    pub vmax: f64,
+    pub name: String,
+}
+
+impl Driver {
+    /// Microsteps per full step from the MS pins (MS1/M0 first).
+    pub fn microsteps(&self, ms: [bool; 3]) -> u32 {
+        match (self.chip, ms) {
+            (Chip::A4988, [false, false, false]) => 1,
+            (Chip::A4988, [true, false, false]) => 2,
+            (Chip::A4988, [false, true, false]) => 4,
+            (Chip::A4988, [true, true, false]) => 8,
+            (Chip::A4988, _) => 16,
+            (Chip::Drv8825, [false, false, false]) => 1,
+            (Chip::Drv8825, [true, false, false]) => 2,
+            (Chip::Drv8825, [false, true, false]) => 4,
+            (Chip::Drv8825, [true, true, false]) => 8,
+            (Chip::Drv8825, [false, false, true]) => 16,
+            (Chip::Drv8825, _) => 32,
+            (Chip::Tmc2209, [false, false, _]) => 8,
+            (Chip::Tmc2209, [true, false, _]) => 32,
+            (Chip::Tmc2209, [false, true, _]) => 64,
+            (Chip::Tmc2209, [true, true, _]) => 16,
+        }
+    }
+}
+
+/// A driver from its value: "A4988 1.2A", "DRV8825 1.5A", "TMC2209" (current limit default 1 A).
+pub fn driver_model(value: &str) -> Driver {
+    let u = value.to_ascii_uppercase();
+    let (chip, vmin, vmax, max, name) = if u.contains("8825") {
+        (Chip::Drv8825, 8.2, 45.0, 2.2, "DRV8825")
+    } else if u.contains("2209") || u.contains("2208") || u.contains("TMC") {
+        (Chip::Tmc2209, 4.75, 29.0, 2.0, "TMC2209")
+    } else {
+        (Chip::A4988, 8.0, 35.0, 2.0, "A4988")
+    };
+    let amps = u.split(|c: char| c.is_whitespace() || c == ',').filter_map(|t| t.strip_suffix('A').and_then(|n| n.parse::<f64>().ok())).find(|v| *v > 0.0).unwrap_or(1.0).min(max);
+    Driver { chip, amps, vmin, vmax, name: format!("{name} stepper driver, {} A limit", crate::expr::trim(amps, 2)) }
+}
+
+/// A driver module's pins by role (the names a part's pins may have), in the order of `drv`.
+pub const DRV_PINS: [&[&str]; 15] = [
+    &["STEP", "STP", "CLK"],
+    &["DIR"],
+    &["EN", "ENABLE", "ENN"],
+    &["MS1", "M0"],
+    &["MS2", "M1"],
+    &["MS3", "M2"],
+    &["RST", "RESET", "NRESET"],
+    &["SLP", "SLEEP", "NSLEEP"],
+    &["VDD", "VIO", "VCC"],
+    &["GND", "VSS"],
+    &["VMOT", "VM", "VBB", "VS"],
+    &["1A", "A1", "M1A", "OA1"],
+    &["1B", "A2", "M1B", "OA2"],
+    &["2A", "B1", "M2A", "OB1"],
+    &["2B", "B2", "M2B", "OB2"],
+];
+
+/// Indices into `DRV_PINS`.
+pub mod drv {
+    pub const STEP: usize = 0;
+    pub const DIR: usize = 1;
+    pub const EN: usize = 2;
+    pub const MS1: usize = 3;
+    pub const MS2: usize = 4;
+    pub const MS3: usize = 5;
+    pub const RST: usize = 6;
+    pub const SLP: usize = 7;
+    pub const VDD: usize = 8;
+    pub const GND: usize = 9;
+    pub const VMOT: usize = 10;
+    pub const A1: usize = 11;
+    pub const B1: usize = 12;
+    pub const A2: usize = 13;
+    pub const B2: usize = 14;
+}
+
+/// A driver module in the built circuit: the nodes it reads and the values it sets.
+#[derive(Clone, Debug)]
+pub struct DriverSim {
+    pub reference: String,
+    pub driver: Driver,
+    pub step: usize,
+    pub dir: usize,
+    pub en: Option<usize>,
+    pub ms: [Option<usize>; 3],
+    /// RST and SLP when wired (open, they are pulled high on the module).
+    pub rst: Option<usize>,
+    pub slp: Option<usize>,
+    pub vdd: Option<usize>,
+    pub gnd: usize,
+    pub vmot: usize,
+    /// 1A, 1B, 2A, 2B.
+    pub out: [usize; 4],
+    /// The `Dev::Emf` values across 1A–1B and 2A–2B, and the `Dev::G` of its VMOT draw.
+    pub vals: [usize; 3],
+}
+
 /// How a linked part was built into the circuit.
 #[derive(Clone, Debug)]
 pub enum MechPart {
@@ -249,6 +449,11 @@ pub enum MechPart {
     Encoder {
         pins: [usize; 2],
     },
+    /// The nodes of its A+, A−, B+ and B− leads (a driver whose outputs share them drives it).
+    Stepper {
+        stepper: Stepper,
+        coils: [usize; 4],
+    },
 }
 
 #[derive(Clone, Debug)]
@@ -265,6 +470,7 @@ impl MechSim {
             MechPart::Pot { .. } => Role::Pot,
             MechPart::Switch { .. } => Role::Switch,
             MechPart::Encoder { .. } => Role::Encoder,
+            MechPart::Stepper { .. } => Role::Stepper,
         }
     }
 }
@@ -342,6 +548,7 @@ enum Act {
         mate: Option<usize>,
         base: f64,
     },
+    Stepper(Box<StepAct>),
     Servo {
         servo: Servo,
         sig: usize,
@@ -357,6 +564,54 @@ enum Act {
         moving: bool,
     },
 }
+
+/// A stepper's running state.
+#[derive(Clone, Debug)]
+struct StepAct {
+    stepper: Stepper,
+    /// Its driver (index into the drivers), and which way the driver's sequence turns the rotor
+    /// as the windings are wired (±1).
+    drv: usize,
+    wiring: f64,
+    /// Motor turns per mate turn; mm per output turn on a slider (0 on a revolute mate).
+    n: f64,
+    lead: f64,
+    sign: f64,
+    /// Inertia (rotor and load) and load torque at the motor shaft.
+    j: f64,
+    tl: f64,
+    mate: Option<usize>,
+    base: f64,
+    /// The electrical angle the driver's translator stands at, and the rotor angle (rad, from
+    /// the start). While the rotor follows, theta = wiring · e / pole pairs + offset.
+    e: f64,
+    theta: f64,
+    offset: f64,
+    offset0: f64,
+    locked: bool,
+    step_hi: bool,
+    /// The commanded rotor angle, smoothed twice (speed and acceleration come from these).
+    cmd_prev: f64,
+    w1: f64,
+    w2: f64,
+    omega: f64,
+    /// Peak winding current now, and the supply.
+    amps: f64,
+    vm: f64,
+    steps: u64,
+    on_ever: bool,
+    vmot_hi: bool,
+    /// The first stall (time, torque needed, torque available), the first mate limit it ran
+    /// into (time, mate), and the highest share of its torque it used while it kept step.
+    stall: Option<(f64, f64, f64)>,
+    stop: Option<(f64, String)>,
+    peak: (f64, f64, f64),
+}
+
+/// The translator's home: both windings at 71 %.
+const E0: f64 = std::f64::consts::FRAC_PI_4;
+/// How quickly a stepper's speed and acceleration estimates follow its step pulses (s).
+const STEP_TAU: f64 = 0.01;
 
 /// A sensor reading a mate.
 #[derive(Clone, Debug)]
@@ -405,6 +660,7 @@ pub struct MechExt {
     t: f64,
     mates: Vec<MateState>,
     rels: Vec<Rel>,
+    drivers: Vec<DriverSim>,
     acts: Vec<(String, Act)>,
     senses: Vec<(String, Sense, Option<usize>)>,
     vals: Vec<f64>,
@@ -423,12 +679,13 @@ const ENC_G: f64 = 1.0 / 100.0;
 
 impl MechExt {
     /// The mechanism for the built parts and the links to `asms`; problems go in `notes`.
-    pub fn new(parts: &[MechSim], links: &[Link], asms: &[Assembly], nn: usize, nvals: usize, npins: usize, notes: &mut Vec<String>) -> MechExt {
+    pub fn new(parts: &[MechSim], drivers: &[DriverSim], links: &[Link], asms: &[Assembly], nn: usize, nvals: usize, npins: usize, notes: &mut Vec<String>) -> MechExt {
         let mut ext = MechExt {
             nn,
             t: 0.0,
             mates: vec![],
             rels: vec![],
+            drivers: drivers.to_vec(),
             acts: vec![],
             senses: vec![],
             vals: vec![0.0; nvals],
@@ -522,6 +779,65 @@ impl MechExt {
                         Act::Servo { servo: servo.clone(), sig: *sig, gnd: *gnd, val: *val, mate, range, angle, target: None, rise: None, last: (0.0, 0.0), moving: false },
                     ));
                 }
+                MechPart::Stepper { stepper, coils } => {
+                    // the driver whose outputs the two windings are wired to, and which way round
+                    let pair = |x: usize, y: usize, d: &DriverSim| -> Option<(usize, f64)> {
+                        match (x, y) {
+                            _ if (x, y) == (d.out[0], d.out[1]) => Some((0, 1.0)),
+                            _ if (y, x) == (d.out[0], d.out[1]) => Some((0, -1.0)),
+                            _ if (x, y) == (d.out[2], d.out[3]) => Some((1, 1.0)),
+                            _ if (y, x) == (d.out[2], d.out[3]) => Some((1, -1.0)),
+                            _ => None,
+                        }
+                    };
+                    let found = ext.drivers.iter().enumerate().find_map(|(di, d)| {
+                        let (pa, sa) = pair(coils[0], coils[1], d)?;
+                        let (pb, sb) = pair(coils[2], coils[3], d)?;
+                        (pa != pb).then_some((di, if pa == 0 { 1.0 } else { -1.0 } * sa * sb))
+                    });
+                    let Some((drv, wiring)) = found else {
+                        notes.push(format!("{}: no stepper driver drives its windings (wire A+/A- to a driver's 1A/1B and B+/B- to its 2A/2B)", p.reference));
+                        continue;
+                    };
+                    let ratio = if l.ratio > 0.0 { l.ratio } else { 1.0 };
+                    let (n, lead) = if slide { (stepper.gear, ratio) } else { (stepper.gear * ratio, 0.0) };
+                    let reff = if slide { lead / 1000.0 / std::f64::consts::TAU / n } else { 1.0 / n };
+                    let (j, tl) = if mate.is_some() { (stepper.rotor + l.inertia.max(0.0) * reff * reff, l.load.max(0.0) * reff / stepper.eff()) } else { (stepper.rotor, 0.0) };
+                    let offset0 = -wiring * E0 / stepper.pole_pairs();
+                    ext.acts.push((
+                        p.reference.clone(),
+                        Act::Stepper(Box::new(StepAct {
+                            stepper: stepper.clone(),
+                            drv,
+                            wiring,
+                            n,
+                            lead,
+                            sign: if l.reverse { -1.0 } else { 1.0 },
+                            j,
+                            tl,
+                            mate,
+                            base,
+                            e: E0,
+                            theta: 0.0,
+                            offset: offset0,
+                            offset0,
+                            locked: false,
+                            step_hi: false,
+                            cmd_prev: -offset0,
+                            w1: 0.0,
+                            w2: 0.0,
+                            omega: 0.0,
+                            amps: 0.0,
+                            vm: 0.0,
+                            steps: 0,
+                            on_ever: false,
+                            vmot_hi: false,
+                            stall: None,
+                            stop: None,
+                            peak: (0.0, 0.0, 0.0),
+                        })),
+                    ));
+                }
                 MechPart::Pot { r, vals } => ext.senses.push((p.reference.clone(), Sense::Pot { r: *r, vals: *vals, range: l.range.unwrap_or([-135.0, 135.0]) }, mate)),
                 MechPart::Switch { val } => ext.senses.push((p.reference.clone(), Sense::Switch { val: *val, range: l.range.unwrap_or([45.0, 1e6]) }, mate)),
                 MechPart::Encoder { pins } => ext.senses.push((p.reference.clone(), Sense::Encoder { pins: *pins, cpr: if l.ratio > 0.0 { l.ratio } else { 20.0 } }, mate)),
@@ -581,6 +897,15 @@ impl MechExt {
                         ms.slide = Some(base + out / std::f64::consts::TAU * lead);
                     } else {
                         ms.angle = Some(base + out);
+                    }
+                }
+                Act::Stepper(s) if s.mate.is_some() => {
+                    let out = s.sign * s.theta / s.n;
+                    let ms = &mut self.mates[s.mate.unwrap()];
+                    if ms.slide_unit() {
+                        ms.slide = Some(s.base + out / std::f64::consts::TAU * s.lead);
+                    } else {
+                        ms.angle = Some(s.base + out);
                     }
                 }
                 Act::Servo { mate: Some(m), angle, .. } => {
@@ -706,6 +1031,10 @@ impl MechExt {
                     let pos = mate.map(|m| self.mates[m].value()).unwrap_or((sign * theta / n).to_degrees());
                     (r.clone(), pos, Some(omega / n * 60.0 / std::f64::consts::TAU))
                 }
+                Act::Stepper(s) => {
+                    let pos = s.mate.map(|m| self.mates[m].value()).unwrap_or((s.sign * s.theta / s.n).to_degrees());
+                    (r.clone(), pos, Some(s.sign * s.omega / s.n * 60.0 / std::f64::consts::TAU))
+                }
                 Act::Servo { mate, angle, .. } => (r.clone(), mate.map(|m| self.mates[m].value()).unwrap_or(*angle), None),
             })
             .chain(self.senses.iter().map(|(r, _, mate)| (r.clone(), mate.map(|m| self.mates[m].value()).unwrap_or(0.0), None)))
@@ -767,6 +1096,76 @@ impl MechExt {
                         *theta += *omega * dt;
                     }
                 }
+                Act::Stepper(s) => {
+                    let d = &self.drivers[s.drv];
+                    let vg = v(d.gnd);
+                    let vm = v(d.vmot) - vg;
+                    let vdd = d.vdd.map(|n| v(n) - vg);
+                    let hi = |n: usize| {
+                        let u = v(n) - vg;
+                        match vdd {
+                            Some(vd) => vd > 2.0 && u > 0.5 * vd,
+                            None => u > 1.6,
+                        }
+                    };
+                    let powered = vm >= d.driver.vmin && vdd.map(|x| x >= 2.5).unwrap_or(true);
+                    let rst = d.rst.map(hi).unwrap_or(true);
+                    let awake = powered && rst && d.slp.map(hi).unwrap_or(true);
+                    if !powered || !rst {
+                        s.e = E0;
+                    }
+                    let st = hi(d.step);
+                    if awake && st && !s.step_hi {
+                        let ms = d.driver.microsteps([0, 1, 2].map(|k| d.ms[k].map(hi).unwrap_or(false)));
+                        s.e += if hi(d.dir) { 1.0 } else { -1.0 } * std::f64::consts::FRAC_PI_2 / ms as f64;
+                        s.steps += 1;
+                    }
+                    s.step_hi = st;
+                    s.vmot_hi |= vm > d.driver.vmax;
+                    s.vm = vm;
+                    let on = awake && !d.en.map(hi).unwrap_or(false);
+                    let np = s.stepper.pole_pairs();
+                    let cmd = s.wiring * s.e / np;
+                    let a = (-dt.max(0.0) / STEP_TAU).exp();
+                    let w1 = s.w1;
+                    s.w1 = s.w1 * a + (cmd - s.cmd_prev) / STEP_TAU;
+                    s.w2 = s.w2 * a + w1 * (1.0 - a);
+                    s.cmd_prev = cmd;
+                    let alpha = (s.w1 - s.w2) / STEP_TAU;
+                    let ip = d.driver.amps.min(s.stepper.i_max(vm, s.w1));
+                    let had = s.stepper.torque_at(ip);
+                    let need = s.j * alpha.abs() + s.tl;
+                    if on {
+                        s.on_ever = true;
+                        if s.locked {
+                            if need > had {
+                                s.locked = false;
+                                s.stall.get_or_insert((t, need, had));
+                            } else if had > 0.0 && need / had > s.peak.0 {
+                                s.peak = (need / had, need, had);
+                            }
+                        } else {
+                            // it pulls back into step once the load and the speed allow
+                            if need > had {
+                                s.stall.get_or_insert((t, need, had));
+                            }
+                            let pull = (2.0 * had * std::f64::consts::FRAC_PI_2 / np / s.j).sqrt();
+                            if need <= 0.9 * had && s.w1.abs() <= pull {
+                                let per = std::f64::consts::TAU / np;
+                                let k = ((s.theta - cmd - s.offset0) / per).round();
+                                s.offset = s.offset0 + k * per;
+                                s.locked = true;
+                            }
+                        }
+                    } else {
+                        s.locked = false;
+                    }
+                    if s.locked {
+                        s.theta = cmd + s.offset;
+                    }
+                    s.omega = if s.locked { s.w1 } else { 0.0 };
+                    s.amps = if on { ip } else { 0.0 };
+                }
                 Act::Servo { servo, sig, gnd, angle, target, rise, last, moving, range, .. } => {
                     let u = v(*sig) - v(*gnd);
                     let th = 1.4;
@@ -798,6 +1197,7 @@ impl MechExt {
             self.propagate();
             if let Some((k, over)) = self.overrun() {
                 let cur = self.acts[ai].1.clone();
+                let mate_name = self.mates[k].name.clone();
                 let now = self.mates[k].lim_val().unwrap_or(0.0);
                 let lim = now - over;
                 self.acts[ai].1 = prev.clone();
@@ -815,15 +1215,31 @@ impl MechExt {
                         *angle = p + (*angle - p) * f;
                         *moving = false;
                     }
+                    (Act::Stepper(s), Act::Stepper(p)) => {
+                        // a hard stop: the rotor stays there and misses the steps that follow
+                        s.theta = p.theta + (s.theta - p.theta) * f;
+                        s.locked = false;
+                        s.omega = 0.0;
+                        s.stop.get_or_insert((t, mate_name));
+                    }
                     _ => {}
                 }
                 self.propagate();
             }
         }
-        // the EMFs for the next step
+        // the EMFs for the next step; stepper drivers push their windings' current, and draw it
+        // (and the work the motor does) from VMOT through their choppers
         for (_, a) in &self.acts {
-            if let Act::Motor { val, omega, motor, .. } = a {
-                self.vals[*val] = motor.k() * omega;
+            match a {
+                Act::Motor { val, omega, motor, .. } => self.vals[*val] = motor.k() * omega,
+                Act::Stepper(s) => {
+                    let d = &self.drivers[s.drv];
+                    self.vals[d.vals[0]] = s.amps * s.e.cos() * s.stepper.ohms;
+                    self.vals[d.vals[1]] = s.amps * s.e.sin() * s.stepper.ohms;
+                    let p = s.amps * s.amps * s.stepper.ohms + (s.tl * s.omega).abs();
+                    self.vals[d.vals[2]] = if s.vm > 1.0 { p / 0.85 / (s.vm * s.vm) } else { 0.0 };
+                }
+                _ => {}
             }
         }
         if dt > 0.0 {
@@ -864,6 +1280,38 @@ impl MechExt {
         self.t = t;
         self.sense();
         self.record();
+    }
+
+    /// How each stepper fared: steps taken, the torque it used or where it stalled, lost steps.
+    pub fn report(&self) -> Vec<String> {
+        let mut out = vec![];
+        let f = |v: f64| crate::expr::trim(v, 3);
+        for (r, a) in &self.acts {
+            let Act::Stepper(s) = a else { continue };
+            let d = &self.drivers[s.drv];
+            if s.vmot_hi {
+                out.push(format!("{}: VMOT goes over the {} V its {:?} takes", d.reference, d.driver.vmax, d.driver.chip));
+            }
+            if !s.on_ever {
+                out.push(format!("{r}: its driver {} never turned the windings on (check VMOT, VDD, EN, SLP and RST)", d.reference));
+                continue;
+            }
+            let np = s.stepper.pole_pairs();
+            let lost = (s.wiring * s.e / np + s.offset0 - s.theta) / (std::f64::consts::FRAC_PI_2 / np);
+            let mut msg = format!("{r}: {} steps from {}; ", s.steps, d.reference);
+            match s.stall {
+                Some((t, need, had)) => msg.push_str(&format!("stalled at {} s, needing {} N·m at the motor shaft with {} N·m available", f(t), f(need), f(had))),
+                None => msg.push_str(&format!("kept step, using at most {} % of its torque ({} of {} N·m)", (s.peak.0 * 100.0).round(), f(s.peak.1), f(s.peak.2))),
+            }
+            if lost.abs() >= 0.5 {
+                msg.push_str(&format!("; {} full steps lost", lost.round()));
+            }
+            if let Some((t, m)) = &s.stop {
+                msg.push_str(&format!("; ran into {m}'s limit at {} s", f(*t)));
+            }
+            out.push(msg);
+        }
+        out
     }
 
     /// The parts' and mates' traces.
@@ -1129,6 +1577,105 @@ mod tests {
         assert!((last(&out, "POS(M1)") - 90.0).abs() < 0.5, "{}", last(&out, "POS(M1)"));
         assert!((last(&out, "POS(SV1)") - 90.0).abs() < 1.0, "{}", last(&out, "POS(SV1)"));
         assert_eq!(out.mates.len(), 2);
+    }
+
+    /// A stepper on a driver, STEP from a 1 kHz pulse source, the MS pins and DIR from `logic`.
+    fn stepper_board(motor: &str, driver: &str, logic: &[&str], swap_a: bool) -> Pcb {
+        let mut nets: Vec<(&str, Vec<(&str, &str)>)> = vec![
+            ("GND", vec![("U1", "GND")]),
+            ("24V", vec![("U1", "VMOT")]),
+            ("3V3", vec![("U1", "VDD")]),
+            ("STEP", vec![("U1", "STEP")]),
+            ("PA", vec![("U1", "1A"), ("M1", if swap_a { "A-" } else { "A+" })]),
+            ("NA", vec![("U1", "1B"), ("M1", if swap_a { "A+" } else { "A-" })]),
+            ("PB", vec![("U1", "2A"), ("M1", "B+")]),
+            ("NB", vec![("U1", "2B"), ("M1", "B-")]),
+        ];
+        for l in logic {
+            nets[2].1.push(("U1", l));
+        }
+        // pins by name: the first pin of that name
+        let mut p = board(&[("STEPDRV", driver), ("STEPPER", motor)], &[], &[("24V", "24"), ("3V3", "3.3"), ("STEP", "PULSE(0 3.3 0 1u 1u 0.5m 1m)")]);
+        for (net, pins) in &nets {
+            let pins: Vec<(usize, String)> = pins
+                .iter()
+                .map(|(r, n)| {
+                    let i = p.part_index(r).unwrap();
+                    let k = p.parts[i].pin_names.iter().position(|x| x == n).unwrap();
+                    (i, p.parts[i].footprint().pin_numbers()[k].clone())
+                })
+                .collect();
+            crate::agent::pcb_connect(&mut p, net, &pins);
+        }
+        p
+    }
+
+    #[test]
+    fn stepper_models_from_values() {
+        let m = stepper_model("NEMA17 0.45Nm 1.5A 1:27");
+        assert_eq!((m.torque, m.amps, m.gear, m.step_deg), (0.45, 1.5, 27.0, 1.8));
+        assert_eq!(m.pole_pairs(), 50.0);
+        let m = stepper_model("nema23 2.8mH 0.9deg 40Ncm 2ohm");
+        assert_eq!((m.henry, m.step_deg, m.torque, m.ohms), (2.8e-3, 0.9, 0.4, 2.0));
+        // the supply runs out of voltage as the motor speeds up
+        let m = stepper_model("NEMA17");
+        assert!(m.i_max(24.0, 0.0) > 10.0 && m.i_max(24.0, 150.0) < 0.1);
+        let d = driver_model("DRV8825 1.5A");
+        assert_eq!((d.chip, d.amps, d.microsteps([false, false, true])), (Chip::Drv8825, 1.5, 16));
+        assert_eq!(driver_model("A4988 5A").amps, 2.0);
+        assert_eq!(driver_model("A4988").microsteps([true, true, false]), 8);
+    }
+
+    #[test]
+    fn a_stepper_counts_its_steps_into_a_mate() {
+        let a = asm(vec![mate(1, "Joint", MateKind::Revolute, None)], vec![]);
+        // eighth steps (MS1, MS2 high), DIR high: 200 pulses = 25 full steps = 45° at the motor
+        let mut p = stepper_board("NEMA17 0.4Nm 1.7A 1:5", "A4988 1.2A", &["MS1", "MS2", "DIR"], false);
+        let mut l = new_link("M1", Role::Stepper, 0, 1, false, None);
+        l.load = 0.5;
+        p.sim.links = vec![l];
+        let out = tran(&p, 0.1995, &[a.clone()]);
+        assert!((last(&out, "POS(M1)") - 9.0).abs() < 0.05, "{} {:?}", last(&out, "POS(M1)"), out.notes);
+        let rep = out.notes.iter().find(|n| n.starts_with("M1:")).unwrap_or_else(|| panic!("{:?}", out.notes));
+        assert!(rep.contains("200 steps") && rep.contains("kept step"), "{rep}");
+        // the windings carry the driver's current, sine and cosine
+        let ia = out.probe("I(M1.A+)").unwrap();
+        let ib = out.probe("I(M1.B+)").unwrap();
+        let peak = ia.re.iter().chain(&ib.re).fold(0.0f64, |m, v| m.max(v.abs()));
+        assert!((peak - 1.2).abs() < 0.02, "{peak}");
+        // and VMOT supplies that power, 1.2² × 1.5 Ω, and the work against the load, 0.125 N·m
+        // at 3.9 rad/s, through an 85 % chopper: about 0.13 A at 24 V
+        let i = last(&out, "I(V24V)");
+        assert!(i > 0.12 && i < 0.15, "{i}");
+        // swapping one winding's leads turns it the other way
+        let mut p = stepper_board("NEMA17 0.4Nm 1.7A 1:5", "A4988 1.2A", &["MS1", "MS2", "DIR"], true);
+        p.sim.links = vec![new_link("M1", Role::Stepper, 0, 1, false, None)];
+        let out = tran(&p, 0.1995, &[a]);
+        assert!((last(&out, "POS(M1)") + 9.0).abs() < 0.05, "{}", last(&out, "POS(M1)"));
+    }
+
+    #[test]
+    fn an_overloaded_stepper_stalls_and_loses_steps() {
+        let a = asm(vec![mate(1, "Joint", MateKind::Revolute, None)], vec![]);
+        // full steps at 1 kHz, no gearbox, 0.4 N·m of load against about 0.17 N·m at 1 A
+        let mut p = stepper_board("NEMA17 0.4Nm 1.7A", "A4988 1A", &["DIR"], false);
+        let mut l = new_link("M1", Role::Stepper, 0, 1, false, None);
+        l.load = 0.4;
+        p.sim.links = vec![l];
+        let out = tran(&p, 0.1, &[a]);
+        let rep = out.notes.iter().find(|n| n.starts_with("M1:")).unwrap_or_else(|| panic!("{:?}", out.notes));
+        assert!(rep.contains("stalled at 0 s") && rep.contains("full steps lost"), "{rep}");
+        assert!(last(&out, "POS(M1)").abs() < 1e-9);
+    }
+
+    #[test]
+    fn a_disabled_driver_holds_still() {
+        let a = asm(vec![mate(1, "Joint", MateKind::Revolute, None)], vec![]);
+        let mut p = stepper_board("NEMA17", "A4988", &["EN", "DIR"], false);
+        p.sim.links = vec![new_link("M1", Role::Stepper, 0, 1, false, None)];
+        let out = tran(&p, 0.05, &[a]);
+        assert!(last(&out, "POS(M1)").abs() < 1e-9);
+        assert!(out.notes.iter().any(|n| n.contains("never turned the windings on")), "{:?}", out.notes);
     }
 
     #[test]

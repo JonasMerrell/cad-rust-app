@@ -161,12 +161,24 @@ pub struct Rules {
     pub min_track: f64,
     pub min_drill: f64,
     pub min_annular: f64,
+    /// More nets that get the power track width, by name (`M1_*` ends in a prefix match): motor
+    /// phases, heater and LED strip outputs.
+    pub power_nets: Vec<String>,
+}
+
+impl Rules {
+    pub fn is_power_net(&self, net: &str) -> bool {
+        self.power_nets.iter().any(|p| match p.strip_suffix('*') {
+            Some(pre) => net.to_ascii_uppercase().starts_with(&pre.to_ascii_uppercase()),
+            None => net.eq_ignore_ascii_case(p),
+        })
+    }
 }
 
 impl Default for Rules {
     fn default() -> Self {
         // what common low-cost fabs make without extra charge
-        Rules { clearance: 0.2, track: 0.25, power_track: 0.5, via_d: 0.6, via_drill: 0.3, edge: 0.3, min_track: 0.15, min_drill: 0.3, min_annular: 0.13 }
+        Rules { clearance: 0.2, track: 0.25, power_track: 0.5, via_d: 0.6, via_drill: 0.3, edge: 0.3, min_track: 0.15, min_drill: 0.3, min_annular: 0.13, power_nets: vec![] }
     }
 }
 
@@ -553,13 +565,14 @@ impl Pcb {
         }
         let id = self.next_id.max(1);
         self.next_id = id + 1;
+        let value = value.unwrap_or(k.value);
         let mut p = Part {
             id,
             reference: self.next_reference(k.prefix),
-            value: value.unwrap_or(k.value).to_string(),
+            value: value.to_string(),
             symbol: k.key.to_string(),
             footprint: fp.to_string(),
-            pin_names: pcb_lib::default_pin_names(k.key),
+            pin_names: pcb_lib::default_pin_names(k.key, value),
             sch: snap(sch, pcb_lib::GRID),
             ..Default::default()
         };
@@ -727,7 +740,7 @@ impl Pcb {
     /// The width a new track on `net` gets.
     pub fn track_width(&self, nl: &Netlist, net: &str) -> f64 {
         match nl.by_name(net) {
-            Some(n) if nl.nets[n].power => self.board.rules.power_track,
+            Some(n) if nl.nets[n].power || self.board.rules.is_power_net(net) => self.board.rules.power_track,
             _ => self.board.rules.track,
         }
     }

@@ -88,6 +88,24 @@ pub const SYMBOLS: &[SymbolKind] = &[
     SymbolKind { key: "SW", name: "Push button", prefix: "SW", value: "SW", footprint: "SW_6mm", footprints: &["SW_6mm", "Terminal_2P", "PinHeader_1x02"], tags: "switch button tactile limit microswitch endstop" },
     SymbolKind { key: "RV", name: "Potentiometer", prefix: "RV", value: "10k", footprint: "PinHeader_1x03", footprints: &["PinHeader_1x03", "Terminal_3P"], tags: "potentiometer pot trimmer variable resistor knob position sensor" },
     SymbolKind { key: "M", name: "DC motor", prefix: "M", value: "6V 10000rpm 1A", footprint: "Terminal_2P", footprints: &["Terminal_2P", "PinHeader_1x02"], tags: "motor dc gear actuator" },
+    SymbolKind {
+        key: "STEPPER",
+        name: "Stepper motor",
+        prefix: "M",
+        value: "NEMA17 0.4Nm 1.7A",
+        footprint: "PinHeader_1x04",
+        footprints: &["PinHeader_1x04", "Terminal_2P"],
+        tags: "stepper motor bipolar nema17 nema23 actuator",
+    },
+    SymbolKind {
+        key: "STEPDRV",
+        name: "Stepper driver module",
+        prefix: "U",
+        value: "A4988 1A",
+        footprint: "StepStick",
+        footprints: &["StepStick", "DIP-16"],
+        tags: "stepper driver a4988 drv8825 tmc2209 stepstick pololu step dir",
+    },
     SymbolKind { key: "SERVO", name: "Servo", prefix: "SV", value: "SG90", footprint: "PinHeader_1x03", footprints: &["PinHeader_1x03"], tags: "servo rc hobby actuator pwm" },
     SymbolKind { key: "ENC", name: "Encoder", prefix: "ENC", value: "Encoder", footprint: "PinHeader_1x04", footprints: &["PinHeader_1x04"], tags: "encoder quadrature rotary position sensor hall" },
     SymbolKind { key: "Y", name: "Crystal", prefix: "Y", value: "16MHz", footprint: "Crystal_HC49", footprints: &["Crystal_HC49"], tags: "crystal oscillator quartz" },
@@ -108,10 +126,16 @@ pub const PICO_PINS: [&str; 40] = [
     "GP28", "ADC_VREF", "3V3", "3V3_EN", "GND", "VSYS", "VBUS",
 ];
 
-/// Default pin names for a library symbol (the Pico's pinout, a servo's lead).
-pub fn default_pin_names(key: &str) -> Vec<String> {
+/// Default pin names for a library symbol (the Pico's pinout, a servo's lead, a stepper driver
+/// module's pinout, which differs between the A4988 and the DRV8825).
+pub fn default_pin_names(key: &str, value: &str) -> Vec<String> {
     match key {
         "PICO" => PICO_PINS.iter().map(|s| s.to_string()).collect(),
+        "STEPPER" => ["A+", "A-", "B+", "B-"].iter().map(|s| s.to_string()).collect(),
+        "STEPDRV" if value.contains("8825") => {
+            ["EN", "M0", "M1", "M2", "RST", "SLP", "STEP", "DIR", "GND", "FAULT", "A2", "A1", "B1", "B2", "GND", "VMOT"].iter().map(|s| s.to_string()).collect()
+        }
+        "STEPDRV" => ["EN", "MS1", "MS2", "MS3", "RST", "SLP", "STEP", "DIR", "GND", "VDD", "1B", "1A", "2A", "2B", "GND", "VMOT"].iter().map(|s| s.to_string()).collect(),
         "SERVO" => ["GND", "V+", "SIG"].iter().map(|s| s.to_string()).collect(),
         "ENC" => ["A", "B", "VCC", "GND"].iter().map(|s| s.to_string()).collect(),
         _ => vec![],
@@ -150,7 +174,7 @@ pub fn footprint_names() -> Vec<String> {
     for n in [2, 3, 4, 5, 8, 10, 20] {
         v.push(format!("PinHeader_2x{n:02}"));
     }
-    for s in ["Terminal_2P", "Terminal_3P", "SW_6mm", "Crystal_HC49", "RPi_Pico"] {
+    for s in ["Terminal_2P", "Terminal_3P", "SW_6mm", "Crystal_HC49", "RPi_Pico", "StepStick"] {
         v.push(s.into());
     }
     v
@@ -438,6 +462,29 @@ pub fn footprint(name: &str) -> Option<Footprint> {
                 f.color = [30, 120, 60];
                 body_rect = ([-10.5, -25.5], [10.5, 26.5]);
             }
+            "StepStick" => {
+                // a Pololu-style driver module on two 1 × 8 sockets 12.7 mm apart: 1..8 down the
+                // left (EN … DIR), 9..16 up the right (GND … VMOT)
+                for i in 0..8 {
+                    f.pads.push(tht(i + 1, [-6.35, 8.89 - i as f64 * 2.54], 1.7, 1.0));
+                }
+                for i in 0..8 {
+                    f.pads.push(tht(9 + i, [6.35, -8.89 + i as f64 * 2.54], 1.7, 1.0));
+                }
+                f.silk = vec![G::Rect([-7.62, -10.16], [7.62, 10.16]), G::Line([-7.62, 8.0], [-5.0, 10.16])];
+                f.body = vec![
+                    Solid::Box { lo: [-7.62, -10.16, 0.0], hi: [-5.08, 10.16, 8.5] },
+                    Solid::Box { lo: [5.08, -10.16, 0.0], hi: [7.62, 10.16, 8.5] },
+                    Solid::Box { lo: [-7.62, -10.16, 8.5], hi: [7.62, 10.16, 10.1] },
+                    // the chip's heatsink
+                    Solid::Box { lo: [-4.5, -4.5, 10.1], hi: [4.5, 4.5, 19.0] },
+                ];
+                for p in &f.pads {
+                    f.body.push(Solid::Box { lo: [p.at[0] - 0.32, p.at[1] - 0.32, -3.0], hi: [p.at[0] + 0.32, p.at[1] + 0.32, 0.0] });
+                }
+                f.color = [30, 70, 150];
+                body_rect = ([-7.62, -10.16], [7.62, 10.16]);
+            }
             "Crystal_HC49" => {
                 f.pads = vec![tht(1, [-2.44, 0.0], 1.5, 0.8), tht(2, [2.44, 0.0], 1.5, 0.8)];
                 f.pads[0].shape = PadShape::Round;
@@ -502,8 +549,8 @@ fn arc(c: P, r: f64, a0: f64, a1: f64) -> G {
 /// The symbol for a library key; `pins` are the footprint's pad numbers (for ICs and connectors)
 /// and `names` optional pin names by position.
 pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
-    if matches!(key, "PICO" | "SERVO" | "ENC") {
-        let names = if names.is_empty() { default_pin_names(key) } else { names.to_vec() };
+    if matches!(key, "PICO" | "SERVO" | "ENC" | "STEPPER" | "STEPDRV") {
+        let names = if names.is_empty() { default_pin_names(key, "") } else { names.to_vec() };
         return symbol("U", pins, &names);
     }
     let up = [0.0, -1.0];
