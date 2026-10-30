@@ -41,6 +41,87 @@ fn look() -> Option<&'static Look> {
     })
 }
 
+#[derive(Clone, Copy, PartialEq)]
+pub enum TabStyle {
+    /// The active tab joins the panel above with an accent line (current).
+    Raised,
+    /// Rounded pills on the bar.
+    Pill,
+    /// Square cells with dividers.
+    Box,
+    /// A folder tab with a border around the active one.
+    Folder,
+    /// Text only, the active one underlined.
+    Underline,
+}
+
+/// A trial shape language picked with `CAD_SHAPE=<name>`: corners, borders, tabs and panels.
+pub struct Shape {
+    pub name: &'static str,
+    /// Buttons, inputs, menus.
+    pub radius: u8,
+    /// Feature tree and list rows.
+    pub row_radius: u8,
+    pub tab: TabStyle,
+    /// Outline idle buttons.
+    pub button_stroke: bool,
+    /// Fill idle buttons.
+    pub button_fill: bool,
+    /// Gap around panels drawn as floating cards on a canvas (0 = flush panels).
+    pub gap: i8,
+    pub card_radius: u8,
+    /// Each toolbar group sits on its own rounded chip.
+    pub chips: bool,
+    /// Selected rows get an accent bar on the left instead of a tint only.
+    pub sel_bar: bool,
+    /// Row and button height.
+    pub height: f32,
+    /// Panel separator lines.
+    pub separators: bool,
+    /// Popups and dialogs.
+    pub window_radius: u8,
+}
+
+const CURRENT_SHAPE: Shape =
+    Shape { name: "current", radius: 5, row_radius: 5, tab: TabStyle::Raised, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 10 };
+
+const SHAPES: &[Shape] = &[
+    Shape { name: "soft", radius: 8, row_radius: 8, tab: TabStyle::Pill, button_stroke: false, button_fill: false, gap: 6, card_radius: 12, chips: true, sel_bar: false, height: 28.0, separators: false, window_radius: 14 },
+    Shape { name: "crisp", radius: 0, row_radius: 0, tab: TabStyle::Box, button_stroke: true, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 26.0, separators: true, window_radius: 0 },
+    Shape { name: "classic", radius: 3, row_radius: 2, tab: TabStyle::Folder, button_stroke: true, button_fill: true, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 4 },
+    Shape { name: "minimal", radius: 6, row_radius: 0, tab: TabStyle::Underline, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 30.0, separators: false, window_radius: 10 },
+];
+
+pub fn shape() -> &'static Shape {
+    static S: std::sync::OnceLock<&'static Shape> = std::sync::OnceLock::new();
+    S.get_or_init(|| std::env::var("CAD_SHAPE").ok().and_then(|n| SHAPES.iter().find(|s| s.name.eq_ignore_ascii_case(&n))).unwrap_or(&CURRENT_SHAPE))
+}
+
+/// A trial layout picked with `CAD_LAYOUT=floating|sidetools`; "current" otherwise.
+pub fn layout() -> &'static str {
+    static L: std::sync::OnceLock<&'static str> = std::sync::OnceLock::new();
+    L.get_or_init(|| match std::env::var("CAD_LAYOUT").unwrap_or_default().as_str() {
+        "floating" => "floating",
+        "sidetools" => "sidetools",
+        _ => "current",
+    })
+}
+
+/// Behind floating panel cards.
+pub fn canvas() -> Color32 {
+    if is_dark() { lerp(pal().bg, Color32::BLACK, 0.25) } else { lerp(pal().panel_2, pal().border, 0.35) }
+}
+
+/// A panel frame: flush, or a floating card for shapes with a gap.
+pub fn panel_frame(fill: Color32, m: egui::Margin) -> egui::Frame {
+    let sh = shape();
+    let f = egui::Frame::new().fill(fill).inner_margin(m);
+    if sh.gap == 0 {
+        return f;
+    }
+    f.outer_margin(egui::Margin::same(sh.gap)).corner_radius(sh.card_radius).stroke(Stroke::new(1.0, lerp(pal().border, pal().panel, 0.3)))
+}
+
 const LOOKS: &[Look] = &[
     // A: dark charcoal, warm orange accent, light aluminium parts
     Look {
@@ -489,8 +570,9 @@ pub fn apply(ctx: &egui::Context) {
     v.panel_fill = p.panel;
     v.window_fill = p.window;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(10);
-    v.menu_corner_radius = CornerRadius::same(8);
+    let sh = shape();
+    v.window_corner_radius = CornerRadius::same(sh.window_radius);
+    v.menu_corner_radius = CornerRadius::same(sh.window_radius.min(8).max(sh.radius));
     // inputs are filled, not outlined; focus draws the accent ring
     let input = input_fill();
     v.extreme_bg_color = input;
@@ -507,7 +589,7 @@ pub fn apply(ctx: &egui::Context) {
     v.slider_trailing_fill = true;
     v.handle_shape = egui::style::HandleShape::Circle;
 
-    let r = CornerRadius::same(look().map(|l| l.radius).unwrap_or(5));
+    let r = CornerRadius::same(if sh.name == "current" { look().map(|l| l.radius).unwrap_or(5) } else { sh.radius });
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.panel;
     w.noninteractive.weak_bg_fill = p.panel;
@@ -536,6 +618,20 @@ pub fn apply(ctx: &egui::Context) {
     w.open.bg_stroke = Stroke::NONE;
     w.open.fg_stroke = Stroke::new(1.0, p.text);
     w.open.corner_radius = r;
+    if sh.button_stroke {
+        w.inactive.bg_stroke = Stroke::new(1.0, lerp(p.border, p.muted, 0.25));
+        w.hovered.bg_stroke = Stroke::new(1.0, lerp(p.border, p.muted, 0.6));
+        w.active.bg_stroke = Stroke::new(1.0, p.accent);
+        w.open.bg_stroke = w.hovered.bg_stroke;
+    }
+    if sh.button_fill {
+        w.inactive.weak_bg_fill = if dark { lerp(p.panel, Color32::WHITE, 0.07) } else { lerp(p.panel_2, p.border, 0.2) };
+        w.hovered.weak_bg_fill = if dark { lerp(p.panel, Color32::WHITE, 0.12) } else { lerp(p.panel_2, p.border, 0.7) };
+        w.inactive.bg_stroke = Stroke::new(1.0, lerp(p.border, p.muted, 0.45));
+    }
+    if !sh.separators {
+        w.noninteractive.bg_stroke = Stroke::new(1.0, lerp(p.border, p.panel, 0.55));
+    }
     let theme = if dark { egui::Theme::Dark } else { egui::Theme::Light };
     ctx.set_theme(if dark { egui::ThemePreference::Dark } else { egui::ThemePreference::Light });
     ctx.set_visuals_of(theme, v);
@@ -543,7 +639,11 @@ pub fn apply(ctx: &egui::Context) {
     ctx.style_mut_of(theme, |s| {
         s.spacing.item_spacing = egui::vec2(6.0, 5.0);
         s.spacing.button_padding = egui::vec2(6.0, 4.0);
-        s.spacing.interact_size.y = 26.0;
+        s.spacing.interact_size.y = sh.height;
+        if sh.height > 28.0 {
+            s.spacing.item_spacing = egui::vec2(8.0, 7.0);
+            s.spacing.button_padding = egui::vec2(6.0, 5.0);
+        }
         s.spacing.menu_margin = egui::Margin::same(6);
         s.spacing.window_margin = egui::Margin::same(10);
         s.spacing.combo_width = 120.0;

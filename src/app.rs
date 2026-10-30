@@ -1321,13 +1321,68 @@ impl App {
     }
 
     pub fn group(ui: &mut Ui, add: impl FnOnce(&mut Ui)) {
-        ui.add_space(3.0);
-        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, 26.0), Sense::hover());
-        ui.painter().vline(rect.center().x, rect.y_range().shrink(5.0), Stroke::new(1.0, theme::border()));
-        ui.add_space(3.0);
+        let sh = theme::shape();
+        if theme::layout() == "sidetools" {
+            // each group starts a new row of the tool column
+            ui.end_row();
+            ui.spacing_mut().item_spacing.x = 1.0;
+            add(ui);
+            return;
+        }
+        if sh.chips {
+            ui.add_space(5.0);
+            Frame::new().fill(theme::panel_2()).corner_radius(sh.radius + 2).inner_margin(Margin::symmetric(3, 1)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.spacing_mut().item_spacing.x = 1.0;
+                    add(ui);
+                });
+            });
+            ui.spacing_mut().item_spacing.x = 1.0;
+            return;
+        }
+        let h = ui.spacing().interact_size.y;
+        ui.add_space(if sh.separators { 3.0 } else { 6.0 });
+        let (rect, _) = ui.allocate_exact_size(egui::vec2(1.0, h), Sense::hover());
+        if sh.separators {
+            let shrink = if sh.radius == 0 { 0.0 } else { 5.0 };
+            ui.painter().vline(rect.center().x, rect.y_range().shrink(shrink), Stroke::new(1.0, theme::border()));
+        }
+        ui.add_space(if sh.separators { 3.0 } else { 0.0 });
         ui.spacing_mut().item_spacing.x = 1.0;
         add(ui);
         ui.spacing_mut().item_spacing.x = 1.0;
+    }
+
+    /// Trial layout: the toolbar and the sidebar float as cards over a full-bleed viewport.
+    fn floating_panels(&mut self, ui: &mut Ui, top: f32) {
+        let screen = ui.ctx().content_rect();
+        let card = |fill: Color32| {
+            Frame::new()
+                .fill(fill)
+                .corner_radius(theme::shape().card_radius.max(10))
+                .stroke(Stroke::new(1.0, theme::border()))
+                .shadow(egui::Shadow { offset: [0, 6], blur: 24, spread: 0, color: Color32::from_black_alpha(if theme::is_dark() { 120 } else { 30 }) })
+        };
+        let ctx = ui.ctx().clone();
+        egui::Area::new(egui::Id::new("float-toolbar")).order(egui::Order::Middle).pivot(egui::Align2::CENTER_TOP).fixed_pos(egui::pos2(screen.center().x + 21.0, top + 10.0)).show(&ctx, |ui| {
+            card(theme::window()).inner_margin(Margin::symmetric(8, 4)).show(ui, |ui| {
+                ui.set_max_width(screen.width() - 140.0);
+                self.toolbar(ui);
+            });
+        });
+        if self.sidebar_open {
+            let h = screen.bottom() - 84.0 - (top + 64.0);
+            egui::Area::new(egui::Id::new("float-sidebar")).order(egui::Order::Middle).fixed_pos(egui::pos2(screen.left() + 52.0, top + 64.0)).show(&ctx, |ui| {
+                card(theme::window()).show(ui, |ui| {
+                    let w = self.side_w;
+                    ui.allocate_ui(egui::vec2(w, h), |ui| {
+                        ui.set_min_size(egui::vec2(w, h));
+                        ui.set_max_size(egui::vec2(w, h));
+                        self.sidebar(ui);
+                    });
+                });
+            });
+        }
     }
 
     /// Top strip: logo, document menu and name, theme and phone toggles.
@@ -1594,7 +1649,7 @@ impl App {
                         crate::sketcher::cancel(self);
                     }
                 });
-            } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) && !self.phone {
+            } else if matches!(self.tab, crate::workspace::Tab::Studio(_)) && !self.phone && theme::layout() == "current" {
                 if ui.available_width() < 200.0 {
                     ui.end_row();
                 }
@@ -3285,28 +3340,46 @@ impl eframe::App for App {
             }
         }
 
-        let header = Frame::new().fill(theme::header()).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: 3 });
-        egui::Panel::top("header").frame(header).resizable(false).show_separator_line(false).show(ui, |ui| self.header(ui));
-        let bar = Frame::new().fill(theme::panel()).inner_margin(Margin { left: 8, right: 8, top: 2, bottom: 4 });
-        egui::Panel::top("toolbar").frame(bar).resizable(false).show(ui, |ui| self.toolbar(ui));
-        egui::Panel::bottom("tabs")
-            .frame(Frame::new().fill(theme::tabbar()).inner_margin(Margin { left: 4, right: 8, top: 0, bottom: 0 }))
-            .resizable(false)
-            .show(ui, |ui| self.tabs_ui(ui));
+        let sh = theme::shape();
+        let cards = sh.gap > 0;
+        if cards {
+            ui.painter().rect_filled(ui.max_rect(), 0.0, theme::canvas());
+        }
+        let lines = sh.separators && !cards;
+        let header = Frame::new().fill(if cards { theme::canvas() } else { theme::header() }).inner_margin(Margin { left: 12, right: 10, top: 5, bottom: if cards { 0 } else { 3 } });
+        let layout = theme::layout();
+        let header_r = egui::Panel::top("header").frame(header).resizable(false).show_separator_line(false).show(ui, |ui| self.header(ui)).response.rect;
+        let tabs_frame = Frame::new().fill(if cards { theme::canvas() } else { theme::tabbar() }).inner_margin(Margin { left: 4, right: 8, top: 0, bottom: if cards { 4 } else { 0 } });
+        if layout == "sidetools" {
+            // document tabs under the header, like browser tabs; tools in a column on the right
+            egui::Panel::top("tabs").frame(tabs_frame).resizable(false).show_separator_line(lines).show(ui, |ui| self.tabs_ui(ui));
+            let bar = theme::panel_frame(theme::panel(), Margin::symmetric(6, 8));
+            egui::Panel::right("toolbar").frame(bar).resizable(false).show_separator_line(lines).exact_size(if cards { 108.0 } else { 96.0 }).show(ui, |ui| self.toolbar(ui));
+        } else {
+            if layout == "current" {
+                let bar = theme::panel_frame(theme::panel(), Margin { left: 8, right: 8, top: if cards { 4 } else { 2 }, bottom: 4 });
+                egui::Panel::top("toolbar").frame(bar).resizable(false).show_separator_line(lines).show(ui, |ui| self.toolbar(ui));
+            }
+            egui::Panel::bottom("tabs").frame(tabs_frame).resizable(false).show_separator_line(lines).show(ui, |ui| self.tabs_ui(ui));
+        }
         if self.phone {
             egui::Panel::bottom("dock").frame(Frame::new().fill(theme::panel()).inner_margin(Margin::same(4))).resizable(false).show(ui, |ui| self.dock(ui));
         }
         if !self.phone && matches!(self.tab, crate::workspace::Tab::Studio(_)) {
-            let rail = Frame::new().fill(theme::tabbar());
-            egui::Panel::left("rail").frame(rail).resizable(false).exact_size(42.0).show(ui, |ui| self.rail(ui));
+            let rail = Frame::new().fill(if cards { theme::canvas() } else { theme::tabbar() });
+            egui::Panel::left("rail").frame(rail).resizable(false).show_separator_line(lines).exact_size(42.0).show(ui, |ui| self.rail(ui));
         }
-        if self.sidebar_open && !self.phone {
-            let side = Frame::new().fill(theme::panel());
+        let floating = layout == "floating" && !self.phone;
+        if floating {
+            self.floating_panels(ui, header_r.bottom());
+        }
+        if self.sidebar_open && !self.phone && !floating {
+            let side = theme::panel_frame(theme::panel(), Margin::ZERO);
             // one width for every tab: the panel keeps what the user dragged it to
             let switched = self.side_tab != Some(self.tab);
             self.side_tab = Some(self.tab);
             let _ = switched;
-            let panel = egui::Panel::left("sidebar").frame(side).resizable(false).exact_size(self.side_w);
+            let panel = egui::Panel::left("sidebar").frame(side).resizable(false).show_separator_line(lines).exact_size(self.side_w);
             let r = panel.show(ui, |ui| {
                 // content may not widen the panel
                 ui.set_max_width(ui.available_width());
@@ -3404,13 +3477,17 @@ fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl 
 }
 
 fn tree_row(ui: &mut Ui, indent: u8, icon: &str, name: &str, picked: bool, rolled: bool, suppressed: bool, hidden: bool, error: Option<&str>) -> egui::Response {
-    let h = 26.0;
+    let sh = theme::shape();
+    let h = sh.height;
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), h), Sense::click());
     let p = ui.painter();
     if picked {
-        p.rect_filled(rect, CornerRadius::same(5), theme::sel_fill());
+        p.rect_filled(rect, CornerRadius::same(sh.row_radius), theme::sel_fill());
+        if sh.sel_bar {
+            p.rect_filled(egui::Rect::from_min_size(rect.min, egui::vec2(3.0, rect.height())), 0.0, theme::accent());
+        }
     } else if resp.hovered() {
-        p.rect_filled(rect, CornerRadius::same(5), theme::panel_2());
+        p.rect_filled(rect, CornerRadius::same(sh.row_radius), theme::panel_2());
     }
     let alpha = if rolled { 0.4 } else { 1.0 };
     let col = |c: Color32| c.gamma_multiply(alpha);
@@ -3453,11 +3530,52 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
     let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click_and_drag());
     let p = ui.painter();
     let body = rect.shrink2(egui::vec2(1.0, 0.0));
-    if active {
-        p.rect_filled(body, CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 }, theme::panel());
-        p.hline(body.shrink2(egui::vec2(6.0, 0.0)).x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
-    } else if resp.hovered() {
-        p.rect_filled(body.shrink2(egui::vec2(0.0, 3.0)), CornerRadius::same(6), theme::panel_2());
+    use theme::TabStyle;
+    match theme::shape().tab {
+        TabStyle::Raised => {
+            if active {
+                p.rect_filled(body, CornerRadius { nw: 0, ne: 0, sw: 6, se: 6 }, theme::panel());
+                p.hline(body.shrink2(egui::vec2(6.0, 0.0)).x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
+            } else if resp.hovered() {
+                p.rect_filled(body.shrink2(egui::vec2(0.0, 3.0)), CornerRadius::same(6), theme::panel_2());
+            }
+        }
+        TabStyle::Pill => {
+            let pill = body.shrink2(egui::vec2(2.0, 4.0));
+            if active {
+                p.rect_filled(pill, CornerRadius::same(12), theme::panel());
+                p.rect_stroke(pill, CornerRadius::same(12), Stroke::new(1.0, theme::border()), egui::StrokeKind::Inside);
+            } else if resp.hovered() {
+                p.rect_filled(pill, CornerRadius::same(12), theme::panel_2());
+            }
+        }
+        TabStyle::Box => {
+            if active {
+                p.rect_filled(rect, 0.0, theme::panel());
+                p.hline(rect.x_range(), rect.top() + 1.0, Stroke::new(2.0, theme::accent()));
+            } else if resp.hovered() {
+                p.rect_filled(rect, 0.0, theme::panel_2());
+            }
+            p.vline(rect.right(), rect.y_range(), Stroke::new(1.0, theme::border()));
+        }
+        TabStyle::Folder => {
+            let tab = body.shrink2(egui::vec2(1.0, 0.0)).with_max_y(rect.bottom() - 3.0);
+            let cr = CornerRadius { nw: 0, ne: 0, sw: 4, se: 4 };
+            if active {
+                p.rect_filled(tab, cr, theme::panel());
+                p.rect_stroke(tab, cr, Stroke::new(1.0, theme::lerp(theme::border(), theme::muted(), 0.3)), egui::StrokeKind::Inside);
+                p.hline(tab.shrink2(egui::vec2(1.0, 0.0)).x_range(), tab.top() + 0.5, Stroke::new(1.0, theme::panel()));
+            } else {
+                p.rect_filled(tab.shrink2(egui::vec2(0.0, 2.0)).translate(egui::vec2(0.0, -2.0)), cr, if resp.hovered() { theme::panel_2() } else { theme::lerp(theme::tabbar(), theme::panel_2(), 0.5) });
+            }
+        }
+        TabStyle::Underline => {
+            if active {
+                p.hline(body.shrink2(egui::vec2(10.0, 0.0)).x_range(), rect.bottom() - 2.0, Stroke::new(2.0, theme::accent()));
+            } else if resp.hovered() {
+                p.hline(body.shrink2(egui::vec2(10.0, 0.0)).x_range(), rect.bottom() - 2.0, Stroke::new(2.0, theme::border()));
+            }
+        }
     }
     let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(15.0, 15.0));
     icons::image(icon, 15.0).tint(if active { theme::accent() } else { col }).paint_at(ui, ir);
@@ -3467,9 +3585,9 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
 
 /// A collapsible group header row with a chevron ("Default geometry", "Parts (n)").
 fn disclosure_row(ui: &mut Ui, label: &str, open: bool) -> egui::Response {
-    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), theme::shape().height), Sense::click());
     if resp.hovered() {
-        ui.painter().rect_filled(rect, CornerRadius::same(5), theme::panel_2());
+        ui.painter().rect_filled(rect, CornerRadius::same(theme::shape().row_radius), theme::panel_2());
     }
     let ir = egui::Rect::from_center_size(egui::pos2(rect.min.x + 12.0, rect.center().y), egui::vec2(14.0, 14.0));
     icons::image(if open { "chevronDown" } else { "chevronRight" }, 14.0).tint(theme::muted()).paint_at(ui, ir);
