@@ -17,8 +17,235 @@ const fn rgba(c: u32, a: u8) -> Color32 {
 static DARK: AtomicBool = AtomicBool::new(false);
 
 pub fn is_dark() -> bool {
-    DARK.load(Ordering::Relaxed)
+    look().map(|l| l.dark).unwrap_or_else(|| DARK.load(Ordering::Relaxed))
 }
+
+/// A trial look picked with `CAD_STYLE=<name>`, overriding the light and dark palettes.
+pub struct Look {
+    pub name: &'static str,
+    pub dark: bool,
+    pub pal: Palette,
+    pub vp: ViewPalette,
+    pub input: Color32,
+    pub input_hover: Color32,
+    pub button: Color32,
+    pub radius: u8,
+    pub font: f32,
+}
+
+fn look() -> Option<&'static Look> {
+    static L: std::sync::OnceLock<Option<&'static Look>> = std::sync::OnceLock::new();
+    *L.get_or_init(|| {
+        let n = std::env::var("CAD_STYLE").ok()?;
+        LOOKS.iter().find(|l| l.name.eq_ignore_ascii_case(&n))
+    })
+}
+
+const LOOKS: &[Look] = &[
+    // A: dark charcoal, warm orange accent, light aluminium parts
+    Look {
+        name: "graphite",
+        dark: true,
+        pal: Palette {
+            bg: hex(0x0f1012),
+            panel: hex(0x17181b),
+            panel_2: hex(0x222327),
+            border: hex(0x2a2b30),
+            text: hex(0xe9e9eb),
+            muted: hex(0x9b9ca3),
+            accent: hex(0xff8a3d),
+            active_text: hex(0xffc39a),
+            header: hex(0x121315),
+            tabbar: hex(0x111214),
+            window: rgba(0x1b1c20, 0xfa),
+            label_bg: rgba(0x17181b, 0xe6),
+            sel_fill: rgba(0xff8a3d, 0x2e),
+            active_fill: rgba(0xff8a3d, 0x26),
+            active_stroke: rgba(0xff8a3d, 0x00),
+            rollbar: hex(0x55575e),
+            ..DARK_PAL
+        },
+        vp: ViewPalette {
+            background: hex(0x2b2d31),
+            background_2: hex(0x131416),
+            body: hex(0xd4d7dc),
+            edge: hex(0x0c0d0f),
+            hover: hex(0xffb36b),
+            picked: hex(0x46c8ff),
+            plane: hex(0x8a8f99),
+            grid_minor: hex(0x26282c),
+            grid_major: hex(0x35383d),
+            ..DARK_VP
+        },
+        input: hex(0x0f1012),
+        input_hover: hex(0x1c1d21),
+        button: hex(0x26272b),
+        radius: 6,
+        font: 12.5,
+    },
+    // B: warm paper white, quiet greys, pale parts, blue accent
+    Look {
+        name: "paper",
+        dark: false,
+        pal: Palette {
+            bg: hex(0xfbfbfa),
+            panel: hex(0xf6f6f4),
+            panel_2: hex(0xeaeae6),
+            border: hex(0xe1e1dc),
+            text: hex(0x1c1c1a),
+            muted: hex(0x66665f),
+            accent: hex(0x2563eb),
+            active_text: hex(0x1d4ed8),
+            header: hex(0xf6f6f4),
+            tabbar: hex(0xefefeb),
+            window: rgba(0xffffff, 0xfc),
+            label_bg: rgba(0xffffff, 0xf0),
+            sel_fill: rgba(0x2563eb, 0x1f),
+            active_fill: rgba(0x2563eb, 0x1a),
+            active_stroke: rgba(0x2563eb, 0x00),
+            rollbar: hex(0xc9c9c2),
+            ..LIGHT_PAL
+        },
+        vp: ViewPalette {
+            background: hex(0xffffff),
+            background_2: hex(0xf0f0ec),
+            body: hex(0xdde2e8),
+            edge: hex(0x2b3038),
+            plane: hex(0xa9bfdc),
+            grid_minor: hex(0xf0f0ec),
+            grid_major: hex(0xdedfd9),
+            ..LIGHT_VP
+        },
+        input: hex(0xffffff),
+        input_hover: hex(0xf2f2ef),
+        button: hex(0xe6e6e1),
+        radius: 8,
+        font: 13.0,
+    },
+    // C: engineering blueprint, navy and cyan, white edges
+    Look {
+        name: "blueprint",
+        dark: true,
+        pal: Palette {
+            bg: hex(0x081527),
+            panel: hex(0x0d1e36),
+            panel_2: hex(0x152c4d),
+            border: hex(0x1d3961),
+            text: hex(0xe4eeff),
+            muted: hex(0x8ea6c8),
+            accent: hex(0x38c6f4),
+            active_text: hex(0xa6e8ff),
+            header: hex(0x0a1930),
+            tabbar: hex(0x08152a),
+            window: rgba(0x10233f, 0xfa),
+            label_bg: rgba(0x0d1e36, 0xe6),
+            sel_fill: rgba(0x38c6f4, 0x2e),
+            active_fill: rgba(0x38c6f4, 0x26),
+            active_stroke: rgba(0x38c6f4, 0x00),
+            rollbar: hex(0x3d5f8f),
+            ..DARK_PAL
+        },
+        vp: ViewPalette {
+            background: hex(0x13325c),
+            background_2: hex(0x0a1b35),
+            body: hex(0x7fa9d6),
+            edge: hex(0xe8f3ff),
+            hover: hex(0xffd166),
+            picked: hex(0x7cf0ff),
+            plane: hex(0x5d8ccc),
+            grid_minor: hex(0x1a3d6b),
+            grid_major: hex(0x2a5590),
+            ..DARK_VP
+        },
+        input: hex(0x081527),
+        input_hover: hex(0x112642),
+        button: hex(0x173156),
+        radius: 3,
+        font: 12.5,
+    },
+    // D: mid-tone cool slate, soft contrast, frost accent
+    Look {
+        name: "slate",
+        dark: true,
+        pal: Palette {
+            bg: hex(0x2b303b),
+            panel: hex(0x343a46),
+            panel_2: hex(0x3e4552),
+            border: hex(0x464e5c),
+            text: hex(0xeceff4),
+            muted: hex(0xaab2c0),
+            accent: hex(0x88c0d0),
+            active_text: hex(0xc4e4ee),
+            header: hex(0x2f3541),
+            tabbar: hex(0x2b303b),
+            window: rgba(0x373d4a, 0xfa),
+            label_bg: rgba(0x343a46, 0xe6),
+            sel_fill: rgba(0x88c0d0, 0x33),
+            active_fill: rgba(0x88c0d0, 0x2b),
+            active_stroke: rgba(0x88c0d0, 0x00),
+            rollbar: hex(0x6a7486),
+            ..DARK_PAL
+        },
+        vp: ViewPalette {
+            background: hex(0x4a5263),
+            background_2: hex(0x2e3440),
+            body: hex(0xdfe5ee),
+            edge: hex(0x242933),
+            hover: hex(0xebcb8b),
+            picked: hex(0x8fd4ff),
+            plane: hex(0x81a1c1),
+            grid_minor: hex(0x434b5a),
+            grid_major: hex(0x515a6b),
+            ..DARK_VP
+        },
+        input: hex(0x2b303b),
+        input_hover: hex(0x3a404d),
+        button: hex(0x434a58),
+        radius: 7,
+        font: 12.5,
+    },
+    // E: warm workshop sand, ink text, safety orange, square corners
+    Look {
+        name: "workshop",
+        dark: false,
+        pal: Palette {
+            bg: hex(0xf5f2eb),
+            panel: hex(0xede8dd),
+            panel_2: hex(0xe1d9c9),
+            border: hex(0xd3c9b5),
+            text: hex(0x221f1a),
+            muted: hex(0x655e50),
+            accent: hex(0xd9531e),
+            active_text: hex(0xa83c10),
+            header: hex(0xe6e0d2),
+            tabbar: hex(0xe6e0d2),
+            window: rgba(0xf8f5ef, 0xfc),
+            label_bg: rgba(0xf8f5ef, 0xf0),
+            sel_fill: rgba(0xd9531e, 0x24),
+            active_fill: rgba(0xd9531e, 0x1f),
+            active_stroke: rgba(0xd9531e, 0x00),
+            rollbar: hex(0xbdb19a),
+            ..LIGHT_PAL
+        },
+        vp: ViewPalette {
+            background: hex(0xf8f6f1),
+            background_2: hex(0xe3ddd0),
+            body: hex(0xc3c8cd),
+            edge: hex(0x221f1a),
+            hover: hex(0xf0a020),
+            picked: hex(0x0f8fd6),
+            plane: hex(0xb7a98c),
+            grid_minor: hex(0xebe6db),
+            grid_major: hex(0xd6cdbb),
+            ..LIGHT_VP
+        },
+        input: hex(0xfbf9f5),
+        input_hover: hex(0xf3efe7),
+        button: hex(0xdcd3c1),
+        radius: 2,
+        font: 12.5,
+    },
+];
 
 pub struct Palette {
     pub bg: Color32,
@@ -177,10 +404,16 @@ const LIGHT_VP: ViewPalette = ViewPalette {
 };
 
 pub fn pal() -> &'static Palette {
+    if let Some(l) = look() {
+        return &l.pal;
+    }
     if is_dark() { &DARK_PAL } else { &LIGHT_PAL }
 }
 
 pub fn vpal() -> &'static ViewPalette {
+    if let Some(l) = look() {
+        return &l.vp;
+    }
     if is_dark() { &DARK_VP } else { &LIGHT_VP }
 }
 
@@ -233,6 +466,9 @@ pub fn medium() -> egui::FontFamily {
 
 /// Background of text fields and combo boxes.
 pub fn input_fill() -> Color32 {
+    if let Some(l) = look() {
+        return l.input;
+    }
     if is_dark() { pal().bg } else { hex(0xf3f4f6) }
 }
 
@@ -240,12 +476,13 @@ pub fn input_fill() -> Color32 {
 pub fn field_style(ui: &mut egui::Ui) {
     let w = &mut ui.visuals_mut().widgets;
     w.inactive.weak_bg_fill = input_fill();
-    w.hovered.weak_bg_fill = if is_dark() { hex(0x202328) } else { hex(0xeceef1) };
+    w.hovered.weak_bg_fill = look().map(|l| l.input_hover).unwrap_or(if is_dark() { hex(0x202328) } else { hex(0xeceef1) });
 }
 
 pub fn apply(ctx: &egui::Context) {
     let p = pal();
     let dark = is_dark();
+    let font = look().map(|l| l.font).unwrap_or(12.5);
     let mut v = if dark { Visuals::dark() } else { Visuals::light() };
     v.override_text_color = Some(p.text);
     v.weak_text_color = Some(p.muted);
@@ -260,7 +497,7 @@ pub fn apply(ctx: &egui::Context) {
     v.text_edit_bg_color = Some(input);
     v.faint_bg_color = p.panel_2;
     v.code_bg_color = p.panel_2;
-    v.selection.bg_fill = if dark { rgba(0x4c9bff, 0x45) } else { rgba(0x1a6fd9, 0x38) };
+    v.selection.bg_fill = if let Some(l) = look() { Color32::from_rgba_unmultiplied(l.pal.accent.r(), l.pal.accent.g(), l.pal.accent.b(), 0x45) } else if dark { rgba(0x4c9bff, 0x45) } else { rgba(0x1a6fd9, 0x38) };
     v.selection.stroke = Stroke::new(1.0, p.accent);
     v.hyperlink_color = p.accent;
     let shadow = if dark { 110 } else { 28 };
@@ -270,14 +507,14 @@ pub fn apply(ctx: &egui::Context) {
     v.slider_trailing_fill = true;
     v.handle_shape = egui::style::HandleShape::Circle;
 
-    let r = CornerRadius::same(5);
+    let r = CornerRadius::same(look().map(|l| l.radius).unwrap_or(5));
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.panel;
     w.noninteractive.weak_bg_fill = p.panel;
     w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = r;
-    w.inactive.bg_fill = if dark { hex(0x2a2d33) } else { hex(0xe9ecf0) };
+    w.inactive.bg_fill = look().map(|l| l.button).unwrap_or(if dark { hex(0x2a2d33) } else { hex(0xe9ecf0) });
     w.inactive.weak_bg_fill = Color32::TRANSPARENT;
     w.inactive.bg_stroke = Stroke::NONE;
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
@@ -288,7 +525,7 @@ pub fn apply(ctx: &egui::Context) {
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
     w.hovered.corner_radius = r;
     w.hovered.expansion = 0.0;
-    w.active.bg_fill = if dark { hex(0x30343a) } else { hex(0xe6e9ed) };
+    w.active.bg_fill = look().map(|l| lerp(l.button, l.pal.text, 0.08)).unwrap_or(if dark { hex(0x30343a) } else { hex(0xe6e9ed) });
     w.active.weak_bg_fill = w.active.bg_fill;
     w.active.bg_stroke = Stroke::NONE;
     w.active.fg_stroke = Stroke::new(1.0, p.text);
@@ -315,8 +552,8 @@ pub fn apply(ctx: &egui::Context) {
         s.spacing.scroll = egui::style::ScrollStyle::floating();
         use egui::{FontId, TextStyle};
         s.text_styles.insert(TextStyle::Heading, FontId::new(16.0, medium()));
-        s.text_styles.insert(TextStyle::Body, FontId::proportional(12.5));
-        s.text_styles.insert(TextStyle::Button, FontId::proportional(12.5));
+        s.text_styles.insert(TextStyle::Body, FontId::proportional(font));
+        s.text_styles.insert(TextStyle::Button, FontId::proportional(font));
         s.text_styles.insert(TextStyle::Small, FontId::proportional(11.0));
         s.text_styles.insert(TextStyle::Monospace, FontId::monospace(12.0));
     });
