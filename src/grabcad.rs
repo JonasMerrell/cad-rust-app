@@ -42,20 +42,23 @@ pub struct Found {
 fn rank(format: &str) -> usize {
     match format {
         "step" => 0,
-        "iges" => 1,
-        "stl" => 2,
-        _ => 3,
+        "parasolid" => 1,
+        "iges" => 2,
+        "stl" => 3,
+        _ => 4,
     }
 }
 
 /// The model files at `path`: the file itself, or the best format found inside a ZIP (STEP over
-/// IGES over STL over OBJ; every file of that format, since a download can hold several parts).
+/// Parasolid over IGES over STL over OBJ; every file of that format, since a download can hold
+/// several parts). Parasolid files come back already turned into STEP.
 pub fn read_models(path: &Path) -> Result<Found, String> {
     let bytes = std::fs::read(path).map_err(|e| format!("could not read {}: {e}", path.display()))?;
     let is_zip = path.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) || bytes.starts_with(b"PK\x03\x04");
     if !is_zip {
-        let format = crate::import::format_of(path).ok_or_else(|| format!("{} is not a STEP, IGES, STL, OBJ or ZIP file", path.display()))?;
+        let format = crate::import::format_of(path).ok_or_else(|| format!("{} is not a STEP, Parasolid, IGES, STL, OBJ or ZIP file", path.display()))?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Import".into());
+        let (format, bytes) = crate::import::storable(format, bytes, &name)?;
         return Ok(Found { files: vec![ModelFile { name, format, bytes }], skipped: vec![] });
     }
     let entries = unzip(&bytes)?;
@@ -84,7 +87,7 @@ pub fn read_models(path: &Path) -> Result<Found, String> {
                 let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
                 if matches!(
                     ext.as_str(),
-                    "sldprt" | "sldasm" | "ipt" | "iam" | "f3d" | "prt" | "asm" | "catpart" | "catproduct" | "x_t" | "x_b" | "3dm" | "skp" | "par" | "fcstd" | "dwg" | "sat"
+                    "sldprt" | "sldasm" | "ipt" | "iam" | "f3d" | "prt" | "asm" | "catpart" | "catproduct" | "x_b" | "3dm" | "skp" | "par" | "fcstd" | "dwg" | "sat"
                 ) {
                     skipped.push(p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(name.clone()));
                 }
@@ -95,6 +98,11 @@ pub fn read_models(path: &Path) -> Result<Found, String> {
         files.retain(|f| rank(f.format) == best);
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
+    for f in &mut files {
+        let (format, bytes) = crate::import::storable(f.format, std::mem::take(&mut f.bytes), &f.name).map_err(|e| format!("{}: {e}", f.name))?;
+        f.format = format;
+        f.bytes = bytes;
+    }
     Ok(Found { files, skipped })
 }
 
