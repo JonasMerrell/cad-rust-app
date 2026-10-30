@@ -255,11 +255,16 @@ pub enum Dev {
     /// [pin, supply, ground]: a microcontroller pin, conductances to its supply and ground set
     /// by the `Ext` driving it (the index is into its pins).
     Pin(usize),
+    /// [plus, minus] voltage source whose value an `Ext` sets (a motor's back EMF), with its
+    /// current unknown; the index is into the values.
+    Emf(usize),
+    /// [a, b] conductance an `Ext` sets (a potentiometer track, a limit switch).
+    G(usize),
 }
 
 impl Dev {
     pub fn branch(&self) -> bool {
-        matches!(self, Dev::V(..) | Dev::L(..))
+        matches!(self, Dev::V(..) | Dev::L(..) | Dev::Emf(_))
     }
 }
 
@@ -529,6 +534,12 @@ pub trait Ext {
     fn advance(&mut self, t: f64, x: &[f64], until: f64) -> f64;
     /// Each pin's (conductance to supply, conductance to ground) as of the time reached.
     fn pins(&self) -> Vec<(f64, f64)>;
+    /// The `Dev::Emf` and `Dev::G` values; they change smoothly, so a change is no breakpoint.
+    fn values(&self) -> Vec<f64> {
+        vec![]
+    }
+    /// The circuit took a step to `t`: watch it (called once for every accepted time point).
+    fn step(&mut self, _t: f64, _x: &[f64]) {}
     /// The longest the circuit may run ahead of what the driver has seen.
     fn horizon(&self) -> f64;
 }
@@ -823,6 +834,8 @@ pub struct Sim<'a> {
     on: Vec<bool>,
     /// The `Dev::Pin` conductances.
     pub pins: Vec<(f64, f64)>,
+    /// The `Dev::Emf` and `Dev::G` values.
+    pub vals: Vec<f64>,
     gmin: f64,
     scale: f64,
     pub notes: Vec<String>,
@@ -846,6 +859,7 @@ impl<'a> Sim<'a> {
             mem: vec![Mem::default(); c.elems.len()],
             on: vec![true; c.elems.len()],
             pins: vec![(0.0, 0.0); c.elems.iter().filter_map(|e| if let Dev::Pin(k) = e.dev { Some(k + 1) } else { None }).max().unwrap_or(0)],
+            vals: vec![0.0; c.elems.iter().filter_map(|e| if let Dev::Emf(k) | Dev::G(k) = e.dev { Some(k + 1) } else { None }).max().unwrap_or(0)],
             gmin: 1e-12,
             scale: 1.0,
             notes: vec![],
@@ -880,6 +894,12 @@ impl<'a> Sim<'a> {
         for (ei, e) in self.c.elems.iter().enumerate() {
             match &e.dev {
                 Dev::R(g) => stamp_g(&mut a, n, row(e.n[0]), row(e.n[1]), *g),
+                Dev::G(k) => stamp_g(&mut a, n, row(e.n[0]), row(e.n[1]), self.vals[*k]),
+                Dev::Emf(k) => {
+                    let br = nn + e.br;
+                    stamp_branch(&mut a, n, br, row(e.n[0]), row(e.n[1]));
+                    b[br] = self.vals[*k];
+                }
                 Dev::C(c) => {
                     if let Mode::Tran { dt, hp, .. } = mode {
                         let h = self.hist[ei];
@@ -1063,6 +1083,10 @@ impl<'a> Sim<'a> {
                     let i = g * (v[0] - v[1]);
                     out.extend([i, -i]);
                 }
+                Dev::G(k) => {
+                    let i = self.vals[*k] * (v[0] - v[1]);
+                    out.extend([i, -i]);
+                }
                 Dev::C(_) => {
                     let i = if dc { 0.0 } else { self.hist[ei].i };
                     out.extend([i, -i]);
@@ -1071,7 +1095,7 @@ impl<'a> Sim<'a> {
                     let i = self.cur_i(ei);
                     out.extend([-i, i]);
                 }
-                Dev::V(..) | Dev::L(..) => {
+                Dev::V(..) | Dev::L(..) | Dev::Emf(_) => {
                     let j = x[nn + e.br];
                     out.extend([j, -j]);
                 }
@@ -1152,6 +1176,7 @@ impl<'a> Sim<'a> {
         if let Some(e) = ext.as_deref() {
             hmax = hmax.min(e.horizon());
             self.pins = e.pins();
+            self.vals = e.values();
         }
         let hmin = (stop * 1e-13).max(1e-18);
         let ev_tol = (stop * 1e-8).max(1e-12);
@@ -1187,13 +1212,14 @@ impl<'a> Sim<'a> {
             if let Some(e) = ext.as_deref_mut() {
                 if t >= ext_t - 1e-15 {
                     ext_t = e.advance(t, &x, (t + hmax).min(stop)).max(t + hmin);
-                    let p = e.pins();
-                    if p != self.pins {
-                        self.pins = p;
-                        be = true;
-                        dt = dt.min((hmax / 100.0).max(hmin * 10.0));
-                    }
                 }
+                let p = e.pins();
+                if p != self.pins {
+                    self.pins = p;
+                    be = true;
+                    dt = dt.min((hmax / 100.0).max(hmin * 10.0));
+                }
+                self.vals = e.values();
             }
             let bp = self.c.elems.iter().filter_map(|e| if let Dev::V(w, _) | Dev::I(w, _) = &e.dev { Some(w.next_break(t)) } else { None }).fold(f64::INFINITY, f64::min);
             let mut h = dt.min(hmax).min(stop - t);
@@ -1235,6 +1261,9 @@ impl<'a> Sim<'a> {
             out.t.push(t);
             out.x.push(xn.clone());
             out.i.push(i);
+            if let Some(e) = ext.as_deref_mut() {
+                e.step(t, &xn);
+            }
             x = xn;
             hp = h;
             if switched {
@@ -1295,7 +1324,7 @@ impl<'a> Sim<'a> {
             .iter()
             .enumerate()
             .map(|(ei, e)| match &e.dev {
-                Dev::R(_) | Dev::C(_) | Dev::I(..) | Dev::V(..) | Dev::L(..) => None,
+                Dev::R(_) | Dev::C(_) | Dev::I(..) | Dev::V(..) | Dev::L(..) | Dev::Emf(_) | Dev::G(_) => None,
                 Dev::Pin(k) => Some(pin_lin(self.pins[*k], &self.terms(e, op))),
                 dev => {
                     let mut m = self.mem[ei];
@@ -1341,6 +1370,10 @@ impl<'a> Sim<'a> {
                         let i = (v(e.n[0]) - v(e.n[1])) * Cx::new(*g, 0.0);
                         cur.extend([i, -i]);
                     }
+                    Dev::G(k) => {
+                        let i = (v(e.n[0]) - v(e.n[1])) * Cx::new(self.vals[*k], 0.0);
+                        cur.extend([i, -i]);
+                    }
                     Dev::C(c) => {
                         let i = (v(e.n[0]) - v(e.n[1])) * Cx::new(0.0, w * c);
                         cur.extend([i, -i]);
@@ -1349,7 +1382,7 @@ impl<'a> Sim<'a> {
                         let i = Cx::new(*ac, 0.0);
                         cur.extend([-i, i]);
                     }
-                    Dev::V(..) | Dev::L(..) => {
+                    Dev::V(..) | Dev::L(..) | Dev::Emf(_) => {
                         let j = b[nn + e.br];
                         cur.extend([j, -j]);
                     }

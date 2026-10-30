@@ -4,7 +4,8 @@
 
 use serde::{Deserialize, Serialize};
 
-use crate::circuit_solve::{Bjt, Circuit, Cx, Dev, Diode, Mos, OpAmp, Reg, Sim, Timer, VT, Wave};
+use crate::circuit_mech::{MechExt, MechPart, MechSim};
+use crate::circuit_solve::{Bjt, Circuit, Cx, Dev, Diode, Ext, Mos, OpAmp, Reg, Sim, Timer, VT, Wave};
 use crate::pcb::{LabelKind, Part, Pcb};
 
 // ---------------------------------------------------------------- setup
@@ -81,6 +82,9 @@ pub struct SimSetup {
     /// Firmware for the microcontroller boards (Raspberry Pi Pico).
     #[serde(skip_serializing_if = "Vec::is_empty")]
     pub mcus: Vec<crate::circuit_mcu::McuSetup>,
+    /// Motors, servos and sensors tied to assembly mates.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub links: Vec<crate::circuit_mech::Link>,
 }
 
 impl SimSetup {
@@ -279,6 +283,12 @@ pub enum Model {
     Switch(bool),
     /// A Raspberry Pi Pico board.
     Pico,
+    Motor(crate::circuit_mech::Motor),
+    Servo(crate::circuit_mech::Servo, [String; 3]),
+    /// Track resistance.
+    Pot(f64),
+    /// Pins A, B, VCC, GND.
+    Encoder([String; 4]),
     /// Left out of the circuit, with the reason.
     Open(String),
 }
@@ -564,6 +574,24 @@ pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
             Model::M(m, p, caps, name)
         }
         "SW" => Model::Switch(setup.closed.iter().any(|s| s.eq_ignore_ascii_case(&part.reference))),
+        "M" => Model::Motor(crate::circuit_mech::motor_model(&part.value)),
+        "SERVO" => {
+            let r = roles(part, &pins, &[&["GND", "-", "VSS"], &["V+", "VCC", "+", "5V", "PWR", "VDD"], &["SIG", "PWM", "S", "IN", "CTRL"]], &["1", "2", "3"]);
+            let Some(r) = r else { return Err(format!("{}: a servo needs 3 pins (GND, V+, SIG)", part.reference)) };
+            Model::Servo(crate::circuit_mech::servo_model(&part.value), [r[0].clone(), r[1].clone(), r[2].clone()])
+        }
+        "RV" => {
+            let r = parse_si(&part.value).unwrap_or(10e3);
+            if r <= 0.0 {
+                return Err(format!("{}: resistance must be positive", part.reference));
+            }
+            Model::Pot(r)
+        }
+        "ENC" => {
+            let r = roles(part, &pins, &[&["A", "OUTA", "CHA"], &["B", "OUTB", "CHB"], &["VCC", "V+", "VDD", "+"], &["GND", "-", "VSS"]], &["1", "2", "3", "4"]);
+            let Some(r) = r else { return Err(format!("{}: an encoder needs 4 pins (A, B, VCC, GND)", part.reference)) };
+            Model::Encoder([r[0].clone(), r[1].clone(), r[2].clone(), r[3].clone()])
+        }
         "J" => Model::Open("connector (power comes from the simulation sources)".into()),
         "Y" => Model::Open("crystal (not simulated)".into()),
         _ if crate::circuit_mcu::is_pico(&part.symbol, &part.value, pins.len()) => Model::Pico,
@@ -612,6 +640,10 @@ pub fn describe(m: &Model) -> String {
         Model::OpAmp(_, _, _, d) | Model::Reg(_, _, d) => d.clone(),
         Model::Switch(c) => format!("switch, {}", if *c { "pressed" } else { "open" }),
         Model::Pico => "Raspberry Pi Pico (RP2040)".into(),
+        Model::Motor(m) => m.name.clone(),
+        Model::Servo(s, _) => s.name.clone(),
+        Model::Pot(r) => format!("potentiometer {}", si(*r, "Ω")),
+        Model::Encoder(_) => "quadrature encoder".into(),
         Model::Open(why) => why.clone(),
     }
 }
@@ -667,6 +699,8 @@ pub struct Built {
     pub nets: Vec<(String, usize)>,
     pub notes: Vec<String>,
     pub mcus: Vec<crate::circuit_mcu::PicoSim>,
+    /// Motors, servos and sensors.
+    pub mech: Vec<crate::circuit_mech::MechSim>,
 }
 
 /// A supply voltage guessed from a power net's name: +5V 5, 3V3 3.3, -12V -12, VCC/VDD 5.
@@ -737,6 +771,10 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
     }
     let mut parts = vec![];
     let mut mcus = vec![];
+    let mut mech = vec![];
+    // the next `Dev::Emf`/`Dev::G` value and `Dev::Pin` indices
+    let nval = |c: &Circuit| c.elems.iter().filter(|e| matches!(e.dev, Dev::Emf(_) | Dev::G(_))).count();
+    let npin = |c: &Circuit| c.elems.iter().filter(|e| matches!(e.dev, Dev::Pin(_))).count();
     for (pi, part) in p.parts.iter().enumerate() {
         let sym = part.symbol();
         let nums = part.footprint().pin_numbers();
@@ -780,6 +818,7 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
                     pins[*pk].terms.push((e, k));
                 }
             }
+            e
         };
         let modelled = !matches!(m, Model::Open(_));
         let two = |pins: &[PinSim]| -> Option<(usize, usize)> { Some((pin_ix(pins, "1")?, pin_ix(pins, "2")?)) };
@@ -804,8 +843,54 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
             }
             Model::Switch(closed) => {
                 if let Some((a, b)) = two(&pins) {
-                    add(&mut c, &mut pins, Dev::R(if *closed { 1.0 / 0.05 } else { 1e-12 }), &[T::P(a), T::P(b)]);
+                    if setup.links.iter().any(|l| l.part.eq_ignore_ascii_case(&part.reference)) {
+                        // a limit switch: its mate opens and closes it
+                        let val = nval(&c);
+                        add(&mut c, &mut pins, Dev::G(val), &[T::P(a), T::P(b)]);
+                        mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Switch { val } });
+                    } else {
+                        add(&mut c, &mut pins, Dev::R(if *closed { 1.0 / 0.05 } else { 1e-12 }), &[T::P(a), T::P(b)]);
+                    }
                     main = Some(a);
+                }
+            }
+            Model::Motor(m) => {
+                if let Some((a, b)) = two(&pins) {
+                    let mid = c.node(format!("{}.emf", part.reference));
+                    let e = add(&mut c, &mut pins, Dev::L(m.l(), m.r()), &[T::P(a), T::N(mid)]);
+                    let val = nval(&c);
+                    add(&mut c, &mut pins, Dev::Emf(val), &[T::N(mid), T::P(b)]);
+                    let br = c.elems[e].br;
+                    mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Motor { motor: m.clone(), br, val } });
+                    main = Some(a);
+                }
+            }
+            Model::Servo(sv, r) => {
+                if let (Some(g), Some(vp), Some(sg)) = (pin_ix(&pins, &r[0]), pin_ix(&pins, &r[1]), pin_ix(&pins, &r[2])) {
+                    // a high-impedance signal input, the electronics' idle current, and the motor's
+                    add(&mut c, &mut pins, Dev::R(1.0 / 100e3), &[T::P(sg), T::P(g)]);
+                    add(&mut c, &mut pins, Dev::R(1.0 / 1000.0), &[T::P(vp), T::P(g)]);
+                    let val = nval(&c);
+                    add(&mut c, &mut pins, Dev::G(val), &[T::P(vp), T::P(g)]);
+                    mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Servo { servo: sv.clone(), sig: pins[sg].node, gnd: pins[g].node, val } });
+                }
+            }
+            Model::Pot(r) => {
+                if let (Some(a), Some(w), Some(b)) = (pin_ix(&pins, "1"), pin_ix(&pins, "2"), pin_ix(&pins, "3")) {
+                    let v0 = nval(&c);
+                    add(&mut c, &mut pins, Dev::G(v0), &[T::P(a), T::P(w)]);
+                    add(&mut c, &mut pins, Dev::G(v0 + 1), &[T::P(w), T::P(b)]);
+                    mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Pot { r: *r, vals: [v0, v0 + 1] } });
+                }
+            }
+            Model::Encoder(r) => {
+                let ix: Vec<usize> = r.iter().filter_map(|n| pin_ix(&pins, n)).collect();
+                if let [a, b, vcc, gnd] = ix[..] {
+                    let k = npin(&c);
+                    add(&mut c, &mut pins, Dev::Pin(k), &[T::P(a), T::P(vcc), T::P(gnd)]);
+                    add(&mut c, &mut pins, Dev::Pin(k + 1), &[T::P(b), T::P(vcc), T::P(gnd)]);
+                    add(&mut c, &mut pins, Dev::R(1.0 / 5000.0), &[T::P(vcc), T::P(gnd)]);
+                    mech.push(MechSim { reference: part.reference.clone(), part: MechPart::Encoder { pins: [k, k + 1] } });
                 }
             }
             Model::D(d, rs, cj, _) => {
@@ -930,7 +1015,12 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
     if !open.is_empty() {
         notes.push(format!("not simulated: {}", open.join(", ")));
     }
-    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus })
+    for l in &setup.links {
+        if !mech.iter().any(|m| m.reference.eq_ignore_ascii_case(&l.part)) {
+            notes.push(format!("{} is linked to a mate but is not a motor, servo, potentiometer, switch or encoder", l.part));
+        }
+    }
+    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus, mech })
 }
 
 /// A transient stop time from the circuit: five of its longest RC time constants, or periods.
@@ -1008,6 +1098,9 @@ pub struct SimOut {
     pub stop: f64,
     /// What each microcontroller did (transients).
     pub mcus: Vec<crate::circuit_mcu::McuOut>,
+    /// What the motors, servos and sensors did, and the assembly mates they moved (transients).
+    pub mech: Vec<crate::circuit_mech::PartTrace>,
+    pub mates: Vec<crate::circuit_mech::MateTrace>,
 }
 
 impl SimOut {
@@ -1107,14 +1200,54 @@ fn op_tables(b: &Built, x: &[f64], i: &[f64], off: &[usize], out: &mut SimOut) {
 /// How far a microcontroller runs ahead of the circuit it reads (its inputs are this stale at most).
 const MCU_HORIZON: f64 = 50e-6;
 
+/// The microcontrollers and the mechanism together, driving the circuit.
+struct Cosim<'a> {
+    mcu: Option<&'a mut crate::circuit_mcu::McuExt>,
+    mech: &'a mut MechExt,
+}
+
+impl Ext for Cosim<'_> {
+    fn advance(&mut self, t: f64, x: &[f64], until: f64) -> f64 {
+        let r = match self.mcu.as_deref_mut() {
+            Some(m) => m.advance(t, x, until),
+            None => until,
+        };
+        r.min(self.mech.advance(t, until))
+    }
+    fn pins(&self) -> Vec<(f64, f64)> {
+        let mut p = self.mcu.as_deref().map(|m| m.pins()).unwrap_or_default();
+        self.mech.fill_pins(&mut p);
+        p
+    }
+    fn values(&self) -> Vec<f64> {
+        self.mech.values()
+    }
+    fn step(&mut self, t: f64, x: &[f64]) {
+        self.mech.step(t, x)
+    }
+    fn horizon(&self) -> f64 {
+        let h = self.mcu.as_deref().map(|m| m.horizon()).unwrap_or(f64::INFINITY);
+        h.min(self.mech.horizon())
+    }
+}
+
 /// Run the setup's analysis on a PCB's schematic.
 pub fn run(p: &Pcb, a: &Analysis) -> Result<SimOut, String> {
+    run_with(p, a, &[])
+}
+
+/// `run`, with the workspace's assemblies for the parts linked to mates.
+pub fn run_with(p: &Pcb, a: &Analysis, asms: &[crate::assembly::Assembly]) -> Result<SimOut, String> {
     let b = build(p)?;
     if b.c.size() == 0 {
         return Err("the circuit is empty".into());
     }
     let mut sim = Sim::new(&b.c);
     let mut out = SimOut { kind: a.kind, ground: b.ground.clone(), notes: b.notes.clone(), ..Default::default() };
+    let mut mech = MechExt::new(&b.mech, &p.sim.links, asms, b.c.nodes.len() - 1, sim.vals.len(), sim.pins.len(), &mut out.notes);
+    // sensors read where the mechanism stands
+    sim.vals = mech.values();
+    mech.fill_pins(&mut sim.pins);
     match a.kind {
         Kind::Op => {
             let x = sim.op()?;
@@ -1133,13 +1266,33 @@ pub fn run(p: &Pcb, a: &Analysis) -> Result<SimOut, String> {
             };
             out.stop = stop;
             let mut ext = crate::circuit_mcu::McuExt::new(&b.mcus, MCU_HORIZON, &mut out.notes);
-            let tr = if ext.active() { sim.tran_ext(stop, a.step, a.from_op, Some(&mut ext))? } else { sim.tran(stop, a.step, a.from_op)? };
+            let tr = if ext.active() || mech.active() {
+                let mut co = Cosim { mcu: if ext.active() { Some(&mut ext) } else { None }, mech: &mut mech };
+                sim.tran_ext(stop, a.step, a.from_op, Some(&mut co))?
+            } else {
+                sim.tran(stop, a.step, a.from_op)?
+            };
             out.mcus = ext.finish();
+            let mut extra = vec![];
+            if !b.mech.is_empty() {
+                let (parts, mates) = mech.finish();
+                for pt in &parts {
+                    if pt.pos.len() == tr.t.len() {
+                        extra.push(Sig { name: format!("POS({})", pt.reference), unit: pt.unit, re: pt.pos.clone(), im: vec![] });
+                    }
+                    if pt.rpm.len() == tr.t.len() {
+                        extra.push(Sig { name: format!("RPM({})", pt.reference), unit: "rpm", re: pt.rpm.clone(), im: vec![] });
+                    }
+                }
+                out.mech = parts;
+                out.mates = mates.into_iter().filter(|m| m.angle.as_ref().or(m.slide.as_ref()).map(|v| v.len() == tr.t.len()).unwrap_or(false)).collect();
+            }
             out.sigs = b
                 .sigs
                 .iter()
                 .map(|d| Sig { name: d.name.clone(), unit: d.unit, re: tr.x.iter().zip(&tr.i).map(|(x, i)| eval_sig(d, x, i, &sim.offsets)).collect(), im: vec![] })
                 .collect();
+            out.sigs.extend(extra);
             // the nets at the end
             if let (Some(x), Some(i)) = (tr.x.last(), tr.i.last()) {
                 op_tables(&b, x, i, &sim.offsets, &mut out);

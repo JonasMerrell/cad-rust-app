@@ -396,9 +396,23 @@ pub struct SolveResult {
     pub failed: Vec<u64>,
 }
 
+/// A mate held at an angle (degrees) and/or a travel (mm), as a motor or servo turns it.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Drive {
+    pub mate: u64,
+    pub angle: Option<f64>,
+    pub slide: Option<f64>,
+}
+
 /// Move free instances to satisfy the mates. `hold` instances move as little as possible;
 /// `centers` gives each instance's rotation centre (part centroid, local coordinates).
 pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3) -> SolveResult {
+    solve_driven(asm, hold, centers, &[])
+}
+
+/// `solve` with mates held where `drives` puts them. A relation between driven mates is left
+/// to the drives (they already agree, and the relation only sees angles within a turn).
+pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive]) -> SolveResult {
     let free: Vec<usize> = (0..asm.instances.len()).filter(|&i| !asm.instances[i].fixed).collect();
     let n = free.len() * 6;
     let mates: Vec<Mate> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some()).cloned().collect();
@@ -420,7 +434,8 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
         let p = &poses[i];
         Some((p.apply(c.origin.into()), p.dir(c.z.into()).normalize(), p.dir(c.x.into()).normalize()))
     };
-    let relations: Vec<Relation> = asm.relations.clone();
+    let driven = |id: u64| drives.iter().any(|d| d.mate == id);
+    let relations: Vec<Relation> = asm.relations.iter().filter(|r| !(driven(r.a) && r.b.map(driven).unwrap_or(true))).cloned().collect();
     let active: std::cell::RefCell<Vec<(u64, f64)>> = std::cell::RefCell::new(vec![]);
     let residuals = |x: &[f64]| -> Vec<f64> {
         let poses = poses_for(x);
@@ -428,6 +443,14 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
         for m in &mates {
             if let (Some(a), Some(b)) = (world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) {
                 mate_residuals(m, a, b, &mut out);
+                for d in drives.iter().filter(|d| d.mate == m.id) {
+                    if let Some(g) = d.angle {
+                        out.push(wrap(mate_angle(m, a, b) - g.to_radians()) * 10.0);
+                    }
+                    if let Some(s) = d.slide {
+                        out.push(mate_slide(m, a, b) - s);
+                    }
+                }
                 // a limit that was hit holds the part at it
                 if let Some((_, bound)) = active.borrow().iter().find(|x| x.0 == m.id) {
                     match m.kind {

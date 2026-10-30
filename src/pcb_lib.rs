@@ -85,7 +85,11 @@ pub const SYMBOLS: &[SymbolKind] = &[
         footprints: &["PinHeader_1x02", "PinHeader_1x03", "PinHeader_1x04", "PinHeader_1x06", "PinHeader_1x08", "PinHeader_2x03", "PinHeader_2x05", "Terminal_2P", "Terminal_3P"],
         tags: "connector header pin socket terminal",
     },
-    SymbolKind { key: "SW", name: "Push button", prefix: "SW", value: "SW", footprint: "SW_6mm", footprints: &["SW_6mm"], tags: "switch button tactile" },
+    SymbolKind { key: "SW", name: "Push button", prefix: "SW", value: "SW", footprint: "SW_6mm", footprints: &["SW_6mm", "Terminal_2P", "PinHeader_1x02"], tags: "switch button tactile limit microswitch endstop" },
+    SymbolKind { key: "RV", name: "Potentiometer", prefix: "RV", value: "10k", footprint: "PinHeader_1x03", footprints: &["PinHeader_1x03", "Terminal_3P"], tags: "potentiometer pot trimmer variable resistor knob position sensor" },
+    SymbolKind { key: "M", name: "DC motor", prefix: "M", value: "6V 10000rpm 1A", footprint: "Terminal_2P", footprints: &["Terminal_2P", "PinHeader_1x02"], tags: "motor dc gear actuator" },
+    SymbolKind { key: "SERVO", name: "Servo", prefix: "SV", value: "SG90", footprint: "PinHeader_1x03", footprints: &["PinHeader_1x03"], tags: "servo rc hobby actuator pwm" },
+    SymbolKind { key: "ENC", name: "Encoder", prefix: "ENC", value: "Encoder", footprint: "PinHeader_1x04", footprints: &["PinHeader_1x04"], tags: "encoder quadrature rotary position sensor hall" },
     SymbolKind { key: "Y", name: "Crystal", prefix: "Y", value: "16MHz", footprint: "Crystal_HC49", footprints: &["Crystal_HC49"], tags: "crystal oscillator quartz" },
     SymbolKind {
         key: "PICO",
@@ -104,9 +108,14 @@ pub const PICO_PINS: [&str; 40] = [
     "GP28", "ADC_VREF", "3V3", "3V3_EN", "GND", "VSYS", "VBUS",
 ];
 
-/// Default pin names for a library symbol (the Pico's pinout).
+/// Default pin names for a library symbol (the Pico's pinout, a servo's lead).
 pub fn default_pin_names(key: &str) -> Vec<String> {
-    if key == "PICO" { PICO_PINS.iter().map(|s| s.to_string()).collect() } else { vec![] }
+    match key {
+        "PICO" => PICO_PINS.iter().map(|s| s.to_string()).collect(),
+        "SERVO" => ["GND", "V+", "SIG"].iter().map(|s| s.to_string()).collect(),
+        "ENC" => ["A", "B", "VCC", "GND"].iter().map(|s| s.to_string()).collect(),
+        _ => vec![],
+    }
 }
 
 pub fn symbol_kind(key: &str) -> Option<&'static SymbolKind> {
@@ -493,8 +502,9 @@ fn arc(c: P, r: f64, a0: f64, a1: f64) -> G {
 /// The symbol for a library key; `pins` are the footprint's pad numbers (for ICs and connectors)
 /// and `names` optional pin names by position.
 pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
-    if names.is_empty() && key == "PICO" {
-        return symbol("U", pins, &default_pin_names(key));
+    if matches!(key, "PICO" | "SERVO" | "ENC") {
+        let names = if names.is_empty() { default_pin_names(key) } else { names.to_vec() };
+        return symbol("U", pins, &names);
     }
     let up = [0.0, -1.0];
     let down = [0.0, 1.0];
@@ -562,6 +572,19 @@ pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
             s.g.push(if key == "Q_NMOS" { G::Poly(vec![[-0.6, 0.0], [0.3, 0.4], [0.3, -0.4]], true) } else { G::Poly(vec![[1.2, 0.0], [0.3, 0.4], [0.3, -0.4]], true) });
             s.ref_at = [4.0, 0.6];
             s.value_at = [4.0, -1.8];
+        }
+        "RV" => {
+            // the track top to bottom, the wiper from the right
+            s.pins = vec![pin(1, "", [0.0, 5.08], up, 2.54), pin(3, "", [0.0, -5.08], down, 2.54), pin(2, "", [5.08, 0.0], [-1.0, 0.0], 2.54)];
+            s.g = vec![G::Rect([-0.9, -2.54], [0.9, 2.54]), G::Line([2.54, 0.0], [1.5, 0.0]), G::Poly(vec![[0.9, 0.0], [1.7, 0.45], [1.7, -0.45]], true)];
+            s.ref_at = [-4.5, 0.6];
+            s.value_at = [-4.5, -1.8];
+        }
+        "M" => {
+            s.pins = two("+", "");
+            s.g = vec![G::Circle([0.0, 0.0], 2.54), G::Poly(vec![[-1.1, -1.0], [-1.1, 1.0], [0.0, -0.1], [1.1, 1.0], [1.1, -1.0]], false), G::Line([-1.6, 3.6], [-0.6, 3.6]), G::Line([-1.1, 3.1], [-1.1, 4.1])];
+            s.ref_at = [3.4, 0.6];
+            s.value_at = [3.4, -1.8];
         }
         "SW" => {
             s.pins = vec![pin(1, "", [-5.08, 0.0], [1.0, 0.0], 2.54), pin(2, "", [5.08, 0.0], [-1.0, 0.0], 2.54)];

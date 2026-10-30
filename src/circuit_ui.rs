@@ -26,6 +26,13 @@ pub struct SimUi {
     ms: f64,
 }
 
+impl SimUi {
+    /// The name of the PCB tab the results are from.
+    pub fn ran_name(&self) -> Option<String> {
+        self.ran.as_ref().map(|(_, p)| p.name.clone())
+    }
+}
+
 fn index(app: &App) -> Option<usize> {
     match app.tab {
         crate::workspace::Tab::Pcb(i) if i < app.ws.pcbs.len() => Some(i),
@@ -71,7 +78,7 @@ pub fn run(app: &mut App) {
         }
     }
     let t0 = Instant::now();
-    let r = circuit::run(&q, &q.sim.analysis);
+    let r = circuit::run_with(&q, &q.sim.analysis, &app.ws.assemblies);
     app.pcb.sim.ms = t0.elapsed().as_secs_f64() * 1e3;
     app.pcb.sim.xr = None;
     app.pcb.sim.cursor = None;
@@ -200,6 +207,11 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     if app.ws.pcbs[pi].parts.iter().any(|x| crate::circuit_mcu::is_pico(&x.symbol, &x.value, x.footprint().pin_numbers().len())) {
         section(ui, "Microcontrollers", |ui| mcu_ui(app, ui, pi));
     }
+    if app.ws.pcbs[pi].parts.iter().any(|x| crate::circuit_mech::role(&x.symbol).map(|r| r != crate::circuit_mech::Role::Switch).unwrap_or(false))
+        || !app.ws.pcbs[pi].sim.links.is_empty()
+    {
+        section(ui, "Mechanism", |ui| mech_ui(app, ui, pi));
+    }
     if let Some(out) = results(app).cloned() {
         section(ui, "Results", |ui| results_ui(app, ui, &out));
     } else if let Some(e) = app.pcb.sim.err.clone() {
@@ -209,7 +221,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     }
     section(ui, "Models", |ui| {
         let p = &mut app.ws.pcbs[pi];
-        let switches: Vec<String> = p.parts.iter().filter(|x| x.symbol == "SW").map(|x| x.reference.clone()).collect();
+        // linked switches are limit switches: their mate opens and closes them
+        let switches: Vec<String> =
+            p.parts.iter().filter(|x| x.symbol == "SW" && !p.sim.links.iter().any(|l| l.part.eq_ignore_ascii_case(&x.reference))).map(|x| x.reference.clone()).collect();
         for s in switches {
             let mut on = p.sim.closed.iter().any(|c| c.eq_ignore_ascii_case(&s));
             if ui.checkbox(&mut on, format!("{s} pressed")).changed() {
@@ -291,6 +305,160 @@ fn mcu_ui(app: &mut App, ui: &mut Ui, pi: usize) {
         ui.add_space(4.0);
     }
     ui.label(RichText::new("The RP2040 runs its firmware during a transient, reading the circuit's voltages and driving its pins. GPIO, PWM, ADC, UART, timers, interrupts and both cores are simulated; PIO, DMA, USB, I2C and SPI devices are not.").size(11.0).color(theme::muted()));
+}
+
+/// The assembly mates a part can link to: (assembly, mate id, label, slider, limits).
+fn linkable_mates(app: &App) -> Vec<(usize, u64, String, bool, Option<[f64; 2]>)> {
+    use crate::assembly::MateKind;
+    let mut v = vec![];
+    for (ai, a) in app.ws.assemblies.iter().enumerate() {
+        for m in a.mates.iter().filter(|m| matches!(m.kind, MateKind::Revolute | MateKind::Slider | MateKind::Cylindrical) && !m.suppressed) {
+            v.push((ai, m.id, format!("{} › {} ({})", a.name, m.name, m.kind.label().to_lowercase()), m.kind == MateKind::Slider, m.limits));
+        }
+    }
+    v
+}
+
+/// Motors, servos and sensors, and the assembly mates they move or read.
+fn mech_ui(app: &mut App, ui: &mut Ui, pi: usize) {
+    use crate::circuit_mech::{Role, new_link, role};
+    let mates = linkable_mates(app);
+    let parts: Vec<(String, Role, String)> = app.ws.pcbs[pi].parts.iter().filter_map(|x| role(&x.symbol).map(|r| (x.reference.clone(), r, x.value.clone()))).collect();
+    let out = results(app).cloned();
+    if mates.is_empty() {
+        ui.label(RichText::new("Add an assembly with a revolute, slider or cylindrical mate to link these parts to the design.").size(11.5).color(theme::muted()));
+    }
+    for (r, role, value) in parts {
+        let p = &mut app.ws.pcbs[pi];
+        let k = p.sim.links.iter().position(|l| l.part.eq_ignore_ascii_case(&r));
+        let desc = match role {
+            Role::Motor => crate::circuit_mech::motor_model(&value).name,
+            Role::Servo => crate::circuit_mech::servo_model(&value).name,
+            _ => role.label().to_string(),
+        };
+        // a push button stays a button unless it is linked
+        if role == Role::Switch && k.is_none() && mates.is_empty() {
+            continue;
+        }
+        ui.label(RichText::new(format!("{r}  {desc}")).size(12.5).strong());
+        let cur = k.map(|k| (p.sim.links[k].assembly, p.sim.links[k].mate));
+        let cur_label = cur.and_then(|c| mates.iter().find(|m| (m.0, m.1) == c).map(|m| m.2.clone())).unwrap_or_else(|| if cur.is_some() { "missing mate".into() } else { "Not linked".into() });
+        let mut pick: Option<Option<usize>> = None;
+        row(ui, if role.drives() { "Drives" } else { "Reads" }, |ui| {
+            egui::ComboBox::from_id_salt(("mech_link", &r)).width(ui.available_width()).truncate().selected_text(RichText::new(cur_label).size(12.0)).show_ui(ui, |ui| {
+                if ui.selectable_label(cur.is_none(), "Not linked").clicked() {
+                    pick = Some(None);
+                }
+                for (i, m) in mates.iter().enumerate() {
+                    if ui.selectable_label(cur == Some((m.0, m.1)), &m.2).clicked() {
+                        pick = Some(Some(i));
+                    }
+                }
+            });
+        });
+        match pick {
+            Some(None) => p.sim.links.retain(|l| !l.part.eq_ignore_ascii_case(&r)),
+            Some(Some(i)) => {
+                let m = &mates[i];
+                let l = new_link(&r, role, m.0, m.1, m.3, m.4);
+                match k {
+                    Some(k) => {
+                        // keep the settings that still mean the same on the new mate
+                        let old = p.sim.links[k].clone();
+                        let same_kind = mates.iter().find(|x| (x.0, x.1) == (old.assembly, old.mate)).map(|x| x.3 == m.3).unwrap_or(false);
+                        p.sim.links[k] = if same_kind { crate::circuit_mech::Link { assembly: m.0, mate: m.1, ..old } } else { l };
+                    }
+                    None => p.sim.links.push(l),
+                }
+            }
+            None => {}
+        }
+        let Some(k) = p.sim.links.iter().position(|l| l.part.eq_ignore_ascii_case(&r)) else {
+            if role == Role::Switch {
+                ui.label(RichText::new("A push button (pressed in Models); link it to make it a limit switch").size(11.0).color(theme::muted()));
+            }
+            ui.add_space(4.0);
+            continue;
+        };
+        let slide = mates.iter().find(|m| (m.0, m.1) == (p.sim.links[k].assembly, p.sim.links[k].mate)).map(|m| m.3).unwrap_or(false);
+        let unit = if slide { " mm" } else { "°" };
+        let l = &mut p.sim.links[k];
+        match role {
+            Role::Motor => {
+                if slide {
+                    row(ui, "Lead", |ui| {
+                        ui.add(egui::DragValue::new(&mut l.ratio).range(0.01..=1000.0).speed(0.1).suffix(" mm/turn"));
+                    });
+                } else {
+                    row(ui, "Gear ratio", |ui| {
+                        ui.add(egui::DragValue::new(&mut l.ratio).range(0.01..=10000.0).speed(0.1).prefix("1:"))
+                            .on_hover_text("Motor turns per turn of the mate, after the gearbox in the motor's value (1:48)");
+                    });
+                }
+                row(ui, "Load inertia", |ui| {
+                    ui.add(egui::DragValue::new(&mut l.inertia).range(0.0..=1e3).speed(1e-5).max_decimals(6).suffix(if slide { " kg" } else { " kg·m²" }));
+                });
+                row(ui, "Friction", |ui| {
+                    ui.add(egui::DragValue::new(&mut l.load).range(0.0..=1e4).speed(0.01).max_decimals(4).suffix(if slide { " N" } else { " N·m" }))
+                        .on_hover_text("Holds the mate until the motor's torque beats it");
+                });
+                ui.checkbox(&mut l.reverse, "Turn the other way");
+            }
+            Role::Servo => {
+                let rg = l.range.get_or_insert([-90.0, 90.0]);
+                row(ui, "At 1 ms", |ui| {
+                    ui.add(egui::DragValue::new(&mut rg[0]).speed(1.0).suffix(unit));
+                });
+                row(ui, "At 2 ms", |ui| {
+                    ui.add(egui::DragValue::new(&mut rg[1]).speed(1.0).suffix(unit));
+                });
+            }
+            Role::Pot | Role::Switch => {
+                let rg = l.range.get_or_insert([0.0, 90.0]);
+                let (a, b) = if role == Role::Pot { ("Pin 1 end at", "Pin 3 end at") } else { ("Closed from", "to") };
+                row(ui, a, |ui| {
+                    ui.add(egui::DragValue::new(&mut rg[0]).speed(0.5).suffix(unit));
+                });
+                row(ui, b, |ui| {
+                    ui.add(egui::DragValue::new(&mut rg[1]).speed(0.5).suffix(unit));
+                });
+            }
+            Role::Encoder => {
+                row(ui, "Counts", |ui| {
+                    ui.add(egui::DragValue::new(&mut l.ratio).range(0.01..=100000.0).speed(1.0).suffix(if slide { " per mm" } else { " per turn" }));
+                });
+            }
+        }
+        if let Some(t) = out.as_ref().and_then(|o| o.mech.iter().find(|t| t.reference.eq_ignore_ascii_case(&r))) {
+            if let (Some(a), Some(b)) = (t.pos.first(), t.pos.last()) {
+                let f = |v: f64| crate::expr::trim(v, 2);
+                let mut s = format!("{} {}{unit} to {}{unit}", if role.drives() { "Moved it from" } else { "Read it from" }, f(*a), f(*b));
+                if let Some(w) = t.rpm.iter().cloned().reduce(|x, y| if y.abs() > x.abs() { y } else { x }) {
+                    s.push_str(&format!(", up to {} rpm", f(w)));
+                }
+                ui.label(RichText::new(s).size(11.5).color(theme::muted()));
+            }
+        }
+        ui.add_space(4.0);
+    }
+    // play the motion in the assembly
+    if let Some(out) = &out {
+        let mut asms: Vec<usize> = out.mates.iter().map(|m| m.assembly).collect();
+        asms.dedup();
+        for ai in asms {
+            let Some(a) = app.ws.assemblies.get(ai) else { continue };
+            if ui.button(format!("Play in {}", a.name)).on_hover_text("Show the motion in the assembly").clicked() {
+                app.switch_tab(crate::workspace::Tab::Assembly(ai));
+                crate::asm_ui::checkpoint(app);
+                crate::asm_ui::play_motion(app, ai);
+            }
+        }
+    }
+    ui.label(
+        RichText::new("Motors turn their mate from the current and the back EMF; servos follow 1–2 ms pulses; potentiometers, limit switches and encoders read their mate. Gear, rack and screw relations carry the motion on, and mate limits stop it.")
+            .size(11.0)
+            .color(theme::muted()),
+    );
 }
 
 fn analysis_ui(app: &mut App, ui: &mut Ui, pi: usize) {

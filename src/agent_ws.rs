@@ -132,6 +132,12 @@ impl Session {
         failed
     }
 
+    /// Solve with mates held by `drives` (a simulation's motors); the mates that fail.
+    pub(super) fn solve_driven(&mut self, ai: usize, drives: &[assembly::Drive]) -> Vec<u64> {
+        let centers: Vec<(u64, DVec3)> = self.ws.assemblies[ai].instances.iter().map(|x| (x.id, self.centroid_local(x))).collect();
+        assembly::solve_driven(&mut self.ws.assemblies[ai], &[], &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), drives).failed
+    }
+
     fn refresh_connectors(&mut self, ai: usize) -> Vec<u64> {
         let meshes: std::collections::HashMap<(usize, BodyId), BodyMesh> = self.ws.assemblies[ai]
             .instances

@@ -34,6 +34,7 @@ mod fea_solve;
 mod fea_ui;
 mod circuit;
 mod circuit_mcu;
+mod circuit_mech;
 mod circuit_plot;
 mod circuit_solve;
 mod circuit_ui;

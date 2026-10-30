@@ -265,7 +265,7 @@ pub fn schematic_scene(p: &Pcb, nl: &Netlist, highlight: Option<&str>) -> Vec<Dr
         // reference and value stay upright, beside the symbol
         let (lo, hi) = sch_bbox(part);
         let side = |y_of: f64| -> P { [hi[0] + 0.8, y_of] };
-        let (r_at, v_at) = if part.sch_rot % 2 == 0 && !matches!(part.symbol.as_str(), "U" | "J" | "SW" | "Y" | "PICO") {
+        let (r_at, v_at) = if part.sch_rot % 2 == 0 && !matches!(part.symbol.as_str(), "U" | "J" | "SW" | "Y" | "PICO" | "SERVO" | "ENC" | "RV") {
             (side((lo[1] + hi[1]) / 2.0 + 0.4), side((lo[1] + hi[1]) / 2.0 - 2.0))
         } else {
             ([lo[0], hi[1] + 0.8], [lo[0], lo[1] - 2.2])

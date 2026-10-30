@@ -71,6 +71,146 @@ pub struct AsmUi {
     pub measure: Option<Vec<(DVec3, Option<DVec3>)>>,
     /// Standard parts and GrabCAD window.
     pub lib: crate::stdparts_ui::Lib,
+    /// Playing back the mates a PCB simulation moved.
+    pub motion: Option<Motion>,
+}
+
+/// Playback of a circuit simulation's motors and servos in an assembly.
+pub struct Motion {
+    pub asm: usize,
+    /// The simulated time shown (s), and the time last solved for.
+    pub t: f64,
+    shown: Option<f64>,
+    pub playing: bool,
+    /// Simulated seconds per real second.
+    pub rate: f64,
+    /// The poses from before, to go back to.
+    rest: Vec<(u64, Pose)>,
+    last: Option<std::time::Instant>,
+}
+
+/// The simulation results' mate traces for assembly `ai`, with their times.
+fn motion_data(app: &App, ai: usize) -> Option<(&[f64], Vec<&crate::circuit_mech::MateTrace>)> {
+    let out = app.pcb.sim.out.as_ref()?;
+    let tr: Vec<_> = out.mates.iter().filter(|m| m.assembly == ai).collect();
+    (!tr.is_empty() && out.x.len() > 1).then_some((&out.x[..], tr))
+}
+
+/// Start playing the last simulation in assembly `ai` (from the start).
+pub fn play_motion(app: &mut App, ai: usize) {
+    let Some((x, _)) = motion_data(app, ai) else { return };
+    let stop = *x.last().unwrap();
+    let rest = match &app.asm.motion {
+        Some(m) if m.asm == ai => m.rest.clone(),
+        _ => app.ws.assemblies[ai].instances.iter().map(|i| (i.id, i.pose)).collect(),
+    };
+    // a run over a few seconds plays in real time; a short one slows down to about 4 s
+    let rate = if stop > 4.0 { 1.0 } else { [1.0, 0.5, 0.25, 0.1, 0.05, 0.01].into_iter().find(|r| stop / r >= 2.0).unwrap_or(0.01) };
+    app.asm.motion = Some(Motion { asm: ai, t: 0.0, shown: None, playing: true, rate, rest, last: None });
+}
+
+/// Advance the playback and move the parts to it.
+fn motion_tick(app: &mut App, ctx: &egui::Context) {
+    let Some(ai) = asm_index(app) else { return };
+    if app.asm.motion.as_ref().map(|m| m.asm != ai).unwrap_or(true) {
+        return;
+    }
+    let Some(end) = motion_data(app, ai).map(|(x, _)| *x.last().unwrap()) else { return };
+    let now = std::time::Instant::now();
+    let m = app.asm.motion.as_mut().unwrap();
+    if m.playing {
+        if let Some(l) = m.last {
+            m.t += now.duration_since(l).as_secs_f64() * m.rate;
+        }
+        m.last = Some(now);
+        if m.t >= end {
+            m.t = end;
+            m.playing = false;
+            m.last = None;
+        }
+        ctx.request_repaint();
+    } else {
+        m.last = None;
+    }
+    if m.shown == Some(m.t) {
+        return;
+    }
+    m.shown = Some(m.t);
+    let t = m.t;
+    let drives: Vec<assembly::Drive> = {
+        let (x, tr) = motion_data(app, ai).unwrap();
+        let k = x.partition_point(|v| *v <= t).saturating_sub(1).min(x.len() - 1);
+        let f = if k + 1 < x.len() && x[k + 1] > x[k] { ((t - x[k]) / (x[k + 1] - x[k])).clamp(0.0, 1.0) } else { 0.0 };
+        tr.iter().map(|m| m.drive(k, f)).collect()
+    };
+    let centers: Vec<(u64, DVec3)> = app.ws.assemblies[ai].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
+    let r = assembly::solve_driven(&mut app.ws.assemblies[ai], &[], &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), &drives);
+    app.asm.failed = r.failed;
+    app.asm.clash_stale = true;
+    app.asm.scene_dirty = true;
+}
+
+fn motion_ui(app: &mut App, ui: &mut Ui, ai: usize) {
+    let Some((end, names)) = motion_data(app, ai).map(|(x, tr)| (*x.last().unwrap(), tr.iter().map(|m| m.name.clone()).collect::<Vec<_>>())) else { return };
+    let movers: Vec<String> = app.pcb.sim.out.as_ref().map(|o| o.mech.iter().filter(|p| p.role.map(|r| r.drives()).unwrap_or(false)).map(|p| p.reference.clone()).collect()).unwrap_or_default();
+    let pcb_name = app.pcb.sim.ran_name().unwrap_or_default();
+    ui.label(RichText::new(format!("{} from the {pcb_name} simulation moves {}.", movers.join(", "), names.join(", "))).size(12.0).color(theme::muted()));
+    if app.asm.motion.as_ref().map(|m| m.asm != ai).unwrap_or(true) {
+        if ui.button("Play").clicked() {
+            checkpoint(app);
+            play_motion(app, ai);
+        }
+        return;
+    }
+    let m = app.asm.motion.as_mut().unwrap();
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        let label = if m.playing { "Pause" } else { "Play" };
+        if ui.button(label).clicked() {
+            if !m.playing && m.t >= end {
+                m.t = 0.0;
+            }
+            m.playing = !m.playing;
+        }
+        if ui.button("Back to start").on_hover_text("Put the parts back where they were before playing").clicked() {
+            reset = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = ui.available_width() - 70.0;
+        if ui.add(egui::Slider::new(&mut m.t, 0.0..=end).show_value(false)).changed() {
+            m.playing = false;
+        }
+        ui.label(RichText::new(crate::circuit::si(m.t, "s")).size(11.5).monospace());
+    });
+    row_label(ui, "Speed", |ui| {
+        egui::ComboBox::from_id_salt("motion_rate").width(90.0).selected_text(format!("{}×", m.rate)).show_ui(ui, |ui| {
+            for r in [1.0, 0.5, 0.25, 0.1, 0.05, 0.01] {
+                ui.selectable_value(&mut m.rate, r, format!("{r}×"));
+            }
+        });
+    });
+    if reset {
+        let rest = m.rest.clone();
+        app.asm.motion = None;
+        if let Some(a) = app.ws.assemblies.get_mut(ai) {
+            for (id, p) in rest {
+                if let Some(i) = a.instances.iter_mut().find(|i| i.id == id) {
+                    i.pose = p;
+                }
+            }
+        }
+        app.asm.failed = assembly::failed_mates(&app.ws.assemblies[ai]);
+        app.asm.scene_dirty = true;
+        app.asm.clash_stale = true;
+    }
+}
+
+fn row_label(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(12.0).color(theme::muted()));
+        add(ui);
+    });
 }
 
 pub fn asm_index(app: &App) -> Option<usize> {
@@ -443,6 +583,7 @@ pub fn fit(app: &mut App) {
 // ---------------------------------------------------------------- sidebar
 
 pub fn sidebar(app: &mut App, ui: &mut Ui) {
+    motion_tick(app, &ui.ctx().clone());
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if app.asm.insert_open {
             section(ui, "Insert", |ui| insert_panel(app, ui));
@@ -454,6 +595,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         if app.asm.relation.is_some() || asm(app).map(|a| !a.relations.is_empty()).unwrap_or(false) {
             section(ui, "Relations", |ui| relations(app, ui));
+        }
+        if let Some(ai) = asm_index(app).filter(|ai| motion_data(app, *ai).is_some()) {
+            section(ui, "Motion", |ui| motion_ui(app, ui, ai));
         }
         if app.asm.explode > 0.0 {
             section(ui, "Exploded view", |ui| explode_ui(app, ui));

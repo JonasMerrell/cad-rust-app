@@ -112,6 +112,9 @@ impl Session {
                         }
                     }
                 }
+                if let Some(ls) = a.get("links") {
+                    p.sim.links = self.parse_links(&p, ls)?;
+                }
                 apply_analysis(&mut p.sim.analysis, a)?;
                 let b = circuit::build(&p)?;
                 self.ws.pcbs[pi] = p;
@@ -127,6 +130,10 @@ impl Session {
                     "signals": b.sigs.iter().map(|s| s.name.clone()).collect::<Vec<_>>(),
                     "probes": p.sim.probes,
                     "mcus": p.sim.mcus.iter().map(|m| json!({"part": m.part, "firmware": m.firmware, "usb": m.usb, "uart_in": m.uart_in})).collect::<Vec<_>>(),
+                    "links": p.sim.links.iter().map(|l| {
+                        let mate = self.ws.assemblies.get(l.assembly).and_then(|x| x.mates.iter().find(|m| m.id == l.mate));
+                        json!({"part": l.part, "assembly": l.assembly, "mate": mate.map(|m| m.name.clone()), "mate_id": l.mate, "ratio": l.ratio, "range": l.range, "inertia": l.inertia, "load": l.load, "reverse": l.reverse})
+                    }).collect::<Vec<_>>(),
                     "notes": b.notes,
                 });
                 Ok((v, None))
@@ -143,7 +150,7 @@ impl Session {
                 }
                 // the UI opens on the same analysis
                 self.ws.pcbs[pi].sim = setup.clone();
-                let out = circuit::run(&self.ws.pcbs[pi], &setup.analysis)?;
+                let out = circuit::run_with(&self.ws.pcbs[pi], &setup.analysis, &self.ws.assemblies)?;
                 let probes = probe_sigs(&out, &setup.probes)?;
                 let mut v = json!({"pcb": pi, "analysis": format!("{:?}", out.kind).to_lowercase(), "notes": out.notes});
                 match out.kind {
@@ -176,6 +183,44 @@ impl Session {
                             m.insert(s.name.clone(), o);
                         }
                         v["probes"] = Value::Object(m);
+                        if !out.mech.is_empty() {
+                            let st = |x: &[f64]| {
+                                let (lo, hi) = x.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), v| (a.min(*v), b.max(*v)));
+                                json!({"start": sig4(x[0]), "final": sig4(*x.last().unwrap()), "min": sig4(lo), "max": sig4(hi)})
+                            };
+                            v["mechanism"] = json!(out.mech.iter().filter(|t| !t.pos.is_empty()).map(|t| {
+                                let mut o = json!({"part": t.reference, "role": t.role.map(|r| r.label()), "unit": t.unit, "position": st(&t.pos)});
+                                if !t.rpm.is_empty() {
+                                    o["rpm"] = st(&t.rpm);
+                                }
+                                o
+                            }).collect::<Vec<_>>());
+                            v["mates_moved"] = json!(out.mates.iter().map(|m| {
+                                let mut o = json!({"assembly": m.assembly, "mate": m.name, "mate_id": m.mate});
+                                if let Some(a) = &m.angle {
+                                    o["angle_deg"] = st(a);
+                                }
+                                if let Some(s) = &m.slide {
+                                    o["travel_mm"] = st(s);
+                                }
+                                o
+                            }).collect::<Vec<_>>());
+                            // pose the assemblies as they were at a time of the run
+                            if let Some(t) = a.get("pose_assembly_at").and_then(|v| v.as_f64()) {
+                                let k = out.x.partition_point(|v| *v <= t).saturating_sub(1).min(out.x.len() - 1);
+                                let mut asms: Vec<usize> = out.mates.iter().map(|m| m.assembly).collect();
+                                asms.dedup();
+                                let mut failed = vec![];
+                                for ai in asms {
+                                    let drives: Vec<_> = out.mates.iter().filter(|m| m.assembly == ai).map(|m| m.drive(k, 0.0)).collect();
+                                    failed.extend(self.solve_driven(ai, &drives));
+                                }
+                                v["posed_at"] = json!(sig4(out.x[k]));
+                                if !failed.is_empty() {
+                                    v["posed_failed_mates"] = json!(failed);
+                                }
+                            }
+                        }
                         if !out.mcus.is_empty() {
                             v["mcus"] = json!(out.mcus.iter().map(|m| {
                                 let skip = m.uart.len().saturating_sub(200);
@@ -236,6 +281,54 @@ impl Session {
             }
             _ => Err(format!("unknown tool {name}")),
         }
+    }
+}
+
+impl Session {
+    /// Links from JSON: [{part, assembly, mate (name or id), ratio, range, inertia, load, reverse}].
+    fn parse_links(&self, p: &crate::pcb::Pcb, v: &Value) -> R<Vec<crate::circuit_mech::Link>> {
+        use crate::assembly::MateKind;
+        let list = v.as_array().ok_or("links: a list of {part, assembly, mate, …}")?;
+        let mut out = vec![];
+        for (k, l) in list.iter().enumerate() {
+            let part = l.get("part").and_then(|v| v.as_str()).ok_or_else(|| format!("links[{k}]: give part (M1, SV1, RV1, SW1, ENC1)"))?;
+            let x = p.parts.iter().find(|x| x.reference.eq_ignore_ascii_case(part)).ok_or_else(|| format!("links[{k}]: no part {part}"))?;
+            let role = crate::circuit_mech::role(&x.symbol).ok_or_else(|| format!("links[{k}]: {part} is not a motor (M), servo (SERVO), potentiometer (RV), switch (SW) or encoder (ENC)"))?;
+            let ai = l.get("assembly").and_then(|v| v.as_u64()).unwrap_or(0) as usize;
+            let asm = self.ws.assemblies.get(ai).ok_or_else(|| format!("links[{k}]: no assembly {ai}"))?;
+            let mate = match l.get("mate") {
+                Some(Value::Number(n)) => asm.mates.iter().find(|m| Some(m.id) == n.as_u64()),
+                Some(Value::String(s)) => asm.mates.iter().find(|m| m.name.eq_ignore_ascii_case(s)),
+                _ => return Err(format!("links[{k}]: give mate (its name or id)")),
+            }
+            .ok_or_else(|| format!("links[{k}]: no such mate in {}; the mates are {}", asm.name, asm.mates.iter().map(|m| format!("{} (id {})", m.name, m.id)).collect::<Vec<_>>().join(", ")))?;
+            if !matches!(mate.kind, MateKind::Revolute | MateKind::Slider | MateKind::Cylindrical) {
+                return Err(format!("links[{k}]: {} is a {} mate; link to a revolute, slider or cylindrical mate", mate.name, mate.kind.label().to_lowercase()));
+            }
+            let mut link = crate::circuit_mech::new_link(&x.reference, role, ai, mate.id, mate.kind == MateKind::Slider, mate.limits);
+            if let Some(r) = l.get("ratio").and_then(|v| v.as_f64()) {
+                if r <= 0.0 {
+                    return Err(format!("links[{k}]: ratio must be positive"));
+                }
+                link.ratio = r;
+            }
+            if let Some(r) = l.get("range").and_then(|v| v.as_array()) {
+                let r: Vec<f64> = r.iter().filter_map(|x| x.as_f64()).collect();
+                let [a, b] = r[..] else { return Err(format!("links[{k}]: range is [from, to]")) };
+                link.range = Some([a, b]);
+            }
+            if let Some(v) = l.get("inertia").and_then(|v| v.as_f64()) {
+                link.inertia = v.max(0.0);
+            }
+            if let Some(v) = l.get("load").and_then(|v| v.as_f64()) {
+                link.load = v.max(0.0);
+            }
+            if let Some(v) = l.get("reverse").and_then(|v| v.as_bool()) {
+                link.reverse = v;
+            }
+            out.push(link);
+        }
+        Ok(out)
     }
 }
 
@@ -319,8 +412,19 @@ pub fn tools() -> Vec<Value> {
         "usb": {"type": "boolean", "description": "powered from USB: 5 V on VBUS (default true)"},
         "uart_in": {"type": "string", "description": "text arriving on UART0 RX (GP1) at the start"},
     }, "required": ["part"], "additionalProperties": false}});
+    setup["links"] = json!({"type": "array", "description": "replace the links from schematic parts to assembly mates: a DC motor (symbol M) or servo (SERVO) turns or slides its mate during transients; a potentiometer (RV), limit switch (SW) or encoder (ENC) reads its mate back into the circuit. Gear, rack and screw relations carry the motion on and mate limits stop it", "items": {"type": "object", "properties": {
+        "part": {"type": "string", "description": "the part's reference (M1, SV1, RV1, SW1, ENC1)"},
+        "assembly": {"type": "integer", "minimum": 0, "description": "assembly tab index (default 0)"},
+        "mate": {"type": ["string", "integer"], "description": "a revolute, slider or cylindrical mate: its name or id"},
+        "ratio": {"type": "number", "description": "motor on a revolute mate: gear ratio, motor turns per mate turn (on top of a 1:N gearbox in its value; default 1); on a slider: lead, mm per turn (default 8); encoder: counts per turn or per mm (default 20 / 1)"},
+        "range": {"type": "array", "items": {"type": "number"}, "description": "[a, b], degrees or mm: servo, the mate angle at 1 ms and 2 ms pulses (default [-90, 90]); potentiometer, the mate at the pin 1 and pin 3 ends (default the mate's limits or ±135°); limit switch, closed while the mate is between these (default just below the upper limit and beyond)"},
+        "inertia": {"type": "number", "description": "motor load inertia at the mate, kg·m² (kg on a slider)"},
+        "load": {"type": "number", "description": "motor load friction at the mate, N·m (N on a slider): holds it until the motor beats it"},
+        "reverse": {"type": "boolean", "description": "turn the mate the other way"},
+    }, "required": ["part", "mate"], "additionalProperties": false}});
     let mut sim = analysis;
     sim["pcb"] = pcb;
+    sim["pose_assembly_at"] = json!({"type": "number", "description": "after a transient, leave the linked assemblies posed as the motors and servos had them at this time (s), e.g. to render_assembly it"});
     sim["analysis"] = json!({"type": "string", "enum": ["op", "tran", "ac"], "description": "op: DC operating point; tran: transient; ac: small-signal sweep about the operating point (default the last one run, else tran)"});
     sim["probes"] = strs("signals to report and plot (default the setup's, else the net voltages)");
     sim["at"] =
@@ -330,7 +434,7 @@ pub fn tools() -> Vec<Value> {
     sim["width"] = json!({"type": "integer", "description": "plot width px (default 1000)"});
     sim["csv"] = json!({"type": "string", "description": "write the probed waveforms as CSV here"});
     vec![
-        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators, Raspberry Pi Pico boards running firmware; connectors, crystals and other ICs are left open), the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
-        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, variable-step BDF2 transient, AC about the operating point; Pico boards run their firmware during transients, so transients default to at least 1 s with them). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. Picos report their serial (UART) output with times, notes and pin states. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
+        json!({"name": "pcb_sim_setup", "description": "Set up the circuit simulation of a PCB tab's schematic: sources (by default a DC supply on every power net, named like VCC, +5V, 3V3), ground net, pressed switches, probes and analysis settings. Returns each part's model (by symbol and value: resistors 4k7, capacitors 100n, inductors, 1N4148/1N4007/1N5819/BAT54/zener diodes, LEDs by colour, BC847/2N3904/2N2222/BC857/2N3906 BJTs, 2N7002/BSS138/AO3400/AO3401/IRLZ44N MOSFETs, NE555/TLC555 timers, LM358/LM324/TL072/NE5532/MCP6002/LMV321 op amps, 78xx/LM317/AMS1117/AP2112/MCP1700 regulators, Raspberry Pi Pico boards running firmware, DC motors (M: value like 6V 10000rpm 1A 1:48, or TT/N20/130/775), SG90/MG996R servos, potentiometers (RV), encoders (ENC); connectors, crystals and other ICs are left open), the links of motors, servos and sensors to assembly mates, the signal names for probes, and notes.", "inputSchema": obj(setup, &["pcb"])}),
+        json!({"name": "simulate_pcb", "description": "Simulate a PCB tab's schematic (SPICE-like: Newton-Raphson DC, variable-step BDF2 transient, AC about the operating point; Pico boards run their firmware during transients, so transients default to at least 1 s with them). op returns net voltages, source currents and each part's pin voltages, currents and power. tran returns per probe min, max, average, RMS, final value and, when it repeats, period, frequency and duty cycle (from the second cycle on). ac returns gain at the start, peak and the −3 dB frequencies. Picos report their serial (UART) output with times, notes and pin states. Parts linked to assembly mates report how far they moved or read (probe POS(M1) in degrees or mm and RPM(M1)) and which mates moved; pose_assembly_at leaves the assembly where they had it at that time. The plot (plot: true or path) shows the probes; csv writes the waveforms.", "inputSchema": obj(sim, &["pcb"])}),
     ]
 }
