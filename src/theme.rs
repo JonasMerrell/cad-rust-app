@@ -205,6 +205,49 @@ pub fn to_rgba(c: Color32, a: f32) -> [f32; 4] {
     [c.r() as f32 / 255.0, c.g() as f32 / 255.0, c.b() as f32 / 255.0, a]
 }
 
+/// Panels are cards floating on this canvas, with this gap around them.
+pub const CARD_GAP: i8 = 8;
+pub const CARD_RADIUS: u8 = 14;
+
+/// Behind the panel cards.
+pub fn canvas() -> Color32 {
+    if is_dark() { hex(0x0b0c0e) } else { hex(0xe3e6ea) }
+}
+
+/// A panel drawn as a card: rounded, with a soft shadow, inset from its neighbours by `CARD_GAP`.
+pub fn card(fill: Color32, inner: egui::Margin) -> egui::Frame {
+    egui::Frame::new().fill(fill).inner_margin(inner).outer_margin(egui::Margin::same(CARD_GAP)).corner_radius(CARD_RADIUS).shadow(card_shadow())
+}
+
+pub fn card_shadow() -> egui::Shadow {
+    egui::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha(if is_dark() { 90 } else { 22 }) }
+}
+
+/// Round the corners of a flush area (the viewport) by painting the canvas over them.
+pub fn round_corners(painter: &egui::Painter, rect: egui::Rect, r: f32) {
+    use std::f32::consts::{FRAC_PI_2, PI};
+    let col = canvas();
+    let mut m = egui::Mesh::default();
+    let n = 8;
+    for (corner, centre, a0) in [
+        (rect.left_top(), rect.left_top() + egui::vec2(r, r), PI),
+        (rect.right_top(), rect.right_top() + egui::vec2(-r, r), 1.5 * PI),
+        (rect.right_bottom(), rect.right_bottom() + egui::vec2(-r, -r), 0.0),
+        (rect.left_bottom(), rect.left_bottom() + egui::vec2(r, -r), FRAC_PI_2),
+    ] {
+        let base = m.vertices.len() as u32;
+        m.colored_vertex(corner, col);
+        for i in 0..=n {
+            let a = a0 + FRAC_PI_2 * i as f32 / n as f32;
+            m.colored_vertex(centre + r * egui::vec2(a.cos(), a.sin()), col);
+        }
+        for i in 0..n {
+            m.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+    painter.add(m);
+}
+
 /// Switch between the light and dark palettes and restyle egui.
 pub fn set_dark(ctx: &egui::Context, dark: bool) {
     DARK.store(dark, Ordering::Relaxed);
@@ -252,7 +295,7 @@ pub fn apply(ctx: &egui::Context) {
     v.panel_fill = p.panel;
     v.window_fill = p.window;
     v.window_stroke = Stroke::new(1.0, p.border);
-    v.window_corner_radius = CornerRadius::same(10);
+    v.window_corner_radius = CornerRadius::same(14);
     v.menu_corner_radius = CornerRadius::same(8);
     // inputs are filled, not outlined; focus draws the accent ring
     let input = input_fill();
@@ -270,11 +313,12 @@ pub fn apply(ctx: &egui::Context) {
     v.slider_trailing_fill = true;
     v.handle_shape = egui::style::HandleShape::Circle;
 
-    let r = CornerRadius::same(5);
+    let r = CornerRadius::same(8);
     let w = &mut v.widgets;
     w.noninteractive.bg_fill = p.panel;
     w.noninteractive.weak_bg_fill = p.panel;
-    w.noninteractive.bg_stroke = Stroke::new(1.0, p.border);
+    // separators stay faint; the cards and the canvas between them do the dividing
+    w.noninteractive.bg_stroke = Stroke::new(1.0, lerp(p.border, p.panel, 0.55));
     w.noninteractive.fg_stroke = Stroke::new(1.0, p.text);
     w.noninteractive.corner_radius = r;
     w.inactive.bg_fill = if dark { hex(0x2a2d33) } else { hex(0xe9ecf0) };
@@ -306,7 +350,7 @@ pub fn apply(ctx: &egui::Context) {
     ctx.style_mut_of(theme, |s| {
         s.spacing.item_spacing = egui::vec2(6.0, 5.0);
         s.spacing.button_padding = egui::vec2(6.0, 4.0);
-        s.spacing.interact_size.y = 26.0;
+        s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);
         s.spacing.window_margin = egui::Margin::same(10);
         s.spacing.combo_width = 120.0;
