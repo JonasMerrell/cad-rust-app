@@ -5,9 +5,9 @@ build-backend = "maturin"
 [project]
 name = "cadrust"
 version = "0.1.0"
-description = "Python scripting for cad-rust-app: OpenCascade shapes with a FreeCAD-style API"
+description = "Python scripting for rCAD: OpenCascade shapes with a FreeCAD-style API"
 requires-python = ">=3.10"
-license = { text = "MIT" }
+license = { text = "AGPL-3.0-only" }
 
 [tool.maturin]
 python-source = "."

@@ -1,12 +1,12 @@
 [
   {"tool": "new_document", "args": {"units": "mm"}},
-  {"tool": "import_file", "args": {"path": "examples/zerotorque/HeadAssembly.step", "name": "Head assembly"}},
+  {"tool": "import_file", "args": {"path": "HeadAssembly.step", "name": "Head assembly"}},
   {"tool": "describe", "args": {}},
   {"tool": "set_part", "args": {"body": [1, 0], "name": "Head", "material": "Aluminium 6061"}},
   {"tool": "set_part", "args": {"body": [1, 1], "name": "Plug 70/2", "material": "Aluminium 7075"}},
   {"tool": "set_part", "args": {"body": [1, 2], "name": "Foam core", "material": "Urethane foam"}},
   {"tool": "create_simulation", "args": {"name": "Head, free-free", "analysis": "modal", "modes": 12, "mesh_size": 3}},
   {"tool": "solve_simulation", "args": {"simulation": 0}},
-  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 7, "path": "zt-head-mode1.png"}},
+  {"tool": "render_simulation", "args": {"simulation": 0, "mode": 7, "path": "zt-head-mode7.png"}},
   {"tool": "save_document", "args": {"path": "zt-head-modal.json"}}
 ]

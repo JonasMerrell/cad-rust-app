@@ -185,14 +185,14 @@ pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
         if r <= 0.0 {
             return Ok(s.clone());
         }
-        Ok(wrap(occ_err(occ::fillet(&s.0, &all_edges(&s.0), r, r))?))
+        Ok(wrap(occ_err(occ::fillet(&s.0, &all_edges(&s.0), r, r).and_then(|x| occ::checked(x, "fillet", " (radius too large for the part?)")))?))
     });
     e.register_fn("chamfer", |s: &mut S, d: Dynamic| -> Res<S> {
         let d = num(&d)?;
         if d <= 0.0 {
             return Ok(s.clone());
         }
-        Ok(wrap(occ_err(occ::chamfer(&s.0, &all_edges(&s.0), d))?))
+        Ok(wrap(occ_err(occ::chamfer(&s.0, &all_edges(&s.0), d).and_then(|x| occ::checked(x, "chamfer", " (distance too large for the part?)")))?))
     });
     // move the shape's origin to `p` with its +Z along `n`
     e.register_fn("place", |s: &mut S, p: Dynamic, n: Dynamic| -> Res<S> {
@@ -207,12 +207,12 @@ pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
         };
         Ok(wrap(occ_err(occ::transform(&s.0, m, p))?))
     });
-    e.register_fn("+", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::fuse(&a.0, &b.0))?)) });
-    e.register_fn("-", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::cut(&a.0, &b.0))?)) });
-    e.register_fn("&", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::common(&a.0, &b.0))?)) });
-    e.register_fn("union", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::fuse(&a.0, &b.0))?)) });
-    e.register_fn("subtract", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::cut(&a.0, &b.0))?)) });
-    e.register_fn("intersect", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::common(&a.0, &b.0))?)) });
+    e.register_fn("+", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::fuse(&a.0, &b.0).and_then(|x| occ::checked(x, "union", "")))?)) });
+    e.register_fn("-", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::cut(&a.0, &b.0).and_then(|x| occ::checked(x, "subtract", "")))?)) });
+    e.register_fn("&", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::common(&a.0, &b.0).and_then(|x| occ::checked(x, "intersect", "")))?)) });
+    e.register_fn("union", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::fuse(&a.0, &b.0).and_then(|x| occ::checked(x, "union", "")))?)) });
+    e.register_fn("subtract", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::cut(&a.0, &b.0).and_then(|x| occ::checked(x, "subtract", "")))?)) });
+    e.register_fn("intersect", |a: S, b: S| -> Res<S> { Ok(wrap(occ_err(occ::common(&a.0, &b.0).and_then(|x| occ::checked(x, "intersect", "")))?)) });
     e.register_fn("volume", |s: &mut S| -> f64 { crate::kernel::volume(&s.0) });
     e.register_fn("deg", |d: Dynamic| -> Res<f64> { Ok(num(&d)?.to_radians()) });
     e

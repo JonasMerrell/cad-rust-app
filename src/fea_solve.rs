@@ -546,18 +546,48 @@ pub fn von_mises(s: &[f32; 6]) -> f32 {
     (0.5 * ((xx - yy).powi(2) + (yy - zz).powi(2) + (zz - xx).powi(2)) + 3.0 * (xy * xy + yz * yz + zx * zx)).sqrt()
 }
 
-/// Reaction force (N) at the given nodes: internal forces K u minus the applied loads there.
-pub fn reaction(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], force: &[f64], nodes: &[u32]) -> DVec3 {
-    let mut on = vec![false; mesh.nodes.len()];
-    for n in nodes {
-        on[*n as usize] = true;
+/// Principal stresses [σ1 ≥ σ2 ≥ σ3] (MPa) of a stress [xx, yy, zz, xy, yz, zx] (eigenvalues of the
+/// symmetric tensor, by the trigonometric solution of its characteristic cubic).
+pub fn principal(s: &[f32; 6]) -> [f32; 3] {
+    let [xx, yy, zz, xy, yz, zx] = s.map(|v| v as f64);
+    let p1 = xy * xy + yz * yz + zx * zx;
+    let q = (xx + yy + zz) / 3.0;
+    let p2 = (xx - q).powi(2) + (yy - q).powi(2) + (zz - q).powi(2) + 2.0 * p1;
+    let p = (p2 / 6.0).sqrt();
+    if p < 1e-12 * (1.0 + q.abs()) {
+        return [q as f32; 3];
     }
-    let mut r = DVec3::ZERO;
-    for (ei, e) in mesh.tets.iter().enumerate().filter(|(_, e)| e.iter().any(|n| on[*n as usize])) {
+    // B = (A − qI) / p; r = det(B) / 2
+    let (a, b, c) = ((xx - q) / p, (yy - q) / p, (zz - q) / p);
+    let (d, e, f) = (xy / p, yz / p, zx / p);
+    let det = a * (b * c - e * e) - d * (d * c - e * f) + f * (d * e - b * f);
+    let phi = (det / 2.0).clamp(-1.0, 1.0).acos() / 3.0;
+    let s1 = q + 2.0 * p * phi.cos();
+    let s3 = q + 2.0 * p * (phi + 2.0 * std::f64::consts::PI / 3.0).cos();
+    let s2 = 3.0 * q - s1 - s3;
+    [s1 as f32, s2 as f32, s3 as f32]
+}
+
+/// Reaction force (N) at the given nodes: internal forces K u minus the applied loads there.
+#[allow(dead_code)] // the tests use it
+pub fn reaction(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], force: &[f64], nodes: &[u32]) -> DVec3 {
+    node_reactions(mesh, mat, mats, u, force, nodes).iter().fold(DVec3::ZERO, |a, r| a + *r)
+}
+
+/// Reaction force (N) at each of the given nodes (same order): internal forces K u minus the applied
+/// loads there.
+pub fn node_reactions(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], force: &[f64], nodes: &[u32]) -> Vec<DVec3> {
+    let mut slot = vec![usize::MAX; mesh.nodes.len()];
+    for (k, n) in nodes.iter().enumerate() {
+        slot[*n as usize] = k;
+    }
+    let mut r = vec![DVec3::ZERO; nodes.len()];
+    for (ei, e) in mesh.tets.iter().enumerate().filter(|(_, e)| e.iter().any(|n| slot[*n as usize] != usize::MAX)) {
         let (lam, mu) = lame(mat_at(mesh, mats, mat, ei));
         let Some((ke, _)) = stiffness(&coords(mesh, e), lam, mu) else { continue };
         for i in 0..10 {
-            if !on[e[i] as usize] {
+            let k = slot[e[i] as usize];
+            if k == usize::MAX {
                 continue;
             }
             for a in 0..3 {
@@ -567,13 +597,13 @@ pub fn reaction(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], force: 
                         s += ke[3 * i + a][3 * j + b] * u[3 * e[j] as usize + b];
                     }
                 }
-                r[a] += s;
+                r[k][a] += s;
             }
         }
     }
-    for n in nodes {
+    for (k, n) in nodes.iter().enumerate() {
         for a in 0..3 {
-            r[a] -= force[3 * *n as usize + a];
+            r[k][a] -= force[3 * *n as usize + a];
         }
     }
     r
@@ -623,10 +653,18 @@ pub struct Mode {
     /// Modal loss factor: the materials' loss factors weighted by where the mode stores its strain
     /// energy. Vibration in the mode dies away as e^(−η ω t / 2).
     pub loss: f64,
+    /// A rigid-body motion of a part that nothing holds (0 Hz).
+    pub rigid: bool,
 }
 
-/// Lowest `count` natural frequencies by shift-invert Lanczos (shifted just below zero, so parts
-/// without supports work too: their rigid-body modes come out near 0 Hz).
+/// Whether nothing holds the model (no fixes and no springs to the ground), so it has six rigid-body modes.
+pub fn is_free(p: &Problem) -> bool {
+    p.fixes.is_empty() && !p.couplings.iter().any(|c| c.b.is_empty() && c.k.iter().any(|k| *k != 0.0))
+}
+
+/// Lowest `count` natural frequencies by shift-invert Lanczos. A model that nothing holds has exactly six
+/// rigid-body modes: they come first, at 0 Hz, and are kept out of the Lanczos basis so that rounding
+/// cannot hide one of them or mix it with the flexible modes.
 pub fn modal(p: &Problem, count: usize, cancel: &dyn Fn() -> bool) -> Result<Vec<Mode>, String> {
     let mut sys = assemble(p, cancel)?;
     modes_of(&mut sys, p, count, cancel)
@@ -635,50 +673,66 @@ pub fn modal(p: &Problem, count: usize, cancel: &dyn Fn() -> bool) -> Result<Vec
 fn modes_of(sys: &mut System, p: &Problem, count: usize, cancel: &dyn Fn() -> bool) -> Result<Vec<Mode>, String> {
     let n = sys.n;
     let count = count.clamp(1, n);
+    let free = is_free(p);
+    let rigid = if free { rigid_modes(sys, p.mesh) } else { vec![] };
+    let total_mass = sys.mass;
+    // effective mass fractions and modal loss factor of an M-normalised vector over the free DOFs
+    let describe = |sys: &System, x: &[f64]| -> ([f64; 3], f64) {
+        let mut mx = vec![0.0; n];
+        sys.mul(&sys.m, x, &mut mx);
+        let mut part = [0.0; 3];
+        for (i, d) in sys.dof.iter().enumerate() {
+            part[d % 3] += mx[i];
+        }
+        let participation = part.map(|g| g * g / total_mass.max(1e-300));
+        let loss = if sys.k_eta.is_empty() {
+            0.0
+        } else {
+            let (mut kx, mut ex) = (vec![0.0; n], vec![0.0; n]);
+            sys.mul(&sys.k, x, &mut kx);
+            sys.mul(&sys.k_eta, x, &mut ex);
+            let dot = |a: &[f64]| a.iter().zip(x).map(|(p, q)| p * q).sum::<f64>();
+            let d = dot(&kx);
+            if d > 1e-300 { (dot(&ex) / d).clamp(0.0, 1.0) } else { 0.0 }
+        };
+        (participation, loss)
+    };
+    let mut out = vec![];
+    for r in rigid.iter().take(count) {
+        let (participation, _) = describe(sys, r);
+        out.push(Mode { freq: 0.0, shape: expand(sys, r, p.mesh.nodes.len()), participation, loss: 0.0, rigid: true });
+    }
+    let want = count - out.len();
+    if want == 0 || n <= rigid.len() {
+        return Ok(out);
+    }
     // shift: a small negative value relative to the stiffness/mass scale; bigger for a free model,
     // whose stiffness alone is singular, so that rounding cannot break the factorisation
     let kd: f64 = (0..n).map(|c| sys.k[sys.col_ptr[c]]).sum::<f64>() / n as f64;
     let md: f64 = (0..n).map(|c| sys.m[sys.col_ptr[c]]).sum::<f64>() / n as f64;
-    let sigma = -(kd / md.max(1e-300)) * if p.fixes.is_empty() { 1e-5 } else { 1e-8 };
+    let sigma = -(kd / md.max(1e-300)) * if free { 1e-5 } else { 1e-8 };
     let shifted: Vec<f64> = sys.k.iter().zip(&sys.m).map(|(k, m)| k - sigma * m).collect();
     let llt = sys.factor(&shifted)?;
-    let mut m_steps = (2 * count + 20).min(n);
+    let mut m_steps = (2 * want + 20).min(n - rigid.len());
     loop {
-        let (vals, vecs, ok) = lanczos(sys, &llt, m_steps, count, cancel)?;
-        if ok || m_steps >= n {
-            let total_mass = sys.mass;
-            let mut out = vec![];
+        let (vals, vecs, ok) = lanczos(sys, &llt, m_steps, want, &rigid, cancel)?;
+        if ok || m_steps >= n - rigid.len() {
             for (theta, x) in vals.into_iter().zip(vecs) {
                 let lam = sigma + 1.0 / theta;
                 let freq = lam.max(0.0).sqrt() / std::f64::consts::TAU;
-                // participation: (φᵀ M r)² / total mass, r the unit rigid translation
-                let mut mx = vec![0.0; n];
-                sys.mul(&sys.m, &x, &mut mx);
-                let mut part = [0.0; 3];
-                for (i, d) in sys.dof.iter().enumerate() {
-                    part[d % 3] += mx[i];
-                }
-                let participation = part.map(|g| g * g / total_mass.max(1e-300));
-                let loss = if sys.k_eta.is_empty() {
-                    0.0
-                } else {
-                    let (mut kx, mut ex) = (vec![0.0; n], vec![0.0; n]);
-                    sys.mul(&sys.k, &x, &mut kx);
-                    sys.mul(&sys.k_eta, &x, &mut ex);
-                    let dot = |a: &[f64]| a.iter().zip(&x).map(|(p, q)| p * q).sum::<f64>();
-                    (dot(&ex) / dot(&kx).max(1e-300)).clamp(0.0, 1.0)
-                };
-                out.push(Mode { freq, shape: expand(sys, &x, p.mesh.nodes.len()), participation, loss });
+                let (participation, loss) = describe(sys, &x);
+                out.push(Mode { freq, shape: expand(sys, &x, p.mesh.nodes.len()), participation, loss, rigid: false });
             }
             return Ok(out);
         }
-        m_steps = (m_steps * 2).min(n);
+        m_steps = (m_steps * 2).min(n - rigid.len());
     }
 }
 
-/// Lanczos with full reorthogonalisation in the M inner product on (K − σM)⁻¹M. Returns the `count`
-/// largest Ritz values θ (λ = σ + 1/θ), their M-normalised vectors and whether they converged.
-fn lanczos(sys: &System, llt: &Llt<usize, f64>, m: usize, count: usize, cancel: &dyn Fn() -> bool) -> Result<(Vec<f64>, Vec<Vec<f64>>, bool), String> {
+/// Lanczos with full reorthogonalisation in the M inner product on (K − σM)⁻¹M, kept M-orthogonal to the
+/// M-orthonormal vectors `deflate` (rigid-body modes). Returns the `count` largest Ritz values θ
+/// (λ = σ + 1/θ), their M-normalised vectors and whether they converged.
+fn lanczos(sys: &System, llt: &Llt<usize, f64>, m: usize, count: usize, deflate: &[Vec<f64>], cancel: &dyn Fn() -> bool) -> Result<(Vec<f64>, Vec<Vec<f64>>, bool), String> {
     let n = sys.n;
     let dot = |a: &[f64], b: &[f64]| a.iter().zip(b).map(|(x, y)| x * y).sum::<f64>();
     let mut seed = 0x9e37_79b9_7f4a_7c15u64;
@@ -688,10 +742,18 @@ fn lanczos(sys: &System, llt: &Llt<usize, f64>, m: usize, count: usize, cancel: 
         seed ^= seed << 17;
         (seed >> 11) as f64 / (1u64 << 53) as f64 - 0.5
     };
-    // M-orthogonalise r against the basis (twice), returning M r and its M-norm
+    let mdeflate: Vec<Vec<f64>> = deflate
+        .iter()
+        .map(|d| {
+            let mut md = vec![0.0; n];
+            sys.mul(&sys.m, d, &mut md);
+            md
+        })
+        .collect();
+    // M-orthogonalise r against the deflated vectors and the basis (twice), returning M r and its M-norm
     let orth = |r: &mut Vec<f64>, q: &[Vec<f64>], mq: &[Vec<f64>]| -> (Vec<f64>, f64) {
         for _ in 0..2 {
-            for (qi, mqi) in q.iter().zip(mq) {
+            for (qi, mqi) in deflate.iter().zip(&mdeflate).chain(q.iter().zip(mq)) {
                 let c = dot(mqi, r);
                 r.iter_mut().zip(qi).for_each(|(x, y)| *x -= c * y);
             }
@@ -855,13 +917,18 @@ pub struct TransientResult {
     pub dt: f64,
     /// The part is not held: displacements are its vibration, with the rigid motion taken out.
     pub free: bool,
-    /// Time from the largest response until it has died down to a tenth of it (None: not within the run).
+    /// Ring-down time of an impact (pulse) with damping: from the largest response after the pulse until
+    /// it stays below a tenth of it. None for loads that stay on (step, ramp, shaking), for undamped runs and
+    /// when it does not die down within the run.
     pub decay: Option<f64>,
 }
 
-/// Time from the peak of `amp` until it stays below a tenth of the peak.
-pub fn decay_time(times: &[f64], amp: &[f64]) -> Option<f64> {
-    let (ip, peak) = amp.iter().copied().enumerate().fold((0, 0.0), |b, (i, a)| if a > b.1 { (i, a) } else { b });
+/// Ring-down after an impact: from the largest response once the load has ended (at `from`) until the
+/// response stays below a tenth of that peak, measured about the final rest position (zero, as no load is
+/// left). None when the run ends before that.
+pub fn decay_time(times: &[f64], amp: &[f64], from: f64) -> Option<f64> {
+    let start = times.iter().position(|t| *t >= from)?;
+    let (ip, peak) = amp.iter().copied().enumerate().skip(start).fold((start, 0.0), |b, (i, a)| if a > b.1 { (i, a) } else { b });
     if peak <= 0.0 {
         return None;
     }
@@ -912,7 +979,7 @@ fn rigid_modes(sys: &System, mesh: &Mesh) -> Vec<Vec<f64>> {
 /// damping (ηₑ Kₑ / ω₁). A part with no supports floats freely: its rigid motion is taken out of the results.
 pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), cancel: &dyn Fn() -> bool) -> Result<TransientResult, String> {
     let mut sys = assemble(p, cancel)?;
-    let free = p.fixes.is_empty();
+    let free = is_free(p);
     let modes = modes_of(&mut sys, p, if free { 7 } else { 1 }, cancel)?;
     let f1 = modes.last().map(|m| m.freq).unwrap_or(0.0).max(1e-6);
     let (w1, w2) = (std::f64::consts::TAU * f1, std::f64::consts::TAU * f1 * 5.0);
@@ -997,7 +1064,12 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
             next_frame += every;
         }
     }
-    let decay = decay_time(&times, &max_disp);
+    // ring-down only means something once an impact is over and something damps it
+    let damped = s.damping > 0.0 || !sys.k_eta.is_empty();
+    let decay = match s.profile {
+        Profile::HalfSine(tp) if damped => decay_time(&times, &max_disp, tp),
+        _ => None,
+    };
     Ok(TransientResult { times, frames, max_disp, f1, rayleigh: (ar, br), duration, dt, free, decay })
 }
 
@@ -1008,7 +1080,12 @@ mod tests {
 
     /// A 100 × 10 × 10 mm box as triangles, faces numbered −x, +x, −y, +y, −z, +z.
     fn beam() -> Surface {
-        let (lo, hi) = (DVec3::ZERO, DVec3::new(100.0, 10.0, 10.0));
+        let (t, f, b) = boxed(DVec3::ZERO, DVec3::new(100.0, 10.0, 10.0), 0, 0);
+        Surface::new(t, f, b)
+    }
+
+    /// Triangles of a box, faces numbered from `face` (−x, +x, −y, +y, −z, +z), all in part `body`.
+    fn boxed(lo: DVec3, hi: DVec3, face: u32, body: u32) -> (Vec<[DVec3; 3]>, Vec<u32>, Vec<u32>) {
         let c = |i: usize| DVec3::new([lo.x, hi.x][i & 1], [lo.y, hi.y][(i >> 1) & 1], [lo.z, hi.z][(i >> 2) & 1]);
         let quads = [[0, 4, 6, 2], [1, 3, 7, 5], [0, 1, 5, 4], [2, 6, 7, 3], [0, 2, 3, 1], [4, 5, 7, 6]];
         let mut t = vec![];
@@ -1016,9 +1093,9 @@ mod tests {
         for (fi, q) in quads.iter().enumerate() {
             t.push([c(q[0]), c(q[1]), c(q[2])]);
             t.push([c(q[0]), c(q[2]), c(q[3])]);
-            f.extend([fi as u32; 2]);
+            f.extend([face + fi as u32; 2]);
         }
-        Surface::new(t, f, vec![0; 12])
+        (t, f, vec![body; 12])
     }
 
     const STEEL: Elastic = Elastic { e: 200000.0, nu: 0.3, rho: 7.85e-9, yield_mpa: 250.0, eta: 0.0 };
@@ -1040,7 +1117,7 @@ mod tests {
 
     #[test]
     fn cantilever_matches_beam_theory() {
-        let m = mesh(&beam(), 2.5, &|| false).unwrap();
+        let m = mesh(&beam(), 2.5, &Default::default(), &|| false).unwrap();
         assert!(m.min_dihedral > 20.0);
         let p = cantilever(&m);
         let u = static_solve(&p, &|| false).unwrap().u;
@@ -1064,12 +1141,81 @@ mod tests {
 
     #[test]
     fn free_part_has_six_rigid_modes() {
-        let m = mesh(&beam(), 3.4, &|| false).unwrap();
+        let m = mesh(&beam(), 3.4, &Default::default(), &|| false).unwrap();
         let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![], force: vec![0.0; 3 * m.nodes.len()], couplings: vec![], masses: vec![] };
-        let modes = modal(&p, 7, &|| false).unwrap();
-        assert!(modes[..6].iter().all(|m| m.freq < 5.0));
+        let modes = modal(&p, 9, &|| false).unwrap();
+        // exactly six rigid-body modes at 0 Hz, and none among the rest
+        assert!(modes[..6].iter().all(|m| m.rigid && m.freq == 0.0));
+        assert!(modes[6..].iter().all(|m| !m.rigid && m.freq > 1000.0), "{:?}", modes.iter().map(|m| m.freq).collect::<Vec<_>>());
+        // the rigid translations carry all the mass along each axis, the vibration modes none of it
+        let rigid: [f64; 3] = std::array::from_fn(|a| modes[..6].iter().map(|m| m.participation[a]).sum());
+        assert!(rigid.iter().all(|x| (x - 1.0).abs() < 1e-6), "{rigid:?}");
+        assert!(modes[6..].iter().all(|m| m.participation.iter().all(|x| *x < 1e-6)));
         // free-free first bending: 4.730² / 2π √(EI / ρAL⁴) = 5185 Hz slender-beam theory, a few percent
-        // less for a beam this stocky (shear and rotary inertia)
+        // less for a beam this stocky (shear and rotary inertia); twice, as the section is square
         assert!(modes[6].freq > 4900.0 && modes[6].freq < 5200.0, "{}", modes[6].freq);
+        assert!((modes[7].freq - modes[6].freq).abs() < 0.01 * modes[6].freq);
+    }
+
+    #[test]
+    fn bonded_parts_join_exactly() {
+        // the beam as two parts of the same steel, meshed apart and bonded where they meet at x = 50
+        let (mut t, mut f, mut b) = boxed(DVec3::ZERO, DVec3::new(50.0, 10.0, 10.0), 0, 0);
+        let (t2, f2, b2) = boxed(DVec3::new(50.0, 0.0, 0.0), DVec3::new(100.0, 10.0, 10.0), 6, 1);
+        t.extend(t2);
+        f.extend(f2);
+        b.extend(b2);
+        let whole = mesh(&beam(), 2.5, &Default::default(), &|| false).unwrap();
+        let parts = crate::fea_mesh::mesh_parts(&Surface::new(t, f, b), 2.5, &Default::default(), &|| false).unwrap();
+        // no faces left between the parts: they share their nodes there
+        assert!(!parts.faces.iter().any(|(fc, _)| fc[..3].iter().all(|v| (parts.nodes[*v as usize].x - 50.0).abs() < 0.3)));
+        // so the bonded beam bends like the one-piece beam, and has no stress peak at the joint
+        let tip = |m: &Mesh, fixed: u32, end: u32| {
+            let ends: Vec<usize> = (0..m.faces.len()).filter(|i| m.faces[*i].1 == end).collect();
+            let area = area_of(m, &ends);
+            let mut force = vec![0.0; 3 * m.nodes.len()];
+            traction_loads(m, &ends, |_| DVec3::new(0.0, 0.0, -100.0 / area), &mut force);
+            let held: Vec<u32> = m.faces.iter().filter(|x| x.1 == fixed).flat_map(|x| x.0).collect();
+            let p = Problem { mesh: m, mat: STEEL, body_mats: vec![STEEL, STEEL], fixes: vec![Fix::Fixed(held)], force, couplings: vec![], masses: vec![] };
+            let u = static_solve(&p, &|| false).unwrap().u;
+            let s = nodal_stress(m, &STEEL, &[STEEL, STEEL], &u);
+            // the largest stress away from the support's corners
+            let joint = s.iter().zip(&m.nodes).filter(|(_, p)| (p.x - 50.0).abs() < 3.0).map(|(s, _)| von_mises(s)).fold(0.0f32, f32::max);
+            (u.chunks(3).map(|c| c[2]).fold(0.0, f64::min), joint)
+        };
+        let (d1, s1) = tip(&whole, 0, 1);
+        let (d2, s2) = tip(&parts, 0, 7);
+        assert!((d2 / d1 - 1.0).abs() < 0.003, "{d1} {d2}");
+        assert!(s2 < 1.15 * s1, "{s1} {s2}");
+    }
+
+    #[test]
+    fn principal_stresses() {
+        // a pure shear τ: principal stresses τ, 0, −τ
+        let p = principal(&[0.0, 0.0, 0.0, 50.0, 0.0, 0.0]);
+        assert!((p[0] - 50.0).abs() < 1e-3 && p[1].abs() < 1e-3 && (p[2] + 50.0).abs() < 1e-3, "{p:?}");
+        // already principal, in any order
+        let p = principal(&[-20.0, 70.0, 10.0, 0.0, 0.0, 0.0]);
+        assert!((p[0] - 70.0).abs() < 1e-3 && (p[1] - 10.0).abs() < 1e-3 && (p[2] + 20.0).abs() < 1e-3, "{p:?}");
+        // hydrostatic
+        assert_eq!(principal(&[5.0, 5.0, 5.0, 0.0, 0.0, 0.0]), [5.0; 3]);
+        // von Mises from the principal stresses agrees
+        let s = [30.0, -10.0, 5.0, 12.0, -7.0, 3.0];
+        let p = principal(&s);
+        let vm = (0.5 * ((p[0] - p[1]).powi(2) + (p[1] - p[2]).powi(2) + (p[2] - p[0]).powi(2))).sqrt();
+        assert!((vm - von_mises(&s)).abs() < 1e-3);
+    }
+
+    #[test]
+    fn decay_counts_from_the_end_of_the_pulse() {
+        let times: Vec<f64> = (0..200).map(|i| i as f64 * 1e-4).collect();
+        // a pulse until 2 ms pushes the response up, then it rings down as e^(−t / 2 ms)
+        let amp: Vec<f64> = times.iter().map(|t| if *t < 2e-3 { 10.0 * t / 2e-3 } else { 10.0 * (-(t - 2e-3) / 2e-3).exp() }).collect();
+        let d = decay_time(&times, &amp, 2e-3).unwrap();
+        // ln 10 × 2 ms
+        assert!((d - 4.6e-3).abs() < 2e-4, "{d}");
+        // still ringing at the end of the run: no decay time
+        let ringing: Vec<f64> = times.iter().map(|t| (t * 5000.0).sin().abs()).collect();
+        assert_eq!(decay_time(&times, &ringing, 0.0), None);
     }
 }

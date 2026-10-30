@@ -20,6 +20,8 @@ mod cam_stock;
 mod cam_ui;
 mod palette;
 mod camera;
+mod claude;
+mod claude_ui;
 mod dialog;
 mod doc;
 mod drawing;
@@ -27,9 +29,26 @@ mod drawing_export;
 mod drawing_ui;
 mod expr;
 mod fea;
+mod fea_adv;
 mod fea_mesh;
 mod fea_solve;
 mod fea_ui;
+mod circuit;
+mod circuit_mcu;
+mod circuit_mech;
+mod circuit_plot;
+mod circuit_solve;
+mod circuit_ui;
+mod mcu_cm0;
+mod mcu_rom;
+mod mcu_rp2040;
+mod pcb;
+mod pcb_export;
+mod pcb_lib;
+mod pcb_route;
+mod pcb_ui;
+mod grabcad;
+mod home;
 mod icon_paths;
 mod icons;
 mod import;
@@ -37,6 +56,7 @@ mod kernel;
 mod occ;
 mod regions;
 mod printing;
+mod rcnc;
 mod render;
 mod script;
 mod script_api;
@@ -44,19 +64,32 @@ mod script_num;
 mod script_ui;
 mod sketch;
 mod sketch_import;
+mod session;
 mod sketcher;
+mod stdparts;
+mod stdparts_ui;
 mod text;
 mod theme;
+mod units_switch;
 mod viewport;
 mod web_asm;
 mod web_export;
 mod worker;
 mod workspace;
 
+/// Command line help; `prog` is the name the program was started as (normally rcad).
+fn usage(prog: &str) -> String {
+    format!(
+        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} --version | --help",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
+    let prog = args.first().and_then(|a| std::path::Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "rcad".into());
     #[cfg(windows)]
-    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h")) {
+    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h") | Some("--version") | Some("-V")) || args.get(1).map(|a| a.starts_with('-') && a != "--kernel-worker").unwrap_or(false) {
         // print to the terminal that started us (the MCP server talks over pipes and needs no console)
         unsafe {
             windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
@@ -68,17 +101,25 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Some("run") => {
-            let Some(path) = args.get(2) else {
-                eprintln!("usage: cad-app run script.json");
+            let stop = args[2..].iter().any(|a| a == "--stop-on-error");
+            let rest: Vec<&String> = args[2..].iter().filter(|a| *a != "--stop-on-error").collect();
+            let (Some(path), 1) = (rest.first(), rest.len()) else {
+                eprintln!("usage: {prog} run [--stop-on-error] script.json");
                 std::process::exit(2);
             };
-            std::process::exit(agent::run_script(path));
+            if path.starts_with('-') {
+                eprintln!("unknown option {path}\nusage: {prog} run [--stop-on-error] script.json");
+                std::process::exit(2);
+            }
+            std::process::exit(agent::run_script(path, stop));
         }
         Some("script") => {
             let Some(path) = args.get(2) else {
-                eprintln!("usage: cad-app script file.rhai [args…]");
+                eprintln!("usage: {prog} script file.rhai [args…]");
                 std::process::exit(2);
             };
+            // stdout carries the script's prints and result: keep OpenCascade's chatter off it
+            opencascade_sys::extra::ex_messages_to_stderr();
             match script_api::run_file(path, &args[3..]) {
                 Ok(v) => {
                     if !v.is_null() {
@@ -92,9 +133,23 @@ fn main() -> eframe::Result {
                 }
             }
         }
-        Some("--help") | Some("-h") => {
-            println!("cad-app [part.json]        open the editor\ncad-app mcp                Model Context Protocol server on stdio (for AI agents)\ncad-app run script.json    run a JSON list of tool calls (see AGENTS.md)\ncad-app script file.rhai   run a Rhai script with no window (see SCRIPTING.md)");
+        Some("--help") | Some("-h") | Some("help") => {
+            println!("{}", usage(&prog));
             return Ok(());
+        }
+        Some("--version") | Some("-V") | Some("version") => {
+            println!("{prog} {}", env!("CARGO_PKG_VERSION"));
+            return Ok(());
+        }
+        Some("--kernel-worker") => {}
+        // (-psn_… is what older macOS Finder passes)
+        Some(a) if a.starts_with('-') && !a.starts_with("-psn") => {
+            eprintln!("unknown option {a}\n\n{}", usage(&prog));
+            std::process::exit(2);
+        }
+        Some(a) if args.len() > 2 => {
+            eprintln!("unexpected arguments after {a}\n\n{}", usage(&prog));
+            std::process::exit(2);
         }
         _ => {}
     }
@@ -107,8 +162,9 @@ fn main() -> eframe::Result {
         renderer: eframe::Renderer::Wgpu,
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
-        viewport: egui::ViewportBuilder::default().with_inner_size([1600.0, 1000.0]).with_min_inner_size([320.0, 400.0]).with_title("cad-app"),
+        // the window opens at the size it had last time
+        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD"),
         ..Default::default()
     };
-    eframe::run_native("cad-app", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native("rCAD", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
 }

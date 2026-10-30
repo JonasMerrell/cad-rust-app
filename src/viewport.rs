@@ -42,7 +42,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     if app.sketch.is_some() {
         crate::sketcher::viewport_input(app, ui, &resp, rect);
     } else if app.nav.is_none() {
-        let hit = pointer.and_then(|p| pick(app, local(p)));
+        let hit = pointer.filter(|_| !crate::home::hide_hover(app)).and_then(|p| pick(app, local(p)));
         if hit != app.hover {
             app.hover = hit.clone();
             app.scene_dirty = true;
@@ -66,14 +66,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
 
     let ppp = ui.ctx().pixels_per_point();
-    let clip = match app.section {
-        Some(s) => {
-            let n = [Vec3::Z, -Vec3::Y, Vec3::X][s.plane as usize];
-            let (n, w) = if s.flip { (-n, -(s.offset as f32)) } else { (n, s.offset as f32) };
-            [n.x, n.y, n.z, w]
-        }
-        None => [0.0; 4],
-    };
+    let clip = app.section.map(|s| s.clip()).unwrap_or([0.0; 4]);
     let cb = ViewportCallback {
         scene: app.scene.clone(),
         view_proj: app.camera.view_proj(),
@@ -197,8 +190,9 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
             for p in &sketch.points {
-                let d = (to_screen(frame.to_world(p.v())) - s).length();
-                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
+                let w = frame.to_world(p.v());
+                let d = (to_screen(w) - s).length();
+                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) && (app.xray || !occluded(app, w)) {
                     best = Some((d, Ref::SketchPoint { sketch: f.id, point: p.id }));
                 }
             }
@@ -207,20 +201,25 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     if let Some((_, r)) = best {
         return Some(r);
     }
-    // model edges
-    let mut best: Option<(f32, Ref)> = None;
+    // model edges: the nearest one on screen that no face hides
+    let mut near: Vec<(f32, DVec3, Ref)> = vec![];
     for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
         for e in &b.edges {
             let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(Vec3::from(*p))).collect();
-            for w in pts.windows(2) {
+            for (k, w) in pts.windows(2).enumerate() {
                 let d = seg_px(w[0], w[1]);
-                if d < px * 0.85 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
-                    best = Some((d, Ref::Edge { point: e.mid }));
+                if d < px * 0.85 {
+                    // the 3D point under the cursor (the view is orthographic, so the screen parameter carries over)
+                    let dd = w[1] - w[0];
+                    let t = if dd.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(dd) / dd.length_squared()).clamp(0.0, 1.0) };
+                    let (p0, p1) = (Vec3::from(e.pts[k]).as_dvec3(), Vec3::from(e.pts[k + 1]).as_dvec3());
+                    near.push((d, p0 + (p1 - p0) * t as f64, Ref::Edge { point: e.mid, name: Default::default() }));
                 }
             }
         }
     }
-    if let Some((_, r)) = best {
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
         return Some(r);
     }
     // curve features
@@ -237,25 +236,29 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     if let Some((_, r)) = best {
         return Some(r);
     }
-    // sketch curves
-    let mut best: Option<(f32, Ref)> = None;
+    // sketch curves, again skipping the ones behind the part
+    let mut near: Vec<(f32, DVec3, Ref)> = vec![];
     for f in &app.doc.features {
         if f.hidden || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
             for c in &sketch.curves {
-                let pts: Vec<Vec2> = sketch.tessellate(c, 2.0).iter().map(|p| to_screen(frame.to_world(*p))).collect();
-                for w in pts.windows(2) {
+                let world: Vec<DVec3> = sketch.tessellate(c, 2.0).iter().map(|p| frame.to_world(*p)).collect();
+                let pts: Vec<Vec2> = world.iter().map(|p| to_screen(*p)).collect();
+                for (k, w) in pts.windows(2).enumerate() {
                     let d = seg_px(w[0], w[1]);
-                    if d < px * 0.7 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
-                        best = Some((d, Ref::SketchCurve { sketch: f.id, curve: c.id }));
+                    if d < px * 0.7 {
+                        let dd = w[1] - w[0];
+                        let t = if dd.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(dd) / dd.length_squared()).clamp(0.0, 1.0) };
+                        near.push((d, world[k] + (world[k + 1] - world[k]) * t as f64, Ref::SketchCurve { sketch: f.id, curve: c.id }));
                     }
                 }
             }
         }
     }
-    if let Some((_, r)) = best {
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
         return Some(r);
     }
     // faces, regions and planes by depth along the view ray
@@ -275,7 +278,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
                     if section_keeps(app, o + d * t) {
                         let fi = b.tri_face[ti] as usize;
                         let fa = &b.faces[fi];
-                        consider(&mut best, t, Ref::Face { point: (o + d * t).into(), normal: fa.normal });
+                        consider(&mut best, t, Ref::Face { point: (o + d * t).into(), normal: fa.normal, name: Default::default() });
                     }
                 }
             }
@@ -329,15 +332,30 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     best.map(|b| b.1)
 }
 
-fn section_keeps(app: &App, p: DVec3) -> bool {
-    match app.section {
-        None => true,
-        Some(s) => {
-            let n = [DVec3::Z, -DVec3::Y, DVec3::X][s.plane as usize];
-            let (n, w) = if s.flip { (-n, -s.offset) } else { (n, s.offset) };
-            w - n.dot(p) >= 0.0
+/// Whether a face of a shown body lies in front of model point `p` (an edge point behind the part).
+fn occluded(app: &App, p: DVec3) -> bool {
+    let cam = &app.camera;
+    let (o, d) = cam.ray(cam.project(p.as_vec3()));
+    let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
+    let depth = (p - o).dot(d);
+    // faces that end at the edge meet the ray at its own depth: allow a few pixels of slack for tessellation
+    let (lo, hi) = app.model_bounds();
+    let slack = (cam.wpp() as f64 * 3.0).max((hi - lo).length() * 1e-4);
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        for tri in b.indices.chunks(3) {
+            let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+            if let Some(t) = ray_tri(o, d, v(tri[0]), v(tri[1]), v(tri[2])) {
+                if t < depth - slack && section_keeps(app, o + d * t) {
+                    return true;
+                }
+            }
         }
     }
+    false
+}
+
+fn section_keeps(app: &App, p: DVec3) -> bool {
+    app.section.map(|s| s.keeps(p)).unwrap_or(true)
 }
 
 pub fn ray_plane(o: DVec3, d: DVec3, fr: &Frame) -> Option<(f64, DVec2)> {
@@ -536,7 +554,12 @@ fn build_scene(app: &App) -> SceneData {
         let finish = if classes.is_some() { 0.0 } else { app.part_finish(b.id) };
         // glass is drawn see-through
         let transparent = transparent || (finish == 5.0);
+        // hidden line: faces in the background colour hide the edges behind them; wireframe: no faces
+        let mode = app.session.render_mode;
         for (ti, tri) in b.indices.chunks(3).enumerate() {
+            if mode == 2 {
+                break;
+            }
             let fi = b.tri_face[ti] as usize;
             let col = if body_picked || picked_f.contains(&fi) {
                 vp::picked()
@@ -546,6 +569,7 @@ fn build_scene(app: &App) -> SceneData {
                 match classes.as_ref().and_then(|c| c.get(ti)) {
                     Some(1) => egui::Color32::from_rgb(0xe0, 0x4f, 0x4f),
                     Some(2) => egui::Color32::from_rgb(0xa8, 0x55, 0xd8),
+                    _ if mode == 1 => vp::background(),
                     _ => app.part_color(b.id),
                 }
             };
@@ -561,7 +585,7 @@ fn build_scene(app: &App) -> SceneData {
             }
         }
         for e in &b.edges {
-            let r = Ref::Edge { point: e.mid };
+            let r = Ref::Edge { point: e.mid, name: Default::default() };
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r);
             let (col, w) = if picked {
@@ -575,7 +599,7 @@ fn build_scene(app: &App) -> SceneData {
             if picked {
                 s.polyline(&pts, 10.0, rgba(vp::picked(), 0.28), true);
             }
-            s.polyline(&pts, if picked { 3.8 } else { w }, col, picked || hov || app.xray);
+            s.polyline(&pts, if picked { 3.8 } else { w }, col, picked || hov || app.xray || mode == 2);
         }
     }
 
@@ -753,7 +777,7 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
 
 fn hover_text(app: &App, r: &Ref) -> String {
     match r {
-        Ref::Edge { point } => {
+        Ref::Edge { point, .. } => {
             for b in &app.result.bodies {
                 if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
                     let kind = if e.linear {
@@ -818,6 +842,27 @@ pub fn view_cube(app: &mut App, ui: &Ui, rect: egui::Rect) {
             (-Vec3::X, "Left", StdView::Left),
         ];
         let mut clicked_view = None;
+        // edges and corners: the view looks along them (corners first, they are smallest)
+        let mut spots: Vec<Vec3> = vec![];
+        for x in [-1.0f32, 1.0] {
+            for y in [-1.0f32, 1.0] {
+                for z in [-1.0f32, 1.0] {
+                    spots.push(Vec3::new(x, y, z));
+                }
+            }
+        }
+        for (a, b) in [(0usize, 1usize), (0, 2), (1, 2)] {
+            for sa in [-1.0f32, 1.0] {
+                for sb in [-1.0f32, 1.0] {
+                    let mut v = Vec3::ZERO;
+                    v[a] = sa;
+                    v[b] = sb;
+                    spots.push(v);
+                }
+            }
+        }
+        let spot = hover.and_then(|h| spots.iter().copied().filter(|d| d.normalize().dot(back) > 0.15).find(|d| proj(*d).distance(h) < if d.abs().min_element() > 0.5 { 7.0 } else { 6.5 }));
+        let mut clicked_dir = None;
         for (n, label, view) in faces {
             let facing = n.dot(back);
             if facing <= 1e-3 {
@@ -832,7 +877,7 @@ pub fn view_cube(app: &mut App, ui: &Ui, rect: egui::Rect) {
                 (Vec3::X, Vec3::Z)
             };
             let pts: Vec<Pos2> = [(-1.0, -1.0), (1.0, -1.0), (1.0, 1.0), (-1.0, 1.0)].iter().map(|(a, b)| proj(n + u * *a + v * *b)).collect();
-            let hovered = hover.map(|h| point_in_quad(h, &pts)).unwrap_or(false);
+            let hovered = spot.is_none() && hover.map(|h| point_in_quad(h, &pts)).unwrap_or(false);
             let shade = 0.86 + 0.14 * facing;
             let (base, edge) =
                 if crate::theme::is_dark() { (crate::theme::hex(0x46505d), crate::theme::hex(0x7a8696)) } else { (crate::theme::hex(0xeef1f5), crate::theme::hex(0x9aa5b2)) };
@@ -845,6 +890,16 @@ pub fn view_cube(app: &mut App, ui: &Ui, rect: egui::Rect) {
             }
             if hovered && resp.clicked() {
                 clicked_view = Some(view);
+            }
+        }
+
+        if let Some(d) = spot {
+            let at = proj(d);
+            p.circle_filled(at, 5.0, pal.accent);
+            let tip = if d.abs().min_element() > 0.5 { "View from this corner" } else { "View from this edge" };
+            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("cube-spot"), egui::PopupAnchor::Pointer).show(|ui| ui.label(tip));
+            if resp.clicked() {
+                clicked_dir = Some(d.normalize());
             }
         }
 
@@ -880,11 +935,17 @@ pub fn view_cube(app: &mut App, ui: &Ui, rect: egui::Rect) {
             p.rect_filled(home, 3.0, pal.panel_2);
         }
         crate::icons::image("isoView", 15.0).tint(if hov { pal.accent } else { pal.muted }).paint_at(ui, egui::Rect::from_center_size(home.center(), egui::vec2(15.0, 15.0)));
-        if hov && resp.clicked() {
-            clicked_view = Some(StdView::Iso);
+        if hov {
+            egui::Tooltip::always_open(ui.ctx().clone(), ui.layer_id(), egui::Id::new("cube-home"), egui::PopupAnchor::Pointer).show(|ui| ui.label("Home: isometric view (0)"));
+            if resp.clicked() {
+                clicked_view = Some(StdView::Iso);
+            }
         }
 
-        if let Some(v) = clicked_view {
+        if let Some(d) = clicked_dir {
+            app.camera.set_orientation(d, Vec3::Z);
+            changed = true;
+        } else if let Some(v) = clicked_view {
             app.camera.set_view(v);
             changed = true;
         } else if let Some((axis, sign)) = turn {
@@ -922,7 +983,28 @@ fn point_in_quad(p: Pos2, q: &[Pos2]) -> bool {
 /// like Onshape's: section, X-ray, dimensions, measure, zoom to fit, views.
 pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
     let pal = crate::theme::pal();
-    let pos = egui::pos2(rect.right() - 46.0, rect.center().y - 120.0);
+    // below the view cube when there is room, else beside it, so it never covers the cube
+    let below = rect.top() + 8.0 + 162.0 + 6.0;
+    let pos = if rect.height() >= below - rect.top() + 300.0 {
+        egui::pos2(rect.right() - 46.0, (rect.center().y - 120.0).max(below))
+    } else {
+        egui::pos2(rect.right() - 150.0 - 8.0 - 50.0, rect.top() + 8.0)
+    };
+    // the section's offset, right beside the tools while a section is on
+    if let Some(sec) = app.section {
+        egui::Area::new(egui::Id::new("section-offset")).order(egui::Order::Middle).pivot(egui::Align2::RIGHT_TOP).fixed_pos(egui::pos2(pos.x - 6.0, pos.y)).show(ui.ctx(), |ui| {
+            egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.border)).corner_radius(8).inner_margin(egui::Margin::symmetric(8, 4)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.label(egui::RichText::new(format!("Section · {}", sec.label())).size(12.0).color(pal.muted));
+                    app.section_offset_ui(ui);
+                    if ui.add(egui::Button::image(crate::icons::image("close", 14.0).tint(pal.text)).frame(false)).on_hover_text("End the section view").clicked() {
+                        app.section = None;
+                        app.scene_dirty = true;
+                    }
+                });
+            });
+        });
+    }
     egui::Area::new(egui::Id::new("view-tools")).order(egui::Order::Middle).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::new()
             .fill(pal.panel)
@@ -942,7 +1024,6 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                         ui.add(b).on_hover_text(tip)
                     };
                     let on = app.section.is_some();
-                    let mut sec = app.section;
                     let r = egui::containers::menu::MenuButton::from_button({
                         let fg = if on { pal.active_text } else { pal.text };
                         let mut b = egui::Button::image(crate::icons::image("section", 18.0).tint(fg)).min_size(egui::vec2(28.0, 28.0));
@@ -951,36 +1032,31 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                         }
                         b
                     })
+                    // stays open while choosing, so the offset below can be set straight away
+                    .config(egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside))
                     .ui(ui, |ui| {
-                        ui.set_min_width(170.0);
-                        if ui.selectable_label(sec.is_none(), "No section").clicked() {
-                            sec = None;
-                        }
-                        let off = app.section.map(|s| s.offset).unwrap_or(0.0);
-                        for (pl, name) in [(0u8, "Top"), (1, "Front"), (2, "Right")] {
-                            for flip in [false, true] {
-                                let cur = sec.map(|s| s.plane == pl && s.flip == flip).unwrap_or(false);
-                                let l = if flip { format!("{name} (flipped)") } else { name.to_string() };
-                                if ui.selectable_label(cur, l).clicked() {
-                                    sec = Some(crate::app::Section { plane: pl, flip, offset: off });
-                                }
-                            }
-                        }
-                        if let Some(s) = &mut sec {
+                        ui.set_min_width(230.0);
+                        app.section_choices(ui);
+                        if app.section.is_some() {
                             ui.separator();
                             ui.horizontal(|ui| {
                                 ui.label("Offset");
-                                ui.add(egui::DragValue::new(&mut s.offset).speed(0.5).suffix(" mm"));
+                                app.section_offset_ui(ui);
                             });
                         }
                     });
                     r.0.on_hover_text("Section view");
-                    if sec != app.section {
-                        app.section = sec;
-                        app.scene_dirty = true;
-                    }
                     if btn(ui, "xray", "See-through bodies (X-ray)", app.xray).clicked() {
                         app.xray = !app.xray;
+                        app.scene_dirty = true;
+                    }
+                    let (tip, on) = match app.session.render_mode {
+                        1 => ("Hidden line: click for wireframe", true),
+                        2 => ("Wireframe: click for shaded", true),
+                        _ => ("Shaded: click for hidden line", false),
+                    };
+                    if btn(ui, "display", tip, on).clicked() {
+                        app.session.render_mode = (app.session.render_mode + 1) % 3;
                         app.scene_dirty = true;
                     }
                     if btn(ui, "dimension", "Show dimensions on the model", app.show_dims).clicked() {
@@ -1017,7 +1093,7 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
 pub fn body_of(app: &App, r: &Ref) -> Option<crate::doc::BodyId> {
     match r {
         Ref::Body { body } => Some(*body),
-        Ref::Edge { point } => app.result.bodies.iter().find(|b| b.edges.iter().any(|e| e.mid == *point)).map(|b| b.id),
+        Ref::Edge { point, .. } => app.result.bodies.iter().find(|b| b.edges.iter().any(|e| e.mid == *point)).map(|b| b.id),
         Ref::Face { point, .. } => {
             let p = DVec3::from(*point);
             let mut best: Option<(f64, crate::doc::BodyId)> = None;
@@ -1088,7 +1164,7 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         close = true;
                     }
                 }
-                if let Ref::Face { point, normal } = t {
+                if let Ref::Face { point, normal, .. } = t {
                     if t.is_planar() && ui.button("Add decal (image)…").clicked() {
                         let (p, n) = (*point, *normal);
                         close = true;
@@ -1100,7 +1176,7 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                     app.start_feature("sketch");
                     close = true;
                 }
-                if let Ref::Face { point, normal } = t {
+                if let Ref::Face { point, normal, .. } = t {
                     if ui.button("View normal to").clicked() {
                         app.camera.set_orientation(DVec3::from(*normal).as_vec3(), if normal[2].abs() > 0.9 { Vec3::Y } else { Vec3::Z });
                         app.camera.target = DVec3::from(*point).as_vec3();
@@ -1147,8 +1223,8 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
 
 fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
     match r {
-        Ref::Face { point, normal } => Some((DVec3::from(*point), Some(DVec3::from(*normal)))),
-        Ref::Edge { point } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
+        Ref::Face { point, normal, .. } => Some((DVec3::from(*point), Some(DVec3::from(*normal)))),
+        Ref::Edge { point, .. } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
         Ref::SketchPoint { sketch, point } => {
             let f = app.doc.feature(*sketch)?;
             if let Op::Sketch { sketch, frame, .. } = &f.op { Some((frame.to_world(sketch.point(*point)?.v()), None)) } else { None }
@@ -1162,7 +1238,7 @@ fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
 pub fn measure_pair(app: &App, m: &Measure) -> Option<(DVec3, DVec3, String)> {
     let u = app.doc.units;
     if m.picks.len() == 1 {
-        if let Ref::Edge { point } = &m.picks[0] {
+        if let Ref::Edge { point, .. } = &m.picks[0] {
             for b in &app.result.bodies {
                 if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
                     let a = DVec3::from(e.pts[0].map(|x| x as f64));

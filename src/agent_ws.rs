@@ -6,7 +6,7 @@ use serde_json::{json, Value};
 use super::{id_arg, round, Session, R};
 use crate::assembly::{self, Assembly, Connector, ExplodeStep, Instance, Mate, MateKind, Pose, Relation, RelationKind};
 use crate::doc::{BodyId, Document};
-use crate::drawing::{DrawDim, DrawView, Drawing, Gdt, Note, GDT_KINDS};
+use crate::drawing::{DimTol, DrawDim, DrawView, Drawing, Gdt, Note, GDT_KINDS};
 use crate::drawing_ui::{self, DocCtx, Prim};
 use crate::kernel::{BodyMesh, ProjView, RebuildResult};
 
@@ -20,8 +20,8 @@ impl DocCtx for Session {
     fn studio_doc(&self, studio: usize) -> Option<&Document> {
         if studio == self.cur { Some(&self.doc) } else { self.ws.studios.get(studio).map(|s| &s.doc) }
     }
-    fn proj(&self, studio: usize, dir: &str) -> Option<&ProjView> {
-        self.proj.get(&(studio, dir.to_string()))
+    fn proj(&self, key: &drawing_ui::ProjKey) -> Option<&ProjView> {
+        self.proj.get(key)
     }
 }
 
@@ -117,10 +117,46 @@ impl Session {
         if w > 0.0 { sum / w } else { DVec3::ZERO }
     }
 
+    /// Move mate connectors onto the parts' current geometry, then solve. Failed mates include
+    /// those whose geometry is gone.
     fn solve(&mut self, ai: usize, hold: &[u64]) -> Vec<u64> {
+        let lost = self.refresh_connectors(ai);
         let centers: Vec<(u64, DVec3)> = self.ws.assemblies[ai].instances.iter().map(|x| (x.id, self.centroid_local(x))).collect();
         let r = assembly::solve(&mut self.ws.assemblies[ai], hold, &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO));
-        r.failed
+        let mut failed = r.failed;
+        for m in lost {
+            if !failed.contains(&m) {
+                failed.push(m);
+            }
+        }
+        failed
+    }
+
+    /// Solve with mates held by `drives` (a simulation's motors); the mates that fail.
+    pub(super) fn solve_driven(&mut self, ai: usize, drives: &[assembly::Drive]) -> Vec<u64> {
+        let centers: Vec<(u64, DVec3)> = self.ws.assemblies[ai].instances.iter().map(|x| (x.id, self.centroid_local(x))).collect();
+        assembly::solve_driven(&mut self.ws.assemblies[ai], &[], &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), drives).failed
+    }
+
+    fn refresh_connectors(&mut self, ai: usize) -> Vec<u64> {
+        let meshes: std::collections::HashMap<(usize, BodyId), BodyMesh> = self.ws.assemblies[ai]
+            .instances
+            .iter()
+            .flat_map(|x| assembly::leaves(&self.ws.assemblies, x))
+            .filter_map(|l| self.mesh(l.studio, l.body).map(|m| ((l.studio, l.body), m.clone())))
+            .collect();
+        assembly::refresh_connectors(&mut self.ws.assemblies, ai, &|s, b| meshes.get(&(s, b)))
+    }
+
+    /// Bring an assembly up to date with its parts: connectors follow the geometry and the
+    /// mates are solved again when anything moved.
+    fn settle(&mut self, ai: usize) -> Vec<u64> {
+        let before = serde_json::to_string(&self.ws.assemblies[ai].mates).unwrap_or_default();
+        let lost = self.refresh_connectors(ai);
+        if serde_json::to_string(&self.ws.assemblies[ai].mates).unwrap_or_default() != before || !lost.is_empty() {
+            return self.solve(ai, &[]);
+        }
+        assembly::failed_mates(&self.ws.assemblies[ai])
     }
 
     /// A mate connector from {instance, face:[x,y,z]} / {instance, edge:[x,y,z]} (points in the
@@ -132,7 +168,7 @@ impl Session {
         if let (Some(o), Some(z)) = (v.get("origin").and_then(arr3), v.get("z").and_then(arr3)) {
             let z = z.normalize();
             let xx = v.get("x").and_then(arr3).map(|x| x.normalize()).unwrap_or_else(|| DVec3::from(crate::kernel::frame_from(o, z).x));
-            return Ok(Connector { inst: id, origin: o.into(), z: z.into(), x: xx.into() });
+            return Ok(Connector { inst: id, origin: o.into(), z: z.into(), x: xx.into(), on: None });
         }
         let (pt, is_edge) = match (v.get("face").and_then(arr3), v.get("edge").and_then(arr3)) {
             (Some(p), _) => (p, false),
@@ -168,12 +204,13 @@ impl Session {
         }
         let l = leaves[li];
         let m = self.mesh(l.studio, l.body).unwrap();
-        let c = assembly::infer_connector(id, m, face, edge, lp).ok_or("could not place a connector there")?;
+        let c = assembly::infer_connector(id, li, m, face, edge, lp).ok_or("could not place a connector there")?;
         Ok(Connector { origin: l.pose.apply(c.origin.into()).into(), z: l.pose.dir(c.z.into()).into(), x: l.pose.dir(c.x.into()).into(), ..c })
     }
 
     fn asm_info(&mut self, ai: usize, interference: bool) -> R<Value> {
         self.build_for_assembly(ai)?;
+        let failed = self.settle(ai);
         let a = &self.ws.assemblies[ai];
         let name_of = |s: usize, b: BodyId| {
             self.studio_doc(s).and_then(|d| d.parts.get(&crate::doc::body_key(b))).and_then(|p| p.name.clone()).or_else(|| self.mesh(s, b).map(|m| m.name.clone())).unwrap_or_default()
@@ -209,7 +246,7 @@ impl Session {
             .collect();
         let mates: Vec<Value> = a.mates.iter().map(|m| json!({"id": m.id, "name": m.name, "kind": format!("{:?}", m.kind).to_lowercase(), "a": m.a.map(|c| c.inst), "b": m.b.map(|c| c.inst), "offset": m.offset, "rotation": m.rotation, "flip": m.flip, "suppressed": m.suppressed})).collect();
         let bom: Vec<Value> = crate::asm_ui::bom(self, a).into_iter().map(|(i, n, q, m, mass)| json!({"item": i, "part": n, "qty": q, "material": m, "mass_g": mass.map(round)})).collect();
-        let mut v = json!({"name": a.name, "instances": insts, "mates": mates, "bom": bom, "explode_steps": a.explode_steps});
+        let mut v = json!({"name": a.name, "instances": insts, "mates": mates, "bom": bom, "explode_steps": a.explode_steps, "failed_mates": failed});
         if interference {
             let mut items = vec![];
             let mut ids = vec![];
@@ -227,7 +264,31 @@ impl Session {
         Ok(v)
     }
 
-    fn render_assembly(&mut self, ai: usize, a: &Value) -> R<Vec<u8>> {
+    /// The box an assembly's visible parts fill as it stands.
+    pub(super) fn assembly_bounds(&mut self, ai: usize) -> R<(DVec3, DVec3)> {
+        self.build_for_assembly(ai)?;
+        let asm = &self.ws.assemblies[ai];
+        let (mut lo, mut hi) = (DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY));
+        for x in asm.instances.iter().filter(|x| !x.hidden) {
+            for l in assembly::leaves(&self.ws.assemblies, x) {
+                if let Some(b) = self.mesh(l.studio, l.body) {
+                    let pose = x.pose.compose(&l.pose);
+                    for c in 0..8 {
+                        let p = pose.apply(DVec3::new(b.bbox[c & 1][0], b.bbox[(c >> 1) & 1][1], b.bbox[(c >> 2) & 1][2]));
+                        lo = lo.min(p);
+                        hi = hi.max(p);
+                    }
+                }
+            }
+        }
+        Ok((lo, hi))
+    }
+
+    pub(super) fn render_assembly(&mut self, ai: usize, a: &Value) -> R<Vec<u8>> {
+        self.render_assembly_in(ai, a, None)
+    }
+
+    pub(super) fn render_assembly_in(&mut self, ai: usize, a: &Value, fit: Option<(DVec3, DVec3)>) -> R<Vec<u8>> {
         self.build_for_assembly(ai)?;
         let asm = &self.ws.assemblies[ai];
         let explode = a.get("explode").and_then(|v| v.as_f64()).unwrap_or(0.0);
@@ -258,23 +319,37 @@ impl Session {
         let view = a.get("view").and_then(|v| v.as_str()).unwrap_or("iso");
         let w = a.get("width").and_then(|v| v.as_u64()).unwrap_or(800).clamp(64, 4096) as u32;
         let h = a.get("height").and_then(|v| v.as_u64()).unwrap_or(600).clamp(64, 4096) as u32;
-        let dir = a.get("direction").and_then(arr3).map(|d| d.to_array());
-        super::raster_scene(&items, &[], view, dir, w, h)
+        let dir = super::direction_arg(a)?;
+        super::raster_scene_in(&items, &[], view, dir, w, h, fit)
     }
 
-    /// Fetch the projections a drawing needs.
+    /// Fetch the projections a drawing needs, then let its dimensions follow the model.
     fn project_drawing(&mut self, di: usize) -> R<()> {
-        let views: Vec<(usize, String)> = self.ws.drawings.get(di).ok_or_else(|| format!("no drawing {di}"))?.views.iter().map(|v| (v.studio, v.dir.clone())).collect();
-        for (studio, dir) in views {
-            if self.proj.contains_key(&(studio, dir.clone())) {
+        let d = self.ws.drawings.get(di).ok_or_else(|| format!("no drawing {di}"))?.clone();
+        for v in d.views.iter().filter(|v| v.detail.is_none()) {
+            if let Some(ai) = v.assembly {
+                if ai >= self.ws.assemblies.len() {
+                    return Err(format!("view {} shows assembly {ai}, which does not exist", v.id));
+                }
+                self.build_for_assembly(ai)?;
+                self.settle(ai);
+            } else {
+                self.ensure_built(v.studio)?;
+            }
+            let key = drawing_ui::view_key(&self.ws, &d, v);
+            if self.proj.contains_key(&key) {
                 continue;
             }
-            self.ensure_built(studio)?;
-            let doc = self.studio_doc(studio).cloned().ok_or("no such Part Studio")?;
-            let (d, u) = drawing_ui::dir_vectors(&dir);
-            let pv = self.kernel.project_blocking(studio, &dir, &doc, vec![(d, u, dir.starts_with("section:"))])?;
+            let req = drawing_ui::view_req(&self.ws, v);
+            let doc = if v.assembly.is_some() {
+                self.kernel.set_studios(self.ws.studios.iter().map(|s| s.doc.clone()).collect());
+                Document::default()
+            } else {
+                self.studio_doc(v.studio).cloned().ok_or("no such Part Studio")?
+            };
+            let pv = self.kernel.project_blocking(key.0, &key.1, &doc, vec![req])?;
             if let Some(p) = pv.into_iter().next() {
-                self.proj.insert((studio, dir), p);
+                self.proj.insert(key, p);
             }
         }
         // a BOM table needs its assembly's parts
@@ -282,6 +357,10 @@ impl Session {
             if ai < self.ws.assemblies.len() {
                 self.build_for_assembly(ai)?;
             }
+        }
+        let mut d = self.ws.drawings[di].clone();
+        if drawing_ui::refresh(self, &mut d) {
+            self.ws.drawings[di] = d;
         }
         Ok(())
     }
@@ -313,7 +392,7 @@ impl Session {
             .views
             .iter()
             .map(|v| {
-                let p = self.proj.get(&(v.studio, v.dir.clone()));
+                let p = drawing_ui::view_proj(self, d, v);
                 // corners and circles to dimension, in the view's own coordinates (model mm)
                 let mut pts: Vec<[f64; 2]> = vec![];
                 let mut circles: Vec<Value> = vec![];
@@ -321,7 +400,12 @@ impl Session {
                 if let Some(p) = p {
                     for pl in &p.visible {
                         if let Some((c, r, full)) = drawing_ui::fit_circle(pl) {
-                            circles.push(json!({"center": c.map(round), "radius": round(r), "full": full}));
+                            let mut cv = json!({"center": c.map(round), "radius": round(r), "full": full});
+                            if !full {
+                                let (a0, a1) = drawing_ui::arc_span(pl, c);
+                                cv["angles_deg"] = json!([round(a0.to_degrees()), round(a1.to_degrees())]);
+                            }
+                            circles.push(cv);
                             continue;
                         }
                         for q in [pl[0], pl[pl.len() - 1]] {
@@ -335,20 +419,64 @@ impl Session {
                     }
                 }
                 pts.truncate(80);
-                json!({
+                let mut j = json!({
                     "id": v.id, "studio": v.studio, "dir": v.dir, "sheet": v.sheet + 1, "position": v.pos.map(round), "scale": v.scale,
                     "model_bbox_2d": p.map(|p| json!([p.bbox[0].map(round), p.bbox[1].map(round)])),
                     "points": pts.iter().map(|q| q.map(round)).collect::<Vec<_>>(), "circles": circles, "lines": lines,
                     "detail_of": v.detail.map(|x| x.0),
-                })
+                    "hidden_lines": v.hidden_lines,
+                });
+                if let Some(b) = v.body {
+                    j["body"] = json!([b.0, b.1]);
+                }
+                if let Some(a) = v.assembly {
+                    j["assembly"] = json!(a);
+                }
+                if !v.letter.is_empty() {
+                    j["letter"] = json!(v.letter);
+                }
+                if drawing_ui::is_section(v) {
+                    j["cut"] = json!(v.cut.or(p.and_then(|p| p.cut)).map(round));
+                }
+                j
             })
             .collect();
+        let warnings = drawing_ui::warnings(self, d);
         Ok(json!({
             "name": d.name, "sheet_size": d.sheet, "sheets": d.sheet_count(), "views": views,
-            "dimensions": d.dims.iter().map(|x| json!({"id": x.id, "view": x.view, "kind": DIM_KINDS.get(x.kind as usize), "a": x.a, "b": x.b, "prefix": x.prefix})).collect::<Vec<_>>(),
+            "dimensions": d.dims.iter().map(|x| {
+                let mut j = json!({"id": x.id, "view": x.view, "kind": DIM_KINDS.get(x.kind as usize), "a": x.a.map(round), "b": x.b.map(round), "prefix": x.prefix});
+                let u = d.views.iter().find(|v| v.id == x.view).and_then(|v| self.studio_doc(v.studio)).map(|doc| doc.units).unwrap_or_default();
+                let value = match x.kind {
+                    1 => Some((x.b[0] - x.a[0]).abs()),
+                    2 => Some((x.b[1] - x.a[1]).abs()),
+                    0 => Some(glam::DVec2::from(x.a).distance(x.b.into())),
+                    3 => Some(glam::DVec2::from(x.a).distance(x.b.into())),
+                    4 => Some(glam::DVec2::from(x.a).distance(x.b.into()) * 2.0),
+                    _ => None,
+                };
+                if let Some(v) = value {
+                    j["text"] = json!(format!("{}{}{}{}", x.prefix, match x.kind { 3 => "R", 4 => "Ø", _ => "" }, drawing_ui::fmt_len(d, u, v), x.suffix));
+                }
+                if !x.suffix.is_empty() {
+                    j["suffix"] = json!(x.suffix);
+                }
+                if !x.auto.is_empty() {
+                    j["auto"] = json!(x.auto);
+                }
+                if x.dangling {
+                    j["dangling"] = json!(true);
+                }
+                if let Some(t) = x.tol {
+                    j["tolerance"] = json!(t);
+                }
+                j
+            }).collect::<Vec<_>>(),
             "notes": d.notes.iter().map(|n| json!({"id": n.id, "text": n.text, "position": n.pos, "sheet": n.sheet + 1})).collect::<Vec<_>>(),
             "gdt": d.gdts.iter().map(|g| json!({"id": g.id, "kind": g.kind, "tolerance": g.tol, "datums": g.datums, "position": g.pos, "sheet": g.sheet + 1})).collect::<Vec<_>>(),
-            "note": "Coordinates: view points/circles are in the view's model mm (pass them to dimension a/b); positions are sheet mm from the bottom-left.",
+            "title_block": d.title, "decimals": d.decimals,
+            "warnings": warnings,
+            "note": "Coordinates: view points/circles are in the view's model mm (pass them to dimension a/b); positions are sheet mm from the bottom-left. Dimensions are attached to the model's edges and follow model changes; 'dangling' ones lost their geometry.",
         }))
     }
 
@@ -367,17 +495,55 @@ impl Session {
         };
         match ty.as_str() {
             "view" => {
+                let assembly = it.get("assembly").and_then(|s| s.as_u64()).map(|a| a as usize);
+                if let Some(ai) = assembly {
+                    if ai >= self.ws.assemblies.len() {
+                        return Err(format!("no assembly {ai}"));
+                    }
+                }
                 let studio = it.get("studio").and_then(|s| s.as_u64()).unwrap_or(self.cur as u64) as usize;
                 let dir = it.get("dir").and_then(|s| s.as_str()).unwrap_or("front").to_string();
                 if !drawing_ui::DIRS.iter().any(|x| x.0 == dir) {
                     return Err(format!("dir must be one of {}", drawing_ui::DIRS.iter().map(|x| x.0).collect::<Vec<_>>().join(", ")));
                 }
+                let body = match it.get("body").and_then(|b| b.as_array()) {
+                    Some(b) => Some((b.first().and_then(|v| v.as_u64()).ok_or("body [f,i]")?, b.get(1).and_then(|v| v.as_u64()).ok_or("body [f,i]")? as u32)),
+                    None => None,
+                };
+                let section = dir.starts_with("section:");
+                // a section's cutting plane through a model point, or at a distance along the view direction
+                let (dv, _) = drawing_ui::dir_vectors(&dir);
+                let cut = it.get("through").and_then(arr3).map(|p| p.dot(DVec3::from(dv))).or_else(|| it.get("cut").and_then(|c| c.as_f64()));
                 let scale = it.get("scale").and_then(|s| s.as_f64()).or_else(|| d.views.first().map(|v| v.scale)).unwrap_or(1.0);
                 let size = drawing_ui::sheet_size(&d.sheet);
                 let pos = it.get("position").and_then(arr2).unwrap_or([size[0] / 2.0, size[1] / 2.0]);
                 let hidden_lines = it.get("hidden_lines").and_then(|h| h.as_bool()).unwrap_or(false);
-                d.views.push(DrawView { id, studio, dir, pos, scale, hidden_lines, detail: None, sheet });
+                let letter = if section { it.get("letter").and_then(|l| l.as_str()).map(String::from).unwrap_or_else(|| drawing_ui::next_letter(d)) } else { String::new() };
+                let parent = it.get("parent").and_then(|p| p.as_u64());
+                let balloons = it.get("balloons").and_then(|b| b.as_bool()).unwrap_or(assembly.is_some());
+                d.views.push(DrawView { id, studio, dir, pos, scale, hidden_lines, sheet, body, assembly, cut: if section { cut } else { None }, letter, parent, balloons, ..Default::default() });
                 Ok(json!({"view": id}))
+            }
+            "section" => {
+                // cut a view along a horizontal or vertical line through a point of it
+                let src = view_of(d)?;
+                let at = it.get("at").and_then(arr2).ok_or("give at:[x,y] (a point in the view's coordinates the cutting line goes through)")?;
+                let horizontal = it.get("line").and_then(|l| l.as_str()).unwrap_or("horizontal") != "vertical";
+                let (vx, vy, _) = view_axes_of(&src.dir);
+                let n = if horizontal { vy } else { vx };
+                let names = ["front", "top", "right"];
+                let (name, ds) = names.iter().map(|k| (*k, DVec3::from(drawing_ui::dir_vectors(k).0))).max_by(|a, b| a.1.dot(n).abs().partial_cmp(&b.1.dot(n).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap();
+                if ds.dot(n).abs() < 0.999 {
+                    return Err("that view is not seen square on".into());
+                }
+                let cut = (vx * at[0] + vy * at[1]).dot(ds);
+                let scale = it.get("scale").and_then(|s| s.as_f64()).unwrap_or(src.scale);
+                let size = drawing_ui::sheet_size(&d.sheet);
+                let pos = it.get("position").and_then(arr2).unwrap_or([size[0] / 2.0, size[1] / 2.0]);
+                let letter = it.get("letter").and_then(|l| l.as_str()).map(String::from).unwrap_or_else(|| drawing_ui::next_letter(d));
+                let hidden_lines = it.get("hidden_lines").and_then(|h| h.as_bool()).unwrap_or(false);
+                d.views.push(DrawView { id, studio: src.studio, dir: format!("section:{name}"), pos, scale, hidden_lines, sheet: src.sheet, body: src.body, assembly: src.assembly, cut: Some(cut), letter: letter.clone(), parent: Some(src.id), ..Default::default() });
+                Ok(json!({"view": id, "letter": letter}))
             }
             "detail" => {
                 let src = view_of(d)?;
@@ -385,18 +551,26 @@ impl Session {
                 let r = it.get("radius").and_then(|r| r.as_f64()).ok_or("give radius")?;
                 let scale = it.get("scale").and_then(|s| s.as_f64()).unwrap_or(src.scale * 2.0);
                 let pos = it.get("position").and_then(arr2).ok_or("give position")?;
-                d.views.push(DrawView { id, studio: src.studio, dir: src.dir.clone(), pos, scale, hidden_lines: false, detail: Some((src.id, c, r)), sheet: src.sheet });
-                Ok(json!({"view": id}))
+                let letter = it.get("letter").and_then(|l| l.as_str()).map(String::from).unwrap_or_else(|| drawing_ui::next_letter(d));
+                let hidden_lines = it.get("hidden_lines").and_then(|h| h.as_bool()).unwrap_or(src.hidden_lines);
+                d.views.push(DrawView { id, studio: src.studio, dir: src.dir.clone(), pos, scale, hidden_lines, detail: Some((src.id, c, r)), sheet: src.sheet, letter: letter.clone(), ..Default::default() });
+                Ok(json!({"view": id, "letter": letter}))
             }
             "dimension" => {
                 let v = view_of(d)?;
                 let kind_s = it.get("kind").and_then(|k| k.as_str()).unwrap_or("aligned");
                 let kind = DIM_KINDS.iter().position(|k| *k == kind_s).ok_or("kind: aligned, horizontal, vertical, radius, diameter or angle")? as u8;
                 let a = it.get("a").and_then(arr2).ok_or("give a (or center for radius/diameter)").or_else(|_| it.get("center").and_then(arr2).ok_or("give a"))?;
+                d.next_id -= 1;
+                self.project_drawing(di)?;
+                let p = drawing_ui::view_proj(self, &self.ws.drawings[di], &v).cloned();
+                let d = &mut self.ws.drawings[di];
+                d.next_id += 1;
                 let b = match kind {
                     3 | 4 => match (it.get("b").and_then(arr2), it.get("radius").and_then(|r| r.as_f64())) {
                         (Some(b), _) => b,
-                        (None, Some(r)) => [a[0] + r * 0.7071, a[1] + r * 0.7071],
+                        // the leader goes through the middle of the arc the view shows
+                        (None, Some(r)) => drawing_ui::arc_mid_point(p.as_ref(), a, r),
                         _ => return Err("give b (a point on the circle) or radius".into()),
                     },
                     _ => it.get("b").and_then(arr2).ok_or("give b")?,
@@ -413,19 +587,69 @@ impl Session {
                     _ => 8.0,
                 });
                 let prefix = it.get("prefix").and_then(|p| p.as_str()).unwrap_or("").to_string();
-                d.dims.push(DrawDim { id, view: v.id, a, b, kind, offset, extra, prefix });
-                Ok(json!({"dimension": id}))
+                let suffix = it.get("suffix").and_then(|p| p.as_str()).unwrap_or("").to_string();
+                let tol = match it.get("tolerance") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::Number(n)) => Some(DimTol::Symmetric { value: n.as_f64().unwrap_or(0.0) }),
+                    Some(t) => {
+                        let f = |k: &str| t.get(k).and_then(|v| v.as_f64());
+                        match (f("plus").or(f("upper")), f("minus").or(f("lower")), t.get("limits").and_then(|l| l.as_bool()).unwrap_or(false)) {
+                            (Some(u), Some(l), true) => Some(DimTol::Limits { upper: u, lower: l.abs() }),
+                            (Some(u), Some(l), false) => Some(DimTol::Deviation { upper: u, lower: l.abs() }),
+                            _ => return Err("tolerance: a number (±), or {plus, minus} (deviations), with limits:true for limit sizes".into()),
+                        }
+                    }
+                };
+                let mut dm = DrawDim { id, view: v.id, a, b, kind, offset, extra, prefix, suffix, tol, ..Default::default() };
+                let mut warn = None;
+                match &p {
+                    Some(p) => {
+                        drawing_ui::anchor_dim(p, &mut dm);
+                        if dm.anchors.is_empty() {
+                            warn = Some("these points are not on the view's edges, so the dimension will not follow model changes (use points, circle centres or line ends from drawing_info)");
+                        }
+                    }
+                    None => warn = Some("the view has no projection yet"),
+                }
+                d.dims.push(dm);
+                Ok(match warn {
+                    Some(w) => json!({"dimension": id, "warning": w}),
+                    None => json!({"dimension": id}),
+                })
             }
             "auto_dimensions" => {
                 let v = view_of(d)?;
                 d.next_id -= 1;
+                if v.dir == "iso" || v.detail.is_some() {
+                    return Err("auto-dimensions need an orthographic view".into());
+                }
+                if let Some(x) = d.views.iter_mut().find(|x| x.id == v.id) {
+                    x.auto = true;
+                    x.auto_off.clear();
+                }
                 self.project_drawing(di)?;
-                let p = self.proj.get(&(v.studio, v.dir.clone())).cloned().ok_or("the view has no projection")?;
-                let d = &mut self.ws.drawings[di];
-                let dims = drawing_ui::auto_dims(&p, v.id, &mut d.next_id);
-                let ids: Vec<u64> = dims.iter().map(|x| x.id).collect();
-                d.dims.extend(dims);
-                Ok(json!({"dimensions": ids}))
+                let d = &self.ws.drawings[di];
+                let ids: Vec<u64> = d.dims.iter().filter(|x| x.view == v.id && !x.auto.is_empty()).map(|x| x.id).collect();
+                Ok(json!({"dimensions": ids, "note": "auto-dimensions are regenerated from the model whenever it changes"}))
+            }
+            "title" => {
+                d.next_id -= 1;
+                let t = &mut d.title;
+                for (k, f) in [("part", &mut t.part), ("part_no", &mut t.part_no), ("material", &mut t.material), ("revision", &mut t.revision), ("date", &mut t.date), ("drawn_by", &mut t.drawn_by), ("tolerance", &mut t.tolerance)] {
+                    if let Some(v) = it.get(k).and_then(|v| v.as_str()) {
+                        *f = v.to_string();
+                    }
+                }
+                if let Some(p) = it.get("projection").and_then(|v| v.as_str()) {
+                    t.first_angle = p.starts_with("first");
+                }
+                if let Some(n) = it.get("decimals") {
+                    d.decimals = n.as_u64().map(|n| n.min(6) as u8);
+                }
+                if let Some(n) = it.get("name").and_then(|v| v.as_str()) {
+                    d.name = n.to_string();
+                }
+                Ok(json!({"title_block": d.title, "decimals": d.decimals}))
             }
             "note" => {
                 let text = it.get("text").and_then(|t| t.as_str()).ok_or("give text")?.to_string();
@@ -448,6 +672,9 @@ impl Session {
             }
             "bom" => {
                 let ai = it.get("assembly").and_then(|a| a.as_u64()).ok_or("give assembly")? as usize;
+                if ai >= self.ws.assemblies.len() {
+                    return Err(if self.ws.assemblies.is_empty() { "this document has no assembly to list (create_assembly first)".to_string() } else { format!("no assembly {ai}; there are {}", self.ws.assemblies.len()) });
+                }
                 let size = drawing_ui::sheet_size(&d.sheet);
                 let pos = it.get("position").and_then(arr2).unwrap_or([size[0] - 130.0, size[1] - 10.0]);
                 d.bom = Some((ai, pos));
@@ -519,6 +746,8 @@ impl Session {
                     selection: a.get("selection").and_then(|v| v.as_str()).unwrap_or("").to_string(),
                     source: a.get("source").and_then(|v| v.as_str()).ok_or("give source")?.to_string(),
                 };
+                // a syntax error shows now, with its line, not when the feature is first built
+                rhai::Engine::new().compile(&def.source).map_err(|e| format!("{}: syntax error in the source: {e}", def.name))?;
                 match self.doc.custom_features.iter_mut().find(|d| d.name == def.name) {
                     Some(d) => *d = def,
                     None => self.doc.custom_features.push(def),
@@ -532,6 +761,46 @@ impl Session {
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| format!("Assembly {}", self.ws.assemblies.len() + 1));
                 self.ws.assemblies.push(Assembly { name, ..Default::default() });
                 json!({"assembly": self.ws.assemblies.len() - 1})
+            }
+            "list_standard_parts" => json!({
+                "standards": crate::stdparts::catalogue_json(),
+                "note": "insert_standard_part puts one in an assembly. Screws: the seating plane (under the head; the top of countersunk and set screws) is z = 0, shank down -Z. Nuts, washers, bearings, pins, shafts and extrusions stand on z = 0 along +Z. Motors: mounting face z = 0, shaft up +Z."
+            }),
+            "insert_standard_part" => {
+                let std = crate::stdparts::find(a.get("standard").and_then(|s| s.as_str()).ok_or("give standard (from list_standard_parts, e.g. \"ISO 4762\")")?)
+                    .ok_or("no such standard; list_standard_parts lists them")?;
+                let size = match a.get("size") {
+                    Some(Value::String(s)) => std.parse_size(s).ok_or_else(|| format!("no size {s} in {}", std.key))?,
+                    Some(v) => v.as_f64().ok_or("size is a label like \"M5\" or a number")?,
+                    None => std.default.0,
+                };
+                let length = a.get("length").and_then(|v| v.as_f64()).or(std.lengths.map(|_| std.default.1));
+                if self.ws.assemblies.is_empty() && a.get("assembly").is_none() {
+                    self.ws.assemblies.push(Assembly { name: "Assembly 1".into(), ..Default::default() });
+                }
+                self.sync();
+                let si = crate::stdparts::studio_index(&mut self.ws);
+                let (body, _, added) = if si == self.cur {
+                    crate::stdparts::add_to_doc(&mut self.doc, std, size, length)?
+                } else {
+                    crate::stdparts::add_to_doc(&mut self.ws.studios[si].doc, std, size, length)?
+                };
+                if si == self.cur {
+                    self.rebuild()?;
+                } else if added {
+                    self.others.remove(&si);
+                }
+                let mut b = a.clone();
+                b["assembly"] = a.get("assembly").cloned().unwrap_or(json!(0));
+                b["studio"] = json!(si);
+                b["body"] = json!([body.0, body.1]);
+                if let Some(e) = self.ensure_built(si).err().or_else(|| self.others.get(&si).and_then(|r| r.features.iter().find(|f| f.id == body.0)).and_then(|f| f.error.clone())) {
+                    return Err(format!("{}: {e}", std.title(size, length)));
+                }
+                let (mut v, _) = self.ws_call("assembly_insert", &b)?;
+                v["part"] = json!(std.title(size, length));
+                v["part_studio"] = json!(si);
+                v
             }
             "assembly_insert" => {
                 let ai = asm_idx(a, self)?;
@@ -627,7 +896,9 @@ impl Session {
                     limits,
                     suppressed: false,
                 });
-                let failed = self.solve(ai, &[]);
+                // the instance with fewer mates (or inserted later) moves to meet the other
+                let hold = assembly::mate_anchor(&self.ws.assemblies[ai], id);
+                let failed = self.solve(ai, &hold);
                 let mut v = self.asm_info(ai, false)?;
                 v["mate"] = json!(id);
                 v["failed_mates"] = json!(failed);
@@ -689,15 +960,27 @@ impl Session {
                     }
                 };
                 let joints = scene.nodes.iter().filter(|n| n.joint.is_some()).count();
-                let w = crate::web_export::write(&scene, &meshes, &path, inline)?;
+                super::make_parent(&path.to_string_lossy())?;
+                let w = crate::web_export::write(&scene, &meshes, &path, inline).map_err(|e| format!("can't write {}: {e}", path.display()))?;
                 json!({"exported": path, "bytes": w.bytes, "parts": scene.parts.len(), "meshes": w.meshes, "triangles": w.triangles, "joints": joints, "notes": notes})
             }
             "render_assembly" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();
-                let png = self.render_assembly(ai, a)?;
+                let fit = match a.get("fit_box").and_then(|v| v.as_array()) {
+                    Some(b) => {
+                        let c: Vec<Vec<f64>> = b.iter().map(|p| p.as_array().map(|p| p.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default()).collect();
+                        let [lo, hi] = &c[..] else { return Err("fit_box: [[x, y, z], [x, y, z]]".into()) };
+                        if lo.len() != 3 || hi.len() != 3 {
+                            return Err("fit_box: [[x, y, z], [x, y, z]]".into());
+                        }
+                        Some((DVec3::new(lo[0], lo[1], lo[2]), DVec3::new(hi[0], hi[1], hi[2])))
+                    }
+                    None => None,
+                };
+                let png = self.render_assembly_in(ai, a, fit)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"assembly": ai, "saved": a.get("path")}), Some(png)));
             }
@@ -735,7 +1018,7 @@ impl Session {
                 let di = dwg_idx(a, self)?;
                 let png = self.export_drawing_tab(di, "png", a)?;
                 if let Some(p) = a.get("path").and_then(|p| p.as_str()) {
-                    std::fs::write(p, &png).map_err(|e| e.to_string())?;
+                    super::write_out(p, &png)?;
                 }
                 return Ok((json!({"drawing": di, "saved": a.get("path")}), Some(png)));
             }
@@ -766,8 +1049,16 @@ fn standard_views(d: &mut Drawing, studio: usize, bodies: &[BodyMesh]) {
         ("iso", [sheet[0] - 30.0 - (size.x + size.y) * scale * 0.45, sheet[1] - 30.0 - (size.z + size.y) * scale * 0.45]),
     ] {
         d.next_id += 1;
-        d.views.push(DrawView { id: d.next_id, studio, dir: dir.into(), pos, scale, hidden_lines: false, detail: None, sheet: 0 });
+        d.views.push(DrawView { id: d.next_id, studio, dir: dir.into(), pos, scale, ..Default::default() });
     }
+}
+
+/// A view's 2D x and y axes in model space.
+fn view_axes_of(dir: &str) -> (DVec3, DVec3, DVec3) {
+    let (d, u) = drawing_ui::dir_vectors(dir);
+    let (d, u) = (DVec3::from(d), DVec3::from(u));
+    let x = u.cross(d).normalize();
+    (x, d.cross(x), d)
 }
 
 fn seg_dist(p: DVec3, a: DVec3, b: DVec3) -> f64 {

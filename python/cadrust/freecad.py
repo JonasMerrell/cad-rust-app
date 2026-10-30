@@ -1,4 +1,4 @@
-"""A FreeCAD-style API on cad-rust-app's OpenCascade kernel.
+"""A FreeCAD-style API on rCAD's OpenCascade kernel.
 
 Covers the parts of FreeCAD's `FreeCAD` (Vector, Matrix, Rotation, Placement, BoundBox) and `Part`
 modules that parametric modelling scripts use, with FreeCAD's semantics:
@@ -1203,7 +1203,7 @@ def show(shape, name=None):
     """No document here: does nothing."""
 
 
-Part = types.ModuleType('Part', 'FreeCAD-style Part module on cad-rust-app (cadrust.freecad)')
+Part = types.ModuleType('Part', 'FreeCAD-style Part module on rCAD (cadrust.freecad)')
 for _n, _o in dict(Shape=Shape, Compound=Compound, CompSolid=CompSolid, Solid=Solid, Shell=Shell, Face=Face,
                    Wire=Wire, Edge=Edge, Vertex=Vertex, Curve=Curve, Line=Line, LineSegment=LineSegment,
                    Circle=Circle, Arc=Arc, Ellipse=Ellipse, BSplineCurve=BSplineCurve, Surface=Surface, Plane=Plane,
@@ -1213,7 +1213,7 @@ for _n, _o in dict(Shape=Shape, Compound=Compound, CompSolid=CompSolid, Solid=So
                    show=show, OCCError=OCCError).items():
     setattr(Part, _n, _o)
 
-App = types.ModuleType('FreeCAD', 'FreeCAD-style App module on cad-rust-app (cadrust.freecad): no document, no GUI')
+App = types.ModuleType('FreeCAD', 'FreeCAD-style App module on rCAD (cadrust.freecad): no document, no GUI')
 for _n, _o in dict(Vector=Vector, Matrix=Matrix, Rotation=Rotation, Placement=Placement, BoundBox=BoundBox,
                    GuiUp=False, Base=types.SimpleNamespace(Vector=Vector, Matrix=Matrix, Rotation=Rotation,
                                                            Placement=Placement, BoundBox=BoundBox)).items():

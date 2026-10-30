@@ -1,4 +1,4 @@
-// Extra OpenCascade operations for cad-rust-app. Every function catches OCCT
+// Extra OpenCascade operations for rCAD. Every function catches OCCT
 // exceptions and returns a null shape instead (cxx can't translate
 // Standard_Failure, and an uncaught one aborts the process). The message of
 // the last failure is available from ex_last_error().
@@ -579,6 +579,31 @@ inline std::unique_ptr<TopoDS_Shape> ex_shell(const TopoDS_Shape &s, const TopTo
   EX_CATCH("shell")
 }
 
+/// The shape with its orientation flipped (makes an inside-out solid right).
+inline std::unique_ptr<TopoDS_Shape> ex_reversed(const TopoDS_Shape &s) {
+  EX_TRY
+  return ex_wrap(s.Reversed());
+  EX_CATCH("reverse")
+}
+
+/// A closed hollow: the solid with a cavity leaving walls `t` thick inside its surface (t > 0),
+/// or with walls `-t` thick grown around it (t < 0, the solid becomes the cavity).
+inline std::unique_ptr<TopoDS_Shape> ex_hollow(const TopoDS_Shape &s, double t) {
+  EX_TRY
+  BRepOffsetAPI_MakeOffsetShape mk;
+  mk.PerformByJoin(s, -t, 1e-4, BRepOffset_Skin, Standard_False, Standard_False, GeomAbs_Intersection);
+  if (!mk.IsDone())
+    return ex_null("shell failed (thickness too large for the part?)");
+  TopoDS_Shape off = ex_as_solid(mk.Shape());
+  if (ex_solid_volume(off) < 0)
+    off.Reverse();
+  TopoDS_Shape r = t > 0 ? ex_boolean_raw(s, off, 1, 1e-6) : ex_boolean_raw(off, s, 1, 1e-6);
+  if (r.IsNull())
+    return ex_null("shell failed (thickness too large for the part?)");
+  return ex_wrap(r);
+  EX_CATCH("shell")
+}
+
 inline std::unique_ptr<TopoDS_Shape> ex_thicken(const TopoDS_Shape &s, double t) {
   EX_TRY
   BRepOffsetAPI_MakeThickSolid mk;
@@ -613,10 +638,14 @@ inline std::unique_ptr<TopoDS_Shape> ex_draft(const TopoDS_Shape &s, const TopTo
   EX_CATCH("draft")
 }
 
+// `frenet`: true follows the Frenet trihedron (helices), false the corrected Frenet one, which
+// keeps the profile turning with the path also along straight pieces. Sharp corners of the
+// path get mitred (right-corner) transitions instead of the profile being dragged round them.
 inline std::unique_ptr<TopoDS_Shape> ex_sweep(const TopoDS_Shape &profile_wire, const TopoDS_Shape &spine, bool frenet) {
   EX_TRY
   BRepOffsetAPI_MakePipeShell mk(TopoDS::Wire(spine));
   mk.SetMode(frenet);
+  mk.SetTransitionMode(BRepBuilderAPI_RightCorner);
   mk.Add(profile_wire);
   mk.Build();
   if (!mk.IsDone())
@@ -1810,6 +1839,17 @@ inline rust::Vec<double> ex_edge_polylines(const TopoDS_Shape &s, double deflect
 #include <XCAFDoc_ShapeTool.hxx>
 #include <Quantity_Color.hxx>
 #include <Interface_Static.hxx>
+#include <Message.hxx>
+#include <Message_Messenger.hxx>
+#include <Message_PrinterOStream.hxx>
+
+/// Send OpenCascade's own messages (such as the STEP writer's transfer statistics) to stderr instead of
+/// stdout, warnings and worse only, for command-line modes whose stdout is their result.
+inline void ex_messages_to_stderr() {
+  const Handle(Message_Messenger) &m = Message::DefaultMessenger();
+  m->RemovePrinters(STANDARD_TYPE(Message_PrinterOStream));
+  m->AddPrinter(new Message_PrinterOStream("cerr", Standard_False, Message_Warning));
+}
 
 /// Write an assembly to STEP with names, colours and structure. Nodes in order: `shapes` (a null shape for
 /// an assembly), `parents` (index of the parent node, -1 at the top; parents come before children),

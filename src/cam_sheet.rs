@@ -6,7 +6,7 @@ use std::fmt::Write;
 use base64::Engine;
 use glam::DVec3;
 
-use crate::cam::{fmt_mm, Cam, OpKind};
+use crate::cam::{fmt_mm, Cam, OpKind, ToolKind};
 use crate::cam_paths::{self, Move, Part, Toolpath};
 
 fn esc(s: &str) -> String {
@@ -95,13 +95,14 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
         } else {
             format!("part {} faces the spindle, tilted {}° about X then {}° about Y", cam.orient, fmt_mm(cam.tilt[0]), fmt_mm(cam.tilt[1]))
         }),
-        ("Work zero (G54)", cam.origin.label().to_string()),
+        ("Work zero (G54)", cam_paths::work_zero_note(cam, part)),
         ("Stock", format!("{} × {} × {} mm, {}", fmt_mm(hi.x - lo.x), fmt_mm(hi.y - lo.y), fmt_mm(hi.z - lo.z), cam.stock.material)),
         ("Stock from / to (work)", format!("{} / {}", xyz(w(lo)), xyz(w(hi)))),
         ("Part from / to (work)", format!("{} / {}", xyz(w(part.lo)), xyz(w(part.hi)))),
         ("Clearance / retract", format!("{} / {} mm", fmt_mm(cam.clearance), fmt_mm(cam.retract))),
         ("Machine", if cam.machine.name.is_empty() { "custom".into() } else { cam.machine.name.clone() }),
         ("Tool changes", if cam.machine.tool_changer { "automatic".into() } else { "by hand (the program stops)".into() }),
+        ("Spindle", format!("{} rpm, {} s to spin up", if cam.min_rpm > 0.0 { format!("{}–{}", fmt_mm(cam.min_rpm), fmt_mm(cam.max_rpm)) } else { format!("up to {}", fmt_mm(cam.max_rpm)) }, fmt_mm(cam.machine.spin_up))),
         ("Cycle time", time(total)),
         ("Tools / operations", format!("{} / {}", used.len(), paths.iter().filter(|p| !p.moves.is_empty()).count())),
     ];
@@ -118,12 +119,26 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
                 fmt_mm(j.top - o.z)
             ),
         ));
+        if let Some(m) = &sj.mount {
+            kv.push(("Jaw mounting", mount_text(m)));
+        }
     }
     if !cam.jaws_of.is_empty() {
         kv.push(("Machines", format!("the soft jaws of {}: clamp both blanks in the vise on a spacer", cam.jaws_of)));
     }
-    if !cam.follows.is_empty() {
-        kv.insert(0, ("Starts from", format!("what {} leaves (flip the part)", cam.follows)));
+    for (k, n) in cam.setup_notes().into_iter().enumerate() {
+        kv.insert(k, (if k == 0 { "Before running" } else { "" }, n));
+    }
+    let taps: Vec<String> = used.iter().filter_map(|id| cam.tool(*id)).filter(|t| t.kind == ToolKind::Tap && !t.tapping_head).map(|t| format!("T{}", t.number)).collect();
+    if !taps.is_empty() && cam.post != "linuxcnc" {
+        let ctl = crate::cam::POSTS.iter().find(|p| p.0 == cam.post).map(|p| p.1).unwrap_or(&cam.post);
+        kv.push((
+            "Tapping",
+            format!(
+                "{ctl} has no rigid tapping: the spindle reverses at the bottom of each hole, so hold {} in a floating tap holder, or in a self-reversing tapping head (set it on the tool)",
+                taps.join(", ")
+            ),
+        ));
     }
     match cam.probe.mode.as_str() {
         "plate" => kv.push((
@@ -173,8 +188,8 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
             t.flutes,
             fmt_mm(t.flute_length),
             fmt_mm(t.stickout),
-            holder,
-            t.rpm.round(),
+            if t.kind == ToolKind::Tap && t.tapping_head { format!("{holder}, self-reversing tapping head") } else { holder },
+            cam.spindle_rpm(t).round(),
             t.feed.round(),
             t.plunge_feed.round(),
             ops.join(", ")
@@ -210,8 +225,13 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
             format!("{} mm / {}% Ø", fmt_mm(cam_paths::stepdown(op, t)), (cam_paths::stepover(op, t) / t.diameter.max(1e-9) * 100.0).round())
         };
         let mut notes: Vec<String> = vec![];
-        if op.coolant || t.coolant {
-            notes.push("coolant".into());
+        match cam.coolant_for(t, Some(op)) {
+            crate::cam::Coolant::Flood => notes.push("flood coolant".into()),
+            crate::cam::Coolant::Mist => notes.push("mist coolant".into()),
+            _ => {}
+        }
+        if op.kind == OpKind::Adaptive && op.chip_thinning {
+            notes.push(format!("chip thinning: feed ×{:.2}", crate::cam::chip_thinning(cam_paths::stepover(op, t) / t.diameter.max(1e-9))));
         }
         if op.rest {
             notes.push("rest machining".into());
@@ -230,14 +250,13 @@ img{{max-width:100%;border-radius:6px}} .warn{{color:#b3401a}} @media print{{bod
         );
     }
     let _ = write!(s, "<tr><th></th><th>Total</th><th></th><th></th><th></th><th></th><th></th><th class=\"n\">{}</th><th></th></tr></table>", time(total));
-    s.push_str("<p class=\"muted\">Heights are in work coordinates, relative to the work zero. Made by cad-rust-app.</p></body></html>\n");
+    s.push_str("<p class=\"muted\">Heights are in work coordinates, relative to the work zero. Made by rCAD.</p></body></html>\n");
     s
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::cam::ToolKind;
 
     #[test]
     fn sheet_lists_tools_and_operations() {
@@ -262,4 +281,19 @@ mod tests {
         assert!(h.contains("Face 1") && h.contains("Contour 1") && h.contains(">T1<") && h.contains("Clamp"));
         assert!(h.contains("Ø6 flat end mill"));
     }
+}
+
+/// The screw holes the jaw blanks need, for the sheet.
+pub fn mount_text(m: &crate::cam::JawMount) -> String {
+    let xs: Vec<String> = m.holes.iter().map(|x| fmt_mm(*x)).collect();
+    format!(
+        "{}: {} × Ø{} through, Ø{} counterbore leaving {} mm under the head, {} mm from the grip face at X {} from the jaw middle",
+        m.name,
+        m.holes.len(),
+        fmt_mm(m.drill),
+        fmt_mm(m.cbore),
+        fmt_mm(m.seat),
+        fmt_mm(m.inset),
+        xs.join(", ")
+    )
 }

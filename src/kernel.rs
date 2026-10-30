@@ -16,6 +16,8 @@ use crate::script;
 use crate::regions::{Region, Seg, find_regions};
 use crate::sketch::Frame;
 
+mod naming;
+
 // ------------------------------------------------------------------ results
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -24,6 +26,9 @@ pub struct FaceInfo {
     pub normal: [f64; 3],
     pub planar: bool,
     pub area: f64,
+    /// Persistent name of the face (the feature and role that made it), when it has one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<crate::doc::FaceName>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -55,6 +60,9 @@ pub struct BodyMesh {
     pub bbox: [[f64; 3]; 2],
     #[serde(default)]
     pub centroid: [f64; 3],
+    /// Inertia tensor about the centroid for unit density (mm⁵), column-major.
+    #[serde(default)]
+    pub inertia: [f64; 9],
     /// An open surface rather than a solid.
     #[serde(default)]
     pub surface: bool,
@@ -85,6 +93,10 @@ pub struct RebuildResult {
     /// Problems found in the finished parts (slivers, tiny faces, gaps, invalid geometry).
     #[serde(default)]
     pub issues: Vec<Issue>,
+    /// Face and edge references with their persistent names and current points, for the
+    /// editor to store in the document (`Document::apply_ref_updates`).
+    #[serde(default)]
+    pub refs: Vec<crate::doc::RefUpdate>,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -193,6 +205,11 @@ pub struct Model<'a> {
     pub flats: Vec<FlatPattern>,
     /// Sheet metal bodies: thickness, bend radius, K-factor, the feature with its flat pattern.
     pub sheet: HashMap<BodyId, SheetInfo>,
+    /// Faces each feature made, by role, for persistent references (see `naming`).
+    named: Vec<naming::Named>,
+    /// The feature being built (0: none), and the references it resolved that should be stored back.
+    current: std::cell::Cell<FeatId>,
+    updates: std::cell::RefCell<Vec<crate::doc::RefUpdate>>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -221,7 +238,19 @@ fn v3(a: [f64; 3]) -> DVec3 {
 impl<'a> Model<'a> {
     pub fn new(doc: &'a Document) -> Self {
         let (vars, _) = doc.var_values();
-        Model { doc, vars, bodies: vec![], frames: HashMap::new(), curves: vec![], tools: HashMap::new(), flats: vec![], sheet: HashMap::new() }
+        Model {
+            doc,
+            vars,
+            bodies: vec![],
+            frames: HashMap::new(),
+            curves: vec![],
+            tools: HashMap::new(),
+            flats: vec![],
+            sheet: HashMap::new(),
+            named: vec![],
+            current: Default::default(),
+            updates: Default::default(),
+        }
     }
 
     fn units(&self) -> Units {
@@ -250,9 +279,9 @@ impl<'a> Model<'a> {
     pub fn frame_of(&self, r: &Ref) -> R<Frame> {
         match r {
             Ref::OriginPlane { plane } => Ok(plane.frame()),
-            Ref::FeaturePlane { feature } => self.frames.get(feature).copied().ok_or("referenced plane is missing".into()),
-            Ref::Face { point, normal } => {
-                let (face, _) = self.find_face(v3(*point), v3(*normal))?;
+            Ref::FeaturePlane { feature } => self.frames.get(feature).copied().ok_or_else(|| self.missing(*feature, "the referenced plane is missing")),
+            Ref::Face { .. } => {
+                let (face, _) = self.find_face_ref(r)?;
                 let g = face_geom(&face);
                 if !g.planar {
                     return Err("sketch planes must be flat faces".into());
@@ -302,9 +331,9 @@ impl<'a> Model<'a> {
 
     fn body_index(&self, r: &Ref) -> R<usize> {
         match r {
-            Ref::Body { body } => self.bodies.iter().position(|b| b.id == *body).ok_or("a referenced body no longer exists".into()),
-            Ref::Face { point, normal } => Ok(self.find_face(v3(*point), v3(*normal))?.1),
-            Ref::Edge { point } => Ok(self.find_edge(v3(*point))?.1),
+            Ref::Body { body } => self.bodies.iter().position(|b| b.id == *body).ok_or_else(|| self.missing(body.0, "a referenced body no longer exists")),
+            Ref::Face { .. } => Ok(self.find_face_ref(r)?.1),
+            Ref::Edge { .. } => Ok(self.find_edge_ref(r)?.1),
             _ => Err("select bodies".into()),
         }
     }
@@ -327,8 +356,8 @@ impl<'a> Model<'a> {
                     None => Err("the axis curve no longer exists".into()),
                 }
             }
-            Ref::Edge { point } => {
-                let (e, _) = self.find_edge(v3(*point))?;
+            Ref::Edge { .. } => {
+                let (e, _) = self.find_edge_ref(r)?;
                 let pts: Vec<DVec3> = e.approximation_segments().collect();
                 if e_is_line(&e) {
                     let (a, b) = (e.start_point(), e.end_point());
@@ -350,9 +379,23 @@ impl<'a> Model<'a> {
     }
 
     fn sketch(&self, id: FeatId) -> R<(&crate::sketch::Sketch, Frame)> {
-        match self.doc.feature(id).map(|f| &f.op) {
-            Some(Op::Sketch { sketch, .. }) => Ok((sketch, self.frames.get(&id).copied().ok_or("sketch plane is missing")?)),
+        match self.doc.feature(id).map(|f| (&f.op, &f.name)) {
+            Some((Op::Sketch { sketch, .. }, name)) => Ok((sketch, self.frames.get(&id).copied().ok_or_else(|| self.missing(id, &format!("the plane of {name} could not be found")))?)),
             _ => Err("the referenced sketch no longer exists".into()),
+        }
+    }
+
+    /// Why something feature `id` made is missing: say so plainly when that feature comes
+    /// later in the list than the one being built (it was moved above what it uses).
+    fn missing(&self, id: FeatId, otherwise: &str) -> String {
+        let (Some(at), Some(cur)) = (self.doc.index_of(id), self.doc.index_of(self.current.get())) else { return otherwise.into() };
+        if at > cur {
+            let name = |i: usize| self.doc.features[i].name.clone();
+            return format!("this feature uses {}, which comes after it in the list: move {} below {}", name(at), name(cur), name(at));
+        }
+        match self.doc.features.get(at) {
+            Some(f) if f.suppressed => format!("{} is suppressed", f.name),
+            _ => otherwise.into(),
         }
     }
 
@@ -369,8 +412,8 @@ impl<'a> Model<'a> {
                     let reg = regions.iter().filter(|g| g.contains(p)).min_by(|a, b| a.area.total_cmp(&b.area)).ok_or("a profile region no longer exists")?;
                     out.push((region_face(reg, &fr)?, fr));
                 }
-                Ref::Face { point, normal } => {
-                    let (f, _) = self.find_face(v3(*point), v3(*normal))?;
+                Ref::Face { .. } => {
+                    let (f, _) = self.find_face_ref(r)?;
                     let g = face_geom(&f);
                     let fr = frame_from(g.center, g.normal);
                     out.push((f, fr));
@@ -464,8 +507,9 @@ impl<'a> Model<'a> {
     pub fn run(&mut self, fid: FeatId) -> R<()> {
         let f = self.doc.feature(fid).ok_or("missing feature")?;
         match &f.op {
-            Op::Sketch { plane, frame, .. } => {
-                let fr = self.frame_of(plane).unwrap_or(*frame);
+            Op::Sketch { plane, .. } => {
+                // no falling back to where the plane was: the sketch would silently stay behind
+                let fr = self.frame_of(plane).map_err(|e| format!("the sketch plane could not be found: {e}"))?;
                 self.frames.insert(fid, fr);
                 Ok(())
             }
@@ -479,6 +523,7 @@ impl<'a> Model<'a> {
             }
             Op::Extrude { profiles, end, depth, opposite, second, depth2, up_to, op, draft } => {
                 let faces = self.profile_faces(profiles)?;
+                let sketches: Vec<Option<FeatId>> = profiles.iter().map(|r| if let Ref::Region { sketch, .. } = r { Some(*sketch) } else { None }).collect();
                 let sign = if *opposite { -1.0 } else { 1.0 };
                 let d = match end {
                     EndType::ThroughAll | EndType::UpToFace => self.model_size() * 2.0,
@@ -496,13 +541,15 @@ impl<'a> Model<'a> {
                 }
                 let d2 = if *second { self.len(depth2)? } else { 0.0 };
                 let draft_a = self.ang(draft)?.to_radians();
-                let build = |sign: f64| -> R<Vec<Shape>> {
+                // `both`: through all, in both directions
+                let build = |sign: f64, both: bool| -> R<Vec<Shape>> {
                     let mut tools = vec![];
                     for (face, fr) in &faces {
                         let n = fr.normal() * sign;
                         let fs = Shape::from(face);
                         let solid = match end {
                             EndType::Symmetric => occ::prism(&occ::translate(&fs, -n * (d / 2.0))?, n * d)?,
+                            _ if both => occ::prism(&occ::translate(&fs, -n * d)?, n * (2.0 * d))?,
                             _ => {
                                 let mut s = occ::prism(&fs, n * d)?;
                                 if *second && d2 > 0.0 {
@@ -532,21 +579,32 @@ impl<'a> Model<'a> {
                     }
                     Ok(tools)
                 };
-                let mut tools = build(sign)?;
+                // A through-all cut from a profile with material behind it (in the middle of the part,
+                // or on a face that has since moved into it) would end in a blind pocket: cut both ways.
+                let both = *end == EndType::ThroughAll
+                    && *op == BoolOp::Remove
+                    && !*second
+                    && faces.iter().any(|(f, fr)| naming::surf_of(f).map(|s| self.inside_material(s.at - fr.normal() * sign * 1e-2)).unwrap_or(false));
+                let tools = build(sign, both)?;
                 // Cutting away from the material does nothing: go into it instead, as the original does.
                 let cutting = matches!(op, BoolOp::Remove | BoolOp::Intersect);
-                let may_flip = cutting && !matches!(end, EndType::Symmetric | EndType::UpToNext | EndType::UpToVertex) && !*second;
+                let may_flip = cutting && !both && !matches!(end, EndType::Symmetric | EndType::UpToNext | EndType::UpToVertex) && !*second;
                 if !may_flip {
+                    self.name_extruded(fid, &tools, &faces, &sketches, sign);
                     return self.apply(fid, tools, *op);
                 }
                 // cut, and if that removed nothing, cut the other way instead (one boolean in the usual case)
-                let flipped = build(-sign)?;
+                let flipped = build(-sign, false)?;
                 let before: Vec<Body> = self.bodies.iter().map(|b| Body { id: b.id, shape: dup(&b.shape) }).collect();
                 let vol = |bs: &[Body]| bs.iter().map(|b| volume(&b.shape)).sum::<f64>();
                 let v0 = vol(&before);
+                let named = self.named.len();
+                self.name_extruded(fid, &tools, &faces, &sketches, sign);
                 self.apply(fid, tools, *op)?;
                 if (vol(&self.bodies) - v0).abs() <= 1e-9 * v0.abs().max(1.0) && self.bodies.len() == before.len() {
                     self.bodies = before;
+                    self.named.truncate(named);
+                    self.name_extruded(fid, &flipped, &faces, &sketches, -sign);
                     return self.apply(fid, flipped, *op);
                 }
                 Ok(())
@@ -556,11 +614,16 @@ impl<'a> Model<'a> {
                 let axis = axis.as_ref().ok_or("select an axis")?;
                 let (o, dir) = self.axis_of(axis)?;
                 let a = if mode == "full" { 360.0 } else { self.ang(angle)? };
+                let start = if mode == "symmetric" { -(a / 2.0).to_radians() } else { 0.0 };
                 let mut tools = vec![];
-                for (face, _) in &faces {
+                for ((face, _), r) in faces.iter().zip(profiles) {
                     let fs = Shape::from(face);
-                    let fs = if mode == "symmetric" { occ::rotate(&fs, o, dir, -(a / 2.0).to_radians())? } else { fs };
-                    tools.push(occ::revolve(&fs, o, dir, a.to_radians())?);
+                    let fs = if mode == "symmetric" { occ::rotate(&fs, o, dir, start)? } else { fs };
+                    let tool = occ::revolve(&fs, o, dir, a.to_radians())?;
+                    if let (Ref::Region { sketch, .. }, Some(s)) = (r, naming::surf_of(face)) {
+                        self.name_revolve(fid, &tool, o, dir, *sketch, s.at, start);
+                    }
+                    tools.push(tool);
                 }
                 self.apply(fid, tools, *op)
             }
@@ -569,7 +632,14 @@ impl<'a> Model<'a> {
                 let spine = self.path_wire(path)?;
                 let mut tools = vec![];
                 for (face, _) in &faces {
-                    tools.push(occ::sweep(&face.outer_wire(), &spine, true)?);
+                    // the outer boundary swept, less each hole swept the same way
+                    const HINT: &str = " (the path may turn back on itself or too sharply for the profile)";
+                    let sweep = |w: &Wire| occ::sweep(w, &spine, false).map_err(|e| format!("{e}{HINT}"));
+                    let mut s = sweep(&face.outer_wire())?;
+                    for h in hole_wires(face) {
+                        s = occ::cut(&s, &sweep(&h)?)?;
+                    }
+                    tools.push(occ::checked(s, "the sweep", HINT)?);
                 }
                 self.apply(fid, tools, *op)
             }
@@ -579,7 +649,18 @@ impl<'a> Model<'a> {
                     return Err("select two or more profiles".into());
                 }
                 let wires: Vec<Wire> = faces.iter().map(|(f, _)| f.outer_wire()).collect();
-                let s = occ::loft(&wires, *ruled)?;
+                let mut s = occ::loft(&wires, *ruled)?;
+                // holes: loft each through the matching hole of every profile and cut it out
+                let holes: Vec<Vec<Wire>> = faces.iter().map(|(f, _)| hole_wires(f)).collect();
+                let nh = holes[0].len();
+                if holes.iter().any(|h| h.len() != nh) {
+                    return Err(format!("the profiles have different numbers of holes ({}): a loft needs the same holes in every profile", holes.iter().map(|h| h.len().to_string()).collect::<Vec<_>>().join(", ")));
+                }
+                for k in 0..nh {
+                    let chain = matching_holes(&wires, &holes, k);
+                    s = occ::cut(&s, &occ::loft(&chain, *ruled)?)?;
+                }
+                let s = occ::checked(s, "the loft", " (profiles twisted or crossing?)")?;
                 self.apply(fid, vec![s], *op)
             }
             Op::Fillet { edges, radius, variable, end_radius } => {
@@ -588,7 +669,7 @@ impl<'a> Model<'a> {
                     return Err("radius must be positive".into());
                 }
                 let r2 = if *variable { self.len(end_radius)? } else { r };
-                self.edge_op(edges, |shape, es| occ::fillet(shape, es, r, r2))
+                self.edge_op(fid, "fillet", edges, |shape, es| occ::fillet(shape, es, r, r2).and_then(|s| occ::checked(s, "the fillet", " (radius too large?)")))
             }
             Op::Chamfer { edges, distance, mode, distance2, angle } => {
                 let d = self.len(distance)?;
@@ -598,13 +679,13 @@ impl<'a> Model<'a> {
                 match mode.as_str() {
                     "two" => {
                         let d2 = self.len(distance2)?;
-                        self.edge_op(edges, |shape, es| occ::chamfer2(shape, es, d, d2, 0))
+                        self.edge_op(fid, "chamfer", edges, |shape, es| occ::chamfer2(shape, es, d, d2, 0))
                     }
                     "angle" => {
                         let a = self.ang(angle)?.to_radians();
-                        self.edge_op(edges, |shape, es| occ::chamfer2(shape, es, d, a, 1))
+                        self.edge_op(fid, "chamfer", edges, |shape, es| occ::chamfer2(shape, es, d, a, 1))
                     }
-                    _ => self.edge_op(edges, |shape, es| occ::chamfer(shape, es, d)),
+                    _ => self.edge_op(fid, "chamfer", edges, |shape, es| occ::chamfer(shape, es, d)),
                 }
             }
             Op::Shell { faces, thickness } => {
@@ -662,7 +743,7 @@ impl<'a> Model<'a> {
                 let mut es = vec![];
                 for r in edges {
                     match r {
-                        Ref::Edge { point } => es.push(self.find_edge(v3(*point))?.0),
+                        Ref::Edge { .. } => es.push(self.find_edge_ref(r)?.0),
                         Ref::SketchCurve { sketch, curve } => {
                             let (sk, fr) = self.sketch(*sketch)?;
                             es.extend(curve_edges(sk, &fr, *curve)?);
@@ -890,8 +971,7 @@ impl<'a> Model<'a> {
                     return Err("select straight edges of a sheet metal part".into());
                 }
                 for r in edges {
-                    let Ref::Edge { point } = r else { return Err("select edges".into()) };
-                    let (e, bi) = self.find_edge(v3(*point))?;
+                    let (e, bi) = self.find_edge_ref(r)?;
                     let id = self.bodies[bi].id;
                     let info = *self.sheet.get(&id).ok_or("pick an edge of a sheet metal part")?;
                     let (flange, relief, flat_add) = self.flange_shape(&e, bi, &info, l, ang, *flip, inset)?;
@@ -926,8 +1006,8 @@ impl<'a> Model<'a> {
                 if faces.is_empty() {
                     return Err("select the faces to leave open".into());
                 }
-                self.face_op(faces, |shape, fs| occ::shell(shape, fs, -t))?;
                 let ids: Vec<BodyId> = faces.iter().filter_map(|r| self.find_face_ref(r).ok().map(|(_, bi)| self.bodies[bi].id)).collect();
+                self.face_op(faces, |shape, fs| occ::shell(shape, fs, -t))?;
                 for id in ids {
                     self.sheet.insert(id, SheetInfo { t, r: 0.0, k: 0.45, feature: fid, frame: None });
                 }
@@ -967,26 +1047,42 @@ impl<'a> Model<'a> {
             }
             Op::Hole { points, hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, tapped: _ } => {
                 let dia = self.len(diameter)?;
+                if !(dia > 0.0) {
+                    return Err("diameter must be positive".into());
+                }
                 let size = self.model_size();
                 let depth = if *through { size * 2.0 } else { self.len(depth)? };
+                if !(depth > 0.0) {
+                    return Err("depth must be positive".into());
+                }
                 let mut tools = vec![];
-                for r in points {
+                for (k, r) in points.iter().enumerate() {
                     let (p, n) = self.hole_point(r)?;
                     let down = -n;
-                    // start slightly above the surface so the top face is cut cleanly
-                    let start = p - down * 0.01;
-                    let mut tool = Shape::cylinder(start, dia / 2.0, down, depth + 0.01);
+                    // start slightly above the surface so the top face is cut cleanly; a through hole
+                    // from inside the part (its face has moved into the material) goes out both ways
+                    let back = if *through && self.inside_material(p - down * 0.01) { size * 2.0 } else { 0.01 };
+                    let start = p - down * back;
+                    let mut tool = Shape::cylinder(start, dia / 2.0, down, depth + back);
+                    let id = if let Ref::SketchPoint { point, .. } = r { *point as u64 } else { k as u64 };
+                    self.name_hole(fid, &tool, p, down, dia / 2.0, id);
                     match hole_type {
                         HoleType::Simple => {}
                         HoleType::Counterbore => {
                             let cd = self.len(cb_diameter)?;
                             let ch = self.len(cb_depth)?;
+                            if !(cd > dia) || !(ch > 0.0) {
+                                return Err("the counterbore must be wider than the hole and have a positive depth".into());
+                            }
                             let cb = Shape::cylinder(p - down * size, cd / 2.0, down, size + ch);
                             tool = occ::fuse(&tool, &cb)?;
                         }
                         HoleType::Countersink => {
                             let cd = self.len(cs_diameter)?;
                             let ca = self.ang(cs_angle)?.to_radians();
+                            if !(cd > dia) || !(ca > 0.0 && ca < std::f64::consts::PI) {
+                                return Err("the countersink must be wider than the hole, with an angle between 0° and 180°".into());
+                            }
                             let h = (cd - dia) / 2.0 / (ca / 2.0).tan();
                             let cone = cone_shape(p, down, cd / 2.0, dia / 2.0, h.max(0.01))?;
                             let top = Shape::cylinder(p - down * size, cd / 2.0, down, size);
@@ -1075,16 +1171,23 @@ impl<'a> Model<'a> {
                 let (p, n) = (v3(fr.origin), fr.normal());
                 if kind == "feature" {
                     for fref in self.feature_refs(bodies)? {
-                        let (tools, op) = self.tools.get(&fref).ok_or("that feature has nothing to mirror")?;
+                        let (tools, op) = self.tools.get(&fref).ok_or_else(|| self.missing(fref, "that feature has nothing to mirror"))?;
                         let op = *op;
                         let t: Vec<Shape> = tools.iter().map(|t| occ::mirror(t, p, n)).collect::<R<_>>()?;
                         self.apply_tools(fid, t, op)?;
                     }
                     return Ok(());
                 }
+                // a mirror image that doesn't touch the original is a part of its own
+                let mut k = 0;
                 for bi in self.pattern_bodies(bodies)? {
                     let m = occ::mirror(&self.bodies[bi].shape, p, n)?;
-                    self.bodies[bi].shape = occ::fuse(&self.bodies[bi].shape, &m)?;
+                    let mut pieces = join_touching(vec![dup(&self.bodies[bi].shape), m])?.into_iter();
+                    self.bodies[bi].shape = pieces.next().ok_or("the mirror made nothing")?;
+                    for s in pieces {
+                        self.bodies.push(Body { id: (fid, k), shape: s });
+                        k += 1;
+                    }
                 }
                 Ok(())
             }
@@ -1129,6 +1232,11 @@ impl<'a> Model<'a> {
                         BooleanKind::Subtract => occ::cut(&shape, tool)?,
                         BooleanKind::Intersect => occ::common(&shape, tool)?,
                     };
+                }
+                // a union of parts that don't touch would make one part of separate solids: keep them apart
+                let pieces = if *kind == BooleanKind::Union { solids_of(&shape) } else { vec![] };
+                if pieces.len() > solids_of(&self.bodies[t].shape).len() {
+                    return Err("the parts don't touch, so they can't be joined into one part (they are left as they were)".into());
                 }
                 self.bodies[t].shape = shape;
                 if !keep_tools || *kind == BooleanKind::Union {
@@ -1234,7 +1342,7 @@ impl<'a> Model<'a> {
                 let (sk, fr) = self.sketch(*sketch)?;
                 Ok(fr.to_world(sk.point(*point).ok_or("a point no longer exists")?.v()))
             }
-            Ref::Vertex { point } | Ref::Edge { point } => Ok(v3(*point)),
+            Ref::Vertex { point } | Ref::Edge { point, .. } => Ok(v3(*point)),
             Ref::Face { point, .. } => Ok(v3(*point)),
             _ => Err("select points".into()),
         }
@@ -1243,7 +1351,7 @@ impl<'a> Model<'a> {
     /// Start point and tangent of a curve-like reference.
     fn tangent_of(&self, r: &Ref) -> R<(DVec3, DVec3)> {
         let pts: Vec<DVec3> = match r {
-            Ref::Edge { point } => self.find_edge(v3(*point))?.0.approximation_segments().collect(),
+            Ref::Edge { .. } => self.find_edge_ref(r)?.0.approximation_segments().collect(),
             Ref::Curve { feature } => self.curve_points(*feature)?,
             Ref::SketchCurve { sketch, curve } => {
                 let (sk, fr) = self.sketch(*sketch)?;
@@ -1263,7 +1371,7 @@ impl<'a> Model<'a> {
         let mut out: Vec<DVec3> = vec![];
         for r in refs {
             let mut pts: Vec<DVec3> = match r {
-                Ref::Edge { point } => self.find_edge(v3(*point))?.0.approximation_segments().collect(),
+                Ref::Edge { .. } => self.find_edge_ref(r)?.0.approximation_segments().collect(),
                 Ref::Curve { feature } => self.curve_points(*feature)?,
                 Ref::SketchCurve { sketch, curve } => {
                     let (sk, fr) = self.sketch(*sketch)?;
@@ -1306,7 +1414,7 @@ impl<'a> Model<'a> {
     fn pattern(&mut self, fid: FeatId, kind: &str, refs: &[Ref], xf: &[(DMat3, DVec3)]) -> R<()> {
         if kind == "feature" {
             for fref in self.feature_refs(refs)? {
-                let (tools, op) = self.tools.get(&fref).ok_or("that feature has nothing to pattern")?;
+                let (tools, op) = self.tools.get(&fref).ok_or_else(|| self.missing(fref, "that feature has nothing to pattern"))?;
                 let op = *op;
                 let base: Vec<Shape> = tools.iter().map(dup).collect();
                 let mut all = vec![];
@@ -1321,22 +1429,22 @@ impl<'a> Model<'a> {
             }
             return Ok(());
         }
+        // copies that touch the original or each other are joined to it; the others are parts of their own
+        let mut k = 0;
         for bi in self.pattern_bodies(refs)? {
             let base = dup(&self.bodies[bi].shape);
-            let mut acc = dup(&base);
+            let mut copies = vec![dup(&base)];
             for (m, t) in xf {
-                acc = occ::fuse(&acc, &occ::transform(&base, *m, *t)?)?;
+                copies.push(occ::transform(&base, *m, *t)?);
             }
-            self.bodies[bi].shape = acc;
+            let mut pieces = join_touching(copies)?.into_iter();
+            self.bodies[bi].shape = pieces.next().ok_or("the pattern made nothing")?;
+            for s in pieces {
+                self.bodies.push(Body { id: (fid, k), shape: s });
+                k += 1;
+            }
         }
         Ok(())
-    }
-
-    fn find_face_ref(&self, r: &Ref) -> R<(Face, usize)> {
-        match r {
-            Ref::Face { point, normal } => self.find_face(v3(*point), v3(*normal)),
-            _ => Err("select a face".into()),
-        }
     }
 
     fn hole_point(&self, r: &Ref) -> R<(DVec3, DVec3)> {
@@ -1518,7 +1626,7 @@ impl<'a> Model<'a> {
                     let reg = find_regions(sk).into_iter().filter(|g| g.contains(DVec2::from(*point))).min_by(|a, b| a.area.total_cmp(&b.area)).ok_or("a region no longer exists")?;
                     edges.extend(seg_edges(&reg.outer.segs, &fr)?);
                 }
-                Ref::Edge { point } => edges.push(self.find_edge(v3(*point))?.0),
+                Ref::Edge { .. } => edges.push(self.find_edge_ref(r)?.0),
                 _ => return Err("select sketch curves, edges or a helix for the path".into()),
             }
         }
@@ -1528,51 +1636,74 @@ impl<'a> Model<'a> {
         Ok(Wire::from_unordered_edges(edges.iter(), opencascade::primitives::EdgeConnection::default()))
     }
 
-    fn edge_op(&mut self, refs: &[Ref], f: impl Fn(&Shape, &[Edge]) -> R<Shape>) -> R<()> {
+    /// Apply an edge operation (fillet, chamfer) to the referenced edges, body by body. Edges
+    /// that can't be found are left out and named in the error, so one stale reference doesn't
+    /// take the others with it.
+    fn edge_op(&mut self, fid: FeatId, role: &str, refs: &[Ref], f: impl Fn(&Shape, &[Edge]) -> R<Shape>) -> R<()> {
         if refs.is_empty() {
             return Err("select edges".into());
         }
-        let mut by_body: HashMap<usize, Vec<Edge>> = HashMap::new();
-        for r in refs {
-            let p = match r {
-                Ref::Edge { point } => v3(*point),
-                _ => return Err("select edges".into()),
-            };
-            let (e, bi) = self.find_edge(p)?;
-            by_body.entry(bi).or_default().push(e);
+        let mut by_body: HashMap<usize, Vec<(usize, Edge)>> = HashMap::new();
+        let mut missing = vec![];
+        for (i, r) in refs.iter().enumerate() {
+            if !matches!(r, Ref::Edge { .. }) {
+                return Err("select edges".into());
+            }
+            match self.find_edge_ref(r) {
+                Ok((e, bi)) => by_body.entry(bi).or_default().push((i, e)),
+                Err(e) => missing.push(format!("edge {}: {e}", i + 1)),
+            }
         }
-        for (bi, es) in by_body {
+        let mut bodies: Vec<(usize, Vec<(usize, Edge)>)> = by_body.into_iter().collect();
+        bodies.sort_by_key(|b| b.0);
+        for (bi, list) in bodies {
+            let es: Vec<Edge> = list.iter().map(|(_, e)| Edge::from_edge(&e.inner)).collect();
             match f(&self.bodies[bi].shape, &es) {
-                Ok(s) => self.bodies[bi].shape = s,
+                Ok(s) => {
+                    let before = std::mem::replace(&mut self.bodies[bi].shape, s);
+                    let after = dup(&self.bodies[bi].shape);
+                    self.name_edge_faces(fid, role, &before, &after, &list);
+                }
                 Err(e) => {
                     // find the edges that fail on their own, to say which ones
-                    let bad: Vec<String> = es
+                    let bad: Vec<String> = list
                         .iter()
-                        .filter(|edge| f(&self.bodies[bi].shape, std::slice::from_ref(*edge)).is_err())
-                        .map(|edge| {
-                            let pts: Vec<DVec3> = edge.approximation_segments().collect();
-                            let m = if pts.len() % 2 == 0 { (pts[pts.len() / 2 - 1] + pts[pts.len() / 2]) / 2.0 } else { pts[pts.len() / 2] };
-                            format!("[{:.3}, {:.3}, {:.3}]", m.x, m.y, m.z)
+                        .filter(|(_, edge)| f(&self.bodies[bi].shape, std::slice::from_ref(edge)).is_err())
+                        .map(|(i, edge)| {
+                            let m = naming::edge_mid(edge);
+                            format!("edge {} near [{:.3}, {:.3}, {:.3}]", i + 1, m.x, m.y, m.z)
                         })
                         .collect();
-                    return Err(if bad.is_empty() { format!("{e} (each edge works alone; try fewer edges at once)") } else { format!("{e}; failing edge(s) near {}", bad.join(", ")) });
+                    return Err(if bad.is_empty() { format!("{e} (each edge works alone; try fewer edges at once)") } else { format!("{e}; failing: {}", bad.join(", ")) });
                 }
             }
+        }
+        if !missing.is_empty() {
+            let done = refs.len() - missing.len();
+            return Err(format!("{} of {} edges could not be found and were left out ({} done): {}", missing.len(), refs.len(), done, missing.join("; ")));
         }
         Ok(())
     }
 
+    /// Apply a face operation to the referenced faces, body by body; faces that can't be
+    /// found are left out and named in the error.
     fn face_op(&mut self, refs: &[Ref], f: impl Fn(&Shape, &[Face]) -> R<Shape>) -> R<()> {
         if refs.is_empty() {
             return Err("select faces".into());
         }
         let mut by_body: HashMap<usize, Vec<Face>> = HashMap::new();
-        for r in refs {
-            let (face, bi) = self.find_face_ref(r)?;
-            by_body.entry(bi).or_default().push(face);
+        let mut missing = vec![];
+        for (i, r) in refs.iter().enumerate() {
+            match self.find_face_ref(r) {
+                Ok((face, bi)) => by_body.entry(bi).or_default().push(face),
+                Err(e) => missing.push(format!("face {}: {e}", i + 1)),
+            }
         }
         for (bi, fs) in by_body {
             self.bodies[bi].shape = f(&self.bodies[bi].shape, &fs)?;
+        }
+        if !missing.is_empty() {
+            return Err(format!("{} of {} faces could not be found and were left out: {}", missing.len(), refs.len(), missing.join("; ")));
         }
         Ok(())
     }
@@ -1596,11 +1727,13 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
             continue;
         }
         let error = if skip.contains(&f.id) {
-            Some("the kernel crashed on this feature".to_string())
+            Some("the kernel crashed on this feature; it stays skipped until you change it or what it depends on".to_string())
         } else {
             progress(f.id);
             let t = std::time::Instant::now();
+            m.current.set(f.id);
             let e = m.run(f.id).err();
+            m.current.set(0);
             if std::env::var("CAD_TIME").is_ok() {
                 eprintln!("feature {} ({}) {:?}", f.id, f.op.kind(), t.elapsed());
             }
@@ -1609,6 +1742,13 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
         out.features.push(FeatureStatus { id: f.id, error });
     }
     out.frames.extend(m.frames.iter().map(|(k, v)| (*k, *v)));
+    // sketches whose plane is gone still show where they were (they carry the error)
+    for f in &doc.features {
+        if let Op::Sketch { frame, .. } = &f.op {
+            out.frames.entry(f.id).or_insert(*frame);
+        }
+    }
+    out.refs = m.updates.take();
     for (i, b) in m.bodies.iter().enumerate() {
         let valid = unique_faces(&b.shape).len() >= 1500 || occ::is_valid(&b.shape);
         if let Ok(mut mesh) = mesh_body(&b.shape) {
@@ -1616,6 +1756,12 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
             mesh.id = b.id;
             out.issues.extend(check_body(&b.shape, &mesh, valid));
             mesh.name = if mesh.surface { format!("Surface {}", i + 1) } else { format!("Part {}", i + 1) };
+            // face names, for what refers to the part from outside the Part Studio (mate connectors)
+            if mesh.faces.len() <= 600 {
+                for (f, info) in unique_faces(&b.shape).iter().zip(mesh.faces.iter_mut()) {
+                    info.name = m.face_name_of(f);
+                }
+            }
             out.bodies.push(mesh);
         }
     }
@@ -1869,11 +2015,111 @@ pub fn dup(s: &Shape) -> Shape {
 }
 
 fn fuse_all(mut tools: Vec<Shape>) -> R<Shape> {
+    if tools.len() == 1 {
+        return Ok(tools.remove(0));
+    }
+    // all in one boolean: fusing one at a time takes time quadratic in the number of tools
+    let all: Vec<&Shape> = tools.iter().collect();
+    if let Ok(s) = occ::boolean_n(&all[..1], &all[1..], 0, 0.0, true) {
+        if solids_of(&s).len() <= tools.len() && occ::is_valid(&s) {
+            return Ok(s);
+        }
+    }
     let mut acc = tools.remove(0);
     for t in tools {
         acc = occ::fuse(&acc, &t)?;
     }
     Ok(acc)
+}
+
+/// Group shapes that touch or overlap and fuse each group (in one boolean); the group with the
+/// first shape comes first, with the solid holding it first.
+fn join_touching(shapes: Vec<Shape>) -> R<Vec<Shape>> {
+    let n = shapes.len();
+    let boxes: Vec<_> = shapes.iter().map(opencascade::bounding_box::aabb).collect();
+    let tol = 1e-6;
+    let apart = |a: usize, b: usize| boxes[a].min().cmpgt(boxes[b].max() + tol).any() || boxes[b].min().cmpgt(boxes[a].max() + tol).any();
+    // union-find over boxes that overlap (sort-and-sweep along x keeps large patterns fast)
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    let mut order: Vec<usize> = (0..n).collect();
+    order.sort_by(|&a, &b| boxes[a].min().x.total_cmp(&boxes[b].min().x));
+    for (k, &a) in order.iter().enumerate() {
+        for &b in &order[k + 1..] {
+            if boxes[b].min().x > boxes[a].max().x + tol {
+                break;
+            }
+            if !apart(a, b) {
+                let (ra, rb) = (root(&mut parent, a), root(&mut parent, b));
+                parent[ra] = rb;
+            }
+        }
+    }
+    let mut groups: Vec<Vec<usize>> = vec![];
+    let mut group_of: HashMap<usize, usize> = HashMap::new();
+    for i in 0..n {
+        let r = root(&mut parent, i);
+        let g = *group_of.entry(r).or_insert_with(|| {
+            groups.push(vec![]);
+            groups.len() - 1
+        });
+        groups[g].push(i);
+    }
+    let mut slots: Vec<Option<Shape>> = shapes.into_iter().map(Some).collect();
+    let mut out = vec![];
+    for g in groups {
+        if g.len() == 1 {
+            out.push(slots[g[0]].take().unwrap());
+            continue;
+        }
+        let first = g[0];
+        let probe = centroid(slots[first].as_ref().unwrap());
+        let members: Vec<Shape> = g.iter().map(|&i| slots[i].take().unwrap()).collect();
+        let mut solids = solids_of(&fuse_all(members)?);
+        // the solid holding the group's first shape leads
+        if let Some(i) = solids.iter().position(|s| occ::classify(s, &[probe], 1e-6).map(|v| v[0] != 1).unwrap_or(false)) {
+            let s = solids.remove(i);
+            solids.insert(0, s);
+        }
+        out.extend(solids);
+    }
+    Ok(out)
+}
+
+/// The holes (inner boundaries) of a face.
+fn hole_wires(face: &Face) -> Vec<Wire> {
+    let outer = face.outer_wire();
+    sub_shapes(&Shape::from(face), occ::WIRE)
+        .into_iter()
+        .filter(|w| !ffi::extra::ex_is_same(&w.inner, occ::wire_shape(&outer)))
+        .map(|w| Wire::from_wire(ffi::topo_ds::TopoDS::Wire(&w.inner)))
+        .collect()
+}
+
+fn wire_center(w: &Wire) -> DVec3 {
+    let b = opencascade::bounding_box::aabb(&Shape::from(w));
+    (b.min() + b.max()) / 2.0
+}
+
+/// Hole `k` of the first profile and, in each other profile, the hole sitting at the same
+/// place relative to its outer boundary.
+fn matching_holes(outers: &[Wire], holes: &[Vec<Wire>], k: usize) -> Vec<Wire> {
+    let rel = |i: usize, w: &Wire| wire_center(w) - wire_center(&outers[i]);
+    let want = rel(0, &holes[0][k]);
+    holes
+        .iter()
+        .enumerate()
+        .map(|(i, hs)| {
+            let best = if i == 0 { k } else { (0..hs.len()).min_by(|&a, &b| (rel(i, &hs[a]) - want).length().total_cmp(&(rel(i, &hs[b]) - want).length())).unwrap_or(0) };
+            Wire::from_wire(&hs[best].inner)
+        })
+        .collect()
 }
 
 fn bbox_apart(a: &Shape, b: &Shape) -> bool {
@@ -2201,7 +2447,8 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
     let mut out = if faceted {
         BodyMesh { bbox: [bb.min().into(), bb.max().into()], ..Default::default() }
     } else {
-        BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), ..Default::default() }
+        let inertia = occ::mass_props(shape, 0).map(|m| m.2.to_cols_array()).unwrap_or_default();
+        BodyMesh { bbox: [bb.min().into(), bb.max().into()], volume: volume(shape), area: surface_area(shape), centroid: centroid(shape).into(), inertia, ..Default::default() }
     };
     if dbg { eprintln!("  props {:?}", tt.elapsed()); }
     for (fi, face) in unique_faces(shape).into_iter().enumerate() {
@@ -2256,7 +2503,7 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
             out.indices.extend(t.map(|i| base + i as u32));
             out.tri_face.push(fi as u32);
         }
-        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area });
+        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None });
     }
     // tight bounds from the triangulation (OCCT's box includes control points and tolerances)
     if !out.positions.is_empty() {
@@ -2297,17 +2544,8 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
             continue;
         }
         let length: f64 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
-        // midpoint by arc length
-        let mut acc = 0.0;
-        let mut mid = pts[0];
-        for w in pts.windows(2) {
-            let l = (w[1] - w[0]).length();
-            if acc + l >= length / 2.0 {
-                mid = w[0].lerp(w[1], ((length / 2.0 - acc) / l.max(1e-12)).clamp(0.0, 1.0));
-                break;
-            }
-            acc += l;
-        }
+        // references to the edge keep this point
+        let mid = polyline_mid(&pts);
         let ty = e.edge_type();
         let circular = ty == opencascade::primitives::EdgeType::Circle;
         let circle = if circular && pts.len() >= 3 { circle_from_points(&pts).map(|(c, n)| (c.into(), n.into(), (pts[0] - c).length())) } else { None };
@@ -2321,6 +2559,20 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
         });
     }
     Ok(out)
+}
+
+/// The middle of a polyline by arc length.
+pub fn polyline_mid(pts: &[DVec3]) -> DVec3 {
+    let length: f64 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+    let mut acc = 0.0;
+    for w in pts.windows(2) {
+        let l = (w[1] - w[0]).length();
+        if acc + l >= length / 2.0 {
+            return w[0].lerp(w[1], ((length / 2.0 - acc) / l.max(1e-12)).clamp(0.0, 1.0));
+        }
+        acc += l;
+    }
+    pts.first().copied().unwrap_or(DVec3::ZERO)
 }
 
 #[allow(dead_code)]
@@ -2390,7 +2642,7 @@ mod feature_tests {
         let mut s = Sketch::default();
         let c = s.add_point(DVec2::new(20.0, 10.0));
         s.add_curve(Geom::Circle { c, r: 5.0 }, false);
-        let top = Ref::Face { point: [20.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] };
+        let top = Ref::Face { point: [20.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0], name: Default::default() };
         let s2 = doc.insert("Sketch 2".into(), Op::Sketch { plane: top, sketch: s, frame: Frame::TOP });
         extrude(&mut doc, s2, [20.0, 10.0], "10", EndType::ThroughAll, BoolOp::Remove);
         let r = rebuild(&doc, &[], |_| {});
@@ -2409,13 +2661,13 @@ mod feature_tests {
         extrude(&mut doc, s1, [5.0, 5.0], "10", EndType::Blind, BoolOp::New);
         let mut f = Op::new_default("fillet").unwrap();
         if let Op::Fillet { edges, radius, .. } = &mut f {
-            edges.push(Ref::Edge { point: [20.0, 0.0, 10.0] });
+            edges.push(Ref::Edge { point: [20.0, 0.0, 10.0], name: Default::default() });
             *radius = "3".into();
         }
         doc.insert("Fillet".into(), f);
         let mut sh = Op::new_default("shell").unwrap();
         if let Op::Shell { faces, thickness } = &mut sh {
-            faces.push(Ref::Face { point: [30.0, 15.0, 0.0], normal: [0.0, 0.0, -1.0] });
+            faces.push(Ref::Face { point: [30.0, 15.0, 0.0], normal: [0.0, 0.0, -1.0], name: Default::default() });
             *thickness = "1".into();
         }
         doc.insert("Shell".into(), sh);
@@ -2445,7 +2697,10 @@ mod feature_tests {
         doc.insert("Mirror".into(), m);
         let r = rebuild(&doc, &[], |_| {});
         ok(&r);
-        assert!((r.bodies[0].volume - 6000.0).abs() < 1e-3, "{}", r.bodies[0].volume);
+        // the spaced copies are parts of their own; the mirror image touches the original and joins it
+        assert_eq!(r.bodies.len(), 3);
+        assert!((r.bodies[0].volume - 2000.0).abs() < 1e-3, "{}", r.bodies[0].volume);
+        assert!(r.bodies[1..].iter().all(|b| (b.volume - 1000.0).abs() < 1e-3));
         let bb = r.bodies[0].bbox;
         assert!((bb[0][1] + 10.0).abs() < 1e-6 && (bb[1][1] - 10.0).abs() < 1e-6, "{bb:?}");
 
@@ -2510,7 +2765,7 @@ mod more_feature_tests {
         extrude(&mut doc, s, [5.0, 5.0], "20", BoolOp::New);
         let mut d = Op::new_default("draft").unwrap();
         if let Op::Draft { faces, neutral, angle } = &mut d {
-            faces.push(Ref::Face { point: [10.0, 0.0, 10.0], normal: [0.0, -1.0, 0.0] });
+            faces.push(Ref::Face { point: [10.0, 0.0, 10.0], normal: [0.0, -1.0, 0.0], name: Default::default() });
             *neutral = Some(Ref::OriginPlane { plane: OriginPlane::Top });
             *angle = "5".into();
         }
@@ -2540,7 +2795,7 @@ mod more_feature_tests {
         extrude(&mut doc, s, [2.0, 2.0], "5", BoolOp::New);
         let mut df = Op::new_default("deleteFace").unwrap();
         if let Op::DeleteFace { faces } = &mut df {
-            faces.push(Ref::Face { point: [25.0, 20.0, 2.5], normal: [0.0; 3] });
+            faces.push(Ref::Face { point: [25.0, 20.0, 2.5], normal: [0.0; 3], name: Default::default() });
         }
         doc.insert("DF".into(), df);
         let r = run(&doc);
@@ -2612,8 +2867,8 @@ mod more_feature_tests {
         let mut pl = Op::new_default("plane").unwrap();
         if let Op::Plane { mode, base, refs, .. } = &mut pl {
             *mode = "midPlane".into();
-            *base = Some(Ref::Face { point: [50.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0] });
-            refs.push(Ref::Face { point: [50.0, 10.0, 0.0], normal: [0.0, 0.0, -1.0] });
+            *base = Some(Ref::Face { point: [50.0, 10.0, 10.0], normal: [0.0, 0.0, 1.0], name: Default::default() });
+            refs.push(Ref::Face { point: [50.0, 10.0, 0.0], normal: [0.0, 0.0, -1.0], name: Default::default() });
         }
         let pid = doc.insert("Mid".into(), pl);
         let r = run(&doc);
@@ -2715,65 +2970,370 @@ pub struct ProjView {
     #[serde(default)]
     pub hatch: Vec<[[f64; 2]; 2]>,
     pub bbox: [[f64; 2]; 2],
+    /// Visible tangent edges (where faces join smoothly, e.g. fillets), drawn thin.
+    #[serde(default)]
+    pub smooth: Vec<Vec<[f64; 2]>>,
+    /// Every model edge projected, visible or not, with its identity, so dimensions can be
+    /// attached to model geometry and follow it when the model changes.
+    #[serde(default)]
+    pub edges: Vec<ProjEdge>,
+    /// Holes made by Hole features, for callouts.
+    #[serde(default)]
+    pub holes: Vec<ProjHole>,
+    /// Section views: where the cutting plane went (p·dir, mm).
+    #[serde(default)]
+    pub cut: Option<f64>,
+    /// Assembly views: a point on each item (its centroid), for balloons.
+    #[serde(default)]
+    pub items: Vec<[f64; 2]>,
+}
+
+/// A model edge seen in a view.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjEdge {
+    /// The part: its body id in a Part Studio view, (item index, 0) in an assembly view.
+    pub part: BodyId,
+    /// Index of the edge in the part (OpenCascade's edge order, stable while the topology is).
+    pub index: u32,
+    /// 0 straight, 1 circle or arc, 2 other.
+    pub kind: u8,
+    pub pts: Vec<[f64; 2]>,
+    /// A circle or arc seen square on: centre x, y and radius in the view.
+    #[serde(default)]
+    pub circle: Option<[f64; 3]>,
+    /// A circle seen edge on: its centre and its axis direction in the view.
+    #[serde(default)]
+    pub axis: Option<[f64; 4]>,
+}
+
+/// A hole from a Hole feature, as seen in a view.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjHole {
+    pub feature: FeatId,
+    /// Where the hole starts, in the view.
+    pub at: [f64; 2],
+    /// The hole's axis is along the view direction (it shows as circles).
+    pub square: bool,
+    pub dia: f64,
+    pub through: bool,
+    pub depth: f64,
+    /// 0 simple, 1 counterbore, 2 countersink.
+    pub kind: u8,
+    /// Counterbore or countersink diameter.
+    pub dia2: f64,
+    /// Counterbore depth, or countersink angle in degrees.
+    pub v2: f64,
+}
+
+/// One projection to make: a view direction (towards the viewer) and up, and what to show.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+pub struct ProjReq {
+    pub dir: [f64; 3],
+    pub up: [f64; 3],
+    #[serde(default)]
+    pub section: bool,
+    /// Section cutting plane as p·dir (mm); None cuts through the middle.
+    #[serde(default)]
+    pub cut: Option<f64>,
+    /// Only these parts of the Part Studio (all when empty).
+    #[serde(default)]
+    pub bodies: Vec<BodyId>,
+    /// An assembly: (Part Studio, body, row-major 3x4 pose) per part, from the workspace's
+    /// Part Studios (see STUDIOS); the document is not used.
+    #[serde(default)]
+    pub items: Vec<(usize, BodyId, [f64; 12])>,
+}
+
+impl From<([f64; 3], [f64; 3], bool)> for ProjReq {
+    fn from((dir, up, section): ([f64; 3], [f64; 3], bool)) -> Self {
+        ProjReq { dir, up, section, ..Default::default() }
+    }
+}
+
+/// A hole of a Hole feature in model coordinates.
+struct HoleSpec {
+    feature: FeatId,
+    p: DVec3,
+    down: DVec3,
+    dia: f64,
+    through: bool,
+    depth: f64,
+    kind: u8,
+    dia2: f64,
+    v2: f64,
+}
+
+/// Build the document, noting the holes its Hole features make.
+fn build_with_holes(doc: &Document) -> (Vec<Body>, Vec<HoleSpec>) {
+    let mut m = Model::new(doc);
+    let mut holes = vec![];
+    let end = doc.rollback_index();
+    for (i, f) in doc.features.iter().enumerate() {
+        if i >= end || f.suppressed || m.run(f.id).is_err() {
+            continue;
+        }
+        if let Op::Hole { points, hole_type, diameter, depth, through, cb_diameter, cb_depth, cs_diameter, cs_angle, .. } = &f.op {
+            let (kind, dia2, v2) = match hole_type {
+                HoleType::Simple => (0, 0.0, 0.0),
+                HoleType::Counterbore => (1, m.len(cb_diameter).unwrap_or(0.0), m.len(cb_depth).unwrap_or(0.0)),
+                HoleType::Countersink => (2, m.len(cs_diameter).unwrap_or(0.0), m.ang(cs_angle).unwrap_or(90.0)),
+            };
+            let (Ok(dia), d) = (m.len(diameter), if *through { 0.0 } else { m.len(depth).unwrap_or(0.0) }) else { continue };
+            for r in points {
+                if let Ok((p, n)) = m.hole_point(r) {
+                    holes.push(HoleSpec { feature: f.id, p, down: -n, dia, through: *through, depth: d, kind, dia2, v2 });
+                }
+            }
+        }
+    }
+    (m.bodies, holes)
 }
 
 fn polylines_2d(s: &Shape) -> Vec<Vec<[f64; 2]>> {
     unique_edges(s).iter().map(|e| e.approximation_segments().map(|p| [p.x, p.y]).collect::<Vec<_>>()).filter(|p| p.len() >= 2).collect()
 }
 
-/// Hidden-line projections of a Part Studio's parts, one per (direction, up, section) entry.
-/// Section views cut the parts through their centre, square to the view, and hatch the cut.
-pub fn project(doc: &Document, views: &[([f64; 3], [f64; 3], bool)]) -> Vec<ProjView> {
-    let bodies = build_bodies(doc);
-    let shapes: Vec<&Shape> = bodies.iter().map(|b| &b.shape).collect();
-    let Ok(all) = occ::compound(&shapes) else { return vec![ProjView::default(); views.len()] };
+/// Hidden-line projections of a Part Studio's parts (or an assembly's), one per request.
+/// Section views cut the parts square to the view (through the middle unless a cut is given)
+/// and hatch the cut.
+pub fn project(doc: &Document, views: &[ProjReq]) -> Vec<ProjView> {
+    let mut built: Option<(Vec<Body>, Vec<HoleSpec>)> = None;
     views
         .iter()
-        .map(|(d, u, section)| {
-            let (d, u) = (DVec3::from(*d), DVec3::from(*u));
-            let mut v = ProjView::default();
-            let mut shape = dup(&all);
-            if *section {
-                let bb = opencascade::bounding_box::aabb(&all);
-                let c = (bb.min() + bb.max()) / 2.0;
-                let size = (bb.max() - bb.min()).length() * 2.0 + 10.0;
-                // remove the half towards the viewer
-                if let Ok(h) = half_space(c, d, size) {
-                    if let Ok(cut) = occ::cut(&all, &h) {
-                        shape = cut;
+        .map(|req| {
+            // the parts to show, each with an identity for dimension anchors
+            let mut parts: Vec<(BodyId, Shape)> = vec![];
+            let mut holes: Vec<(DVec3, DVec3, &HoleSpec)> = vec![];
+            if req.items.is_empty() {
+                let (bodies, specs) = built.get_or_insert_with(|| build_with_holes(doc));
+                for b in bodies.iter().filter(|b| req.bodies.is_empty() || req.bodies.contains(&b.id)) {
+                    parts.push((b.id, dup(&b.shape)));
+                }
+                // holes in the parts shown
+                for h in specs.iter() {
+                    if req.bodies.is_empty() || bodies.iter().filter(|b| req.bodies.contains(&b.id)).any(|b| aabb_contains(&b.shape, h.p, 0.5)) {
+                        holes.push((h.p, h.down, h));
                     }
                 }
-                // hatch the faces lying on the cutting plane
-                let vx = u.cross(d).normalize();
-                let vy = d.cross(vx);
-                let to2 = |p: DVec3| glam::DVec2::new(p.dot(vx), p.dot(vy));
-                for f in unique_faces(&shape) {
-                    let g = face_geom(&f);
-                    if !(g.planar && g.normal.dot(d) > 0.999 && (g.center - c).dot(d).abs() < 1e-4 * size.max(1.0)) {
+            } else {
+                let studios = STUDIOS.lock().map(|s| s.clone()).unwrap_or_default();
+                let mut cache: HashMap<usize, Vec<Body>> = HashMap::new();
+                for (k, (studio, body, m)) in req.items.iter().enumerate() {
+                    let bs = cache.entry(*studio).or_insert_with(|| studios.get(*studio).map(build_bodies).unwrap_or_default());
+                    let Some(b) = bs.iter().find(|b| b.id == *body) else { continue };
+                    let rot = DMat3::from_cols(DVec3::new(m[0], m[4], m[8]), DVec3::new(m[1], m[5], m[9]), DVec3::new(m[2], m[6], m[10]));
+                    if let Ok(s) = occ::transform(&b.shape, rot, DVec3::new(m[3], m[7], m[11])) {
+                        parts.push(((k as u64, 0), s));
+                    }
+                }
+            }
+            project_parts(parts, &holes, req)
+        })
+        .collect()
+}
+
+fn aabb_contains(s: &Shape, p: DVec3, margin: f64) -> bool {
+    let bb = opencascade::bounding_box::aabb(s);
+    (p - bb.min()).min_element() > -margin && (bb.max() - p).min_element() > -margin
+}
+
+fn project_parts(parts: Vec<(BodyId, Shape)>, holes: &[(DVec3, DVec3, &HoleSpec)], req: &ProjReq) -> ProjView {
+    let (d, u) = (DVec3::from(req.dir).normalize_or(DVec3::Z), DVec3::from(req.up).normalize_or(DVec3::Y));
+    let vx = u.cross(d).normalize_or(DVec3::X);
+    let vy = d.cross(vx);
+    let to2 = |p: DVec3| [p.dot(vx), p.dot(vy)];
+    let mut v = ProjView::default();
+    let shapes: Vec<&Shape> = parts.iter().map(|p| &p.1).collect();
+    let Ok(all) = occ::compound(&shapes) else { return v };
+    // the item centroids (bounding box centres) for balloons
+    if !req.items.is_empty() {
+        v.items = parts.iter().map(|(_, s)| {
+            let bb = opencascade::bounding_box::aabb(s);
+            to2((bb.min() + bb.max()) / 2.0)
+        }).collect();
+    }
+    let mut parts = parts;
+    if req.section {
+        let bb = opencascade::bounding_box::aabb(&all);
+        let size = (bb.max() - bb.min()).length() * 2.0 + 10.0;
+        let mid = (bb.min() + bb.max()) / 2.0;
+        let cut = req.cut.unwrap_or(mid.dot(d));
+        let c = mid + d * (cut - mid.dot(d));
+        v.cut = Some(cut);
+        // remove the half towards the viewer, part by part so each keeps its identity
+        if let Ok(h) = half_space(c, d, size) {
+            for p in parts.iter_mut() {
+                if let Ok(cut) = occ::cut(&p.1, &h) {
+                    p.1 = cut;
+                }
+            }
+        }
+        // hatch the faces lying on the cutting plane
+        for (_, s) in &parts {
+            for f in unique_faces(s) {
+                let g = face_geom(&f);
+                if !(g.planar && g.normal.dot(d) > 0.999 && (g.center - c).dot(d).abs() < 1e-4 * size.max(1.0)) {
+                    continue;
+                }
+                let tris: Vec<[glam::DVec2; 3]> = face_tris(&f).iter().map(|t| t.map(|p| glam::DVec2::from(to2(p)))).collect();
+                v.hatch.extend(hatch_triangles(&tris, 2.0));
+            }
+        }
+    }
+    parts.retain(|p| !unique_faces(&p.1).is_empty());
+    let shapes: Vec<&Shape> = parts.iter().map(|p| &p.1).collect();
+    let Ok(shape) = occ::compound(&shapes) else { return v };
+    // one hidden-line pass over every part together, so parts hide each other
+    if let Ok(s) = occ::hlr(&shape, d, u, 0) {
+        v.visible.extend(polylines_2d(&s));
+    }
+    if let Ok(s) = occ::hlr(&shape, d, u, 2) {
+        v.visible.extend(polylines_2d(&s));
+    }
+    if let Ok(s) = occ::hlr(&shape, d, u, 1) {
+        v.smooth.extend(polylines_2d(&s));
+    }
+    for kind in [3, 4] {
+        if let Ok(s) = occ::hlr(&shape, d, u, kind) {
+            v.hidden.extend(polylines_2d(&s));
+        }
+    }
+    // a hidden edge lying under a visible one is not shown
+    v.hidden = drop_covered(&v.hidden, &v.visible, 0.02);
+    // model edges with their identity
+    for (part, s) in &parts {
+        for (i, e) in unique_edges(s).iter().enumerate() {
+            let pts3: Vec<DVec3> = e.approximation_segments().collect();
+            if pts3.len() < 2 {
+                continue;
+            }
+            let ty = e.edge_type();
+            let kind = match ty {
+                opencascade::primitives::EdgeType::Line => 0,
+                opencascade::primitives::EdgeType::Circle => 1,
+                _ => 2,
+            };
+            let mut pe = ProjEdge { part: *part, index: i as u32, kind, pts: pts3.iter().map(|p| to2(*p)).collect(), circle: None, axis: None };
+            if kind == 1 && pts3.len() >= 3 {
+                if let Some((c, n)) = circle_from_points(&pts3) {
+                    let r = (pts3[0] - c).length();
+                    let c2 = to2(c);
+                    if n.dot(d).abs() > 0.999 {
+                        pe.circle = Some([c2[0], c2[1], r]);
+                    } else if n.dot(d).abs() < 1e-3 {
+                        let a = to2(n);
+                        pe.axis = Some([c2[0], c2[1], a[0], a[1]]);
+                    }
+                }
+            }
+            v.edges.push(pe);
+        }
+    }
+    for (p, down, h) in holes {
+        v.holes.push(ProjHole {
+            feature: h.feature,
+            at: to2(*p),
+            square: down.dot(d).abs() > 0.999,
+            dia: h.dia,
+            through: h.through,
+            depth: h.depth,
+            kind: h.kind,
+            dia2: h.dia2,
+            v2: h.v2,
+        });
+    }
+    let mut lo = [f64::INFINITY; 2];
+    let mut hi = [f64::NEG_INFINITY; 2];
+    for p in v.visible.iter().chain(v.smooth.iter()).flatten() {
+        lo = [lo[0].min(p[0]), lo[1].min(p[1])];
+        hi = [hi[0].max(p[0]), hi[1].max(p[1])];
+    }
+    v.bbox = if lo[0].is_finite() { [lo, hi] } else { [[0.0; 2]; 2] };
+    v
+}
+
+/// The parts of `lines` not lying (within `tol`) on any of `cover`, as polylines.
+fn drop_covered(lines: &[Vec<[f64; 2]>], cover: &[Vec<[f64; 2]>], tol: f64) -> Vec<Vec<[f64; 2]>> {
+    use glam::DVec2;
+    // bucket the covering segments on a grid
+    let cell = 2.0;
+    let key = |p: DVec2| ((p.x / cell).floor() as i64, (p.y / cell).floor() as i64);
+    let mut grid: HashMap<(i64, i64), Vec<(DVec2, DVec2)>> = HashMap::new();
+    for pl in cover {
+        for w in pl.windows(2) {
+            let (a, b) = (DVec2::from(w[0]), DVec2::from(w[1]));
+            let (k0, k1) = (key(a.min(b) - DVec2::splat(tol)), key(a.max(b) + DVec2::splat(tol)));
+            if (k1.0 - k0.0 + 1) * (k1.1 - k0.1 + 1) > 4096 {
+                // a very long segment: put it in the cells along it
+                let n = ((b - a).length() / cell).ceil() as usize + 1;
+                for i in 0..=n {
+                    let p = a.lerp(b, i as f64 / n as f64);
+                    grid.entry(key(p)).or_default().push((a, b));
+                }
+                continue;
+            }
+            for x in k0.0..=k1.0 {
+                for y in k0.1..=k1.1 {
+                    grid.entry((x, y)).or_default().push((a, b));
+                }
+            }
+        }
+    }
+    let covered = |p: DVec2| -> bool {
+        grid.get(&key(p)).map(|segs| {
+            segs.iter().any(|(a, b)| {
+                let d = *b - *a;
+                let t = if d.length_squared() < 1e-18 { 0.0 } else { ((p - *a).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
+                (*a + d * t - p).length() < tol
+            })
+        }).unwrap_or(false)
+    };
+    let mut out = vec![];
+    for pl in lines {
+        let mut run: Vec<[f64; 2]> = vec![];
+        for w in pl.windows(2) {
+            let (a, b) = (DVec2::from(w[0]), DVec2::from(w[1]));
+            // sample the segment; keep the uncovered stretches
+            let n = (((b - a).length() / 0.25).ceil() as usize).clamp(1, 400);
+            for i in 0..n {
+                let (t0, t1) = (i as f64 / n as f64, (i + 1) as f64 / n as f64);
+                let (p0, p1) = (a.lerp(b, t0), a.lerp(b, t1));
+                let hide = covered(p0) && covered(p1) && covered((p0 + p1) / 2.0);
+                if hide {
+                    if run.len() >= 2 {
+                        out.push(std::mem::take(&mut run));
+                    }
+                    run.clear();
+                    continue;
+                }
+                if run.last().map(|l| DVec2::from(*l).distance(p0) > 1e-12).unwrap_or(true) {
+                    if run.len() >= 2 {
+                        out.push(std::mem::take(&mut run));
+                    }
+                    run = vec![p0.into()];
+                }
+                run.push(p1.into());
+            }
+        }
+        if run.len() >= 2 {
+            out.push(run);
+        }
+    }
+    // join the samples of each straight stretch back into one segment
+    out.into_iter()
+        .map(|pl| {
+            let mut s: Vec<[f64; 2]> = vec![pl[0]];
+            for i in 1..pl.len() {
+                if s.len() >= 2 && i + 1 <= pl.len() {
+                    let (a, b, c) = (DVec2::from(s[s.len() - 2]), DVec2::from(s[s.len() - 1]), DVec2::from(pl[i]));
+                    if (b - a).perp_dot(c - b).abs() < 1e-9 * (1.0 + (b - a).length() * (c - b).length()) && (b - a).dot(c - b) > 0.0 {
+                        *s.last_mut().unwrap() = pl[i];
                         continue;
                     }
-                    let tris: Vec<[glam::DVec2; 3]> = face_tris(&f).iter().map(|t| t.map(to2)).collect();
-                    v.hatch.extend(hatch_triangles(&tris, 2.0));
                 }
+                s.push(pl[i]);
             }
-            for kind in [0, 1, 2] {
-                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
-                    v.visible.extend(polylines_2d(&s));
-                }
-            }
-            for kind in [3, 4] {
-                if let Ok(s) = occ::hlr(&shape, d, u, kind) {
-                    v.hidden.extend(polylines_2d(&s));
-                }
-            }
-            let mut lo = [f64::INFINITY; 2];
-            let mut hi = [f64::NEG_INFINITY; 2];
-            for p in v.visible.iter().flatten() {
-                lo = [lo[0].min(p[0]), lo[1].min(p[1])];
-                hi = [hi[0].max(p[0]), hi[1].max(p[1])];
-            }
-            v.bbox = if lo[0].is_finite() { [lo, hi] } else { [[0.0; 2]; 2] };
-            v
+            s
         })
         .collect()
 }
@@ -2824,13 +3384,66 @@ mod projection_tests {
             *depth = "10".into();
         }
         doc.insert("E".into(), e);
-        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false)]);
-        let sec = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], true)]);
+        let v = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false).into()]);
+        let sec = project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], true).into()]);
         assert!(!sec[0].hatch.is_empty());
         let b = v[0].bbox;
         assert!((b[1][0] - b[0][0] - 40.0).abs() < 1e-6, "{b:?}");
         assert!((b[1][1] - b[0][1] - 10.0).abs() < 1e-6, "{b:?}");
         assert!(v[0].visible.len() >= 4);
+        // every model edge is listed with its identity; the box has 12
+        assert_eq!(v[0].edges.len(), 12);
+        // a cut placed off centre
+        let off = project(&doc, &[ProjReq { dir: [0.0, -1.0, 0.0], up: [0.0, 0.0, 1.0], section: true, cut: Some(-5.0), ..Default::default() }]);
+        assert_eq!(off[0].cut, Some(-5.0));
+        // the back edges of the box lie under the front ones: no hidden lines are left
+        assert!(v[0].hidden.iter().all(|pl| pl.len() < 2), "{:?}", v[0].hidden);
+    }
+
+    #[test]
+    fn hidden_segments_under_visible_ones_are_dropped() {
+        let vis = vec![vec![[0.0, 0.0], [10.0, 0.0]]];
+        let hid = vec![vec![[5.0, 0.0], [20.0, 0.0]], vec![[0.0, 5.0], [10.0, 5.0]]];
+        let out = drop_covered(&hid, &vis, 0.02);
+        assert_eq!(out.len(), 2, "{out:?}");
+        assert!((out[0][0][0] - 10.0).abs() < 0.3 && (out[0][out[0].len() - 1][0] - 20.0).abs() < 1e-9, "{out:?}");
+        assert_eq!(out[0].len(), 2, "one straight stretch: {out:?}");
+        assert_eq!(out[1], vec![[0.0, 5.0], [10.0, 5.0]]);
+    }
+
+    #[test]
+    fn parts_hide_each_other_and_holes_are_reported() {
+        // a 40x10x20 block in front of a lower 40x10x10 block behind it, seen from the front
+        let mut doc = Document::default();
+        let mut s = crate::sketch::Sketch::default();
+        for (x0, y0, y1) in [(0.0, 0.0, 10.0), (0.0, 20.0, 30.0)] {
+            let p: Vec<_> = [(x0, y0), (x0 + 40.0, y0), (x0 + 40.0, y1), (x0, y1)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+            for i in 0..4 {
+                s.add_curve(crate::sketch::Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+            }
+        }
+        let sk = doc.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+            *depth = "20".into();
+        }
+        doc.insert("E".into(), e);
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, depth, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 25.0] });
+            *depth = "10".into();
+        }
+        doc.insert("E2".into(), e);
+        let v = &project(&doc, &[([0.0, -1.0, 0.0], [0.0, 0.0, 1.0], false).into()])[0];
+        // the back block's top edge (z = 10) is behind the front block: hidden, not visible
+        let at10 = |pls: &Vec<Vec<[f64; 2]>>| pls.iter().any(|pl| pl.len() >= 2 && pl.iter().all(|p| (p[1] - 10.0).abs() < 1e-6) && (pl[0][0] - pl[pl.len() - 1][0]).abs() > 30.0);
+        assert!(!at10(&v.visible), "{:?}", v.visible);
+        assert!(at10(&v.hidden), "{:?}", v.hidden);
+        // one part only
+        let body = build_bodies(&doc)[0].id;
+        let one = &project(&doc, &[ProjReq { dir: [0.0, -1.0, 0.0], up: [0.0, 0.0, 1.0], bodies: vec![body], ..Default::default() }])[0];
+        assert!(one.edges.iter().all(|e| e.part == body));
     }
 }
 
@@ -3116,7 +3729,7 @@ mod face_tests {
         // push the top of the vertical leg up by 5
         let mut mf = Op::new_default("moveFace").unwrap();
         if let Op::MoveFace { faces, distance } = &mut mf {
-            faces.push(Ref::Face { point: [2.5, -10.0, 40.0], normal: [0.0, 0.0, 1.0] });
+            faces.push(Ref::Face { point: [2.5, -10.0, 40.0], normal: [0.0, 0.0, 1.0], name: Default::default() });
             *distance = "5".into();
         }
         doc.insert("MF".into(), mf);
@@ -3229,7 +3842,7 @@ mod surface_tests {
             "W".into(),
             Op::SurfaceExtrude { curves: lines.iter().map(|l| Ref::SketchCurve { sketch: sk, curve: *l }).collect(), depth: "10".into(), symmetric: false, opposite: false },
         );
-        let edges = |z: f64| vec![[5.0, 0.0, z], [10.0, 5.0, z], [5.0, 10.0, z], [0.0, 5.0, z]].into_iter().map(|p| Ref::Edge { point: p }).collect::<Vec<_>>();
+        let edges = |z: f64| vec![[5.0, 0.0, z], [10.0, 5.0, z], [5.0, 10.0, z], [0.0, 5.0, z]].into_iter().map(|p| Ref::Edge { point: p, name: Default::default() }).collect::<Vec<_>>();
         let bottom = doc.insert("B".into(), Op::Fill { edges: edges(0.0) });
         let top = doc.insert("T".into(), Op::Fill { edges: edges(10.0) });
         doc.insert(
@@ -3286,7 +3899,7 @@ mod flange_tests {
             "SM".into(),
             Op::SheetMetal { profile: vec![Ref::Region { sketch: sk, point: [5.0, 5.0] }], thickness: "2".into(), radius: "2".into(), k_factor: "0.5".into(), depth: "10".into(), flip: false, op: BoolOp::New },
         );
-        doc.insert("F".into(), Op::Flange { edges: vec![Ref::Edge { point: [40.0, 15.0, 2.0] }], length: "10".into(), angle: "90".into(), flip: false, inset: "0".into() });
+        doc.insert("F".into(), Op::Flange { edges: vec![Ref::Edge { point: [40.0, 15.0, 2.0], name: Default::default() }], length: "10".into(), angle: "90".into(), flip: false, inset: "0".into() });
         let r = rebuild(&doc, &[], |_| {});
         for f in &r.features {
             assert!(f.error.is_none(), "{:?}", f.error);
@@ -3355,7 +3968,7 @@ mod feature_option_tests {
             cube(&mut doc, 20.0);
             let mut c = Op::new_default("chamfer").unwrap();
             if let Op::Chamfer { edges, distance, mode: m, distance2, angle } = &mut c {
-                edges.push(Ref::Edge { point: [10.0, 0.0, 20.0] });
+                edges.push(Ref::Edge { point: [10.0, 0.0, 20.0], name: Default::default() });
                 *distance = "2".into();
                 *m = mode.into();
                 *distance2 = "4".into();
@@ -3404,7 +4017,7 @@ mod feature_option_tests {
                 *op = BoolOp::New;
             }
         });
-        let face = Ref::Face { point: [20.0, 10.0, 5.0], normal: [0.0, 0.0, 1.0] };
+        let face = Ref::Face { point: [20.0, 10.0, 5.0], normal: [0.0, 0.0, 1.0], name: Default::default() };
         let s = sketch_on(&mut doc, face, Frame::TOP, |s| rect(s, 15.0, 5.0, 10.0, 10.0));
         extrude(&mut doc, s, [20.0, 10.0], |o| {
             if let Op::Extrude { end, op, .. } = o {
@@ -3419,7 +4032,7 @@ mod feature_option_tests {
         // up to vertex: a cube with a boss up to a point at z = 30
         let mut doc = Document::default();
         cube(&mut doc, 20.0);
-        let face = Ref::Face { point: [10.0, 10.0, 20.0], normal: [0.0, 0.0, 1.0] };
+        let face = Ref::Face { point: [10.0, 10.0, 20.0], normal: [0.0, 0.0, 1.0], name: Default::default() };
         let s = sketch_on(&mut doc, face, Frame::TOP, |s| rect(s, 5.0, 5.0, 10.0, 10.0));
         extrude(&mut doc, s, [10.0, 10.0], |o| {
             if let Op::Extrude { end, up_to, op, .. } = o {
@@ -3464,7 +4077,7 @@ mod feature_option_tests {
         });
         let mut mf = Op::new_default("moveFace").unwrap();
         if let Op::MoveFace { faces, distance } = &mut mf {
-            faces.push(Ref::Face { point: [5.0, 0.0, 5.0], normal: [1.0, 0.0, 0.0] });
+            faces.push(Ref::Face { point: [5.0, 0.0, 5.0], normal: [1.0, 0.0, 0.0], name: Default::default() });
             *distance = "1".into();
         }
         doc.insert("MF".into(), mf);
@@ -3607,5 +4220,188 @@ mod check_tests {
         assert!(r.features.iter().all(|f| f.error.is_none()));
         assert!(r.issues.is_empty(), "{:?}", r.issues);
         assert_eq!(r.bodies.len(), 1);
+    }
+}
+
+#[cfg(test)]
+mod sweep_pattern_tests {
+    use super::*;
+    use crate::doc::{Document, Op, OriginPlane, Ref};
+    use crate::sketch::{Geom, Sketch};
+
+    fn sketch(doc: &mut Document, plane: OriginPlane, f: impl FnOnce(&mut Sketch)) -> FeatId {
+        let mut s = Sketch::default();
+        f(&mut s);
+        doc.insert("Sketch".into(), Op::Sketch { plane: Ref::OriginPlane { plane }, sketch: s, frame: plane.frame() })
+    }
+
+    fn polyline(s: &mut Sketch, pts: &[(f64, f64)]) {
+        let p: Vec<_> = pts.iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for w in p.windows(2) {
+            s.add_curve(Geom::Line { a: w[0], b: w[1] }, false);
+        }
+    }
+
+    fn sweep(doc: &mut Document, profile: FeatId, at: [f64; 2], path: FeatId) {
+        let curves: Vec<Ref> = match &doc.feature(path).unwrap().op {
+            Op::Sketch { sketch, .. } => sketch.curves.iter().map(|c| Ref::SketchCurve { sketch: path, curve: c.id }).collect(),
+            _ => unreachable!(),
+        };
+        doc.insert("Sweep".into(), Op::Sweep { profiles: vec![Ref::Region { sketch: profile, point: at }], path: curves, op: BoolOp::New });
+    }
+
+    fn ok(r: &RebuildResult) {
+        for f in &r.features {
+            assert!(f.error.is_none(), "feature {} failed: {:?}", f.id, f.error);
+        }
+    }
+
+    #[test]
+    fn sweep_keeps_the_holes_of_the_profile() {
+        let mut doc = Document::default();
+        let ring = sketch(&mut doc, OriginPlane::Top, |s| {
+            let c = s.add_point(DVec2::ZERO);
+            s.add_curve(Geom::Circle { c, r: 5.0 }, false);
+            s.add_curve(Geom::Circle { c, r: 4.0 }, false);
+        });
+        let path = sketch(&mut doc, OriginPlane::Front, |s| polyline(s, &[(0.0, 0.0), (0.0, 50.0)]));
+        sweep(&mut doc, ring, [4.5, 0.0], path);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        let want = std::f64::consts::PI * (25.0 - 16.0) * 50.0;
+        assert!((r.bodies[0].volume - want).abs() < 1e-3 * want, "{} vs {want}", r.bodies[0].volume);
+    }
+
+    #[test]
+    fn sweep_turns_the_profile_round_sharp_corners() {
+        let mut doc = Document::default();
+        let disc = sketch(&mut doc, OriginPlane::Top, |s| {
+            let c = s.add_point(DVec2::ZERO);
+            s.add_curve(Geom::Circle { c, r: 5.0 }, false);
+        });
+        // up 50, then 45° over: the second leg must keep its full section, not a sheared one
+        let path = sketch(&mut doc, OriginPlane::Front, |s| polyline(s, &[(0.0, 0.0), (0.0, 50.0), (30.0, 80.0)]));
+        sweep(&mut doc, disc, [0.0, 0.0], path);
+        let r = rebuild(&doc, &[], |_| {});
+        ok(&r);
+        let along = std::f64::consts::PI * 25.0 * (50.0 + 30.0 * 2f64.sqrt());
+        let v = r.bodies[0].volume;
+        assert!(v > 0.97 * along && v < 1.03 * along, "{v} vs {along}");
+        assert!(r.issues.is_empty(), "{:?}", r.issues);
+    }
+
+    fn cube_pattern(spacing: &str, count: &str) -> RebuildResult {
+        let mut doc = Document::default();
+        let s = sketch(&mut doc, OriginPlane::Top, |s| polyline(s, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]));
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, op, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: s, point: [5.0, 5.0] });
+            *op = BoolOp::New;
+        }
+        let e = doc.insert("Extrude".into(), e);
+        let mut lp = Op::new_default("linearPattern").unwrap();
+        if let Op::LinearPattern { bodies, direction, spacing: sp, count: n, .. } = &mut lp {
+            bodies.push(Ref::Body { body: (e, 0) });
+            *direction = Some(Ref::Axis { axis: 0 });
+            *sp = spacing.into();
+            *n = count.into();
+        }
+        doc.insert("Pattern".into(), lp);
+        rebuild(&doc, &[], |_| {})
+    }
+
+    #[test]
+    fn part_pattern_copies_are_parts_unless_they_touch() {
+        let r = cube_pattern("20", "4");
+        ok(&r);
+        assert_eq!(r.bodies.len(), 4);
+        assert!(r.bodies.iter().all(|b| (b.volume - 1000.0).abs() < 1e-6));
+        // touching copies make one part
+        let r = cube_pattern("10", "4");
+        ok(&r);
+        assert_eq!(r.bodies.len(), 1);
+        assert!((r.bodies[0].volume - 4000.0).abs() < 1e-6, "{}", r.bodies[0].volume);
+        // many copies stay fast (they used to be fused one by one)
+        let t = std::time::Instant::now();
+        let r = cube_pattern("20", "300");
+        ok(&r);
+        assert_eq!(r.bodies.len(), 300);
+        assert!(t.elapsed().as_secs_f64() < 60.0, "{:?}", t.elapsed());
+    }
+
+    #[test]
+    fn hole_sizes_are_checked() {
+        for (dia, depth, through) in [("-3", "10", true), ("0", "10", true), ("5", "0", false)] {
+            let mut doc = Document::default();
+            let s = sketch(&mut doc, OriginPlane::Top, |s| {
+                polyline(s, &[(0.0, 0.0), (20.0, 0.0), (20.0, 20.0), (0.0, 20.0), (0.0, 0.0)]);
+                s.add_point(DVec2::new(10.0, 10.0));
+            });
+            let mut e = Op::new_default("extrude").unwrap();
+            if let Op::Extrude { profiles, op, .. } = &mut e {
+                profiles.push(Ref::Region { sketch: s, point: [5.0, 5.0] });
+                *op = BoolOp::New;
+            }
+            doc.insert("Extrude".into(), e);
+            let pt = match &doc.feature(s).unwrap().op {
+                Op::Sketch { sketch, .. } => sketch.points.last().unwrap().id,
+                _ => unreachable!(),
+            };
+            let mut h = Op::new_default("hole").unwrap();
+            if let Op::Hole { points, diameter, depth: d, through: t, .. } = &mut h {
+                points.push(Ref::SketchPoint { sketch: s, point: pt });
+                *diameter = dia.into();
+                *d = depth.into();
+                *t = through;
+            }
+            let hid = doc.insert("Hole".into(), h);
+            let r = rebuild(&doc, &[], |_| {});
+            let err = r.features.iter().find(|f| f.id == hid).and_then(|f| f.error.clone());
+            assert!(err.as_deref().map(|e| e.contains("must be positive")).unwrap_or(false), "{dia} {depth}: {err:?}");
+        }
+    }
+
+    #[test]
+    fn union_of_parts_that_dont_touch_says_so() {
+        let mut doc = Document::default();
+        let s = sketch(&mut doc, OriginPlane::Top, |s| {
+            polyline(s, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]);
+            polyline(s, &[(20.0, 0.0), (30.0, 0.0), (30.0, 10.0), (20.0, 10.0), (20.0, 0.0)]);
+        });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, op, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: s, point: [5.0, 5.0] });
+            profiles.push(Ref::Region { sketch: s, point: [25.0, 5.0] });
+            *op = BoolOp::New;
+        }
+        let e = doc.insert("Extrude".into(), e);
+        let b = doc.insert("Union".into(), Op::Boolean { kind: BooleanKind::Union, target: Some(Ref::Body { body: (e, 0) }), tools: vec![Ref::Body { body: (e, 1) }], keep_tools: false });
+        let r = rebuild(&doc, &[], |_| {});
+        let err = r.features.iter().find(|f| f.id == b).and_then(|f| f.error.clone()).unwrap_or_default();
+        assert!(err.contains("don't touch"), "{err}");
+        assert_eq!(r.bodies.len(), 2);
+    }
+
+    #[test]
+    fn pattern_above_its_seed_says_so() {
+        let mut doc = Document::default();
+        let s = sketch(&mut doc, OriginPlane::Top, |s| polyline(s, &[(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0), (0.0, 0.0)]));
+        let mut lp = Op::new_default("linearPattern").unwrap();
+        let e_id = doc.next_id + 2;
+        if let Op::LinearPattern { kind, bodies, direction, .. } = &mut lp {
+            *kind = "feature".into();
+            bodies.push(Ref::Feature { feature: e_id });
+            *direction = Some(Ref::Axis { axis: 0 });
+        }
+        let p = doc.insert("Pattern".into(), lp);
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, op, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: s, point: [5.0, 5.0] });
+            *op = BoolOp::New;
+        }
+        assert_eq!(doc.insert("Extrude".into(), e), e_id);
+        let r = rebuild(&doc, &[], |_| {});
+        let err = r.features.iter().find(|f| f.id == p).and_then(|f| f.error.clone()).unwrap_or_default();
+        assert!(err.contains("comes after it") && err.contains("move Pattern below Extrude"), "{err}");
     }
 }

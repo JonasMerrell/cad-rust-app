@@ -1466,42 +1466,15 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
         pieces.retain(|(pts, _, _)| pts.windows(2).any(|w| picks.iter().any(|p| seg_dist(*p, w[0], w[1]) < 1.0)));
         chains = pieces;
     }
+    // only the edges whose cut lies between the operation's top and bottom
+    let (zlo, zhi) = (ctx.wz(op.bottom).unwrap_or(f64::NEG_INFINITY), ctx.wz(op.top).unwrap_or(f64::INFINITY));
     for (pts, dirs, closed) in chains {
-        // tool centres: each edge offset along its own outward direction, arcs round convex corners
-        let mut centres: Vec<DVec2> = vec![];
-        let ne = dirs.len();
-        // round a convex corner between edge j and edge i (at the start of edge i)
-        let corner = |centres: &mut Vec<DVec2>, j: usize, i: usize| {
-            let a = pts[i].truncate();
-            let (u0, u) = (dirs[j], dirs[i]);
-            let t0 = (pts[j + 1] - pts[j]).truncate().normalize_or_zero();
-            let turn = u0.angle_to(u);
-            if turn.abs() > 0.01 && (u - u0).dot(t0) > 0.0 {
-                let k = ((turn.abs() * rho / 0.2).ceil() as usize).max(2);
-                for m in 1..k {
-                    centres.push(a + DVec2::from_angle(turn * m as f64 / k as f64).rotate(u0) * rho);
-                }
-            }
-        };
-        for i in 0..ne {
-            let (a, b, u) = (pts[i], pts[i + 1], dirs[i]);
-            if i > 0 {
-                corner(&mut centres, i - 1, i);
-            }
-            let k = (a.distance(b) / 0.3).ceil().max(1.0) as usize;
-            for m in 0..=k {
-                centres.push(a.truncate().lerp(b.truncate(), m as f64 / k as f64) + u * rho);
-            }
-        }
-        if closed && ne > 1 {
-            corner(&mut centres, ne - 1, 0);
-            centres.push(pts[0].truncate() + dirs[0] * rho);
-        }
+        let centres = deburr_centres(&pts, &dirs, closed, rho);
         let mut cur: Vec<DVec3> = vec![];
         let mut pieces = vec![];
         for ctr in centres {
             let (z, _) = d.drop(ctr, &mut s);
-            if !z.is_finite() {
+            if !z.is_finite() || z - dz < zlo - 1e-6 || z - dz > zhi + 1e-6 {
                 if cur.len() >= 2 {
                     pieces.push(std::mem::take(&mut cur));
                 }
@@ -1547,6 +1520,114 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
             pb.cut(p, pb.feed);
         }
     }
+}
+
+/// Tool centres along a chain of edges `pts` (each edge `i` from `pts[i]` to `pts[i + 1]`, offset by `rho` along its
+/// outward direction `dirs[i]`): arcs round the convex corners; at the concave ones (inside a hole, an inside
+/// corner) the neighbouring offsets meet where they cross, and edges too short to show between their
+/// neighbours' offsets drop out, so the tool never runs back and forth over the same stretch.
+fn deburr_centres(pts: &[DVec3], dirs: &[DVec2], closed: bool, rho: f64) -> Vec<DVec2> {
+    let ne = dirs.len();
+    if ne == 0 {
+        return vec![];
+    }
+    let closed = closed && ne > 2;
+    // each edge as an offset line: start, unit direction, and the stretch of it [s0, s1] that is used
+    struct Line {
+        a: DVec2,
+        t: DVec2,
+        len: f64,
+        k: usize,
+    }
+    let lines: Vec<Line> = (0..ne)
+        .map(|i| {
+            let (a, b) = (pts[i].truncate(), pts[i + 1].truncate());
+            Line { a: a + dirs[i] * rho, t: (b - a).normalize_or_zero(), len: a.distance(b), k: i }
+        })
+        .collect();
+    let convex = |j: &Line, i: &Line| {
+        let turn = dirs[j.k].angle_to(dirs[i.k]);
+        turn.abs() > 0.01 && (dirs[i.k] - dirs[j.k]).dot(j.t) > 0.0
+    };
+    // where line j's offset meets line i's at a concave corner: (end on j, start on i)
+    let meet = |j: &Line, i: &Line| -> Option<(f64, f64)> {
+        let den = j.t.perp_dot(i.t);
+        if den.abs() < 1e-9 {
+            return None;
+        }
+        let d = i.a - j.a;
+        Some((d.perp_dot(i.t) / den, d.perp_dot(j.t) / den))
+    };
+    let mut keep: Vec<usize> = (0..ne).collect();
+    let mut span: Vec<(f64, f64)> = lines.iter().map(|l| (0.0, l.len)).collect();
+    // trim the concave corners, dropping the edges that vanish, until none do
+    for _ in 0..ne {
+        let m = keep.len();
+        for v in span.iter_mut() {
+            *v = (0.0, f64::NAN);
+        }
+        for &k in &keep {
+            span[k] = (0.0, lines[k].len);
+        }
+        let pairs = if closed { m } else { m.saturating_sub(1) };
+        for q in 0..pairs {
+            let (j, i) = (keep[q], keep[(q + 1) % m]);
+            if i == j || convex(&lines[j], &lines[i]) {
+                continue;
+            }
+            if let Some((sj, si)) = meet(&lines[j], &lines[i]) {
+                // a near-parallel crossing far off: leave both ends as they are
+                if sj.is_finite() && si.is_finite() && (sj - lines[j].len).abs() < 4.0 * rho + lines[j].len && si.abs() < 4.0 * rho + lines[i].len {
+                    span[j].1 = sj;
+                    span[i].0 = si;
+                }
+            }
+        }
+        let gone: Vec<usize> = keep.iter().copied().filter(|&k| span[k].1 < span[k].0 - 1e-9).collect();
+        if gone.is_empty() || gone.len() >= keep.len().saturating_sub(1) {
+            break;
+        }
+        // the ends of an open chain stay
+        keep.retain(|k| !gone.contains(k) || (!closed && (*k == 0 || *k == ne - 1)));
+        if keep.len() == m {
+            break;
+        }
+    }
+    let m = keep.len();
+    let mut centres: Vec<DVec2> = vec![];
+    let arc = |centres: &mut Vec<DVec2>, j: usize, i: usize| {
+        // round a convex corner at the start of edge i
+        let a = pts[i].truncate();
+        let turn = dirs[j].angle_to(dirs[i]);
+        let k = ((turn.abs() * rho / 0.2).ceil() as usize).max(2);
+        for s in 1..k {
+            centres.push(a + DVec2::from_angle(turn * s as f64 / k as f64).rotate(dirs[j]) * rho);
+        }
+    };
+    for q in 0..m {
+        let k = keep[q];
+        let l = &lines[k];
+        if q > 0 && keep[q - 1] + 1 == k && convex(&lines[keep[q - 1]], l) {
+            arc(&mut centres, keep[q - 1], k);
+        }
+        let (s0, s1) = span[k];
+        let s1 = s1.max(s0);
+        let n = ((s1 - s0) / 0.3).ceil().max(1.0) as usize;
+        for c in 0..=n {
+            centres.push(l.a + l.t * (s0 + (s1 - s0) * c as f64 / n as f64));
+        }
+    }
+    if closed && m > 1 {
+        let (j, i) = (keep[m - 1], keep[0]);
+        if (j + 1) % ne == i && convex(&lines[j], &lines[i]) {
+            arc(&mut centres, j, i);
+        }
+        if let Some(&p) = centres.first() {
+            centres.push(p);
+        }
+    }
+    centres.dedup_by(|a, b| a.distance(*b) < 1e-6);
+    centres
 }
 
 fn seg_dist(p: DVec3, a: DVec3, b: DVec3) -> f64 {
@@ -1647,6 +1728,8 @@ struct Slab<'a, 'b> {
     r: f64,
     adv: f64,
     dir: f64,
+    /// Feed along the loops and walls (with chip thinning, above the tool's).
+    feed: f64,
 }
 
 impl Slab<'_, '_> {
@@ -1656,7 +1739,7 @@ impl Slab<'_, '_> {
 
     fn feed(&mut self, p: DVec2) {
         let from = self.pb.pos;
-        self.pb.cut(DVec3::new(p.x, p.y, self.z), self.pb.feed);
+        self.pb.cut(DVec3::new(p.x, p.y, self.z), self.feed);
         if let Some(f) = from {
             let rad = self.r - self.mat.cell * 0.75;
             self.mat.stamp(f.truncate(), p, rad);
@@ -1873,6 +1956,8 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     let bottom = ctx.wz(op.bottom).unwrap_or(ctx.geo.part.lo.z + op.leave_floor);
     let rt0 = if op.trochoid > 0.0 { op.trochoid } else { 0.4 * t.diameter };
     let adv = stepover(op, t);
+    // the loops take a cut about `adv` wide: with chip thinning the feed rises to keep the chip as thick as the feed per tooth
+    let thin = if op.chip_thinning { crate::cam::chip_thinning(adv / t.diameter.max(1e-9)) } else { 1.0 };
     let bound = offset(&rect(lo, hi), r * 0.5);
     let floors: Vec<f64> = ctx.geo.floors().iter().map(|f| f + op.leave_floor).collect();
     let margin = r + rt0 + 2.0;
@@ -1895,7 +1980,8 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         }
         any = true;
         mat.fill(lo.truncate(), hi.truncate(), stock, z);
-        let mut slab = Slab { pb: &mut *pb, mat: &mut mat, z, z_from: z_prev, r, adv, dir: if op.climb { 1.0 } else { -1.0 } };
+        let feed = pb.feed * thin;
+        let mut slab = Slab { pb: &mut *pb, mat: &mut mat, z, z_from: z_prev, r, adv, dir: if op.climb { 1.0 } else { -1.0 }, feed };
         let mut covered: Shapes = vec![];
         let mut rt = rt0;
         for stage in 0..4 {
@@ -2214,6 +2300,65 @@ mod tests {
         let picked = &generate(&c, &part)[0];
         let ys: Vec<f64> = picked.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[1]) } else { None }).collect();
         assert!(!ys.is_empty() && ys.iter().all(|y| *y < 1.0), "{ys:?}");
+    }
+
+    /// A tube standing on end: 30 across, a Ø10 hole down its middle, 10 high, 64 sides.
+    fn tube() -> Part {
+        let n = 64;
+        let at = |r: f64, k: usize, z: f64| {
+            let a = std::f64::consts::TAU * (k % n) as f64 / n as f64;
+            DVec3::new(15.0 + r * a.cos(), 15.0 + r * a.sin(), z)
+        };
+        let q = |a: DVec3, b: DVec3, c: DVec3, d: DVec3| [[a, b, c], [a, c, d]];
+        let mut t = vec![];
+        for k in 0..n {
+            t.extend(q(at(5.0, k, 10.0), at(15.0, k, 10.0), at(15.0, k + 1, 10.0), at(5.0, k + 1, 10.0)));
+            t.extend(q(at(5.0, k, 0.0), at(5.0, k + 1, 0.0), at(15.0, k + 1, 0.0), at(15.0, k, 0.0)));
+            t.extend(q(at(5.0, k, 0.0), at(5.0, k, 10.0), at(5.0, k + 1, 10.0), at(5.0, k + 1, 0.0)));
+            t.extend(q(at(15.0, k, 0.0), at(15.0, k + 1, 0.0), at(15.0, k + 1, 10.0), at(15.0, k, 10.0)));
+        }
+        Part::new(&t, &[], "top")
+    }
+
+    #[test]
+    fn deburr_runs_smoothly_round_holes_and_keeps_to_its_heights() {
+        let part = tube();
+        let mut c = Cam::default();
+        let t = tool(&mut c, ToolKind::Chamfer, 6.0);
+        let id = c.add_op(OpKind::Deburr, t);
+        let tp = generate(&c, &part).remove(0);
+        assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
+        // inside the hole: one smooth circle, never doubling back (the offsets of the facets used to overlap)
+        let mut inner = vec![];
+        let mut prev: Option<DVec3> = None;
+        for m in &tp.moves {
+            let p = m.end(prev.unwrap_or(DVec3::ZERO));
+            if let (Move::Feed(..), Some(q)) = (m, prev) {
+                if (p.truncate() - DVec2::splat(15.0)).length() < 5.0 && (q.truncate() - DVec2::splat(15.0)).length() < 5.0 {
+                    inner.push((q, p));
+                }
+            }
+            prev = Some(p);
+        }
+        assert!(inner.len() > 20, "{}", inner.len());
+        let r: Vec<f64> = inner.iter().map(|(_, p)| (p.truncate() - DVec2::splat(15.0)).length()).collect();
+        let (rmin, rmax) = r.iter().fold((f64::INFINITY, 0.0f64), |(a, b), x| (a.min(*x), b.max(*x)));
+        assert!(rmax - rmin < 0.05, "{rmin} .. {rmax}");
+        for w in inner.windows(2) {
+            let (a, b) = ((w[0].1 - w[0].0).truncate(), (w[1].1 - w[1].0).truncate());
+            if a.length() > 1e-6 && b.length() > 1e-6 && w[0].1.distance(w[1].0) < 1e-9 {
+                assert!(a.normalize().dot(b.normalize()) > 0.5, "turns back at {:?}", w[1].0);
+            }
+        }
+        // the rims are chamfered 0.3 below the top: a bottom above that leaves nothing to do
+        let o = crate::cam_paths::work_origin(&c, &part);
+        c.op_mut(id).unwrap().bottom = Some(10.0 - 0.2 - o.z);
+        let none = generate(&c, &part).remove(0);
+        assert!(!none.moves.iter().any(|m| matches!(m, Move::Feed(..))), "{:?}", none.warnings);
+        c.op_mut(id).unwrap().bottom = Some(10.0 - 1.0 - o.z);
+        let low = generate(&c, &part).remove(0);
+        assert!(low.moves.iter().any(|m| matches!(m, Move::Feed(..))));
+        assert!(low.moves.iter().all(|m| !matches!(m, Move::Feed(p, _) if p[2] < 9.0 - 1e-6)));
     }
 
     #[test]

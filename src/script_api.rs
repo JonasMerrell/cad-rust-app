@@ -1,7 +1,7 @@
 //! The scripting interface beyond the basic shapes in `script`: building solids from profiles,
 //! picking faces and edges by their geometry, queries (mass properties, point classification,
 //! tessellation), vectors and matrices, files, and export. Custom features get all of it, and
-//! `cad-rust-app script file.rhai` runs a script with no window (see `run_file`).
+//! `rcad script file.rhai` runs a script with no window (see `run_file`).
 
 use std::cell::RefCell;
 use std::rc::Rc;
@@ -316,6 +316,7 @@ impl EdgeRef {
 }
 
 const SURFACES: [&str; 11] = ["plane", "cylinder", "cone", "sphere", "torus", "bezier", "bspline", "revolution", "extrusion", "offset", "other"];
+const FILLET_HINT: &str = " (radius too large for the part?)";
 const CURVES: [&str; 9] = ["line", "circle", "ellipse", "hyperbola", "parabola", "bezier", "bspline", "offset", "other"];
 
 fn kind_name(list: &[&'static str], k: i32) -> &'static str {
@@ -444,26 +445,32 @@ fn register_topology(e: &mut Engine) {
         if es.is_empty() {
             return Ok(s.clone());
         }
-        Ok(wrap(occ_err(occ::fillet(&s.0, &es, r, r))?))
+        Ok(wrap(occ_err(occ::fillet(&s.0, &es, r, r).and_then(|x| occ::checked(x, "fillet", FILLET_HINT)))?))
     });
     e.register_fn("fillet", |s: &mut S, edges: Array, r1: Dynamic, r2: Dynamic| -> Res<S> {
         let es = edge_list(&Dynamic::from_array(edges))?;
         if es.is_empty() {
             return Ok(s.clone());
         }
-        Ok(wrap(occ_err(occ::fillet(&s.0, &es, num(&r1)?, num(&r2)?))?))
+        Ok(wrap(occ_err(occ::fillet(&s.0, &es, num(&r1)?, num(&r2)?).and_then(|x| occ::checked(x, "fillet", FILLET_HINT)))?))
     });
     e.register_fn("chamfer", |s: &mut S, edges: Array, d: Dynamic| -> Res<S> {
         let es = edge_list(&Dynamic::from_array(edges))?;
         if es.is_empty() {
             return Ok(s.clone());
         }
-        Ok(wrap(occ_err(occ::chamfer(&s.0, &es, num(&d)?))?))
+        Ok(wrap(occ_err(occ::chamfer(&s.0, &es, num(&d)?).and_then(|x| occ::checked(x, "chamfer", " (distance too large for the part?)")))?))
     });
-    // hollow out, removing the given faces (none: a closed hollow), wall `t` (negative: inward)
+    // hollow out, removing the given faces (none: a closed hollow), walls `t` thick inside the
+    // surface (negative: grown outside it)
     e.register_fn("shell", |s: &mut S, faces: Array, t: Dynamic| -> Res<S> {
         let fs = face_list(&Dynamic::from_array(faces))?;
-        Ok(wrap(occ_err(occ::shell(&s.0, &fs, num(&t)?))?))
+        let t = num(&t)?;
+        if t == 0.0 {
+            return err("shell thickness must not be 0");
+        }
+        let r = if fs.is_empty() { occ::hollow(&s.0, t) } else { occ::shell(&s.0, &fs, -t) };
+        Ok(wrap(occ_err(r.and_then(|x| occ::checked(x, "shell", " (thickness too large for the part?)")))?))
     });
 }
 
@@ -641,7 +648,7 @@ fn register_build(e: &mut Engine) {
             1 => Ok(S(items[0].clone())),
             _ => {
                 let all: Vec<&Shape> = items.iter().map(|s| &**s).collect();
-                Ok(wrap(occ_err(occ::boolean_n(&all[..1], &all[1..], 0, fuzzy, false))?))
+                Ok(wrap(occ_err(occ::boolean_n(&all[..1], &all[1..], 0, fuzzy, false).and_then(|x| occ::checked(x, "fuse", "")))?))
             }
         }
     };
@@ -653,7 +660,7 @@ fn register_build(e: &mut Engine) {
             return Ok(if op == 1 { s.clone() } else { wrap(Shape::empty()) });
         }
         let tr: Vec<&Shape> = t.iter().map(|x| &**x).collect();
-        Ok(wrap(occ_err(occ::boolean_n(&[&s.0], &tr, op, fuzzy, false))?))
+        Ok(wrap(occ_err(occ::boolean_n(&[&s.0], &tr, op, fuzzy, false).and_then(|x| occ::checked(x, ["fuse", "cut", "common"][op as usize], "")))?))
     };
     e.register_fn("cut", move |s: &mut S, tools: Dynamic| -> Res<S> { bop(s, &tools, 1, 0.0) });
     e.register_fn("cut", move |s: &mut S, tools: Dynamic, fuzzy: Dynamic| -> Res<S> { bop(s, &tools, 1, num(&fuzzy)?) });
@@ -833,14 +840,14 @@ pub fn to_json(d: &Dynamic) -> serde_json::Value {
 fn register_files(e: &mut Engine) {
     e.register_fn("parse_json", |s: &str| -> Res<Dynamic> { Ok(from_json(&serde_json::from_str(s).map_err(|e| format!("JSON: {e}"))?)) });
     e.register_fn("to_json", |d: Dynamic| -> String { serde_json::to_string(&to_json(&d)).unwrap_or_default() });
-    e.register_fn("read_text", |p: &str| -> Res<String> { std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}").into()) });
-    e.register_fn("write_text", |p: &str, s: &str| -> Res<()> { std::fs::write(p, s).map_err(|e| format!("{p}: {e}").into()) });
+    e.register_fn("read_text", |p: &str| -> Res<String> { std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}").into()) });
+    e.register_fn("write_text", |p: &str, s: &str| -> Res<()> { std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into()) });
     e.register_fn("read_json", |p: &str| -> Res<Dynamic> {
-        let t = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+        let t = std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}"))?;
         Ok(from_json(&serde_json::from_str(&t).map_err(|e| format!("{p}: {e}"))?))
     });
     e.register_fn("read_yaml", |p: &str| -> Res<Dynamic> {
-        let t = std::fs::read_to_string(p).map_err(|e| format!("{p}: {e}"))?;
+        let t = std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}"))?;
         let v: serde_json::Value = serde_yaml::from_str(&t).map_err(|e| format!("{p}: {e}"))?;
         Ok(from_json(&v))
     });
@@ -850,26 +857,26 @@ fn register_files(e: &mut Engine) {
     });
     e.register_fn("write_json", |p: &str, d: Dynamic| -> Res<()> {
         let s = serde_json::to_string_pretty(&to_json(&d)).unwrap_or_default();
-        std::fs::write(p, s).map_err(|e| format!("{p}: {e}").into())
+        std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into())
     });
     // STEP of one shape or several (each a separate body), STL of one shape
     e.register_fn("export_step", |x: Dynamic, p: &str| -> Res<()> {
         let v = shape_list(&x)?;
-        Shape::write_all_step(v.iter().map(|s| &**s), p).map_err(|e| format!("{p}: {e:?}").into())
+        Shape::write_all_step(v.iter().map(|s| &**s), p).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
     e.register_fn("export_stl", |x: Dynamic, p: &str| -> Res<()> {
         let v = shape_list(&x)?;
         let r: Vec<&Shape> = v.iter().map(|s| &**s).collect();
         let c = if r.len() == 1 { kdup(r[0]) } else { occ_err(occ::compound(&r))? };
-        c.write_stl_with_tolerance(p, 0.01).map_err(|e| format!("{p}: {e:?}").into())
+        c.write_stl_with_tolerance(p, 0.01).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
     e.register_fn("export_stl", |x: Dynamic, p: &str, deflection: Dynamic| -> Res<()> {
         let v = shape_list(&x)?;
         let r: Vec<&Shape> = v.iter().map(|s| &**s).collect();
         let c = if r.len() == 1 { kdup(r[0]) } else { occ_err(occ::compound(&r))? };
-        c.write_stl_with_tolerance(p, num(&deflection)?).map_err(|e| format!("{p}: {e:?}").into())
+        c.write_stl_with_tolerance(p, num(&deflection)?).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
-    e.register_fn("import_step", |p: &str| -> Res<S> { Ok(wrap(Shape::read_step(p).map_err(|e| format!("{p}: {e:?}"))?)) });
+    e.register_fn("import_step", |p: &str| -> Res<S> { Ok(wrap(Shape::read_step(p).map_err(|e| format!("can't open {p}: {e:?}"))?)) });
     e.register_fn("time", || -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) });
 }
 
@@ -889,7 +896,7 @@ pub fn register(e: &mut Engine) {
 /// Run a script file with no window: `args` become the ARGS array, `print` goes to stdout, and the
 /// script's final value is printed as JSON. Errors (including OCCT's) come back with the line.
 pub fn run_file(path: &str, args: &[String]) -> Result<serde_json::Value, String> {
-    let src = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+    let src = std::fs::read_to_string(path).map_err(|e| format!("can't open {path}: {e}"))?;
     run_source(&src, args, Some(std::path::Path::new(path)))
 }
 
@@ -959,6 +966,22 @@ mod tests {
         // the four top edges lose (1 − π/4) r² along their length; the corners are blended together
         let plain = 40.0 * 20.0 * 10.0;
         assert!(v < plain - 0.8 * (1.0 - std::f64::consts::FRAC_PI_4) * 4.0 * 120.0 && v > plain - 1.2 * (1.0 - std::f64::consts::FRAC_PI_4) * 4.0 * 120.0, "{v}");
+    }
+
+    #[test]
+    fn shell_hollows_inward_and_bad_results_throw() {
+        // a closed hollow keeps the outside: walls 1 thick inside a 10 mm cube
+        let v: f64 = eval(r#"block([0, 0, 0], [10, 10, 10]).shell([], 1).volume()"#);
+        assert!((v - (1000.0 - 512.0)).abs() < 1e-6, "{v}");
+        // negative: walls grown outside it
+        let v: f64 = eval(r#"block([0, 0, 0], [10, 10, 10]).shell([], -1).volume()"#);
+        assert!((v - (1728.0 - 1000.0)).abs() < 1e-6, "{v}");
+        // open at the top
+        let v: f64 = eval(r#"let b = block([0, 0, 0], [10, 10, 10]); let top = []; for f in b.faces() { if f.center().z > 9.9 { top.push(f); } } b.shell(top, 1).volume()"#);
+        assert!((v - (1000.0 - 8.0 * 8.0 * 9.0)).abs() < 1e-6, "{v}");
+        // a fillet larger than the part throws instead of returning an invalid shape
+        let msg: String = eval(r#"let m = "no error"; try { let b = block([0, 0, 0], [10, 10, 10]); b.fillet(b.edges(), 6); } catch (e) { m = `${e}`; } m"#);
+        assert!(msg.contains("fillet"), "{msg}");
     }
 
     #[test]

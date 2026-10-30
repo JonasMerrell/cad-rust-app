@@ -1,0 +1,14 @@
+[package]
+name = "crackh3d-fe"
+version = "0.1.0"
+edition = "2021"
+description = "The linear-elastic FE solver and boundary conditions of crackh3d-rs (vendored, without gmsh or the crack code)"
+publish = false
+
+[dependencies]
+nalgebra = "0.33"
+thiserror = "2"
+faer = "0.24"
+rayon = "1"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"

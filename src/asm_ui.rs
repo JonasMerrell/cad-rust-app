@@ -35,6 +35,8 @@ pub struct Drag {
     pub start: Pose,
     pub rotate: bool,
     pub moved: Vec2,
+    /// Moving: the plane the grabbed point slides in (point, normal), world coordinates.
+    pub plane: (DVec3, DVec3),
 }
 
 pub type Snap = (Vec<Assembly>, Vec<Drawing>);
@@ -51,19 +53,167 @@ pub struct AsmUi {
     pub undo: Vec<Snap>,
     pub redo: Vec<Snap>,
     pub failed: Vec<u64>,
+    /// Mates whose geometry could not be found after the parts changed.
+    pub lost: Vec<u64>,
     /// Relation being made: (kind, first mate, second mate, ratio, reverse).
     pub relation: Option<(RelationKind, Option<u64>, Option<u64>, f64, bool)>,
     /// Last interference check: instance id pairs and overlap volume; None while running.
     pub clashes: Option<Vec<(u64, u64, f64)>>,
     pub clash_ids: Vec<u64>,
     pub checking: bool,
+    /// Something moved or changed since the last interference check.
+    pub clash_stale: bool,
+    /// Fingerprint of the parts' geometry the mate connectors were last placed on.
+    pub geom_sig: u64,
     /// Exploded view distance factor (0 = assembled); with explode steps, 0..1 runs through them.
     pub explode: f32,
     /// Measure tool picks: world point and face normal (None for edges).
     pub measure: Option<Vec<(DVec3, Option<DVec3>)>>,
+    /// Standard parts and GrabCAD window.
+    pub lib: crate::stdparts_ui::Lib,
+    /// Playing back the mates a PCB simulation moved.
+    pub motion: Option<Motion>,
 }
 
-fn asm_index(app: &App) -> Option<usize> {
+/// Playback of a circuit simulation's motors and servos in an assembly.
+pub struct Motion {
+    pub asm: usize,
+    /// The simulated time shown (s), and the time last solved for.
+    pub t: f64,
+    shown: Option<f64>,
+    pub playing: bool,
+    /// Simulated seconds per real second.
+    pub rate: f64,
+    /// The poses from before, to go back to.
+    rest: Vec<(u64, Pose)>,
+    last: Option<std::time::Instant>,
+}
+
+/// The simulation results' mate traces for assembly `ai`, with their times.
+fn motion_data(app: &App, ai: usize) -> Option<(&[f64], Vec<&crate::circuit_mech::MateTrace>)> {
+    let out = app.pcb.sim.out.as_ref()?;
+    let tr: Vec<_> = out.mates.iter().filter(|m| m.assembly == ai).collect();
+    (!tr.is_empty() && out.x.len() > 1).then_some((&out.x[..], tr))
+}
+
+/// Start playing the last simulation in assembly `ai` (from the start).
+pub fn play_motion(app: &mut App, ai: usize) {
+    let Some((x, _)) = motion_data(app, ai) else { return };
+    let stop = *x.last().unwrap();
+    let rest = match &app.asm.motion {
+        Some(m) if m.asm == ai => m.rest.clone(),
+        _ => app.ws.assemblies[ai].instances.iter().map(|i| (i.id, i.pose)).collect(),
+    };
+    // a run over a few seconds plays in real time; a short one slows down to about 4 s
+    let rate = if stop > 4.0 { 1.0 } else { [1.0, 0.5, 0.25, 0.1, 0.05, 0.01].into_iter().find(|r| stop / r >= 2.0).unwrap_or(0.01) };
+    app.asm.motion = Some(Motion { asm: ai, t: 0.0, shown: None, playing: true, rate, rest, last: None });
+}
+
+/// Advance the playback and move the parts to it.
+fn motion_tick(app: &mut App, ctx: &egui::Context) {
+    let Some(ai) = asm_index(app) else { return };
+    if app.asm.motion.as_ref().map(|m| m.asm != ai).unwrap_or(true) {
+        return;
+    }
+    let Some(end) = motion_data(app, ai).map(|(x, _)| *x.last().unwrap()) else { return };
+    let now = std::time::Instant::now();
+    let m = app.asm.motion.as_mut().unwrap();
+    if m.playing {
+        if let Some(l) = m.last {
+            m.t += now.duration_since(l).as_secs_f64() * m.rate;
+        }
+        m.last = Some(now);
+        if m.t >= end {
+            m.t = end;
+            m.playing = false;
+            m.last = None;
+        }
+        ctx.request_repaint();
+    } else {
+        m.last = None;
+    }
+    if m.shown == Some(m.t) {
+        return;
+    }
+    m.shown = Some(m.t);
+    let t = m.t;
+    let drives: Vec<assembly::Drive> = {
+        let (x, tr) = motion_data(app, ai).unwrap();
+        let k = x.partition_point(|v| *v <= t).saturating_sub(1).min(x.len() - 1);
+        let f = if k + 1 < x.len() && x[k + 1] > x[k] { ((t - x[k]) / (x[k + 1] - x[k])).clamp(0.0, 1.0) } else { 0.0 };
+        tr.iter().map(|m| m.drive(k, f)).collect()
+    };
+    let centers: Vec<(u64, DVec3)> = app.ws.assemblies[ai].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
+    let r = assembly::solve_driven(&mut app.ws.assemblies[ai], &[], &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), &drives);
+    app.asm.failed = r.failed;
+    app.asm.clash_stale = true;
+    app.asm.scene_dirty = true;
+}
+
+fn motion_ui(app: &mut App, ui: &mut Ui, ai: usize) {
+    let Some((end, names)) = motion_data(app, ai).map(|(x, tr)| (*x.last().unwrap(), tr.iter().map(|m| m.name.clone()).collect::<Vec<_>>())) else { return };
+    let movers: Vec<String> = app.pcb.sim.out.as_ref().map(|o| o.mech.iter().filter(|p| p.role.map(|r| r.drives()).unwrap_or(false)).map(|p| p.reference.clone()).collect()).unwrap_or_default();
+    let pcb_name = app.pcb.sim.ran_name().unwrap_or_default();
+    ui.label(RichText::new(format!("{} from the {pcb_name} simulation moves {}.", movers.join(", "), names.join(", "))).size(12.0).color(theme::muted()));
+    if app.asm.motion.as_ref().map(|m| m.asm != ai).unwrap_or(true) {
+        if ui.button("Play").clicked() {
+            checkpoint(app);
+            play_motion(app, ai);
+        }
+        return;
+    }
+    let m = app.asm.motion.as_mut().unwrap();
+    let mut reset = false;
+    ui.horizontal(|ui| {
+        let label = if m.playing { "Pause" } else { "Play" };
+        if ui.button(label).clicked() {
+            if !m.playing && m.t >= end {
+                m.t = 0.0;
+            }
+            m.playing = !m.playing;
+        }
+        if ui.button("Back to start").on_hover_text("Put the parts back where they were before playing").clicked() {
+            reset = true;
+        }
+    });
+    ui.horizontal(|ui| {
+        ui.spacing_mut().slider_width = ui.available_width() - 70.0;
+        if ui.add(egui::Slider::new(&mut m.t, 0.0..=end).show_value(false)).changed() {
+            m.playing = false;
+        }
+        ui.label(RichText::new(crate::circuit::si(m.t, "s")).size(11.5).monospace());
+    });
+    row_label(ui, "Speed", |ui| {
+        egui::ComboBox::from_id_salt("motion_rate").width(90.0).selected_text(format!("{}×", m.rate)).show_ui(ui, |ui| {
+            for r in [1.0, 0.5, 0.25, 0.1, 0.05, 0.01] {
+                ui.selectable_value(&mut m.rate, r, format!("{r}×"));
+            }
+        });
+    });
+    if reset {
+        let rest = m.rest.clone();
+        app.asm.motion = None;
+        if let Some(a) = app.ws.assemblies.get_mut(ai) {
+            for (id, p) in rest {
+                if let Some(i) = a.instances.iter_mut().find(|i| i.id == id) {
+                    i.pose = p;
+                }
+            }
+        }
+        app.asm.failed = assembly::failed_mates(&app.ws.assemblies[ai]);
+        app.asm.scene_dirty = true;
+        app.asm.clash_stale = true;
+    }
+}
+
+fn row_label(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(label).size(12.0).color(theme::muted()));
+        add(ui);
+    });
+}
+
+pub fn asm_index(app: &App) -> Option<usize> {
     match app.tab {
         Tab::Assembly(i) => Some(i),
         _ => None,
@@ -81,6 +231,7 @@ pub fn asm_mut(app: &mut App) -> Option<&mut Assembly> {
 
 /// Record an undo step for assembly/drawing edits.
 pub fn checkpoint(app: &mut App) {
+    app.asm.clash_stale = true;
     let snap = (app.ws.assemblies.clone(), app.ws.drawings.clone());
     app.asm.undo.push(snap);
     if app.asm.undo.len() > 200 {
@@ -182,8 +333,56 @@ pub fn solve(app: &mut App, hold: &[u64]) {
     let Some(i) = asm_index(app) else { return };
     let centers: Vec<(u64, DVec3)> = app.ws.assemblies[i].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
     let r = assembly::solve(&mut app.ws.assemblies[i], hold, &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO));
+    // mates whose geometry went away in a Part Studio edit stay failed
+    let lost: Vec<u64> = app.asm.failed.iter().copied().filter(|m| app.asm.lost.contains(m)).collect();
     app.asm.failed = r.failed;
+    for m in lost {
+        if !app.asm.failed.contains(&m) {
+            app.asm.failed.push(m);
+        }
+    }
+    app.asm.clash_stale = true;
     app.asm.scene_dirty = true;
+}
+
+/// After the parts change (a Part Studio rebuilt), move the mate connectors onto the new
+/// geometry and solve again.
+fn follow_parts(app: &mut App) {
+    let Some(i) = asm_index(app) else { return };
+    // a cheap fingerprint of the geometry the instances use
+    use std::hash::{Hash, Hasher};
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    let leaves: Vec<assembly::Leaf> = app.ws.assemblies[i].instances.iter().flat_map(|x| assembly::leaves(&app.ws.assemblies, x)).collect();
+    for l in &leaves {
+        if let Some(m) = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body) {
+            (l.studio, l.body, m.volume.to_bits(), m.area.to_bits(), m.faces.len(), m.edges.len()).hash(&mut h);
+        } else {
+            (l.studio, l.body).hash(&mut h);
+        }
+    }
+    let sig = h.finish();
+    if sig == app.asm.geom_sig {
+        return;
+    }
+    let first = app.asm.geom_sig == 0;
+    app.asm.geom_sig = sig;
+    let meshes: std::collections::HashMap<(usize, crate::doc::BodyId), crate::kernel::BodyMesh> =
+        leaves.iter().filter_map(|l| app.studio_bodies(l.studio).iter().find(|b| b.id == l.body).map(|m| ((l.studio, l.body), m.clone()))).collect();
+    let before = serde_json::to_string(&app.ws.assemblies[i].mates).unwrap_or_default();
+    let lost = assembly::refresh_connectors(&mut app.ws.assemblies, i, &|s, b| meshes.get(&(s, b)));
+    let moved = serde_json::to_string(&app.ws.assemblies[i].mates).unwrap_or_default() != before;
+    app.asm.lost = lost.clone();
+    if moved || !lost.is_empty() {
+        solve(app, &[]);
+        for m in lost {
+            if !app.asm.failed.contains(&m) {
+                app.asm.failed.push(m);
+            }
+        }
+        if !first {
+            app.asm.clash_stale = true;
+        }
+    }
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -192,6 +391,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     App::group(ui, |ui| {
         if app.tool_button(ui, "import", "Insert", "Insert parts from Part Studios", true, app.asm.insert_open, true).clicked() {
             app.asm.insert_open = !app.asm.insert_open;
+        }
+        if app.tool_button(ui, "library", "Library", "Standard parts (screws, nuts, bearings, motors…) and models downloaded from GrabCAD", true, app.asm.lib.open, true).clicked() {
+            crate::stdparts_ui::toggle(app);
         }
     });
     App::group(ui, |ui| {
@@ -320,6 +522,14 @@ fn delete_selection(app: &mut App) {
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
+    if crate::app::key_mods(ctx).0 {
+        // Ctrl+A selects every instance; other Ctrl keys are not the letters' tools
+        if pressed(egui::Key::A) && app.asm.dialog.is_none() {
+            app.asm.sel = asm(app).map(|a| a.instances.iter().map(|x| x.id).collect()).unwrap_or_default();
+            app.asm.scene_dirty = true;
+        }
+        return;
+    }
     if pressed(egui::Key::Escape) {
         if app.asm.dialog.is_some() {
             mate_cancel(app);
@@ -354,7 +564,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
 }
 
-fn fit(app: &mut App) {
+pub fn fit(app: &mut App) {
     let Some(a) = asm(app) else { return };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
@@ -373,6 +583,7 @@ fn fit(app: &mut App) {
 // ---------------------------------------------------------------- sidebar
 
 pub fn sidebar(app: &mut App, ui: &mut Ui) {
+    motion_tick(app, &ui.ctx().clone());
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if app.asm.insert_open {
             section(ui, "Insert", |ui| insert_panel(app, ui));
@@ -384,6 +595,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         if app.asm.relation.is_some() || asm(app).map(|a| !a.relations.is_empty()).unwrap_or(false) {
             section(ui, "Relations", |ui| relations(app, ui));
+        }
+        if let Some(ai) = asm_index(app).filter(|ai| motion_data(app, *ai).is_some()) {
+            section(ui, "Motion", |ui| motion_ui(app, ui, ai));
         }
         if app.asm.explode > 0.0 {
             section(ui, "Exploded view", |ui| explode_ui(app, ui));
@@ -461,7 +675,7 @@ fn insert_panel(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Option<usize>, name: String) {
+pub fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Option<usize>, name: String) {
     checkpoint(app);
     // place new instances beside what is already there
     let mut max_x = f64::NEG_INFINITY;
@@ -818,7 +1032,7 @@ fn connector_for(app: &App, h: &Hit) -> Option<Connector> {
     let a = asm(app)?;
     let x = a.instance(h.inst)?;
     let part = parts_of(app, x).into_iter().nth(h.leaf)??;
-    let c = assembly::infer_connector(h.inst, part.mesh, h.face, h.edge, h.local.into())?;
+    let c = assembly::infer_connector(h.inst, h.leaf, part.mesh, h.face, h.edge, h.local.into())?;
     // from the part's coordinates into the instance's
     let l = part.local;
     Some(Connector { origin: l.apply(c.origin.into()).into(), z: l.dir(c.z.into()).into(), x: l.dir(c.x.into()).into(), ..c })
@@ -896,6 +1110,7 @@ fn build_scene(app: &App) -> SceneData {
 }
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
+    crate::stdparts_ui::window(app, &ui.ctx().clone());
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     if app.viewport_rect != rect {
@@ -912,6 +1127,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
 
+    follow_parts(app);
     if asm(app).map(|a| a.instances.is_empty()).unwrap_or(true) && !app.asm.insert_open {
         app.asm.insert_open = true;
     }
@@ -959,7 +1175,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                         d.active = if active == 0 { 1 } else { 0 };
                     }
                     if solve_now {
-                        solve(app, &[]);
+                        // the instance with fewer mates (or inserted later) moves to meet the other
+                        let hold = asm(app).map(|a| assembly::mate_anchor(a, mid)).unwrap_or_default();
+                        solve(app, &hold);
                     }
                     app.asm.scene_dirty = true;
                 }
@@ -990,7 +1208,12 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     checkpoint(app);
                     let start = asm(app).and_then(|a| a.instance(h.inst)).map(|x| x.pose).unwrap_or_default();
                     let rotate = ui.input(|i| i.modifiers.shift);
-                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO });
+                    // slide in the plane of the grabbed face, else in the world plane facing the camera most
+                    let (p, n) = hit_world(app, &h).unwrap_or((DVec3::ZERO, None));
+                    let back = app.camera.back.as_dvec3().normalize();
+                    let world = [DVec3::Z, DVec3::Y, DVec3::X].into_iter().max_by(|a, b| a.dot(back).abs().partial_cmp(&b.dot(back).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(DVec3::Z);
+                    let n = n.filter(|n| n.dot(back).abs() > 0.2).unwrap_or(world);
+                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO, plane: (p, n) });
                 }
             }
         }
@@ -1005,8 +1228,23 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 let w = (cam.up.as_dvec3() * d.moved.x as f64 + cam.right().as_dvec3() * d.moved.y as f64) * 0.01;
                 d.start.perturbed(w, DVec3::ZERO, c)
             } else {
-                let wpp = cam.wpp() as f64;
-                let v = cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp);
+                // the grabbed point follows the pointer across its plane
+                let (p0, n) = d.plane;
+                let hit = |s: Vec2| {
+                    let (o, dir) = cam.ray(s);
+                    let (o, dir) = (o.as_dvec3(), dir.as_dvec3());
+                    let den = dir.dot(n);
+                    (den.abs() > 1e-9).then(|| o + dir * ((p0 - o).dot(n) / den))
+                };
+                let now = ui.input(|i| i.pointer.latest_pos()).map(local);
+                let start = now.map(|q| q - d.moved);
+                let v = match (start.and_then(hit), now.and_then(hit)) {
+                    (Some(a), Some(b)) if (b - a).length() < 1e6 => b - a,
+                    _ => {
+                        let wpp = cam.wpp() as f64;
+                        cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp)
+                    }
+                };
                 d.start.perturbed(DVec3::ZERO, v, DVec3::ZERO)
             };
             let id = d.inst;
@@ -1033,14 +1271,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         scene: app.scene.clone(),
         view_proj: app.camera.view_proj(),
         eye_dir: app.camera.back,
-        clip: match app.section {
-            Some(sec) => {
-                let n = [Vec3::Z, -Vec3::Y, Vec3::X][sec.plane as usize];
-                let (n, w) = if sec.flip { (-n, -(sec.offset as f32)) } else { (n, sec.offset as f32) };
-                [n.x, n.y, n.z, w]
-            }
-            None => [0.0; 4],
-        },
+        clip: app.section.map(|s| s.clip()).unwrap_or([0.0; 4]),
         size_px: [rect.width() * ppp, rect.height() * ppp],
         pixels_per_point: ppp,
         realistic: app.realistic,
@@ -1090,6 +1321,7 @@ fn check_interference(app: &mut App) {
         }
     }
     app.asm.clash_ids = ids;
+    app.asm.clash_stale = false;
     let docs = app.studio_docs();
     app.kernel.set_studios(docs);
     app.kernel.interference(items);
@@ -1112,13 +1344,17 @@ fn clashes_ui(app: &mut App, ui: &mut Ui) {
     }
     let Some(list) = app.asm.clashes.clone() else { return };
     let Some(a) = asm(app) else { return };
+    let stale = app.asm.clash_stale;
+    if stale {
+        ui.label(RichText::new("Out of date: parts changed since this check. Run Interference again.").color(theme::muted()).italics().size(12.0));
+    }
     if list.is_empty() {
-        ui.label(RichText::new("No parts overlap").color(theme::ok_green()).size(12.5));
+        ui.label(RichText::new("No parts overlap").color(if stale { theme::muted() } else { theme::ok_green() }).size(12.5));
     }
     let name = |id: u64| a.instance(id).map(|x| x.name.clone()).unwrap_or_default();
-    let rows: Vec<(u64, u64, String)> = list.iter().map(|(p, q, v)| (*p, *q, format!("{} ∩ {} · {} mm³", name(*p), name(*q), crate::expr::trim(*v, 2)))).collect();
+    let rows: Vec<(u64, u64, String)> = list.iter().map(|(p, q, v)| (*p, *q, format!("{} overlaps {} · {} mm³", name(*p), name(*q), crate::expr::trim(*v, 2)))).collect();
     for (p, q, text) in rows {
-        if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(theme::error_soft())).min_size(egui::vec2(ui.available_width(), 20.0))).clicked() {
+        if ui.add(egui::Button::new(RichText::new(text).size(12.0).color(if stale { theme::muted() } else { theme::error_soft() })).min_size(egui::vec2(ui.available_width(), 20.0))).clicked() {
             app.asm.sel = vec![p, q];
             app.asm.scene_dirty = true;
         }

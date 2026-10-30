@@ -83,6 +83,17 @@ impl Seg {
             }
         }
     }
+    /// This piece's share of the area its loop encloses: ½∮(x dy − y dx) along it.
+    pub fn area_term(&self) -> f64 {
+        match *self {
+            Seg::Line { a, b } => a.perp_dot(b) * 0.5,
+            Seg::Arc { c, r, t0, t1 } => 0.5 * (r * r * (t1 - t0) + r * c.x * (t1.sin() - t0.sin()) - r * c.y * (t1.cos() - t0.cos())),
+            Seg::Poly { ref pts, closed } => {
+                let n = if closed { pts.len() } else { pts.len() - 1 };
+                (0..n).map(|i| pts[i].perp_dot(pts[(i + 1) % pts.len()])).sum::<f64>() * 0.5
+            }
+        }
+    }
     pub fn polyline(&self, out: &mut Vec<DVec2>) {
         match *self {
             Seg::Poly { ref pts, closed } => {
@@ -114,8 +125,10 @@ impl Loop {
         }
         Loop { segs, poly }
     }
+    /// Signed area (counter-clockwise positive), exact for lines and arcs rather than from the
+    /// polygon drawn through them.
     pub fn area(&self) -> f64 {
-        signed_area(&self.poly)
+        self.segs.iter().map(Seg::area_term).sum()
     }
     pub fn reversed(&self) -> Loop {
         Loop::new(self.segs.iter().rev().map(|s| s.reversed()).collect())
@@ -139,11 +152,6 @@ impl Region {
     pub fn contains(&self, p: DVec2) -> bool {
         point_in_poly(p, &self.outer.poly) && !self.holes.iter().any(|h| point_in_poly(p, &h.poly))
     }
-}
-
-pub fn signed_area(p: &[DVec2]) -> f64 {
-    let n = p.len();
-    (0..n).map(|i| p[i].perp_dot(p[(i + 1) % n])).sum::<f64>() * 0.5
 }
 
 pub fn point_in_poly(p: DVec2, poly: &[DVec2]) -> bool {
@@ -412,7 +420,14 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
                 continue;
             }
             let (a, b) = (vid(p.at(w[0])), vid(p.at(w[1])));
-            if a == b && matches!(seg, Seg::Line { .. }) {
+            // a sliver between two splits that merged into one vertex (e.g. where a line meets an arc
+            // tangentially) is no edge; only a whole circle may start and end at the same vertex
+            let sliver = match seg {
+                Seg::Arc { r, t0, t1, .. } => r * (t1 - t0).abs() < TOL * 100.0,
+                Seg::Poly { ref pts, .. } => pts.windows(2).map(|w| (w[1] - w[0]).length()).sum::<f64>() < TOL * 100.0,
+                Seg::Line { .. } => true,
+            };
+            if a == b && sliver {
                 continue;
             }
             // skip duplicate overlapping edges
@@ -564,7 +579,23 @@ mod tests {
         let r = find_regions(&s);
         assert_eq!(r.len(), 2, "{r:?}");
         let big = r.iter().find(|r| r.holes.len() == 1).unwrap();
-        assert!((big.area - (800.0 - std::f64::consts::PI * 25.0)).abs() < 2.0, "{}", big.area);
+        // exact, not the area of the polygon drawn through the circle
+        assert!((big.area - (800.0 - std::f64::consts::PI * 25.0)).abs() < 1e-9, "{}", big.area);
+        let small = r.iter().find(|r| r.holes.is_empty()).unwrap();
+        assert!((small.area - std::f64::consts::PI * 25.0).abs() < 1e-9, "{}", small.area);
+    }
+
+    #[test]
+    fn half_disc_area_is_exact() {
+        let mut s = Sketch::default();
+        let c = s.add_point(DVec2::new(3.0, -2.0));
+        s.add_curve(Geom::Circle { c, r: 10.0 }, false);
+        let a = s.add_point(DVec2::new(-20.0, -2.0));
+        let b = s.add_point(DVec2::new(20.0, -2.0));
+        s.add_curve(Geom::Line { a, b }, false);
+        for r in find_regions(&s) {
+            assert!((r.area - std::f64::consts::PI * 50.0).abs() < 1e-9, "{}", r.area);
+        }
     }
 
     #[test]

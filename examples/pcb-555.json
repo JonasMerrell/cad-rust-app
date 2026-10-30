@@ -1,0 +1,35 @@
+[
+  {"tool": "new_document", "args": {"units": "mm"}},
+  {"tool": "create_pcb", "args": {"name": "Blinker", "width": 40, "height": 30, "corner_radius": 2}},
+  {"tool": "pcb_add_parts", "args": {"pcb": 0, "parts": [
+    {"symbol": "U", "value": "NE555", "footprint": "SOIC-8", "mpn": "C46749", "pin_names": ["GND", "TRIG", "OUT", "RESET", "CTRL", "THR", "DIS", "VCC"]},
+    {"symbol": "R", "value": "1k"},
+    {"symbol": "R", "value": "10k"},
+    {"symbol": "R", "value": "470"},
+    {"symbol": "CP", "value": "10u"},
+    {"symbol": "C", "value": "10n"},
+    {"symbol": "C", "value": "100n"},
+    {"symbol": "LED", "value": "Red"},
+    {"symbol": "J", "value": "Power", "footprint": "PinHeader_1x02", "pin_names": ["VCC", "GND"]}
+  ]}},
+  {"tool": "pcb_connect", "args": {"pcb": 0, "nets": {
+    "VCC": ["U1.VCC", "U1.RESET", "R1.1", "C3.1", "J1.1"],
+    "GND": ["U1.GND", "C1.2", "C2.2", "C3.2", "D1.1", "J1.2"],
+    "DIS": ["U1.DIS", "R1.2", "R2.1"],
+    "TIMING": ["U1.THR", "U1.TRIG", "R2.2", "C1.1"],
+    "CTRL": ["U1.CTRL", "C2.1"],
+    "OUT": ["U1.OUT", "R3.1"],
+    "LED_A": ["R3.2", "D1.2"]
+  }}},
+  {"tool": "pcb_edit", "args": {"pcb": 0, "auto_place": "unplaced", "holes": [{"at": [3.5, 3.5], "d": 3.2}, {"at": [36.5, 26.5], "d": 3.2}], "zones": [{"net": "GND", "layer": "bottom"}]}},
+  {"tool": "pcb_route", "args": {"pcb": 0}},
+  {"tool": "check_pcb", "args": {"pcb": 0}},
+  {"tool": "simulate_pcb", "args": {"pcb": 0, "analysis": "tran", "stop": 0.6, "probes": ["OUT", "TIMING", "I(D1)"], "path": "pcb-555-sim.png"}},
+  {"tool": "render_pcb", "args": {"pcb": 0, "view": "schematic", "path": "pcb-555-schematic.png"}},
+  {"tool": "render_pcb", "args": {"pcb": 0, "path": "pcb-555-board.png"}},
+  {"tool": "export_pcb", "args": {"pcb": 0, "path": "pcb-555/Blinker.zip"}},
+  {"tool": "pcb_3d", "args": {"pcb": 0}},
+  {"tool": "render", "args": {"view": "iso", "path": "pcb-555-3d.png"}},
+  {"tool": "export", "args": {"format": "step", "path": "pcb-555/Blinker.step"}},
+  {"tool": "save_document", "args": {"path": "pcb-555-doc.json"}}
+]

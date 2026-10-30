@@ -1,4 +1,4 @@
-//! Python bindings to cad-rust-app's OpenCascade kernel: `cadrust._core`.
+//! Python bindings to rCAD's OpenCascade kernel: `cadrust._core`.
 //!
 //! The low-level layer: shapes, the operations on them and the queries, with plain tuples and lists
 //! in and out. `cadrust.freecad` builds a FreeCAD-style API (Vector, Placement, Part.makeBox, …) on it.
