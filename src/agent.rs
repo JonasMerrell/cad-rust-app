@@ -654,7 +654,7 @@ impl Session {
             let mut props = self.doc.parts.get(&crate::doc::body_key(b.id)).cloned().unwrap_or_default();
             // a one-off setting for this answer, not saved on the part
             apply_stock(&mut props, a)?;
-            let Some(st) = crate::stock_size::for_part(b, &props, self.doc.units) else { continue };
+            let Some(st) = crate::stock_parts::for_part(b, &props, self.doc.units) else { continue };
             let r1 = |v: f64| (v * 10.0).round() / 10.0;
             let mut p = json!({
                 "body": [b.id.0, b.id.1],

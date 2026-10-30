@@ -2491,7 +2491,7 @@ impl App {
         let mut pref = props.stock.clone().unwrap_or_default();
         let Some(mesh) = self.result.bodies.iter().find(|b| b.id == id) else { return };
         let volume = mesh.volume;
-        let Some(st) = ss::for_part(mesh, &props, self.doc.units) else { return };
+        let Some(st) = crate::stock_parts::for_part(mesh, &props, self.doc.units) else { return };
         let row = |ui: &mut Ui, k: &str, v: String| {
             ui.horizontal_wrapped(|ui| {
                 ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new(k).color(theme::muted()).size(12.0)));

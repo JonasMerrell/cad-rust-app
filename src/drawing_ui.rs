@@ -838,7 +838,7 @@ fn shown_part(app: &dyn DocCtx, v: Option<&DrawView>) -> (String, String, String
         if v.body.is_some() && bodies.len() > 1 { format!("{studio} / {mesh}") } else { studio.clone() }
     });
     let doc = app.studio_doc(v.studio);
-    let stock = crate::stock_size::bom_text(bodies.iter().find(|m| m.id == b), &props, doc.map(|d| d.units).unwrap_or_default());
+    let stock = crate::stock_parts::bom_text(bodies.iter().find(|m| m.id == b), &props, doc.map(|d| d.units).unwrap_or_default());
     (name, props.material.unwrap_or_default(), stock)
 }
 

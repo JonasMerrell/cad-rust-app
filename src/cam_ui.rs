@@ -512,7 +512,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
             _ => None,
         };
         let pref = one.and_then(|b| doc?.parts.get(&crate::doc::body_key(b))?.stock.clone()).unwrap_or_default();
-        let imperial = crate::stock_size::imperial_for(&pref, doc.map(|d| d.units).unwrap_or_default());
+        let imperial = crate::stock_parts::imperial_for(&pref, doc.map(|d| d.units).unwrap_or_default());
         (pref, imperial)
     };
     {

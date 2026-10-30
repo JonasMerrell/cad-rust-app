@@ -854,7 +854,7 @@ pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<BomRow> {
         };
         // bought parts (screws, bearings) are not cut from stock
         let bought = app.ws().studios.get(l.studio).is_some_and(|s| s.name == crate::stdparts::STUDIO);
-        let stock = if bought { String::new() } else { crate::stock_size::bom_text(mesh, &props, doc.map(|d| d.units).unwrap_or_default()) };
+        let stock = if bought { String::new() } else { crate::stock_parts::bom_text(mesh, &props, doc.map(|d| d.units).unwrap_or_default()) };
         rows.push((key, BomRow { item: 0, name, qty: 1, material: props.material.unwrap_or_default(), mass, stock }));
     }
     rows.into_iter().enumerate().map(|(i, r)| BomRow { item: i + 1, ..r.1 }).collect()

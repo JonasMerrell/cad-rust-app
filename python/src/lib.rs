@@ -26,6 +26,19 @@ mod fea_solve;
 #[path = "../../src/web_export.rs"]
 mod web_export;
 
+#[allow(dead_code)] // the app's CAM setups and BOM use the rest
+#[path = "../../src/stock_size.rs"]
+mod stock_size;
+
+/// The app's number formatting, which `stock_size` labels with.
+mod expr {
+    pub fn trim(v: f64, decimals: usize) -> String {
+        let s = format!("{:.*}", decimals, v);
+        let s = if s.contains('.') { s.trim_end_matches('0').trim_end_matches('.').to_string() } else { s };
+        if s == "-0" { "0".into() } else { s }
+    }
+}
+
 create_exception!(_core, OCCError, PyException, "An OpenCascade operation failed.");
 
 type V3 = (f64, f64, f64);
@@ -473,6 +486,54 @@ fn write_step(nodes: Vec<(Option<PyRef<Shape>>, i32, String, Option<V3>)>, path:
     if ex::ex_write_step_assembly(&shapes, &parents, &names, &colors, path) { Ok(()) } else { Err(fail("STEP export")) }
 }
 
+/// Raw stock for a part, as the app's BOM works it out: the smallest standard plate, flat or square
+/// bar, or round bar (or with standard "box", the bounding box plus the allowances) that holds the
+/// shape with `side` mm on each side and `face` mm on each face. shape_kind: "auto" (least material),
+/// "plate" or "round"; standard: "metric", "imperial" or "box". Returns a dict (kind, label, dims and
+/// part as [thickness, width, length] mm — a round bar's diameter twice — axes, volume mm³), or None.
+#[pyfunction]
+#[pyo3(name = "stock_size", signature = (shape, shape_kind="auto", standard="metric", side=1.0, face=0.5, deflection=0.05))]
+fn stock_for<'py>(
+    py: Python<'py>,
+    shape: PyRef<Shape>,
+    shape_kind: &str,
+    standard: &str,
+    side: f64,
+    face: f64,
+    deflection: f64,
+) -> PyResult<Option<Bound<'py, pyo3::types::PyDict>>> {
+    use pyo3::types::PyDict;
+    if !stock_size::SHAPES.iter().any(|x| x.0 == shape_kind) {
+        return Err(PyException::new_err(format!("stock_size: shape_kind {shape_kind:?}: use auto, plate or round")));
+    }
+    if !["metric", "imperial", "box"].contains(&standard) {
+        return Err(PyException::new_err(format!("stock_size: standard {standard:?}: use metric, imperial or box")));
+    }
+    let v = ex::ex_triangulate(shape.s(), deflection, 0.5, false);
+    if v.len() < 2 {
+        return Err(fail("stock_size: triangulate"));
+    }
+    let nv = v[0] as usize;
+    let pts: Vec<glam::DVec3> = v[2..2 + 3 * nv].chunks_exact(3).map(|p| glam::DVec3::new(p[0], p[1], p[2])).collect();
+    let pref = stock_size::StockPref {
+        shape: shape_kind.into(),
+        standard: standard.into(),
+        side,
+        face,
+        custom: String::new(),
+    };
+    let Some(st) = stock_size::suggest(&pts, &pref, standard == "imperial") else { return Ok(None) };
+    let d = PyDict::new(py);
+    let kind = serde_json::to_value(st.kind).ok().and_then(|k| k.as_str().map(String::from)).unwrap_or_default();
+    d.set_item("kind", kind)?;
+    d.set_item("label", st.label())?;
+    d.set_item("dims", st.dims.to_vec())?;
+    d.set_item("part", st.part.to_vec())?;
+    d.set_item("axes", st.axes.iter().map(|a| (a.x, a.y, a.z)).collect::<Vec<V3>>())?;
+    d.set_item("volume", st.volume())?;
+    Ok(Some(d))
+}
+
 #[pymodule]
 fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
     // a crash inside OCCT raises OCCError instead of killing Python
@@ -497,6 +558,7 @@ fn _core(m: &Bound<'_, PyModule>) -> PyResult<()> {
         wrap_pyfunction!(compound, m)?,
         wrap_pyfunction!(loft, m)?,
         wrap_pyfunction!(write_step, m)?,
+        wrap_pyfunction!(stock_for, m)?,
         wrap_pyfunction!(common_volumes, m)?,
         wrap_pyfunction!(web::web_mesh, m)?,
         wrap_pyfunction!(web::web_write, m)?,
