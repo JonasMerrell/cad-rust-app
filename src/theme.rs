@@ -80,16 +80,24 @@ pub struct Shape {
     pub separators: bool,
     /// Popups and dialogs.
     pub window_radius: u8,
+    /// Hairline around cards.
+    pub card_border: bool,
+    /// Soft drop shadow under cards.
+    pub card_shadow: bool,
+    /// Canvas colour behind cards, light and dark (0 = derived from the palette).
+    pub canvas: [u32; 2],
 }
 
 const CURRENT_SHAPE: Shape =
-    Shape { name: "current", radius: 5, row_radius: 5, tab: TabStyle::Raised, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 10 };
+    Shape { name: "current", radius: 5, row_radius: 5, tab: TabStyle::Raised, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 10, card_border: false, card_shadow: false, canvas: [0, 0] };
 
 const SHAPES: &[Shape] = &[
-    Shape { name: "soft", radius: 8, row_radius: 8, tab: TabStyle::Pill, button_stroke: false, button_fill: false, gap: 6, card_radius: 12, chips: true, sel_bar: false, height: 28.0, separators: false, window_radius: 14 },
-    Shape { name: "crisp", radius: 0, row_radius: 0, tab: TabStyle::Box, button_stroke: true, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 26.0, separators: true, window_radius: 0 },
-    Shape { name: "classic", radius: 3, row_radius: 2, tab: TabStyle::Folder, button_stroke: true, button_fill: true, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 4 },
-    Shape { name: "minimal", radius: 6, row_radius: 0, tab: TabStyle::Underline, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 30.0, separators: false, window_radius: 10 },
+    Shape { name: "soft", radius: 8, row_radius: 8, tab: TabStyle::Pill, button_stroke: false, button_fill: false, gap: 6, card_radius: 12, chips: true, sel_bar: false, height: 28.0, separators: false, window_radius: 14, card_border: true, card_shadow: false, canvas: [0, 0] },
+    Shape { name: "soft-elevated", radius: 8, row_radius: 8, tab: TabStyle::Pill, button_stroke: false, button_fill: false, gap: 8, card_radius: 14, chips: true, sel_bar: false, height: 28.0, separators: false, window_radius: 14, card_border: false, card_shadow: true, canvas: [0xe3e6ea, 0x0b0c0e] },
+    Shape { name: "soft-round", radius: 14, row_radius: 14, tab: TabStyle::Pill, button_stroke: false, button_fill: false, gap: 8, card_radius: 18, chips: true, sel_bar: false, height: 28.0, separators: false, window_radius: 18, card_border: true, card_shadow: false, canvas: [0xe6ecf4, 0x0f131a] },
+    Shape { name: "crisp", radius: 0, row_radius: 0, tab: TabStyle::Box, button_stroke: true, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 26.0, separators: true, window_radius: 0, card_border: false, card_shadow: false, canvas: [0, 0] },
+    Shape { name: "classic", radius: 3, row_radius: 2, tab: TabStyle::Folder, button_stroke: true, button_fill: true, gap: 0, card_radius: 0, chips: false, sel_bar: false, height: 26.0, separators: true, window_radius: 4, card_border: false, card_shadow: false, canvas: [0, 0] },
+    Shape { name: "minimal", radius: 6, row_radius: 0, tab: TabStyle::Underline, button_stroke: false, button_fill: false, gap: 0, card_radius: 0, chips: false, sel_bar: true, height: 30.0, separators: false, window_radius: 10, card_border: false, card_shadow: false, canvas: [0, 0] },
 ];
 
 pub fn shape() -> &'static Shape {
@@ -109,6 +117,10 @@ pub fn layout() -> &'static str {
 
 /// Behind floating panel cards.
 pub fn canvas() -> Color32 {
+    let c = shape().canvas[is_dark() as usize];
+    if c != 0 {
+        return hex(c);
+    }
     if is_dark() { lerp(pal().bg, Color32::BLACK, 0.25) } else { lerp(pal().panel_2, pal().border, 0.35) }
 }
 
@@ -119,7 +131,45 @@ pub fn panel_frame(fill: Color32, m: egui::Margin) -> egui::Frame {
     if sh.gap == 0 {
         return f;
     }
-    f.outer_margin(egui::Margin::same(sh.gap)).corner_radius(sh.card_radius).stroke(Stroke::new(1.0, lerp(pal().border, pal().panel, 0.3)))
+    let mut f = f.outer_margin(egui::Margin::same(sh.gap)).corner_radius(sh.card_radius);
+    if sh.card_border {
+        f = f.stroke(card_stroke());
+    }
+    if sh.card_shadow {
+        f = f.shadow(egui::Shadow { offset: [0, 2], blur: 10, spread: 0, color: Color32::from_black_alpha(if is_dark() { 90 } else { 22 }) });
+    }
+    f
+}
+
+pub fn card_stroke() -> Stroke {
+    Stroke::new(1.0, if is_dark() { lerp(pal().border, pal().panel, 0.2) } else { lerp(pal().border, pal().panel, 0.3) })
+}
+
+/// Round the corners of a flush area (the viewport) by painting the canvas over them.
+pub fn round_corners(painter: &egui::Painter, rect: egui::Rect, r: f32) {
+    let col = canvas();
+    let mut m = egui::Mesh::default();
+    let n = 8;
+    for (corner, centre, a0) in [
+        (rect.left_top(), rect.left_top() + egui::vec2(r, r), std::f32::consts::PI),
+        (rect.right_top(), rect.right_top() + egui::vec2(-r, r), 1.5 * std::f32::consts::PI),
+        (rect.right_bottom(), rect.right_bottom() + egui::vec2(-r, -r), 0.0),
+        (rect.left_bottom(), rect.left_bottom() + egui::vec2(r, -r), 0.5 * std::f32::consts::PI),
+    ] {
+        let base = m.vertices.len() as u32;
+        m.colored_vertex(corner, col);
+        for i in 0..=n {
+            let a = a0 + std::f32::consts::FRAC_PI_2 * i as f32 / n as f32;
+            m.colored_vertex(centre + r * egui::vec2(a.cos(), a.sin()), col);
+        }
+        for i in 0..n {
+            m.add_triangle(base, base + 1 + i, base + 2 + i);
+        }
+    }
+    painter.add(m);
+    if shape().card_border {
+        painter.rect_stroke(rect, r, card_stroke(), egui::StrokeKind::Inside);
+    }
 }
 
 const LOOKS: &[Look] = &[

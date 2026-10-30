@@ -3403,7 +3403,10 @@ impl eframe::App for App {
             }
         }
         crate::claude_ui::panel(self, ui);
-        let central = egui::CentralPanel::no_frame().show(ui, |ui| match self.tab {
+        let gap = if cards && layout != "floating" { sh.gap } else { 0 };
+        let side_card = self.sidebar_open && !self.phone && layout != "floating";
+        let cframe = Frame::new().outer_margin(Margin { left: if side_card { 0 } else { gap }, right: gap, top: 0, bottom: gap });
+        let central = egui::CentralPanel::no_frame().frame(cframe).show(ui, |ui| match self.tab {
             crate::workspace::Tab::Assembly(_) => crate::asm_ui::viewport(self, ui),
             crate::workspace::Tab::Drawing(_) => crate::drawing_ui::show(self, ui),
             crate::workspace::Tab::Cam(_) => crate::cam_ui::viewport(self, ui),
@@ -3417,6 +3420,10 @@ impl eframe::App for App {
                 crate::script_ui::window(self, ui.ctx());
             }
         });
+        if gap > 0 {
+            let r = central.response.rect;
+            theme::round_corners(&ui.painter_at(r), r, sh.card_radius as f32);
+        }
         if !self.phone && !matches!(self.tab, crate::workspace::Tab::Drawing(_)) {
             self.hint_ui(&ctx, central.response.rect);
         }
