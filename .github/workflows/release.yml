@@ -43,28 +43,28 @@ jobs:
       - name: Package (Linux)
         if: runner.os == 'Linux'
         run: |
-          mkdir -p dist/cad-app
-          cp target/release/cad-rust-app dist/cad-app/cad-app
-          strip dist/cad-app/cad-app
-          cp LICENSE README.md AGENTS.md SCRIPTING.md .mcp.json dist/cad-app/
-          cp -r examples dist/cad-app/
-          tar -C dist -cJf cad-app-${{ matrix.name }}.tar.xz cad-app
+          mkdir -p dist/rcad
+          cp target/release/rcad dist/rcad/rcad
+          strip dist/rcad/rcad
+          cp LICENSE README.md AGENTS.md SCRIPTING.md .mcp.json dist/rcad/
+          cp -r examples dist/rcad/
+          tar -C dist -cJf rcad-${{ matrix.name }}.tar.xz rcad
       - name: Package (Windows)
         if: runner.os == 'Windows'
         shell: pwsh
         run: |
-          New-Item -ItemType Directory -Force dist/cad-app | Out-Null
-          Copy-Item target/release/cad-rust-app.exe dist/cad-app/cad-app.exe
-          Copy-Item LICENSE, README.md, AGENTS.md, SCRIPTING.md, .mcp.json dist/cad-app/
-          Copy-Item -Recurse examples dist/cad-app/
-          Compress-Archive -Path dist/cad-app -DestinationPath cad-app-${{ matrix.name }}.zip
+          New-Item -ItemType Directory -Force dist/rcad | Out-Null
+          Copy-Item target/release/rcad.exe dist/rcad/rcad.exe
+          Copy-Item LICENSE, README.md, AGENTS.md, SCRIPTING.md, .mcp.json dist/rcad/
+          Copy-Item -Recurse examples dist/rcad/
+          Compress-Archive -Path dist/rcad -DestinationPath rcad-${{ matrix.name }}.zip
       - name: Trim the OpenCascade cache
         shell: bash
         run: rm -rf target/OCCT/build
       - uses: actions/upload-artifact@v4
         with:
           name: ${{ matrix.name }}
-          path: cad-app-${{ matrix.name }}.*
+          path: rcad-${{ matrix.name }}.*
 
   release:
     needs: build

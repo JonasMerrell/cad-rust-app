@@ -304,40 +304,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "fc652a48c352aef3ea3aed32080501cf3ef6ed5da78602a020c991775b0aff04"
 
 [[package]]
-name = "cad-rust-app"
-version = "0.4.0"
-dependencies = [
- "base64",
- "bytemuck",
- "crackh3d-fe",
- "cxx",
- "earcutr",
- "eframe",
- "egui",
- "egui_extras",
- "env_logger",
- "epaint_default_fonts",
- "faer",
- "flate2",
- "glam",
- "i_overlay",
- "image",
- "log",
- "opencascade",
- "opencascade-sys",
- "rfd",
- "rhai",
- "serde",
- "serde_json",
- "serde_yaml",
- "tiny-skia",
- "ttf-parser",
- "ureq",
- "usvg",
- "windows-sys 0.61.2",
-]
-
-[[package]]
 name = "cadrust-py"
 version = "0.1.0"
 dependencies = [
@@ -3568,6 +3534,40 @@ checksum = "22e18b0f0062d30d4230b2e85ff77fdfe4326feb054b9783a3460d8435c8ab91"
 dependencies = [
  "crossbeam-deque",
  "crossbeam-utils",
+]
+
+[[package]]
+name = "rcad"
+version = "0.4.0"
+dependencies = [
+ "base64",
+ "bytemuck",
+ "crackh3d-fe",
+ "cxx",
+ "earcutr",
+ "eframe",
+ "egui",
+ "egui_extras",
+ "env_logger",
+ "epaint_default_fonts",
+ "faer",
+ "flate2",
+ "glam",
+ "i_overlay",
+ "image",
+ "log",
+ "opencascade",
+ "opencascade-sys",
+ "rfd",
+ "rhai",
+ "serde",
+ "serde_json",
+ "serde_yaml",
+ "tiny-skia",
+ "ttf-parser",
+ "ureq",
+ "usvg",
+ "windows-sys 0.61.2",
 ]
 
 [[package]]

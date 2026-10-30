@@ -555,7 +555,7 @@ fn system_prompt() -> Value {
 
 fn system_text() -> String {
     format!(
-        "You are the design assistant built into cad-app, a parametric CAD program (OpenCascade kernel, Onshape-style Part Studios, Assemblies, Drawings, Manufacture and Simulation tabs). \
+        "You are the design assistant built into rCAD, a parametric CAD program (OpenCascade kernel, Onshape-style Part Studios, Assemblies, Drawings, Manufacture and Simulation tabs). \
 The user types requests in a chat panel beside the 3D view, and you carry them out with the tools, which edit the document the user has open. Every change shows up in their editor as you make it, and they can undo your whole turn from the chat panel.\n\n\
 How to work:\n\
 - The document is already open. Call describe when you need to know what is in it. Each message starts with an <editor> block saying which tab is open, what the user has selected (refs you can use directly, e.g. for \"fillet these edges\") and where the document lives.\n\
@@ -564,14 +564,14 @@ How to work:\n\
 - If a request leaves a design choice open, pick something sensible, say what you assumed, and carry on. Ask only when you can't make progress.\n\
 - Write exported files next to the document (or in the home folder if it is unsaved) with absolute paths, and say where they went.\n\
 - Keep replies short and plain: what you made, the key dimensions, any assumptions. The chat panel shows plain text, so don't use Markdown tables or headings.\n\n\
-cad-app's agent guide, for reference:\n\n{}",
+rCAD's agent guide, for reference:\n\n{}",
         include_str!("../AGENTS.md")
     )
 }
 
 // ---------------------------------------------------------------- Claude Code
 
-/// A tool call from the `cad-app mcp --bridge` process that Claude Code runs.
+/// A tool call from the `rcad mcp --bridge` process that Claude Code runs.
 struct BridgeCall {
     name: String,
     args: Value,
@@ -616,7 +616,7 @@ impl Bridge {
                             return;
                         }
                         // no reply means no request is running: Claude Code called after a stop
-                        let reply = rrx.recv().unwrap_or_else(|_| json!({"content": [{"type": "text", "text": "The cad-app chat is not running a request."}], "isError": true}));
+                        let reply = rrx.recv().unwrap_or_else(|_| json!({"content": [{"type": "text", "text": "The rCAD chat is not running a request."}], "isError": true}));
                         use std::io::Write;
                         if writeln!(out, "{reply}").and_then(|_| out.flush()).is_err() {
                             return;
@@ -662,7 +662,7 @@ pub fn claude_code_version() -> Result<String, String> {
 
 impl Chat {
     /// One request through the Claude Code CLI (`claude -p`), which reaches the open document
-    /// through `cad-app mcp --bridge` and this worker. Follow-ups resume the same conversation.
+    /// through `rcad mcp --bridge` and this worker. Follow-ups resume the same conversation.
     fn claude_code_turn(&mut self, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let bridge = match self.bridge.take() {
             Some(b) => b,
@@ -688,7 +688,7 @@ impl Chat {
             cmd.args(["--resume", id]);
         }
         // a neutral folder, so no project's CLAUDE.md or settings come along
-        let dir = std::env::temp_dir().join("cad-app-claude");
+        let dir = std::env::temp_dir().join("rcad-claude");
         let _ = std::fs::create_dir_all(&dir);
         cmd.current_dir(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| {

@@ -77,8 +77,7 @@ mod web_export;
 mod worker;
 mod workspace;
 
-/// Command line help; `prog` is the name the program was started as (cad-app in the release
-/// archives, cad-rust-app when built from source).
+/// Command line help; `prog` is the name the program was started as (normally rcad).
 fn usage(prog: &str) -> String {
     format!(
         "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} --version | --help",
@@ -88,7 +87,7 @@ fn usage(prog: &str) -> String {
 
 fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
-    let prog = args.first().and_then(|a| std::path::Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "cad-app".into());
+    let prog = args.first().and_then(|a| std::path::Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "rcad".into());
     #[cfg(windows)]
     if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h") | Some("--version") | Some("-V")) || args.get(1).map(|a| a.starts_with('-') && a != "--kernel-worker").unwrap_or(false) {
         // print to the terminal that started us (the MCP server talks over pipes and needs no console)
@@ -164,8 +163,8 @@ fn main() -> eframe::Result {
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
         // the window opens at the size it had last time
-        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("cad-app"),
+        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD"),
         ..Default::default()
     };
-    eframe::run_native("cad-app", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+    eframe::run_native("rCAD", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
 }

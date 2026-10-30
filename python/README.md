@@ -1,6 +1,6 @@
-# cadrust: Python scripting for cad-rust-app
+# cadrust: Python scripting for rCAD
 
-Python bindings to cad-rust-app's OpenCascade kernel, its renderer and its finite elements, for
+Python bindings to rCAD's OpenCascade kernel, its renderer and its finite elements, for
 parametric models written as Python scripts (`python model.py`, no window).
 
     cd python && CMAKE_POLICY_VERSION_MINIMUM=3.5 maturin develop --release   # into the active environment

@@ -1,6 +1,6 @@
 // A 5-axis desktop robot arm (base yaw, shoulder, elbow, wrist pitch, wrist roll) with a gear
 // gripper, built with the scripting API:
-//   cad-rust-app script examples/robot-arm/parts.rhai [output folder]
+//   rcad script examples/robot-arm/parts.rhai [output folder]
 // Writes one STEP per part (in the part's own frame), placements.json (how each part sits in the
 // arm), a render of the arm, mass properties and the joint torques the motors must hold.
 // Units mm. World: Z up, the arm reaches along +X, joint axes J2–J4 along Y.

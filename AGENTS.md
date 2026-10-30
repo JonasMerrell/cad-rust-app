@@ -1,29 +1,28 @@
-# Using cad-app from an AI agent
+# Using rCAD from an AI agent
 
-cad-app has a headless interface with the same modelling kernel as the editor.
-The program is `cad-app` in the release archives and `cad-rust-app` when built
-from source (`target/release/cad-rust-app`); the commands below work with either
-name. `cad-app --help` lists them and `cad-app --version` prints the version.
+rCAD has a headless interface with the same modelling kernel as the editor.
+The program is `rcad` (`target/release/rcad` when built from source).
+`rcad --help` lists the commands and `rcad --version` prints the version.
 Agents can drive it in two ways:
 
-- **MCP server** (`cad-app mcp`): a Model Context Protocol server on stdio.
-- **Script runner** (`cad-app run script.json`): runs a JSON list of tool calls
+- **MCP server** (`rcad mcp`): a Model Context Protocol server on stdio.
+- **Script runner** (`rcad run script.json`): runs a JSON list of tool calls
   and prints one JSON result per line. This suits agents without MCP and CI.
   A failed step prints an `error` and makes the exit status 1; with
-  `cad-app run --stop-on-error script.json` the run stops at the first one.
+  `rcad run --stop-on-error script.json` the run stops at the first one.
 
-Files saved with `save_document` open in the GUI (`cad-app part.json`).
+Files saved with `save_document` open in the GUI (`rcad part.json`).
 
 ## Setup
 
 Claude Code (user-wide):
 
-    claude mcp add --scope user cad -- cad-app mcp
+    claude mcp add --scope user rcad -- rcad mcp
 
 Or use the `.mcp.json` in the repository (and in the release archive, next to
 the program), which Claude Code picks up when it runs in that folder; it starts
-`cad-app mcp`, so put the program on your PATH (or edit the command). Other MCP clients start the same command
-(`cad-app mcp`, transport stdio).
+`rcad mcp`, so put the program on your PATH (or edit the command). Other MCP clients start the same command
+(`rcad mcp`, transport stdio).
 
 ## Conventions
 
@@ -145,7 +144,7 @@ the assembly is rendered where the arm was a quarter of a second in.
 hole and a fillet, renders it, and exports STEP, a PDF drawing and the document into the
 working directory:
 
-    cad-app run examples/bracket.json
+    rcad run examples/bracket.json
 
 ```json
 [

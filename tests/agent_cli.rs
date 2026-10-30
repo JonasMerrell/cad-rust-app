@@ -7,7 +7,7 @@ use std::process::{Command, Stdio};
 use serde_json::{json, Value};
 
 fn exe() -> &'static str {
-    env!("CARGO_BIN_EXE_cad-rust-app")
+    env!("CARGO_BIN_EXE_rcad")
 }
 
 /// An empty folder to run in.

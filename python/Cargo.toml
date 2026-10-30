@@ -3,7 +3,7 @@ name = "cadrust-py"
 version = "0.1.0"
 edition = "2024"
 license = "AGPL-3.0-only"
-description = "Python bindings to cad-rust-app's OpenCascade kernel"
+description = "Python bindings to rCAD's OpenCascade kernel"
 
 [lib]
 name = "_core"

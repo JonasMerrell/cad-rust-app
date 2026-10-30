@@ -203,7 +203,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         o.line("%");
         o.line(&format!("O{:04} {}", cam.program % 10000, comment(&cam.name)));
     }
-    o.line(&comment(&format!("{} - made by cad-rust-app", cam.name)));
+    o.line(&comment(&format!("{} - made by rCAD", cam.name)));
     o.line(&comment(&format!("work zero: {}", work_zero.unwrap_or_else(|| cam.origin.label().to_lowercase()))));
     for n in cam.setup_notes() {
         o.line(&comment(&n));

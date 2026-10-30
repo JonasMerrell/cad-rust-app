@@ -1,7 +1,7 @@
 //! The scripting interface beyond the basic shapes in `script`: building solids from profiles,
 //! picking faces and edges by their geometry, queries (mass properties, point classification,
 //! tessellation), vectors and matrices, files, and export. Custom features get all of it, and
-//! `cad-rust-app script file.rhai` runs a script with no window (see `run_file`).
+//! `rcad script file.rhai` runs a script with no window (see `run_file`).
 
 use std::cell::RefCell;
 use std::rc::Rc;

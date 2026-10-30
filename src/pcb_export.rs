@@ -515,8 +515,8 @@ impl Gerber {
     }
     fn finish(self, function: &str, polarity: &str) -> String {
         let mut s = String::new();
-        s += "G04 Made by cad-app*\n";
-        s += "%TF.GenerationSoftware,cad-app,PCB*%\n";
+        s += "G04 Made by rCAD*\n";
+        s += "%TF.GenerationSoftware,rCAD,PCB*%\n";
         let _ = writeln!(s, "%TF.FileFunction,{function}*%");
         let _ = writeln!(s, "%TF.FilePolarity,{polarity}*%");
         s += "%FSLAX46Y46*%\n%MOMM*%\n";
@@ -614,7 +614,7 @@ fn excellon(holes: &[(P, f64)], plated: bool) -> String {
         }
     }
     sizes.sort_by(|a, b| a.total_cmp(b));
-    let mut s = String::from("M48\n; Made by cad-app\n");
+    let mut s = String::from("M48\n; Made by rCAD\n");
     let _ = writeln!(s, "; #@! TF.FileFunction,{},1,2,{}", if plated { "Plated" } else { "NonPlated" }, if plated { "PTH" } else { "NPTH" });
     s += "FMAT,2\nMETRIC\n";
     for (i, dia) in sizes.iter().enumerate() {

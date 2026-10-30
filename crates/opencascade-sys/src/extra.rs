@@ -1,4 +1,4 @@
-//! Exception-safe OpenCascade operations added for cad-rust-app (see include/extra.hxx).
+//! Exception-safe OpenCascade operations added for rCAD (see include/extra.hxx).
 pub use inner::*;
 
 #[cxx::bridge]
