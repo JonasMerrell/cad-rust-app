@@ -2157,8 +2157,8 @@ pub(crate) fn sheet_dialog(app: &mut App) {
     }
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
     let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} setup sheet.html")) else { return };
-    let png = crate::cam_sheet::picture(&c, &part, 640, 480);
-    match std::fs::write(&p, crate::cam_sheet::html(&c, &part, &app.cam.paths, png.as_deref())) {
+    let sim = crate::cam_sheet::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref());
+    match std::fs::write(&p, crate::cam_sheet::sheet(&c, &part, &app.cam.paths, Some(sim))) {
         Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
         Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
     }
