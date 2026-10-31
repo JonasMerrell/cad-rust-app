@@ -1,4 +1,4 @@
-//! Importing parts from other programs: STEP and IGES (exact solids) and
+//! Importing parts from other programs: STEP, Parasolid and IGES (exact solids) and
 //! STL and OBJ (triangle meshes, turned into solids). The file is stored inside
 //! the document, compressed, so a saved part never depends on the original file.
 
@@ -10,11 +10,24 @@ use base64::Engine;
 pub fn format_of(path: &std::path::Path) -> Option<&'static str> {
     match path.extension()?.to_str()?.to_ascii_lowercase().as_str() {
         "step" | "stp" => Some("step"),
+        "x_t" | "xmt_txt" => Some("parasolid"),
         "iges" | "igs" => Some("iges"),
         "stl" => Some("stl"),
         "obj" => Some("obj"),
         _ => None,
     }
+}
+
+/// The format and bytes to store for an imported file: Parasolid is turned into STEP here.
+pub fn storable(format: &'static str, bytes: Vec<u8>, name: &str) -> Result<(&'static str, Vec<u8>), String> {
+    if format == "parasolid" {
+        let c = crate::parasolid::to_step(&bytes, name)?;
+        if c.skipped > 0 {
+            eprintln!("{name}: {} parts from Parasolid, {} faces left out (geometry rCAD can't convert yet)", c.parts.len(), c.skipped);
+        }
+        return Ok(("step", c.step.into_bytes()));
+    }
+    Ok((format, bytes))
 }
 
 /// Compress and encode file bytes for storing in the document.

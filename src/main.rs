@@ -19,6 +19,7 @@ mod cam_sim;
 mod cam_stock;
 mod cam_ui;
 mod palette;
+mod parasolid;
 mod camera;
 mod claude;
 mod claude_ui;
