@@ -717,18 +717,23 @@ enum Res {
         d: f64,
     },
     RadiusIs(RIdx, f64),
-    /// The radius to `p` (an end shared with line a-b) is perpendicular to the line.
+    /// The line from `p` (an end it shares with an arc about `c`) to its other end `q` leaves
+    /// along the arc's tangent there: `side` times the radius turned a quarter counter-clockwise.
+    /// Fixing the side (rather than asking only that line and radius be perpendicular) keeps a
+    /// smooth joint from folding back into a cusp when the sketch is dragged or re-dimensioned.
     PerpAt {
         p: usize,
         c: usize,
-        a: usize,
-        b: usize,
+        q: usize,
+        side: f64,
     },
-    /// `p` (an end two arcs share) lies on the line through both centres.
+    /// `p` (an end two arcs share) lies on the line through both centres, with the centres on
+    /// the same side of `p` (`side` 1) or on opposite sides (-1).
     CollinearAt {
         p: usize,
         c1: usize,
         c2: usize,
+        side: f64,
     },
     /// |dist(p, line a-b)| - |dist(q, line c-d)|
     EqualDist {
@@ -828,15 +833,17 @@ impl Res {
                 out.push((dd.perp_dot(p2(x, p) - p2(x, a)) / l).abs() - d)
             }
             Res::RadiusIs(r, v) => out.push(rad(x, r) - v),
-            Res::PerpAt { p, c, a, b } => {
-                let u = (p2(x, p) - p2(x, c)).normalize_or_zero();
-                let v = (p2(x, b) - p2(x, a)).normalize_or_zero();
-                out.push(u.dot(v) * 10.0)
+            // the angle off the wanted direction: zero on one branch only, unlike a dot product,
+            // and as steep as before (sin ≈ angle) near the solution
+            Res::PerpAt { p, c, q, side } => {
+                let t = (p2(x, p) - p2(x, c)).perp() * side;
+                let w = p2(x, q) - p2(x, p);
+                out.push(t.perp_dot(w).atan2(t.dot(w)) * 10.0)
             }
-            Res::CollinearAt { p, c1, c2 } => {
-                let u = (p2(x, p) - p2(x, c1)).normalize_or_zero();
-                let v = (p2(x, p) - p2(x, c2)).normalize_or_zero();
-                out.push(u.perp_dot(v) * 10.0)
+            Res::CollinearAt { p, c1, c2, side } => {
+                let u = p2(x, p) - p2(x, c1);
+                let v = (p2(x, p) - p2(x, c2)) * side;
+                out.push(u.perp_dot(v).atan2(u.dot(v)) * 10.0)
             }
             Res::EqualDist { p, a, b, q, c, d } => {
                 let dist = |p: usize, a: usize, b: usize| {
@@ -873,8 +880,8 @@ impl Res {
             Res::RadiusIs(rr, _) => r(rr),
             Res::Symmetric { p, q, a, b } => [pt(p), pt(q), pt(a), pt(b)].concat(),
             Res::EqualDist { p, a, b, q, c, d } => [pt(p), pt(a), pt(b), pt(q), pt(c), pt(d)].concat(),
-            Res::PerpAt { p, c, a, b } => [pt(p), pt(c), pt(a), pt(b)].concat(),
-            Res::CollinearAt { p, c1, c2 } => [pt(p), pt(c1), pt(c2)].concat(),
+            Res::PerpAt { p, c, q, .. } => [pt(p), pt(c), pt(q)].concat(),
+            Res::CollinearAt { p, c1, c2, .. } => [pt(p), pt(c1), pt(c2)].concat(),
         };
         v.sort_unstable();
         v.dedup();
@@ -969,9 +976,37 @@ impl System {
                         let shared = ends(*a).into_iter().find(|p| ends(*b).contains(p));
                         let (ca, cb) = (centre(*a), centre(*b));
                         if let Some(p) = shared.filter(|_| ca.is_some() || cb.is_some()) {
-                            match (line(*a).or(line(*b)), ca, cb) {
-                                (Some((la, lb)), Some(c), None) | (Some((la, lb)), None, Some(c)) => vec![Res::PerpAt { p: pi(p)?, c: pi(c)?, a: la, b: lb }],
-                                (None, Some(c1), Some(c2)) => vec![Res::CollinearAt { p: pi(p)?, c1: pi(c1)?, c2: pi(c2)? }],
+                            // A joint is smooth unless it already is an exact cusp (a sketch saved that way keeps
+                            // it). The current geometry can't simply pick the nearer branch: a drag moves points
+                            // before solving, often far enough to tip a joint past the halfway mark.
+                            let side = |want: DVec2, have: DVec2, smooth: f64| {
+                                let cos = want.normalize_or_zero().dot(have.normalize_or_zero()) * smooth;
+                                if cos < -(1.0 - 1e-8) { -smooth } else { smooth }
+                            };
+                            // +1 where the arc ends at p (a counter-clockwise arc runs a -> b), else -1
+                            let ends_at = |id: Id| match curve(id) {
+                                Some(Geom::Arc { b: end, .. }) if end == p => 1.0,
+                                _ => -1.0,
+                            };
+                            let lines = [*a, *b].into_iter().find_map(|id| match curve(id) {
+                                Some(Geom::Line { a: la, b: lb }) => Some((la, lb)),
+                                _ => None,
+                            });
+                            match (lines, ca, cb) {
+                                (Some((la, lb)), Some(c), None) | (Some((la, lb)), None, Some(c)) => {
+                                    let q = if la == p { lb } else { la };
+                                    let arc = if ca.is_some() { *a } else { *b };
+                                    // leaving where the arc ends continues its way round; arriving where it starts too
+                                    let side = side((s.pv(p) - s.pv(c)).perp(), s.pv(q) - s.pv(p), ends_at(arc));
+                                    vec![Res::PerpAt { p: pi(p)?, c: pi(c)?, q: pi(q)?, side }]
+                                }
+                                (None, Some(c1), Some(c2)) => {
+                                    // arcs joined end to start curve the same way (centres on one side of p);
+                                    // end to end or start to start they make an S (centres either side)
+                                    let smooth = -ends_at(*a) * ends_at(*b);
+                                    let side = side(s.pv(p) - s.pv(c1), s.pv(p) - s.pv(c2), smooth);
+                                    vec![Res::CollinearAt { p: pi(p)?, c1: pi(c1)?, c2: pi(c2)?, side }]
+                                }
                                 _ => return None,
                             }
                         } else if let Some((la, lb)) = line(*a) {

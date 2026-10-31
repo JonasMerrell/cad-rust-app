@@ -606,6 +606,128 @@ mod tests {
         assert_eq!(find_regions(&s).len(), 3);
     }
 
+    /// A slot as the sketcher's slot tool draws it (two lines tangent to two end arcs), optionally
+    /// solved with a radius and a centre-to-centre dimension so the points carry solver round-off.
+    fn slot(c1: DVec2, c2: DVec2, r: f64, dims: Option<(f64, f64)>) -> Sketch {
+        use crate::expr::{Env, Units};
+        use crate::sketch::{Constraint, Dim};
+        let mut s = Sketch::default();
+        let n = (c2 - c1).perp().normalize();
+        let a = s.add_point(c1);
+        let b = s.add_point(c2);
+        let p1 = s.add_point(c1 + n * r);
+        let p2 = s.add_point(c2 + n * r);
+        let p3 = s.add_point(c2 - n * r);
+        let p4 = s.add_point(c1 - n * r);
+        let l1 = s.add_curve(Geom::Line { a: p1, b: p2 }, false);
+        let l2 = s.add_curve(Geom::Line { a: p3, b: p4 }, false);
+        let a1 = s.add_curve(Geom::Arc { c: b, a: p3, b: p2 }, false);
+        let a2 = s.add_curve(Geom::Arc { c: a, a: p1, b: p4 }, false);
+        let axis = s.add_curve(Geom::Line { a, b }, true);
+        for (l, ar) in [(l1, a1), (l1, a2), (l2, a1), (l2, a2)] {
+            s.constraints.push(Constraint::Tangent { a: l, b: ar, inner: false });
+        }
+        s.constraints.push(Constraint::Equal { a: a1, b: a2 });
+        s.constraints.push(Constraint::Parallel { a: axis, b: l1 });
+        if let Some((rad, len)) = dims {
+            s.constraints.push(Constraint::Radius { c: a1, dim: Dim::new(format!("{rad}"), [0.0; 2]) });
+            s.constraints.push(Constraint::Distance { a, b, dim: Dim::new(format!("{len}"), [0.0; 2]) });
+            let vars = std::collections::HashMap::new();
+            assert!(s.solve(&Env { vars: &vars, units: Units::Mm }, &[a]).ok);
+        }
+        s
+    }
+
+    /// Dragging a slot's points or sides about (in small steps, as the mouse does) must leave a
+    /// slot: once the tangent joints could fold into cusps, about one drag in nine turned it into
+    /// a bow tie, a half-round with a stray line, or an arc swept the long way round.
+    #[test]
+    fn dragged_slot_stays_a_slot() {
+        use crate::expr::{Env, Units};
+        use crate::sketch::arc_angles;
+        let vars = std::collections::HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut seed = 12345u64;
+        let mut rnd = || {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            (seed % 100000) as f64 / 100000.0
+        };
+        let mut bad = vec![];
+        for it in 0..600 {
+            let c1 = DVec2::new(rnd() * 40.0 - 20.0, rnd() * 40.0 - 20.0);
+            let len = 0.5 + rnd() * 30.0;
+            let c2 = c1 + DVec2::from_angle(rnd() * 6.28) * len;
+            let r = 0.2 + rnd() * 15.0;
+            let mut s = slot(c1, c2, r, None);
+            // centres, then p1 p2 (one side) and p3 p4 (the other); 6 and 7 drag a whole side
+            let pts: Vec<_> = s.points.iter().map(|p| p.id).collect();
+            let which = (rnd() * 8.0) as usize;
+            let held: Vec<_> = match which {
+                6 => vec![pts[2], pts[3]],
+                7 => vec![pts[4], pts[5]],
+                i => vec![pts[i]],
+            };
+            let d = DVec2::new(rnd() * 40.0 - 20.0, rnd() * 40.0 - 20.0);
+            let p0: Vec<DVec2> = held.iter().map(|h| s.pv(*h)).collect();
+            let mut ok = true;
+            for k in 1..=20 {
+                for (h, p) in held.iter().zip(&p0) {
+                    let q = *p + d * (k as f64 / 20.0);
+                    let pm = s.point_mut(*h).unwrap();
+                    (pm.x, pm.y) = (q.x, q.y);
+                }
+                ok = s.solve(&env, &held).ok;
+            }
+            // (dragged onto the other centre, a slot is a circle: the pieces left are too small to keep apart)
+            if !ok || (s.pv(pts[1]) - s.pv(pts[0])).length() < 0.01 * r {
+                continue;
+            }
+            let sweeps: Vec<f64> = s
+                .curves
+                .iter()
+                .filter_map(|c| match c.geom {
+                    Geom::Arc { c, a, b } => {
+                        let (t0, t1) = arc_angles(s.pv(c), s.pv(a), s.pv(b));
+                        Some((t1 - t0).to_degrees())
+                    }
+                    _ => None,
+                })
+                .collect();
+            let n = find_regions(&s).len();
+            if n != 1 || sweeps.iter().any(|w| (w - 180.0).abs() > 0.5) {
+                bad.push(format!("drag {it} (point {which} by {d}): {n} regions, arcs sweep {sweeps:?}"));
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    #[test]
+    fn slot_is_one_region() {
+        let mut bad = vec![];
+        for (c1, c2, r) in [
+            (DVec2::ZERO, DVec2::new(20.0, 0.0), 4.0),
+            (DVec2::new(1.0, 2.0), DVec2::new(13.0, 9.0), 3.0),
+            (DVec2::new(-5.0, -5.0), DVec2::new(-5.0, 15.0), 2.5),
+            (DVec2::new(0.0, 0.0), DVec2::new(10.0, 6.0), 1.0),
+            (DVec2::new(0.0, 0.0), DVec2::new(30.0, 17.0), 4.0),
+            (DVec2::new(0.0, 0.0), DVec2::new(0.4, 0.3), 0.1),
+            (DVec2::new(100.0, 50.0), DVec2::new(160.0, 85.0), 12.0),
+        ] {
+            for dims in [None, Some((4.0, 8.0)), Some((2.0, 15.0)), Some((0.5, 3.0))] {
+                let s = slot(c1, c2, r, dims);
+                let regs = find_regions(&s);
+                let (rr, len) = dims.unwrap_or((r, (c2 - c1).length()));
+                let want = std::f64::consts::PI * rr * rr + 2.0 * rr * len;
+                if regs.len() != 1 || (regs[0].area - want).abs() > 1e-4 * want {
+                    bad.push(format!("{c1} {c2} r{r} {dims:?}: {} regions, areas {:?} want {want}", regs.len(), regs.iter().map(|r| r.area).collect::<Vec<_>>()));
+                }
+            }
+        }
+        assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
     #[test]
     fn circle_crossing_line() {
         let mut s = Sketch::default();
