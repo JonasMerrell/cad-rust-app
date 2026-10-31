@@ -1324,7 +1324,46 @@ pub fn raster_scene_in(
     h: u32,
     fit: Option<(DVec3, DVec3)>,
 ) -> R<Vec<u8>> {
+    let lines: Vec<(Vec<DVec3>, [u8; 3], bool)> = sketch_lines.iter().map(|l| (l.clone(), [0x56, 0xb6, 0xff], true)).collect();
+    let look = Look { fit, ..Default::default() };
+    raster_look(items, &lines, view, direction, w, h, &look, &[]).map(|r| r.0)
+}
+
+/// How `raster_look` draws: background and edge colours, how far lines are pulled towards the eye (mm,
+/// so paths on a surface show), supersampling, and the framing (None: what it shows).
+pub struct Look {
+    pub bg: [u8; 3],
+    pub edge: [u8; 3],
+    pub lift: f64,
+    pub scale: u32,
+    pub fit: Option<(DVec3, DVec3)>,
+    /// Frame the box closely and make the picture as tall as it needs (`h` is then only a limit).
+    pub tight: bool,
+}
+
+impl Default for Look {
+    fn default() -> Self {
+        Look { bg: [0x20, 0x25, 0x2c], edge: [0x1c, 0x20, 0x26], lift: 0.0, scale: 1, fit: None, tight: false }
+    }
+}
+
+/// `raster_scene_in` with lines in their own colours (and depth tested or drawn on top), and where the
+/// `anchors` land in the picture, as fractions of its width and height (for labels).
+#[allow(clippy::too_many_arguments)]
+pub fn raster_look(
+    items: &[(&crate::kernel::BodyMesh, crate::assembly::Pose, [u8; 3])],
+    lines: &[(Vec<DVec3>, [u8; 3], bool)],
+    view: &str,
+    direction: Option<[f64; 3]>,
+    w0: u32,
+    mut h0: u32,
+    look: &Look,
+    anchors: &[DVec3],
+) -> R<(Vec<u8>, Vec<[f32; 2]>)> {
     use crate::camera::{Camera, StdView};
+    let ss = look.scale.clamp(1, 4);
+    let (w, mut h) = (w0 * ss, h0 * ss);
+    let fit = look.fit;
     let mut cam = Camera { size: glam::Vec2::new(w as f32, h as f32), ..Default::default() };
     let iso = |x: f32, y: f32, z: f32| glam::Vec3::new(x, y, z).normalize();
     let back = match direction {
@@ -1362,7 +1401,7 @@ pub fn raster_scene_in(
             hi = hi.max(p);
         }
     }
-    for l in sketch_lines {
+    for (l, _, _) in lines {
         for p in l {
             lo = lo.min(*p);
             hi = hi.max(*p);
@@ -1376,8 +1415,25 @@ pub fn raster_scene_in(
         (lo, hi) = f;
     }
     cam.fit(lo.as_vec3(), hi.as_vec3());
+    if look.tight {
+        let (r, u) = (cam.right(), cam.up);
+        let (mut a, mut b) = (glam::Vec2::splat(f32::INFINITY), glam::Vec2::splat(f32::NEG_INFINITY));
+        for c in 0..8 {
+            let p = DVec3::new([lo.x, hi.x][c & 1], [lo.y, hi.y][(c >> 1) & 1], [lo.z, hi.z][(c >> 2) & 1]).as_vec3();
+            let q = glam::Vec2::new(p.dot(r), p.dot(u));
+            a = a.min(q);
+            b = b.max(q);
+        }
+        let e = (b - a).max(glam::Vec2::splat(1e-3));
+        h0 = ((w0 as f32 * e.y / e.x).round() as u32).clamp(w0 * 3 / 10, h0.max(w0 * 3 / 10));
+        h = h0 * ss;
+        cam.size = glam::Vec2::new(w as f32, h as f32);
+        let mid = (a + b) / 2.0;
+        cam.target += r * (mid.x - cam.target.dot(r)) + u * (mid.y - cam.target.dot(u));
+        cam.half_height = (e.y / 2.0).max(e.x / 2.0 / cam.aspect()) * 1.03;
+    }
     let (wu, hu) = (w as usize, h as usize);
-    let bg = [0x20u8, 0x25, 0x2c];
+    let bg = look.bg;
     let mut px = vec![0u8; wu * hu * 3];
     for c in px.chunks_mut(3) {
         c.copy_from_slice(&bg);
@@ -1407,18 +1463,43 @@ pub fn raster_scene_in(
         for e in &b.edges {
             for s in e.pts.windows(2) {
                 let (p, q) = (pose.apply(DVec3::from(s[0].map(|v| v as f64))), pose.apply(DVec3::from(s[1].map(|v| v as f64))));
-                raster_line(&mut px, &depth, wu, hu, proj(p.as_vec3()), proj(q.as_vec3()), [0x1c, 0x20, 0x26], true);
+                raster_line(&mut px, &depth, wu, hu, proj(p.as_vec3()), proj(q.as_vec3()), look.edge, true);
             }
         }
     }
-    for l in sketch_lines {
+    let lift = cam.back * look.lift as f32;
+    for (l, col, test) in lines {
         for s in l.windows(2) {
-            raster_line(&mut px, &depth, wu, hu, proj(s[0].as_vec3()), proj(s[1].as_vec3()), [0x56, 0xb6, 0xff], true);
+            let (a, b) = (proj(s[0].as_vec3() + lift), proj(s[1].as_vec3() + lift));
+            for k in 0..ss * ss {
+                let d = glam::Vec3::new((k % ss) as f32, (k / ss) as f32, 0.0);
+                raster_line(&mut px, &depth, wu, hu, a + d, b + d, *col, *test);
+            }
         }
     }
+    let at: Vec<[f32; 2]> = anchors.iter().map(|p| proj(p.as_vec3())).map(|q| [q.x / w as f32, q.y / h as f32]).collect();
+    if ss > 1 {
+        // box filter down to the asked size
+        let (w0u, h0u, s) = (w0 as usize, h0 as usize, ss as usize);
+        let mut small = vec![0u8; w0u * h0u * 3];
+        for y in 0..h0u {
+            for x in 0..w0u {
+                for c in 0..3 {
+                    let mut sum = 0u32;
+                    for dy in 0..s {
+                        for dx in 0..s {
+                            sum += px[((y * s + dy) * wu + x * s + dx) * 3 + c] as u32;
+                        }
+                    }
+                    small[(y * w0u + x) * 3 + c] = (sum / (s * s) as u32) as u8;
+                }
+            }
+        }
+        px = small;
+    }
     let mut out = vec![];
-    image::write_buffer_with_format(&mut std::io::Cursor::new(&mut out), &px, w, h, image::ColorType::Rgb8, image::ImageFormat::Png).map_err(|e| e.to_string())?;
-    Ok(out)
+    image::write_buffer_with_format(&mut std::io::Cursor::new(&mut out), &px, w0, h0, image::ColorType::Rgb8, image::ImageFormat::Png).map_err(|e| e.to_string())?;
+    Ok((out, at))
 }
 
 fn collect_sketch_ids(v: &Value, out: &mut Vec<FeatId>) {

@@ -127,8 +127,9 @@ crash detection, and post G-code for GRBL, LinuxCNC, Fanuc, Mach3 or rcnc.
 - **Simulation:** a stock simulator that colours each operation's cuts and catches rapids into stock,
   shank and holder collisions, fixture hits and gouges.
 - **Output:** G-code with G2/G3 arcs (including helices), tool probing after a change, your own start,
-  tool-change and end code, operation templates, printable setup sheets, and **Send to rcnc**, which
-  loads the program and its tools straight into the controller.
+  tool-change and end code, operation templates, printable setup sheets (with pictures of the setup,
+  each toolpath and the simulation), and **Send to rcnc**, which loads the
+  program and its tools straight into the controller.
 
 </details>
 
