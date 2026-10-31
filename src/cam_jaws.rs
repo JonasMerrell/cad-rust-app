@@ -37,8 +37,10 @@ pub struct Jaws {
     /// How the jaws bolt into the vise, and the hole centres in each jaw.
     pub mount: Option<cam::JawMount>,
     pub holes: [Vec<DVec2>; 2],
-    /// Printed as one block (the two rects meet).
+    /// Printed as one block: the gap between the rects is the slit (with its rounded ends), cut down to `web`.
     pub one_piece: bool,
+    pub slit: Shapes,
+    pub web: f64,
     pub warnings: Vec<String>,
 }
 
@@ -103,13 +105,11 @@ fn build(sj: &SoftJaws, cam: &Cam, part: &Part) -> Jaws {
     let (plo, phi) = bounds(&held);
     let c = (plo + phi) / 2.0;
     let (w2, g2, t) = (sj.width.max(1.0) / 2.0, sj.gap.max(0.0) / 2.0, sj.thickness.max(1.0));
-    let mut rects = [(DVec2::new(c.x - w2, c.y - g2 - t), DVec2::new(c.x + w2, c.y - g2)), (DVec2::new(c.x - w2, c.y + g2), DVec2::new(c.x + w2, c.y + g2 + t))];
-    // one printed block: the two halves meet in the middle
+    let rects = [(DVec2::new(c.x - w2, c.y - g2 - t), DVec2::new(c.x + w2, c.y - g2)), (DVec2::new(c.x - w2, c.y + g2), DVec2::new(c.x + w2, c.y + g2 + t))];
+    // one printed block: the gap is a slit between its halves, rounded where it opens at the ends
     let one = sj.printed && sj.one_piece;
-    if one {
-        rects[0].1.y = c.y;
-        rects[1].0.y = c.y;
-    }
+    let slit = if one { slit(rects[0].0.x, rects[0].1.x, rects[0].1.y, rects[1].0.y, sj.flare.max(0.0).min(t)) } else { vec![] };
+    let web = if one { bottom + sj.web.max(0.0).min(top - bottom) } else { bottom };
     let mount = sj.mount.as_ref().filter(|_| !one);
     if held.is_empty() {
         warnings.push("soft jaws: nothing to hold".into());
@@ -117,7 +117,7 @@ fn build(sj: &SoftJaws, cam: &Cam, part: &Part) -> Jaws {
         if fresh {
             warnings.push("soft jaws: this setup starts from fresh stock, so the jaws hold the stock block".into());
         }
-        let grips = one || rects.iter().all(|(a, b)| shapes_area(&crate::cam_3d::intersect(&held, &rect(a.extend(0.0), b.extend(0.0)))) > 0.01);
+        let grips = rects.iter().all(|(a, b)| shapes_area(&crate::cam_3d::intersect(&held, &rect(a.extend(0.0), b.extend(0.0)))) > 0.01);
         if !grips {
             warnings.push(format!("soft jaws: the part is narrower than the {} mm gap between the jaws, so they can't grip it", cam::fmt_mm(sj.gap)));
         }
@@ -149,7 +149,7 @@ fn build(sj: &SoftJaws, cam: &Cam, part: &Part) -> Jaws {
         }
         mount_warnings(sj, m, &holes, &pocket, held.is_empty(), (bottom, floor, top), &mut warnings);
     }
-    Jaws { rects, bottom, floor, top, pocket, mount: mount.cloned(), holes, one_piece: one, warnings }
+    Jaws { rects, bottom, floor, top, pocket, mount: mount.cloned(), holes, one_piece: one, slit, web, warnings }
 }
 
 /// Whether jaws bolted on with `m` fit the vise and keep clear of their screws.
@@ -186,6 +186,32 @@ fn mount_warnings(sj: &SoftJaws, m: &cam::JawMount, holes: &[Vec<DVec2>; 2], poc
             cam::fmt_mm((heads + 0.5 - floor).ceil())
         ));
     }
+}
+
+/// The slit between the halves of a printed block, from y0 to y1 along its length x0..x1, with rounds of
+/// radius `r` where it opens at the ends.
+fn slit(x0: f64, x1: f64, y0: f64, y1: f64, r: f64) -> Shapes {
+    let mut cs = vec![vec![[x0 - 1.0, y0], [x1 + 1.0, y0], [x1 + 1.0, y1], [x0 - 1.0, y1]]];
+    if r > 1e-3 {
+        let n = 12;
+        for (xe, sx) in [(x0, 1.0), (x1, -1.0)] {
+            for (ye, sy) in [(y0, -1.0), (y1, 1.0)] {
+                // the corner of the half (xe, ye) less a quarter disc round (xe + sx r, ye + sy r)
+                let cen = DVec2::new(xe + sx * r, ye + sy * r);
+                let mut c = vec![[xe - sx, ye], [xe - sx, ye + sy * r]];
+                for k in 0..=n {
+                    let t = std::f64::consts::FRAC_PI_2 * k as f64 / n as f64;
+                    let p = cen + DVec2::new(-sx * t.cos(), -sy * t.sin()) * r;
+                    c.push([p.x, p.y]);
+                }
+                if area(&c) < 0.0 {
+                    c.reverse();
+                }
+                cs.push(c);
+            }
+        }
+    }
+    union_all(&cs)
 }
 
 /// A circle as a polygon (counter-clockwise).
@@ -393,7 +419,7 @@ fn rim(x0: f64, x1: f64, y0: f64, y1: f64, pocket: &Shapes, out: &mut Vec<[f64; 
 
 /// Triangles of a jaw blank (`rect`) with the pocket and any screw holes in it: slabs between the heights
 /// where its section changes, each with its walls, and flat faces where one slab's section steps to the next.
-fn solid(rect_xy: (DVec2, DVec2), pocket: &Shapes, holes: &[DVec2], mount: Option<&cam::JawMount>, bottom: f64, floor: f64, top: f64) -> Vec<[DVec3; 3]> {
+fn solid(rect_xy: (DVec2, DVec2), pocket: &Shapes, holes: &[DVec2], mount: Option<&cam::JawMount>, slit: (&Shapes, f64), bottom: f64, floor: f64, top: f64) -> Vec<[DVec3; 3]> {
     let (a, b) = rect_xy;
     let r = rect(a.extend(0.0), b.extend(0.0));
     let circles = |d: f64| -> Shapes { union_all(&holes.iter().map(|h| circle(*h, d / 2.0)).collect::<Vec<_>>()) };
@@ -409,10 +435,13 @@ fn solid(rect_xy: (DVec2, DVec2), pocket: &Shapes, holes: &[DVec2], mount: Optio
         if z > seat && !cbore.is_empty() {
             s = difference(&s, &cbore);
         }
+        if z > slit.1 && !slit.0.is_empty() {
+            s = difference(&s, slit.0);
+        }
         s
     };
     let mut levels = vec![bottom, top];
-    for z in [floor, seat] {
+    for z in [floor, seat, slit.1] {
         if z > bottom + 1e-6 && z < top - 1e-6 {
             levels.push(z);
         }
@@ -485,15 +514,15 @@ fn fill(tris: &mut Vec<[DVec3; 3]>, s: &Shapes, z: f64, up: bool) {
 /// Both jaws as they sit in the vise holding the part (setup coordinates).
 pub fn jaw_tris(j: &Jaws) -> Vec<[DVec3; 3]> {
     if j.one_piece {
-        return block_tris(j);
+        return solid(j.block(), &j.pocket, &[], None, (&j.slit, j.web), j.bottom, j.floor, j.top);
     }
-    j.rects.iter().zip(&j.holes).flat_map(|(r, h)| solid(*r, &j.pocket, h, j.mount.as_ref(), j.bottom, j.floor, j.top)).collect()
+    j.rects.iter().zip(&j.holes).flat_map(|(r, h)| solid(*r, &j.pocket, h, j.mount.as_ref(), (&vec![], j.bottom), j.bottom, j.floor, j.top)).collect()
 }
 
 /// What the jaws' own setup machines: both blanks as one block (the spacer gap filled) with the pocket.
 /// The screw holes are left out: they are in the blanks before they go in the vise.
 pub fn block_tris(j: &Jaws) -> Vec<[DVec3; 3]> {
-    solid(j.block(), &j.pocket, &[], None, j.bottom, j.floor, j.top)
+    solid(j.block(), &j.pocket, &[], None, (&vec![], j.bottom), j.bottom, j.floor, j.top)
 }
 
 /// The setup a jaw-machining tab makes jaws for.
@@ -670,6 +699,24 @@ pub fn print_doc(j: &Jaws) -> crate::doc::Document {
         let r = rect(a.extend(0.0), b.extend(0.0));
         let side = if j.one_piece { "block" } else if k == 0 { "front" } else { "back" };
         let rim = difference(&r, &j.pocket);
+        if j.one_piece {
+            // the slit's web, the halves on it up to the pocket floor, then the rim round the pocket
+            // (one extrude per half: each makes or joins one solid)
+            let web = j.web - j.bottom;
+            if web > 1e-3 {
+                extrude(&mut doc, "Block web", &r, shift, web, BoolOp::New);
+            }
+            for (half, (a, b)) in ["front", "back"].iter().zip(&j.rects) {
+                let mut op = if web > 1e-3 { BoolOp::Add } else { BoolOp::New };
+                let sh = difference(&rect(a.extend(0.0), b.extend(0.0)), &j.slit);
+                if base > web + 1e-3 {
+                    extrude(&mut doc, &format!("Block half ({half})"), &sh, shift, base, op);
+                    op = BoolOp::Add;
+                }
+                extrude(&mut doc, &format!("Block rim ({half})"), &difference(&sh, &j.pocket), shift, h, op);
+            }
+            continue;
+        }
         if base > 1e-3 {
             extrude(&mut doc, &format!("Jaw base ({side})"), &r, shift, base, BoolOp::New);
             extrude(&mut doc, &format!("Jaw rim ({side})"), &rim, shift, h, BoolOp::Add);
@@ -929,12 +976,24 @@ mod tests {
         let part = Part::new(&block(DVec3::ZERO, DVec3::new(60.0, 30.0, 10.0)), &[], "top");
         let mut c = held_cam();
         let sj = c.soft_jaws.as_mut().unwrap();
-        (sj.printed, sj.one_piece, sj.mount) = (true, true, cam::jaw_mount("gen3_insert_bar").map(|m| m.0));
+        (sj.printed, sj.one_piece, sj.gap, sj.mount) = (true, true, 1.0, cam::jaw_mount("gen3_insert_bar").map(|m| m.0));
         let j = jaws(&c, &part).unwrap();
         // no gap, no screw holes, nothing to warn about the bars it doesn't use
-        assert!(j.one_piece && (j.rects[0].1.y - j.rects[1].0.y).abs() < 1e-9 && j.mount.is_none(), "{:?}", j.warnings);
+        assert!(j.one_piece && j.mount.is_none() && j.warnings.is_empty(), "{:?}", j.warnings);
+        // the gap is a slit, open at the ends with R5 rounds, stopping 1.5 above the bottom
+        let (a, b) = j.block();
+        let mid = (j.rects[0].1.y + j.rects[1].0.y) / 2.0;
+        assert!(inside(&j.slit, [a.x + 30.0, mid]) && !inside(&j.slit, [a.x + 30.0, j.rects[0].1.y - 0.5]));
+        assert!(inside(&j.slit, [a.x + 0.3, j.rects[1].0.y + 0.3]) && !inside(&j.slit, [a.x + 3.0, j.rects[1].0.y + 3.0]));
+        assert!((j.web - j.bottom - 1.5).abs() < 1e-9);
+        // closed mesh: block less pocket less slit above the web
+        let vol: f64 = jaw_tris(&j).iter().map(|t| t[0].dot(t[1].cross(t[2])) / 6.0).sum();
+        let r = rect(a.extend(0.0), b.extend(0.0));
+        let ar = |s: &Shapes| shapes_area(&crate::cam_3d::intersect(&r, s));
+        let expect = shapes_area(&r) * (j.top - j.bottom) - ar(&j.slit) * (j.top - j.web) - ar(&difference(&j.pocket, &j.slit)) * (j.top - j.floor);
+        assert!((vol - expect).abs() < 1.0, "{vol} vs {expect}");
         let doc = print_doc(&j);
         let names: Vec<&str> = doc.features.iter().filter(|f| matches!(f.op, crate::doc::Op::Extrude { .. })).map(|f| f.name.as_str()).collect();
-        assert_eq!(names, ["Jaw base (block)", "Jaw rim (block)"]);
+        assert_eq!(names, ["Block web", "Block half (front)", "Block rim (front)", "Block half (back)", "Block rim (back)"]);
     }
 }
