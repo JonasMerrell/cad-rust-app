@@ -58,6 +58,9 @@ pub struct CamUi {
     pub show_part: bool,
     /// Name to save the operations under as a template.
     tpl_name: String,
+    pub machine: crate::cam_machine_ui::MachineUi,
+    /// The machine placed for the setup, kept while the setup and machine stay the same: (key, placed).
+    placed: Option<(u64, Arc<crate::cam_machine::Placed>)>,
 }
 
 fn cam_index(app: &App) -> Option<usize> {
@@ -503,6 +506,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let mut print_jaws = false;
     let mut goto: Option<String> = None;
     let mut save_machine = None;
+    let importing = crate::cam_machine_ui::is_importing(app);
+    let machine_act;
     // the stock settings of the part being machined (one part: its own; several: the defaults)
     let (stock_pref, imperial) = {
         let doc = app.studio_doc(studio);
@@ -828,6 +833,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        machine_act = crate::cam_machine_ui::setup_rows(ui, c, importing);
         let before = (c.machine.clone(), c.max_rpm, c.rapid_rate);
         row(ui, "Controller", |ui| {
             egui::ComboBox::from_id_salt("cam-post").selected_text(cam::POSTS.iter().find(|p| p.0 == c.post).map(|p| p.1).unwrap_or("GRBL")).show_ui(ui, |ui| {
@@ -913,6 +919,14 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         if ui.button("Save as my machine").on_hover_text("New setups start from these machine settings (controller, spindle, machine, coolant, probing, custom G-code) when the document has no setup to copy them from").clicked() {
             save_machine = Some(cam::MachineSettings::of(c));
         }
+    }
+    match machine_act {
+        Some(crate::cam_machine_ui::Action::Import) => crate::cam_machine_ui::start_import(app, &ui.ctx().clone(), ci),
+        Some(crate::cam_machine_ui::Action::Edit) => {
+            let n = app.ws.cams[ci].machine.model.clone();
+            crate::cam_machine_ui::edit(app, &n);
+        }
+        None => {}
     }
     if let Some(m) = save_machine {
         match cam::save_machine(&m) {
@@ -1935,6 +1949,33 @@ fn start_sim(app: &mut App, run: bool) {
     if let Some(m) = &app.cam.stock_in {
         sim.start_from(m);
     }
+    if !c.machine.model.is_empty() {
+        match crate::cam_machine::load(&c.machine.model) {
+            Ok(l) => {
+                // placing a detailed machine takes a moment: keep it while nothing it depends on changes
+                let key = {
+                    use std::hash::{Hash, Hasher};
+                    let mut h = std::collections::hash_map::DefaultHasher::new();
+                    (Arc::as_ptr(&l) as usize).hash(&mut h);
+                    for v in [stock.0, stock.1, DVec3::from(c.on_table)] {
+                        v.to_array().map(f64::to_bits).hash(&mut h);
+                    }
+                    serde_json::to_string(&(&c.fixtures, &c.soft_jaws)).unwrap_or_default().hash(&mut h);
+                    h.finish()
+                };
+                let placed = match &app.cam.placed {
+                    Some((k, p)) if *k == key => p.clone(),
+                    _ => {
+                        let p = Arc::new(Sim::place_machine(&c, &part, stock, l));
+                        app.cam.placed = Some((key, p.clone()));
+                        p
+                    }
+                };
+                sim.set_machine(&c, &part, placed);
+            }
+            Err(e) => app.flash(e, ToastKind::Error),
+        }
+    }
     app.cam.sim_target = if run { sim.total() } else { 0 };
     app.cam.sim = Some(sim);
     app.cam.sim_mesh_done = usize::MAX;
@@ -2006,6 +2047,7 @@ fn sim_ui(app: &mut App, ui: &mut Ui) {
     if ui.checkbox(&mut app.cam.show_part, "Show the part").on_hover_text("Show the finished part, see-through, over the stock").changed() {
         app.cam.scene_dirty = true;
     }
+    crate::cam_machine_ui::sim_rows(app, ui);
     // colour key: each operation colours what it cut
     let swatch = |ui: &mut Ui, rgb: [u8; 3], text: &str| {
         ui.horizontal(|ui| {
@@ -2033,7 +2075,7 @@ fn sim_ui(app: &mut App, ui: &mut Ui) {
             for e in &events {
                 let op = names.iter().find(|n| n.0 == e.op).map(|n| n.1.as_str()).unwrap_or("?");
                 let r =
-                    ui.add(egui::Button::new(RichText::new(format!("{op}: {} ({} mm)", e.kind.label(), cam::fmt_mm((e.depth * 100.0).round() / 100.0))).size(12.0)).frame(false));
+                    ui.add(egui::Button::new(RichText::new(format!("{op}: {} ({} mm)", if e.what.is_empty() { e.kind.label() } else { &e.what }, cam::fmt_mm((e.depth * 100.0).round() / 100.0))).size(12.0)).frame(false));
                 if r.on_hover_text("Show where").clicked() {
                     app.cam.sim_target = e.step + 1;
                     app.cam.playing = false;
@@ -2272,6 +2314,7 @@ fn build_scene(app: &App) -> SceneData {
                 s.point(to(DVec3::from(e.at)), 9.0, rgba(Color32::from_rgb(0xe0, 0x40, 0x40), 1.0));
             }
         }
+        crate::cam_machine_ui::draw(app, &mut s);
     }
     s
 }
@@ -2285,6 +2328,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     refresh(app, &ctx);
     step_sim(app, &ctx);
     library_window(app, &ctx);
+    crate::cam_machine_ui::window(app, &ctx);
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
     if app.viewport_rect != rect {

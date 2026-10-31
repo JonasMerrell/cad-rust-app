@@ -967,6 +967,10 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
+fn is_zero3(t: &[f64; 3]) -> bool {
+    t.iter().all(|v| *v == 0.0)
+}
+
 fn is_zero2(t: &[f64; 2]) -> bool {
     t[0] == 0.0 && t[1] == 0.0
 }
@@ -1021,11 +1025,15 @@ pub struct Machine {
     pub tool_changer: bool,
     /// Seconds to wait after starting the spindle before cutting (a VFD spindle needs a few to come up to speed).
     pub spin_up: f64,
+    /// The machine's own geometry for the simulation (a machine in ~/.config/cad-rust-app/machines, or a
+    /// path to a machine file); empty = none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0 }
+        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0, model: String::new() }
     }
 }
 
@@ -1254,7 +1262,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone() };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true
@@ -1306,6 +1314,10 @@ pub struct Cam {
     pub arcs: bool,
     /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
     pub fixtures: Vec<Fixture>,
+    /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
+    /// at the bottom of the stock or of the lowest fixture.
+    #[serde(skip_serializing_if = "is_zero3")]
+    pub on_table: [f64; 3],
     /// Hold the part in soft jaws shaped to it (they act as fixtures).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub soft_jaws: Option<SoftJaws>,
@@ -1343,6 +1355,7 @@ impl Default for Cam {
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
+            on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),
             probe: Probe::default(),
