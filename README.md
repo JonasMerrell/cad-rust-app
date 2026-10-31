@@ -103,6 +103,10 @@ crash detection, and post G-code for GRBL, LinuxCNC, Fanuc, Mach3 or rcnc.
 <details>
 <summary>Everything in the Manufacture tab</summary>
 
+- **Work tree:** every setup in the document, and under the open one its stock, work zero,
+  fixtures, machine, tools and operations, each with what it is set to. Pick a node to edit it in
+  the panel below the tree (drag the bar between them to resize); the simulation's results sit on a
+  card of their own over the view.
 - **Setups:** orientation, 3+2 tilts for angle blocks and compound-angle features, stock, work zero,
   material and the spindle's speed range; multiple setups that flip the part and carry on from the
   leftover stock.
