@@ -61,6 +61,37 @@ pub struct CamUi {
     pub machine: crate::cam_machine_ui::MachineUi,
     /// The machine placed for the setup, kept while the setup and machine stay the same: (key, placed).
     placed: Option<(u64, Arc<crate::cam_machine::Placed>)>,
+    /// The setup page shown under the work tree when no operation or tool is picked.
+    pub page: Page,
+    /// Folded work tree branches.
+    folded: std::collections::HashSet<&'static str>,
+    /// Height of the work tree above the properties (0: not dragged yet).
+    tree_h: f32,
+    /// Where the simulation card was last frame, so drags on it don't turn the view.
+    sim_card: Option<egui::Rect>,
+}
+
+/// The parts of a setup, each a node of the work tree with its own settings page.
+#[derive(Clone, Copy, PartialEq, Eq, Default, Debug)]
+pub enum Page {
+    #[default]
+    Part,
+    Stock,
+    WorkZero,
+    Fixtures,
+    Machine,
+}
+
+impl Page {
+    pub fn title(self) -> &'static str {
+        match self {
+            Page::Part => "Setup",
+            Page::Stock => "Stock",
+            Page::WorkZero => "Work zero",
+            Page::Fixtures => "Fixtures",
+            Page::Machine => "Machine",
+        }
+    }
 }
 
 fn cam_index(app: &App) -> Option<usize> {
@@ -467,22 +498,41 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         ui.label("No Manufacture tab");
         return;
     };
-    egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
-        section(ui, "Setup", |ui| setup_ui(app, ui));
-        section(ui, "Tools", |ui| tools_ui(app, ui));
-        section(ui, "Operations", |ui| ops_ui(app, ui));
-        if let Some(id) = app.cam.sel_op {
-            if cam(app).and_then(|c| c.op(id)).is_some() {
-                section(ui, "Operation", |ui| op_params(app, ui, id));
-            }
-        }
-        if let Some(id) = app.cam.sel_tool {
-            if cam(app).and_then(|c| c.tool(id)).is_some() {
-                section(ui, "Tool", |ui| tool_params(app, ui, id));
-            }
-        }
-        if app.cam.sim.is_some() {
-            section(ui, "Simulation", |ui| sim_ui(app, ui));
+    // the work tree on top, the picked node's settings below, split by a bar to drag
+    let full = ui.available_height();
+    if app.cam.tree_h <= 0.0 {
+        app.cam.tree_h = (full * 0.42).max(160.0);
+    }
+    let h = app.cam.tree_h.clamp(90.0, (full - 140.0).max(90.0));
+    let w = ui.available_width();
+    ui.allocate_ui(egui::vec2(w, h), |ui| {
+        ui.set_min_height(h);
+        egui::ScrollArea::vertical().id_salt("cam-tree").auto_shrink([false, false]).show(ui, |ui| {
+            egui::Frame::new().inner_margin(Margin { left: 6, right: 6, top: 8, bottom: 6 }).show(ui, |ui| {
+                ui.spacing_mut().item_spacing.y = 1.0;
+                work_tree(app, ui);
+            });
+        });
+    });
+    let (bar, resp) = ui.allocate_exact_size(egui::vec2(w, 7.0), Sense::drag());
+    let col = if resp.hovered() || resp.dragged() { theme::accent() } else { theme::border() };
+    ui.painter().hline(bar.x_range(), bar.center().y, Stroke::new(1.0, col));
+    if resp.hovered() || resp.dragged() {
+        ui.ctx().set_cursor_icon(egui::CursorIcon::ResizeVertical);
+    }
+    if resp.dragged() {
+        app.cam.tree_h = (h + resp.drag_delta().y).clamp(90.0, (full - 140.0).max(90.0));
+    }
+    egui::ScrollArea::vertical().id_salt("cam-props").auto_shrink([false, false]).show(ui, |ui| {
+        let op = app.cam.sel_op.filter(|&id| cam(app).and_then(|c| c.op(id)).is_some());
+        let tool = app.cam.sel_tool.filter(|&id| cam(app).and_then(|c| c.tool(id)).is_some());
+        if let Some(id) = op {
+            section(ui, "Operation", |ui| op_params(app, ui, id));
+        } else if let Some(id) = tool {
+            section(ui, "Tool", |ui| tool_params(app, ui, id));
+        } else {
+            let page = app.cam.page;
+            section(ui, page.title(), |ui| setup_ui(app, ui, page));
         }
     });
     if cam(app).map(|c| *c != before).unwrap_or(false) {
@@ -490,7 +540,156 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     }
 }
 
-fn setup_ui(app: &mut App, ui: &mut Ui) {
+/// One row of the work tree: fold arrow, icon, name and a muted note on the right.
+/// `trail` is room kept at the right for buttons (shown when hovered or picked, or always with `keep`);
+/// returns the row, whether its arrow was clicked and where the buttons go.
+#[allow(clippy::too_many_arguments)]
+fn tree_row(ui: &mut Ui, depth: u8, fold: Option<bool>, icon: &str, name: &str, note: &str, sel: bool, dim: bool, trail: f32, keep: bool) -> (egui::Response, bool, Option<egui::Rect>) {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(ui.available_width(), 26.0), Sense::click());
+    let over = ui.rect_contains_pointer(rect);
+    let p = ui.painter_at(rect);
+    if sel {
+        p.rect_filled(rect, 6.0, theme::sel_fill());
+    } else if over {
+        p.rect_filled(rect, 6.0, theme::panel_2());
+    }
+    let x0 = rect.left() + 4.0 + depth as f32 * 16.0;
+    let arrow = egui::Rect::from_min_size(egui::pos2(x0, rect.center().y - 6.0), egui::vec2(12.0, 12.0));
+    if let Some(open) = fold {
+        icons::image(if open { "chevronDown" } else { "chevronRight" }, 12.0).tint(theme::muted()).paint_at(ui, arrow);
+    }
+    let ic = egui::Rect::from_min_size(egui::pos2(x0 + 15.0, rect.center().y - 8.0), egui::vec2(16.0, 16.0));
+    let fg = if dim { theme::muted() } else { theme::text() };
+    icons::image(icon, 16.0).tint(if dim { theme::muted() } else { theme::lerp(theme::text(), theme::muted(), 0.35) }).paint_at(ui, ic);
+    let room = if trail > 0.0 && (keep || over || sel) { trail } else { 0.0 };
+    let right = rect.right() - 6.0 - room;
+    // the name comes first; the note gets what is left, shortened to fit
+    let tp = egui::pos2(ic.right() + 6.0, rect.center().y);
+    let clip = egui::Rect::from_min_max(rect.min, egui::pos2(right.max(tp.x), rect.bottom()));
+    let g = p.layout_no_wrap(name.to_string(), egui::FontId::proportional(12.5), fg);
+    let end = tp.x + g.size().x;
+    let pos = egui::pos2(tp.x, tp.y - g.size().y / 2.0);
+    p.with_clip_rect(clip).galley(pos, g, fg);
+    if dim && fold.is_none() {
+        p.with_clip_rect(clip).hline(egui::Rangef::new(tp.x, end.min(clip.right())), rect.center().y, Stroke::new(1.0, theme::muted()));
+    }
+    if !note.is_empty() && room == 0.0 {
+        let font = egui::FontId::proportional(11.5);
+        let space = right - end - 10.0;
+        let mut text = note.to_string();
+        let mut g = p.layout_no_wrap(text.clone(), font.clone(), theme::muted());
+        while g.size().x > space && !text.is_empty() {
+            text.pop();
+            g = p.layout_no_wrap(format!("{}…", text.trim_end()), font.clone(), theme::muted());
+        }
+        if !text.is_empty() {
+            p.galley(egui::pos2(right - g.size().x, rect.center().y - g.size().y / 2.0), g, theme::muted());
+        }
+    }
+    let arrow_hit = fold.is_some() && resp.clicked() && resp.interact_pointer_pos().map(|q| q.x < arrow.right() + 3.0).unwrap_or(false);
+    let slot = (room > 0.0).then(|| egui::Rect::from_min_max(egui::pos2(rect.right() - 4.0 - room, rect.top()), egui::pos2(rect.right() - 4.0, rect.bottom())));
+    (resp, arrow_hit, slot)
+}
+
+/// Widgets in a tree row's button slot, right to left.
+fn in_slot<R>(ui: &mut Ui, slot: egui::Rect, add: impl FnOnce(&mut Ui) -> R) -> R {
+    ui.scope_builder(egui::UiBuilder::new().max_rect(slot).layout(egui::Layout::right_to_left(egui::Align::Center)), add).inner
+}
+
+fn small_icon(ui: &mut Ui, icon: &str, tip: &str, enabled: bool) -> bool {
+    ui.add_enabled(enabled, egui::Button::image(icons::image(icon, 13.0).tint(theme::muted())).frame(false)).on_hover_text(tip).clicked()
+}
+
+/// The setups, and under the open one its part, stock, work zero, fixtures, machine, tools and operations.
+fn work_tree(app: &mut App, ui: &mut Ui) {
+    let Some(ci) = cam_index(app) else { return };
+    let names: Vec<(String, usize)> = app.ws.cams.iter().map(|c| (c.name.clone(), c.ops.iter().filter(|o| !o.suppressed).count())).collect();
+    let mut go = None;
+    for (i, (name, n)) in names.iter().enumerate() {
+        if i != ci {
+            let note = format!("{n} op{}", if *n == 1 { "" } else { "s" });
+            let (r, _, _) = tree_row(ui, 0, Some(false), "camSetup", name, &note, false, false, 0.0, false);
+            if r.on_hover_text("Open this setup").clicked() {
+                go = Some(i);
+            }
+            continue;
+        }
+        let open = !app.cam.folded.contains("setup");
+        let picked = app.cam.sel_op.is_none() && app.cam.sel_tool.is_none();
+        // the setup row stands for its part: which Part Studio, which way up
+        let c = &app.ws.cams[ci];
+        let studio = app.ws.studios.get(c.studio).map(|s| s.name.clone()).unwrap_or_default();
+        let note = if c.jaws_of.is_empty() { format!("{studio} · {} up", c.orient) } else { format!("jaws of {}", c.jaws_of) };
+        let (r, arrow, _) = tree_row(ui, 0, Some(open), "camSetup", name, &note, picked && app.cam.page == Page::Part, false, 0.0, false);
+        if arrow {
+            fold(app, "setup");
+        } else if r.clicked() {
+            pick_page(app, Page::Part);
+        }
+        if open {
+            setup_nodes(app, ui);
+            tools_ui(app, ui);
+            ops_ui(app, ui);
+        }
+    }
+    if let Some(i) = go {
+        app.switch_tab(Tab::Cam(i));
+    }
+}
+
+fn fold(app: &mut App, key: &'static str) {
+    if !app.cam.folded.remove(key) {
+        app.cam.folded.insert(key);
+    }
+}
+
+fn pick_page(app: &mut App, page: Page) {
+    app.cam.page = page;
+    app.cam.sel_op = None;
+    app.cam.sel_tool = None;
+    app.cam.scene_dirty = true;
+}
+
+/// The setup's own nodes, each noting what it is set to.
+fn setup_nodes(app: &mut App, ui: &mut Ui) {
+    let Some(c) = cam(app) else { return };
+    let stock = if !c.follows.is_empty() {
+        format!("from {}", c.follows)
+    } else {
+        let size = app.cam.part.as_ref().map(|p| {
+            let (lo, hi) = cam_paths::stock_box(c, p);
+            let e = hi - lo;
+            format!("{}×{}×{} · ", cam::fmt_mm((e.x * 10.0).round() / 10.0), cam::fmt_mm((e.y * 10.0).round() / 10.0), cam::fmt_mm((e.z * 10.0).round() / 10.0))
+        });
+        format!("{}{}", size.unwrap_or_default(), c.stock.material)
+    };
+    let mut held = vec![];
+    if !c.fixtures.is_empty() {
+        held.push(format!("{} fixture{}", c.fixtures.len(), if c.fixtures.len() == 1 { "" } else { "s" }));
+    }
+    if c.soft_jaws.is_some() {
+        held.push("soft jaws".into());
+    }
+    let held = if held.is_empty() { "none".to_string() } else { held.join(", ") };
+    let post = cam::POSTS.iter().find(|p| p.0 == c.post).map(|p| p.1).unwrap_or("GRBL");
+    let machine = if c.machine.name.is_empty() { format!("custom · {post}") } else { format!("{} · {post}", c.machine.name) };
+    let rows = [
+        (Page::Stock, "cube", "Stock", stock),
+        (Page::WorkZero, "origin", "Work zero", c.origin.label().to_string()),
+        (Page::Fixtures, "fix", "Fixtures", held),
+        (Page::Machine, "cam", "Machine", machine),
+    ];
+    let picked = app.cam.sel_op.is_none() && app.cam.sel_tool.is_none();
+    for (page, icon, name, note) in rows {
+        let sel = picked && app.cam.page == page;
+        let (r, _, _) = tree_row(ui, 1, None, icon, name, &note, sel, false, 0.0, false);
+        if r.on_hover_text(note).clicked() {
+            pick_page(app, page);
+        }
+    }
+}
+
+fn setup_ui(app: &mut App, ui: &mut Ui, page: Page) {
     let studios: Vec<String> = app.ws.studios.iter().map(|s| s.name.clone()).collect();
     let Some(ci) = cam_index(app) else { return };
     let studio = app.ws.cams[ci].studio.min(studios.len().saturating_sub(1));
@@ -507,7 +706,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     let mut goto: Option<String> = None;
     let mut save_machine = None;
     let importing = crate::cam_machine_ui::is_importing(app);
-    let machine_act;
+    let mut machine_act = None;
     // the stock settings of the part being machined (one part: its own; several: the defaults)
     let (stock_pref, imperial) = {
         let doc = app.studio_doc(studio);
@@ -523,6 +722,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     {
         let c = &mut app.ws.cams[ci];
         let jaw_tab = !c.jaws_of.is_empty();
+        if page == Page::Part {
         if jaw_tab {
             ui.label(RichText::new(format!("Machines the soft jaws of {}.", c.jaws_of)).strong());
             ui.label(
@@ -581,6 +781,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
             }
         });
         }
+        }
+        if page == Page::WorkZero {
         row(ui, "Work zero", |ui| {
             egui::ComboBox::from_id_salt("cam-origin").width(150.0).selected_text(c.origin.label()).show_ui(ui, |ui| {
                 for o in Origin::ALL {
@@ -588,6 +790,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        }
+        if page == Page::Part {
         if !jaw_tab {
         row(ui, "Starts from", |ui| {
             let label = if c.follows.is_empty() { "fresh stock".to_string() } else { format!("what {} leaves", c.follows) };
@@ -602,6 +806,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
             new_setup = true;
         }
         }
+        }
+        if page == Page::Stock {
         let mut fixed = c.stock.size.is_some();
         if !c.follows.is_empty() {
             ui.label(RichText::new(format!("The stock is what {} leaves.", c.follows)).color(theme::muted()).size(12.0));
@@ -664,11 +870,13 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             });
         });
+        }
+        if page == Page::WorkZero {
         num(ui, "Clearance", &mut c.clearance, " mm", 1.0..=500.0, 0.5);
         num(ui, "Retract", &mut c.retract, " mm", 0.1..=100.0, 0.1);
-        ui.add_space(4.0);
-        ui.label(RichText::new("FIXTURES").color(theme::muted()).size(11.0).strong())
-            .on_hover_text("Clamps, vise jaws and screws as boxes in work coordinates: toolpaths lift over them and the simulation flags any hit");
+        }
+        if page == Page::Fixtures {
+        ui.label(RichText::new("Clamps, vise jaws and screws as boxes in work coordinates: toolpaths lift over them and the simulation flags any hit.").color(theme::muted()).size(12.0));
         let mut gone = None;
         for (k, f) in c.fixtures.iter_mut().enumerate() {
             ui.horizontal(|ui| {
@@ -821,8 +1029,8 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
                 }
             }
         }
-        ui.add_space(4.0);
-        ui.label(RichText::new("MACHINE").color(theme::muted()).size(11.0).strong());
+        }
+        if page == Page::Machine {
         row(ui, "Machine", |ui| {
             let label = if c.machine.name.is_empty() { "custom".to_string() } else { c.machine.name.clone() };
             egui::ComboBox::from_id_salt("cam-machine").width(150.0).selected_text(label).show_ui(ui, |ui| {
@@ -919,6 +1127,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
         if ui.button("Save as my machine").on_hover_text("New setups start from these machine settings (controller, spindle, machine, coolant, probing, custom G-code) when the document has no setup to copy them from").clicked() {
             save_machine = Some(cam::MachineSettings::of(c));
         }
+        }
     }
     match machine_act {
         Some(crate::cam_machine_ui::Action::Import) => crate::cam_machine_ui::start_import(app, &ui.ctx().clone(), ci),
@@ -1005,7 +1214,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui) {
     if let Some(i) = need_build {
         ensure_built(app, i);
     }
-    if app.studio_bodies(studio).is_empty() {
+    if page == Page::Part && app.studio_bodies(studio).is_empty() {
         ui.label(RichText::new("This Part Studio has no parts yet").color(theme::error_soft()));
     }
 }
@@ -1045,40 +1254,69 @@ pub(crate) fn kind_icon(k: OpKind) -> &'static str {
 fn tools_ui(app: &mut App, ui: &mut Ui) {
     let Some(c) = cam(app) else { return };
     let tools: Vec<(u64, u32, String, ToolKind)> = c.tools.iter().map(|t| (t.id, t.number, t.name.clone(), t.kind)).collect();
+    let open = !app.cam.folded.contains("tools");
+    let (r, _, slot) = tree_row(ui, 1, Some(open), "camTools", "Tools", &tools.len().to_string(), false, false, 44.0, true);
+    if r.clicked() {
+        fold(app, "tools");
+    }
+    if let Some(slot) = slot {
+        in_slot(ui, slot, |ui| {
+            ui.menu_image_button(icons::image("plus", 13.0).tint(theme::muted()), |ui| {
+                for k in ToolKind::ALL {
+                    if ui.button(k.label()).clicked() {
+                        let (material, max_rpm, min_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm, c.min_rpm)).unwrap_or_default();
+                        let mut t = cam::presets().into_iter().find(|t| t.kind == k).unwrap_or(Tool { kind: k, ..Default::default() });
+                        cam::suggest(&mut t, &material, max_rpm, min_rpm);
+                        let mut id = 0;
+                        edit(app, |c| id = c.add_tool(t));
+                        app.cam.sel_tool = Some(id);
+                        app.cam.sel_op = None;
+                        ui.close();
+                    }
+                }
+            })
+            .response
+            .on_hover_text("New tool");
+            if small_icon(ui, "library", "Tool library", true) {
+                app.cam.library_open = true;
+            }
+        });
+    }
+    if !open {
+        return;
+    }
     if tools.is_empty() {
-        ui.label(RichText::new("No tools yet: open the tool library, or add an operation and a suitable tool comes with it.").color(theme::muted()).size(12.0));
+        hint(ui, "No tools yet: open the tool library, or add an operation and a suitable tool comes with it.");
     }
     let mut delete = None;
     for (id, n, name, _) in &tools {
         let sel = app.cam.sel_tool == Some(*id);
-        ui.horizontal(|ui| {
-            let r = ui.add(egui::Button::selectable(sel, RichText::new(format!("T{n}  {name}")).size(12.5)).truncate());
-            if r.clicked() {
-                app.cam.sel_tool = if sel { None } else { Some(*id) };
-                app.cam.sel_op = None;
+        let (r, _, slot) = tree_row(ui, 2, None, "camTools", &format!("T{n}  {name}"), "", sel, false, 20.0, false);
+        if r.clicked() {
+            app.cam.sel_tool = if sel { None } else { Some(*id) };
+            app.cam.sel_op = None;
+        }
+        r.context_menu(|ui| {
+            if ui.button("Save to my library").clicked() {
+                if let Some(t) = cam(app).and_then(|c| c.tool(*id)).cloned() {
+                    let mut lib = cam::load_library();
+                    lib.retain(|x| x.name != t.name);
+                    lib.push(t);
+                    cam::save_library(&lib);
+                    app.flash("Saved to your tool library", ToastKind::Info);
+                }
+                ui.close();
             }
-            r.context_menu(|ui| {
-                if ui.button("Save to my library").clicked() {
-                    if let Some(t) = cam(app).and_then(|c| c.tool(*id)).cloned() {
-                        let mut lib = cam::load_library();
-                        lib.retain(|x| x.name != t.name);
-                        lib.push(t);
-                        cam::save_library(&lib);
-                        app.flash("Saved to your tool library", ToastKind::Info);
-                    }
-                    ui.close();
-                }
-                if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
-                    delete = Some(*id);
-                    ui.close();
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add(egui::Button::image(icons::image("delete", 14.0).tint(theme::muted())).frame(false)).on_hover_text("Delete tool").clicked() {
-                    delete = Some(*id);
-                }
-            });
+            if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
+                delete = Some(*id);
+                ui.close();
+            }
         });
+        if let Some(slot) = slot {
+            if in_slot(ui, slot, |ui| small_icon(ui, "delete", "Delete tool", true)) {
+                delete = Some(*id);
+            }
+        }
     }
     if let Some(id) = delete {
         edit(app, |c| c.tools.retain(|t| t.id != id));
@@ -1086,24 +1324,12 @@ fn tools_ui(app: &mut App, ui: &mut Ui) {
             app.cam.sel_tool = None;
         }
     }
-    ui.horizontal(|ui| {
-        if ui.button("Library…").clicked() {
-            app.cam.library_open = true;
-        }
-        ui.menu_button("New tool", |ui| {
-            for k in ToolKind::ALL {
-                if ui.button(k.label()).clicked() {
-                    let (material, max_rpm, min_rpm) = cam(app).map(|c| (c.stock.material.clone(), c.max_rpm, c.min_rpm)).unwrap_or_default();
-                    let mut t = cam::presets().into_iter().find(|t| t.kind == k).unwrap_or(Tool { kind: k, ..Default::default() });
-                    cam::suggest(&mut t, &material, max_rpm, min_rpm);
-                    let mut id = 0;
-                    edit(app, |c| id = c.add_tool(t));
-                    app.cam.sel_tool = Some(id);
-                    app.cam.sel_op = None;
-                    ui.close();
-                }
-            }
-        });
+}
+
+/// A muted note in the tree, under a branch.
+fn hint(ui: &mut Ui, text: &str) {
+    egui::Frame::new().inner_margin(Margin { left: 40, right: 6, top: 2, bottom: 4 }).show(ui, |ui| {
+        ui.label(RichText::new(text).color(theme::muted()).size(12.0));
     });
 }
 
@@ -1116,55 +1342,64 @@ fn ops_ui(app: &mut App, ui: &mut Ui) {
     let Some(c) = cam(app) else { return };
     let ops: Vec<(u64, OpKind, String, bool, String)> =
         c.ops.iter().map(|o| (o.id, o.kind, o.name.clone(), o.suppressed, c.tool(o.tool).map(|t| format!("T{}", t.number)).unwrap_or("no tool".into()))).collect();
+    let open = !app.cam.folded.contains("ops");
+    let total: f64 = app.cam.paths.iter().map(|p| p.time).sum();
+    let note = if app.cam.computing { "updating…".to_string() } else if app.cam.paths.is_empty() { ops.len().to_string() } else { fmt_time(total) };
+    let (r, _, slot) = tree_row(ui, 1, Some(open), "features", "Operations", &note, false, false, 24.0, false);
+    if r.on_hover_text(if app.cam.paths.is_empty() { String::new() } else { format!("Cycle time {}", fmt_time(total)) }).clicked() {
+        fold(app, "ops");
+    }
+    if let Some(slot) = slot {
+        in_slot(ui, slot, |ui| templates_ui(app, ui));
+    }
+    if !open {
+        return;
+    }
     if ops.is_empty() {
-        ui.label(RichText::new("Add operations from the toolbar: face, clear, pocket, contour, chamfer, drill, bore, thread, tap.").color(theme::muted()).size(12.0));
+        hint(ui, "Add operations from the toolbar: face, clear, pocket, contour, chamfer, drill, bore, thread, tap.");
     }
     let mut action: Option<(&str, u64)> = None;
     let n = ops.len();
     for (i, (id, kind, name, sup, tool)) in ops.iter().enumerate() {
         let tp = app.cam.paths.iter().find(|p| p.op == *id);
         let sel = app.cam.sel_op == Some(*id);
-        ui.horizontal(|ui| {
-            ui.add(icons::image(kind_icon(*kind), 15.0).tint(if *sup { theme::muted() } else { theme::text() }));
-            let mut text = RichText::new(format!("{name} · {tool}")).size(12.5);
-            if *sup {
-                text = text.color(theme::muted()).strikethrough();
+        let warn = tp.map(|t| t.warnings.join("\n")).filter(|w| !w.is_empty());
+        let note = tp.map(|t| fmt_time(t.time)).unwrap_or_default();
+        let note = if warn.is_some() { format!("⚠ {note}") } else { note };
+        let (r, _, slot) = tree_row(ui, 2, None, kind_icon(*kind), &format!("{name} · {tool}"), &note, sel, *sup, 40.0, false);
+        let r = match &warn {
+            Some(w) => r.on_hover_text(w),
+            None => r,
+        };
+        if r.clicked() {
+            app.cam.sel_op = if sel { None } else { Some(*id) };
+            app.cam.sel_tool = None;
+            app.cam.scene_dirty = true;
+        }
+        r.context_menu(|ui| {
+            if ui.button(if *sup { "Unsuppress" } else { "Suppress" }).clicked() {
+                action = Some(("suppress", *id));
+                ui.close();
             }
-            let r = ui.add(egui::Button::selectable(sel, text).truncate());
-            if r.clicked() {
-                app.cam.sel_op = if sel { None } else { Some(*id) };
-                app.cam.sel_tool = None;
-                app.cam.scene_dirty = true;
+            if ui.button("Duplicate").clicked() {
+                action = Some(("duplicate", *id));
+                ui.close();
             }
-            r.context_menu(|ui| {
-                if ui.button(if *sup { "Unsuppress" } else { "Suppress" }).clicked() {
-                    action = Some(("suppress", *id));
-                    ui.close();
-                }
-                if ui.button("Duplicate").clicked() {
-                    action = Some(("duplicate", *id));
-                    ui.close();
-                }
-                if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
-                    action = Some(("delete", *id));
-                    ui.close();
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                if ui.add_enabled(i + 1 < n, egui::Button::image(icons::image("down", 12.0).tint(theme::muted())).frame(false)).on_hover_text("Move down").clicked() {
+            if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
+                action = Some(("delete", *id));
+                ui.close();
+            }
+        });
+        if let Some(slot) = slot {
+            in_slot(ui, slot, |ui| {
+                if small_icon(ui, "down", "Move down", i + 1 < n) {
                     action = Some(("down", *id));
                 }
-                if ui.add_enabled(i > 0, egui::Button::image(icons::image("up", 12.0).tint(theme::muted())).frame(false)).on_hover_text("Move up").clicked() {
+                if small_icon(ui, "up", "Move up", i > 0) {
                     action = Some(("up", *id));
                 }
-                if let Some(tp) = tp {
-                    if !tp.warnings.is_empty() {
-                        ui.add(icons::image("warning", 14.0).tint(theme::error_soft())).on_hover_text(tp.warnings.join("\n"));
-                    }
-                    ui.label(RichText::new(fmt_time(tp.time)).color(theme::muted()).size(11.5));
-                }
             });
-        });
+        }
     }
     if let Some((a, id)) = action {
         edit(app, |c| {
@@ -1186,18 +1421,6 @@ fn ops_ui(app: &mut App, ui: &mut Ui) {
             }
         });
     }
-    templates_ui(app, ui);
-    if !app.cam.paths.is_empty() || app.cam.computing {
-        let total: f64 = app.cam.paths.iter().map(|p| p.time).sum();
-        ui.add_space(4.0);
-        ui.horizontal(|ui| {
-            ui.label(RichText::new(format!("Cycle time {}", fmt_time(total))).strong().size(12.5));
-            if app.cam.computing {
-                ui.spinner();
-                ui.label(RichText::new("updating").color(theme::muted()).size(12.0));
-            }
-        });
-    }
 }
 
 /// Save the setup's operations as a template, or add a saved template's operations.
@@ -1206,10 +1429,10 @@ fn templates_ui(app: &mut App, ui: &mut Ui) {
     let mut save = false;
     let mut add = None;
     let mut gone = None;
-    ui.add_space(2.0);
     // a click in the name box must not close it: only a click outside does
     let keep_open = egui::containers::menu::MenuConfig::new().close_behavior(egui::PopupCloseBehavior::CloseOnClickOutside);
-    egui::containers::menu::MenuButton::new(RichText::new("Templates").size(12.5)).config(keep_open).ui(ui, |ui| {
+    let button = egui::containers::menu::MenuButton::from_button(egui::Button::image(icons::image("file", 13.0).tint(theme::muted())).frame(false));
+    let (r, _) = button.config(keep_open).ui(ui, |ui| {
         ui.set_min_width(240.0);
         ui.label(RichText::new("SAVE THESE OPERATIONS").color(theme::muted()).size(11.0).strong());
         ui.horizontal(|ui| {
@@ -1237,6 +1460,7 @@ fn templates_ui(app: &mut App, ui: &mut Ui) {
             });
         }
     });
+    r.on_hover_text("Templates: save these operations, or add saved ones");
     if save {
         let Some(c) = cam(app) else { return };
         let t = crate::cam_template::from_cam(c, &app.cam.tpl_name, &[]);
@@ -1262,7 +1486,7 @@ fn templates_ui(app: &mut App, ui: &mut Ui) {
 
 fn tool_combo(ui: &mut Ui, c: &Cam, kind: OpKind, tool: &mut u64) {
     let cur = c.tool(*tool).map(|t| format!("T{} {}", t.number, t.name)).unwrap_or("choose a tool".into());
-    egui::ComboBox::from_id_salt("cam-op-tool").width(170.0).selected_text(cur).show_ui(ui, |ui| {
+    egui::ComboBox::from_id_salt("cam-op-tool").width((ui.available_width() - 24.0).clamp(80.0, 170.0)).selected_text(cur).show_ui(ui, |ui| {
         for t in c.tools.iter().filter(|t| kind.accepts(t.kind)) {
             ui.selectable_value(tool, t.id, format!("T{} {}", t.number, t.name));
         }
@@ -2008,37 +2232,11 @@ fn sim_ui(app: &mut App, ui: &mut Ui) {
     let done = sim.done;
     let events = sim.events.clone();
     let removed = sim.removed;
-    ui.horizontal(|ui| {
-        let icon = if app.cam.playing { "pause" } else { "camSim" };
-        if ui.add(egui::Button::image(icons::image(icon, 16.0).tint(theme::text()))).on_hover_text("Play / pause (Space)").clicked() {
-            app.cam.playing = !app.cam.playing;
-            if app.cam.playing && done >= total {
-                app.cam.sim_target = 0;
-            }
-            app.cam.sim_on = true;
-        }
-        if ui.small_button("⏮").on_hover_text("Back to the start").clicked() {
-            app.cam.sim_target = 0;
-            app.cam.playing = false;
-            app.cam.sim_on = true;
-        }
-        if ui.small_button("⏭").on_hover_text("Run to the end").clicked() {
-            app.cam.sim_target = total;
-            app.cam.playing = false;
-            app.cam.sim_on = true;
-        }
-        let mut t = app.cam.sim_target as f64;
-        if ui.add(egui::Slider::new(&mut t, 0.0..=total.max(1) as f64).show_value(false)).changed() {
-            app.cam.sim_target = t as usize;
-            app.cam.playing = false;
-            app.cam.sim_on = true;
-        }
-    });
     if app.cam.speed <= 0.0 {
         app.cam.speed = 200.0;
     }
     row(ui, "Speed", |ui| {
-        ui.add(egui::Slider::new(&mut app.cam.speed, 1.0..=2000.0).logarithmic(true).suffix(" moves/s"));
+        ui.add(egui::Slider::new(&mut app.cam.speed, 1.0..=2000.0).logarithmic(true).suffix("/s").max_decimals(0)).on_hover_text("Moves per second");
     });
     ui.label(RichText::new(format!("Move {done} of {total} · {:.1} cm³ removed", removed / 1000.0)).color(theme::muted()).size(12.0));
     if let Some(now) = sim_step_text(app) {
@@ -2436,8 +2634,12 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                         app.cam.sim_target = 0;
                     }
                 }
+                if ui.add(egui::Button::image(icons::image("rollback", 14.0).tint(theme::text())).frame(false)).on_hover_text("Back to the start").clicked() {
+                    app.cam.sim_target = 0;
+                    app.cam.playing = false;
+                }
                 let mut t = app.cam.sim_target as f64;
-                ui.spacing_mut().slider_width = (strip.width() - 120.0).max(60.0);
+                ui.spacing_mut().slider_width = (strip.width() - 190.0).max(60.0);
                 let r = ui.add(egui::Slider::new(&mut t, 0.0..=total.max(1) as f64).show_value(false));
                 if r.changed() {
                     app.cam.sim_target = t as usize;
@@ -2445,6 +2647,10 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 }
                 if let Some(now) = sim_step_text(app) {
                     r.on_hover_text(now);
+                }
+                if ui.small_button("⏭").on_hover_text("Run to the end").clicked() {
+                    app.cam.sim_target = total;
+                    app.cam.playing = false;
                 }
                 if ui.small_button("Close").clicked() {
                     app.cam.sim_on = false;
@@ -2454,5 +2660,32 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             });
         });
     }
+    sim_card(app, ui, rect);
     let _ = resp;
+}
+
+/// The simulation's results on a card at the viewport's right: speed, what was cut, the colour key and any problems.
+fn sim_card(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
+    if !app.cam.sim_on || app.cam.sim.is_none() {
+        app.cam.sim_card = None;
+        return;
+    }
+    // under the view cube, clear of the playback strip
+    let w = 270.0_f32.min(rect.width() * 0.45);
+    let top = rect.top() + 180.0;
+    let room = egui::Rect::from_min_max(Pos2::new(rect.right() - 12.0 - w, top), Pos2::new(rect.right() - 12.0, (rect.bottom() - 100.0).max(top + 80.0)));
+    if let Some(r) = app.cam.sim_card {
+        // drags on the card's background stay off the view
+        ui.interact(r, egui::Id::new("cam-sim-card"), Sense::click_and_drag());
+    }
+    let mut child = ui.new_child(egui::UiBuilder::new().max_rect(room));
+    let r = egui::Frame::new().fill(theme::window()).stroke(Stroke::new(1.0, theme::border())).corner_radius(10).inner_margin(Margin::same(10)).show(&mut child, |ui| {
+        ui.set_width(w - 22.0);
+        ui.set_max_width(w - 22.0);
+        ui.spacing_mut().slider_width = (w - 200.0).max(60.0);
+        ui.label(RichText::new("SIMULATION").color(theme::muted()).size(11.0).strong());
+        ui.add_space(4.0);
+        egui::ScrollArea::vertical().id_salt("cam-sim-card").max_height(room.height() - 44.0).show(ui, |ui| sim_ui(app, ui));
+    });
+    app.cam.sim_card = Some(r.response.rect);
 }
