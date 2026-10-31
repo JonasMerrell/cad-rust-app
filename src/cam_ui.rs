@@ -305,7 +305,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "camGcode", "G-code", "Export G-code for the machine", true, false, !app.cam.paths.is_empty()).clicked() {
             export_dialog(app);
         }
-        if app.tool_button(ui, "camGcode", "Send to rcnc", "Load the G-code and its tools in rcnc, the CNC controller, running on this computer", true, false, !app.cam.paths.is_empty()).clicked() {
+        if app.tool_button(ui, "camGcode", "Send to rcnc", "Load the G-code, its tools and its setup sheet in rcnc, the CNC controller, running on this computer", true, false, !app.cam.paths.is_empty()).clicked() {
             send_to_rcnc(app);
         }
         if app.tool_button(ui, "camSheet", "Setup sheet", "Save a setup sheet for the operator: stock, work zero, fixtures, tools and operations", true, false, !app.cam.paths.is_empty()).clicked() {
@@ -1911,7 +1911,10 @@ pub(crate) fn send_to_rcnc(app: &mut App) {
     }
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
     let text = gcode_for(&c, &part, &app.cam.paths);
-    let body = crate::rcnc::payload(&c, &app.cam.paths, &format!("{name}.nc"), text);
+    let mut body = crate::rcnc::payload(&c, &app.cam.paths, &format!("{name}.nc"), text);
+    // rcnc shows the setup sheet beside the program
+    let png = crate::cam_sheet::picture(&c, &part, 640, 480);
+    body["setup_sheet"] = crate::cam_sheet::html(&c, &part, &app.cam.paths, png.as_deref()).into();
     match crate::rcnc::send(&body) {
         Ok(msg) => {
             let crashes = app.cam.sim.as_ref().map(|s| s.events.len()).unwrap_or(0);
