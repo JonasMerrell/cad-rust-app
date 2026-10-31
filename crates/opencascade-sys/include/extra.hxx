@@ -2048,9 +2048,13 @@ inline rust::Vec<double> ex_step_parts(rust::Str path, double deflection, rust::
           if (tris.empty())
             return;
           names.push_back(rust::String(full));
-          out.push_back(has_col ? col.Red() : -1.0);
-          out.push_back(has_col ? col.Green() : -1.0);
-          out.push_back(has_col ? col.Blue() : -1.0);
+          // as the file gives them (sRGB), not OCCT's linear values
+          double r = -1.0, g = -1.0, b = -1.0;
+          if (has_col)
+            col.Values(r, g, b, Quantity_TOC_sRGB);
+          out.push_back(r);
+          out.push_back(g);
+          out.push_back(b);
           out.push_back((double)(tris.size() / 9));
           for (double v : tris)
             out.push_back(v);

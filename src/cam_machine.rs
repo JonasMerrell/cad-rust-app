@@ -489,8 +489,17 @@ pub fn import_step(path: &std::path::Path, name: &str) -> Result<MachineModel, S
 /// A part read from a file: name path, colour, triangles.
 pub type StepPart = (String, [u8; 3], Vec<[Vec3; 3]>);
 
-/// A STEP assembly's leaf parts, read in a child process.
+/// A STEP (or Parasolid) assembly's leaf parts, read in a child process.
 pub fn read_step(path: &std::path::Path) -> Result<Vec<StepPart>, String> {
+    if crate::import::format_of(path) == Some("parasolid") {
+        let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
+        let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
+        let step = std::env::temp_dir().join(format!("rcad-machine-{}.step", std::process::id()));
+        std::fs::write(&step, crate::parasolid::to_step(&bytes, &name)?.step).map_err(|e| e.to_string())?;
+        let parts = read_step(&step);
+        let _ = std::fs::remove_file(&step);
+        return parts;
+    }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
     let out = std::env::temp_dir().join(format!("rcad-machine-{}.bin", std::process::id()));
     let st = std::process::Command::new(exe)

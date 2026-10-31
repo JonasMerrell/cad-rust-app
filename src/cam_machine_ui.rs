@@ -53,7 +53,7 @@ pub fn setup_rows(ui: &mut Ui, c: &mut Cam, importing: bool) -> Option<Action> {
         if importing {
             ui.spinner();
             ui.label(RichText::new("Reading the machine…").size(12.0));
-        } else if ui.button("Import machine STEP…").on_hover_text("Read a STEP assembly of the machine; name its axes X/Y/Z axis and its frame Base, or set them afterwards").clicked() {
+        } else if ui.button("Import machine STEP…").on_hover_text("Read a STEP (or Parasolid .x_t) assembly of the machine; name its axes X/Y/Z axis and its frame Base, or set them afterwards").clicked() {
             act = Some(Action::Import);
         }
         if !c.machine.model.is_empty() && ui.button("Axes…").on_hover_text("Which axis moves each part, where the spindle and the table are, and the travel").clicked() {
@@ -73,7 +73,7 @@ pub fn setup_rows(ui: &mut Ui, c: &mut Cam, importing: bool) -> Option<Action> {
 
 /// Start reading a STEP file for setup `ci` in the background.
 pub fn start_import(app: &mut App, ctx: &egui::Context, ci: usize) {
-    let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp", "STEP", "STP"]).pick_file() else { return };
+    let Some(path) = rfd::FileDialog::new().add_filter("STEP or Parasolid", &["step", "stp", "x_t", "STEP", "STP", "X_T"]).pick_file() else { return };
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Machine".into());
     let (tx, rx) = channel();
     let ctx = ctx.clone();
@@ -268,7 +268,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             ui.horizontal(|ui| {
                 if app.cam.machine.adding.is_some() {
                     ui.spinner();
-                } else if ui.button("Add parts from STEP…").on_hover_text("Put something that stands on the table (a vise, a tool setter, a fixture plate) on the machine; it rides with the table").clicked() {
+                } else if ui.button("Add parts from STEP…").on_hover_text("From a STEP or Parasolid .x_t file: put something that stands on the table (a vise, a tool setter, a fixture plate) on the machine; it rides with the table").clicked() {
                     add_step = true;
                 }
                 if ui.button("Save").on_hover_text("Keep these settings for the machine (every setup that uses it)").clicked() {
@@ -280,7 +280,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             });
         });
     if add_step {
-        if let Some(path) = rfd::FileDialog::new().add_filter("STEP", &["step", "stp", "STEP", "STP"]).pick_file() {
+        if let Some(path) = rfd::FileDialog::new().add_filter("STEP or Parasolid", &["step", "stp", "x_t", "STEP", "STP", "X_T"]).pick_file() {
             let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Fixture".into());
             let (tx, rx) = channel();
             let ctx = ctx.clone();

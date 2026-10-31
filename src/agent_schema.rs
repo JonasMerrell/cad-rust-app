@@ -485,7 +485,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("render_cam", "operation") => t("integer", "only this operation id"),
         ("create_cam" | "edit_cam", "on_table") => xyz("where the setup sits on the machine model's table, from its table point, mm"),
         ("cam_machine", "cam") => common("cam").unwrap(),
-        ("cam_machine", "import") => t("string", "STEP assembly of the machine to read"),
+        ("cam_machine", "import") => t("string", "STEP or Parasolid (.x_t) assembly of the machine to read"),
         ("cam_machine", "name") => t("string", "machine name, or a path to a machine .json file"),
         ("cam_machine", "carriers") => json!({"type": "object", "properties": {}, "additionalProperties": en(&["base", "x", "y", "z"], "what carries it"), "description": "part or assembly name → base, x, y or z"}),
         ("cam_machine", "rides") => json!({"type": "array", "items": en(&["base", "x", "y", "z"], "carrier"), "minItems": 3, "maxItems": 3, "description": "what the X, Y and Z axes ride on"}),
@@ -498,7 +498,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_machine", "remove") => arr(t("string", "part or assembly name"), "take these parts off the machine"),
         ("cam_machine", "add") => arr(
             obj(
-                json!({"name": t("string", "name (replaces parts of that name)"), "step": t("string", "STEP file of it"), "cylinder": json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[diameter, height]"}), "box": xyz("[x, y, z] size"), "at": xyz("where the middle of its bottom goes, from the table point")}),
+                json!({"name": t("string", "name (replaces parts of that name)"), "step": t("string", "STEP or Parasolid (.x_t) file of it"), "cylinder": json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[diameter, height]"}), "box": xyz("[x, y, z] size"), "at": xyz("where the middle of its bottom goes, from the table point")}),
                 &["name"],
                 "something standing on the table",
             ),
