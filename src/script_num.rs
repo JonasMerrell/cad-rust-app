@@ -128,10 +128,10 @@ fn register_arrays(e: &mut Engine) {
     // every combination taking one element from each list: [[a0, b0], [a0, b1], …]
     e.register_fn("product", |lists: Array| -> Res<Array> {
         let ls: Vec<Array> = lists.iter().map(|l| l.clone().into_array().map_err(|_| "product: an array of arrays".into())).collect::<Res<_>>()?;
-        let total: usize = ls.iter().map(|l| l.len()).product();
-        if total > 5_000_000 {
-            return err(format!("product: {total} combinations is too many"));
-        }
+        let total = ls.iter().try_fold(1usize, |acc, l| acc.checked_mul(l.len()).filter(|t| *t <= 5_000_000).or(if l.is_empty() { Some(0) } else { None }));
+        let Some(total) = total else {
+            return err("product: more than 5000000 combinations");
+        };
         let mut out = Vec::with_capacity(total);
         let mut idx = vec![0usize; ls.len()];
         if ls.iter().any(|l| l.is_empty()) {
@@ -663,7 +663,7 @@ fn write_png(path: &str, px: &[u8], w: usize, h: usize) -> Res<()> {
     image::save_buffer_with_format(path, px, w as u32, h as u32, image::ColorType::Rgb8, image::ImageFormat::Png).map_err(|e| format!("{path}: {e}").into())
 }
 
-fn register_render(e: &mut Engine) {
+pub fn register_render(e: &mut Engine) {
     // render(parts, options): options {path, width, height, view | eye/target/up, fov, background}
     e.register_fn("render", |parts: Array, opts: Map| -> Res<()> {
         let items = items_of(&parts)?;
@@ -711,7 +711,6 @@ pub fn register(e: &mut Engine) {
     register_arrays(e);
     register_random(e);
     register_rays(e);
-    register_render(e);
 }
 
 #[cfg(test)]

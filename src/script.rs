@@ -67,24 +67,27 @@ fn num(d: &Dynamic) -> Res<f64> {
     Err(format!("expected a number, got {}", d.type_name()).into())
 }
 
+/// A vector: a Vec3 value or an [x, y, z] / [x, y] array (see `script_api::v3`).
 fn vec3(d: &Dynamic) -> Res<DVec3> {
-    let a = d.clone().into_array().map_err(|_| "expected [x, y, z]")?;
-    if a.len() < 3 {
-        return Err("expected [x, y, z]".into());
-    }
-    Ok(DVec3::new(num(&a[0])?, num(&a[1])?, num(&a[2])?))
+    crate::script_api::v3(d)
 }
 
 fn pts2(d: &Array) -> Res<Vec<(f64, f64)>> {
     d.iter()
         .map(|p| {
-            let a = p.clone().into_array().map_err(|_| "expected a list of [x, y] points")?;
-            if a.len() < 2 {
-                return Err("expected [x, y]".into());
-            }
-            Ok((num(&a[0])?, num(&a[1])?))
+            let v = crate::script_api::v3(p).map_err(|_| "expected a list of [x, y] points")?;
+            Ok((v.x, v.y))
         })
         .collect()
+}
+
+/// Sizes of a primitive must be positive (OCCT throws, uncatchably, on zero sizes).
+fn positive(what: &str, vals: &[f64]) -> Res<()> {
+    if vals.iter().all(|v| *v > 1e-7) {
+        Ok(())
+    } else {
+        Err(format!("{what} needs positive sizes").into())
+    }
 }
 
 fn occ_err<T>(r: Result<T, String>) -> Res<T> {
@@ -119,7 +122,10 @@ fn all_edges(s: &Shape) -> Vec<opencascade::primitives::Edge> {
 }
 
 fn engine(log: Rc<RefCell<Vec<String>>>) -> Engine {
-    engine_with(log, false)
+    let mut e = engine_with(log, false);
+    // a document's script can't load other files
+    e.set_module_resolver(rhai::module_resolvers::DummyModuleResolver::new());
+    e
 }
 
 /// The script engine with every shape function; `stdout`: print goes to the terminal instead of `log`.
@@ -140,8 +146,16 @@ pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
     }
     crate::script_api::register(&mut e);
 
-    e.register_fn("cube", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> { Ok(wrap(Shape::box_with_dimensions(num(&w)?, num(&d)?, num(&h)?))) });
-    e.register_fn("cube_centered", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> { Ok(wrap(Shape::box_centered(num(&w)?, num(&d)?, num(&h)?))) });
+    e.register_fn("cube", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> {
+        let (w, d, h) = (num(&w)?, num(&d)?, num(&h)?);
+        positive("cube", &[w, d, h])?;
+        Ok(wrap(Shape::box_with_dimensions(w, d, h)))
+    });
+    e.register_fn("cube_centered", |w: Dynamic, d: Dynamic, h: Dynamic| -> Res<S> {
+        let (w, d, h) = (num(&w)?, num(&d)?, num(&h)?);
+        positive("cube_centered", &[w, d, h])?;
+        Ok(wrap(Shape::box_centered(w, d, h)))
+    });
     e.register_fn("cylinder", |r: Dynamic, h: Dynamic| -> Res<S> {
         let (r, h) = (num(&r)?, num(&h)?);
         if r <= 0.0 || h <= 0.0 {
@@ -150,10 +164,20 @@ pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
         Ok(wrap(Shape::cylinder_radius_height(r, h)))
     });
     e.register_fn("cone", |r1: Dynamic, r2: Dynamic, h: Dynamic| -> Res<S> {
-        Ok(wrap(Shape::cone().bottom_radius(num(&r1)?).top_radius(num(&r2)?).height(num(&h)?).build()))
+        let (r1, r2, h) = (num(&r1)?, num(&r2)?, num(&h)?);
+        cone_ok(r1, r2, h)?;
+        Ok(wrap(Shape::cone().bottom_radius(r1).top_radius(r2).height(h).build()))
     });
-    e.register_fn("sphere", |r: Dynamic| -> Res<S> { Ok(wrap(Shape::sphere(num(&r)?).build())) });
-    e.register_fn("torus", |r1: Dynamic, r2: Dynamic| -> Res<S> { Ok(wrap(Shape::torus().radius_1(num(&r1)?).radius_2(num(&r2)?).build())) });
+    e.register_fn("sphere", |r: Dynamic| -> Res<S> {
+        let r = num(&r)?;
+        positive("sphere", &[r])?;
+        Ok(wrap(Shape::sphere(r).build()))
+    });
+    e.register_fn("torus", |r1: Dynamic, r2: Dynamic| -> Res<S> {
+        let (r1, r2) = (num(&r1)?, num(&r2)?);
+        positive("torus", &[r1, r2])?;
+        Ok(wrap(Shape::torus().radius_1(r1).radius_2(r2).build()))
+    });
     e.register_fn("prism", |pts: Array, h: Dynamic| -> Res<S> {
         let p: Vec<DVec3> = pts2(&pts)?.into_iter().map(|(x, y)| DVec3::new(x, y, 0.0)).collect();
         let f = polygon_face(&p)?;
@@ -216,6 +240,17 @@ pub fn engine_with(log: Rc<RefCell<Vec<String>>>, stdout: bool) -> Engine {
     e.register_fn("volume", |s: &mut S| -> f64 { crate::kernel::volume(&s.0) });
     e.register_fn("deg", |d: Dynamic| -> Res<f64> { Ok(num(&d)?.to_radians()) });
     e
+}
+
+/// A cone's radii may be zero at one end, not both, and its height must be positive.
+pub fn cone_ok(r1: f64, r2: f64, h: f64) -> Res<()> {
+    if r1 < 0.0 || r2 < 0.0 || r1.max(r2) <= 1e-7 || h <= 1e-7 {
+        return Err("cone needs a positive height and radii (one may be 0)".into());
+    }
+    if (r1 - r2).abs() <= 1e-7 {
+        return Err("cone needs two different radii (use cylinder for equal ones)".into());
+    }
+    Ok(())
 }
 
 /// A parameter value handed to the script.

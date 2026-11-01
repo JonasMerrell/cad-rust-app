@@ -635,7 +635,7 @@ mod tests {
         if let Some((rad, len)) = dims {
             s.constraints.push(Constraint::Radius { c: a1, dim: Dim::new(format!("{rad}"), [0.0; 2]) });
             s.constraints.push(Constraint::Distance { a, b, dim: Dim::new(format!("{len}"), [0.0; 2]) });
-            let vars = std::collections::HashMap::new();
+            let vars = crate::expr::Vars::default();
             assert!(s.solve(&Env { vars: &vars, units: Units::Mm }, &[a]).ok);
         }
         s
@@ -648,7 +648,7 @@ mod tests {
     fn dragged_slot_stays_a_slot() {
         use crate::expr::{Env, Units};
         use crate::sketch::arc_angles;
-        let vars = std::collections::HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut seed = 12345u64;
         let mut rnd = || {

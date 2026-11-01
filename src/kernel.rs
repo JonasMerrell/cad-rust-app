@@ -195,7 +195,7 @@ pub struct Body {
 
 pub struct Model<'a> {
     pub doc: &'a Document,
-    pub vars: HashMap<String, f64>,
+    pub vars: crate::expr::Vars,
     pub bodies: Vec<Body>,
     pub frames: HashMap<FeatId, Frame>,
     /// Wire results (helices).

@@ -350,8 +350,13 @@ const markers = MARKERS.map(mk => {
   const el = document.createElement('div');
   el.className = 'readout';
   const axes = mk.axes || ['X', 'Y', 'Z'];
-  el.innerHTML = '<b></b>' + axes.map(a => `<span>${a} <i>0</i></span>`).join('');
-  el.querySelector('b').textContent = mk.name;
+  el.appendChild(document.createElement('b')).textContent = mk.name;
+  for (const a of axes) {
+    const sp = document.createElement('span');
+    sp.append(a + ' ', document.createElement('i'));
+    sp.lastChild.textContent = '0';
+    el.appendChild(sp);
+  }
   hud.appendChild(el);
   const r = { mk, dot, el, out: [...el.querySelectorAll('i')], zero: null, trail: null, pts: [] };
   if (mk.trail && mk.relative != null) {

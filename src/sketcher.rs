@@ -3999,7 +3999,7 @@ mod tests {
     }
 
     fn env_solve(sk: &mut Sketch) -> SolveStatus {
-        let vars = std::collections::HashMap::new();
+        let vars = crate::expr::Vars::default();
         sk.solve(&Env { vars: &vars, units: crate::expr::Units::Mm }, &[])
     }
 
@@ -4084,7 +4084,7 @@ mod tests {
         let Some(Geom::Line { a: q, .. }) = out.curves.iter().rev().find(|c| matches!(c.geom, Geom::Line { .. })).map(|c| c.geom.clone()) else { panic!() };
         let v = out.pv(q);
         out.point_mut(q).unwrap().x = v.x + 3.0;
-        let vars = std::collections::HashMap::new();
+        let vars = crate::expr::Vars::default();
         assert!(out.solve(&Env { vars: &vars, units: crate::expr::Units::Mm }, &[q]).ok);
         assert!((out.pv(q) - v).length() < 1e-6, "{} {v}", out.pv(q));
     }
@@ -4121,7 +4121,7 @@ mod tests {
 
     #[test]
     fn dimension_labels_read_cleanly() {
-        let vars: std::collections::HashMap<String, f64> = [("d".to_string(), 12.0)].into();
+        let vars = crate::expr::Vars::from(std::collections::HashMap::from([("d".to_string(), 12.0)]));
         let env = Env { vars: &vars, units: crate::expr::Units::Mm };
         let mut sk = Sketch::default();
         let c = sk.add_point(DVec2::ZERO);

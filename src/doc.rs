@@ -1,8 +1,6 @@
 //! The part document: variables, the ordered feature list and references
 //! between features and model geometry.
 
-use std::collections::HashMap;
-
 use serde::{Deserialize, Serialize};
 
 use crate::expr::{self, Env, Kind, Units};
@@ -851,7 +849,7 @@ impl Document {
         id
     }
 
-    pub fn var_values(&self) -> (HashMap<String, f64>, Vec<Option<String>>) {
+    pub fn var_values(&self) -> (expr::Vars, Vec<Option<String>>) {
         let cfg = self.active_config.and_then(|i| self.configs.get(i));
         let pairs: Vec<(String, String)> =
             self.variables.iter().map(|v| (v.name.clone(), cfg.and_then(|c| c.values.get(&v.name)).cloned().unwrap_or_else(|| v.expr.clone()))).collect();
@@ -919,6 +917,6 @@ fn part() -> String {
 }
 
 /// Evaluate a feature parameter.
-pub fn eval(src: &str, kind: Kind, vars: &HashMap<String, f64>, units: Units) -> Result<f64, String> {
+pub fn eval(src: &str, kind: Kind, vars: &expr::Vars, units: Units) -> Result<f64, String> {
     expr::eval(src, kind, &Env { vars, units })
 }

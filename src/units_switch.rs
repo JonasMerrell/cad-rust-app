@@ -6,8 +6,6 @@
 //! keeps its size: either converted to the new unit ("0.31496063") or given the
 //! old unit explicitly ("8 mm").
 
-use std::collections::HashMap;
-
 use crate::doc::{Document, Op};
 use crate::expr::{self, Env, Kind, Units};
 
@@ -27,6 +25,42 @@ pub fn switch_units(doc: &mut Document, to: Units, how: UnitChange) -> usize {
     let from = doc.units;
     let mut n = 0;
     if from != to && how != UnitChange::Rescale {
+        // Variables first, one at a time so each is read with the ones before it already
+        // rewritten. A plain-number variable gets the old unit written out ("8" becomes "8 mm"):
+        // that keeps its size as a length and its number where a count or an angle field reads
+        // it, which a converted number would not.
+        let label = |s: &mut String, pairs: &[(String, String)]| -> bool {
+            let (vars, _) = expr::resolve_vars(pairs, from);
+            match rewrite(s, &vars, from, to, UnitChange::Label) {
+                Some(t) => {
+                    *s = t;
+                    true
+                }
+                None => false,
+            }
+        };
+        let mut pairs: Vec<(String, String)> = vec![];
+        for v in &mut doc.variables {
+            if label(&mut v.expr, &pairs) {
+                n += 1;
+            }
+            pairs.push((v.name.clone(), v.expr.clone()));
+        }
+        for c in &mut doc.configs {
+            let mut pairs: Vec<(String, String)> = vec![];
+            for v in &doc.variables {
+                let e = match c.values.get_mut(&v.name) {
+                    Some(e) => {
+                        if label(e, &pairs) {
+                            n += 1;
+                        }
+                        e.clone()
+                    }
+                    None => v.expr.clone(),
+                };
+                pairs.push((v.name.clone(), e));
+            }
+        }
         let (vars, _) = doc.var_values();
         let mut fix = |s: &mut String| {
             if let Some(t) = rewrite(s, &vars, from, to, how) {
@@ -34,15 +68,6 @@ pub fn switch_units(doc: &mut Document, to: Units, how: UnitChange) -> usize {
                 n += 1;
             }
         };
-        // variables are read as lengths (that is how they resolve), whatever they are used for
-        for v in &mut doc.variables {
-            fix(&mut v.expr);
-        }
-        for c in &mut doc.configs {
-            for v in c.values.values_mut() {
-                fix(v);
-            }
-        }
         let defs = doc.custom_features.clone();
         for f in &mut doc.features {
             for_each_length(&mut f.op, &defs, &mut fix);
@@ -123,7 +148,7 @@ fn for_each_length(op: &mut Op, defs: &[crate::script::CustomDef], fix: &mut imp
 
 /// The rewritten text of one length expression, or None when it does not depend on the units
 /// (it names a unit or a variable, or does not evaluate).
-pub fn rewrite(src: &str, vars: &HashMap<String, f64>, from: Units, to: Units, how: UnitChange) -> Option<String> {
+pub fn rewrite(src: &str, vars: &expr::Vars, from: Units, to: Units, how: UnitChange) -> Option<String> {
     let at = |u: Units| expr::eval(src, Kind::Length, &Env { vars, units: u }).ok();
     let (a, b) = (at(Units::Mm)?, at(Units::In)?);
     // a value that is the same read in mm and in inches carries its own unit
@@ -187,7 +212,7 @@ mod tests {
 
     #[test]
     fn rewrites_read_well() {
-        let vars = HashMap::from([("w".to_string(), 40.0)]);
+        let vars = expr::Vars::from(std::collections::HashMap::from([("w".to_string(), 40.0)]));
         assert_eq!(rewrite("8", &vars, Units::Mm, Units::Cm, UnitChange::Convert).as_deref(), Some("0.8"));
         assert_eq!(rewrite("8", &vars, Units::Mm, Units::In, UnitChange::Label).as_deref(), Some("8 mm"));
         assert_eq!(rewrite("2*4", &vars, Units::Mm, Units::In, UnitChange::Convert).as_deref(), Some("(2*4) mm"));
@@ -204,7 +229,7 @@ mod tests {
         let before = depth_mm(&d);
         switch_units(&mut d, Units::In, UnitChange::Convert);
         assert!((depth_mm(&d) - before).abs() < 1e-6);
-        assert_eq!(d.variables[0].expr, "0.31496063");
+        assert_eq!(d.variables[0].expr, "8 mm");
         // angle fields are left alone
         let mut d = Document::default();
         let mut op = Op::new_default("revolve").unwrap();
@@ -215,5 +240,30 @@ mod tests {
         switch_units(&mut d, Units::In, UnitChange::Convert);
         let Op::Revolve { angle, .. } = &d.features[0].op else { panic!() };
         assert_eq!(angle, "90");
+    }
+
+    #[test]
+    fn plain_variables_keep_sizes_and_counts() {
+        for how in [UnitChange::Convert, UnitChange::Label] {
+            let mut d = doc_with("w + 1");
+            d.variables.push(crate::doc::Variable { name: "w".into(), expr: "8".into() });
+            d.variables.push(crate::doc::Variable { name: "h".into(), expr: "w + 2".into() });
+            d.variables.push(crate::doc::Variable { name: "n".into(), expr: "4".into() });
+            d.variables.push(crate::doc::Variable { name: "a".into(), expr: "30".into() });
+            let read = |d: &Document, src: &str, kind: Kind| {
+                let (vars, _) = d.var_values();
+                crate::doc::eval(src, kind, &vars, d.units).unwrap()
+            };
+            let before = depth_mm(&d);
+            assert_eq!(before, 9.0);
+            for to in [Units::In, Units::Cm, Units::Mm] {
+                switch_units(&mut d, to, how);
+                assert!((depth_mm(&d) - before).abs() < 1e-6, "{how:?} {to:?}");
+                assert!((read(&d, "h", Kind::Length) - 10.0).abs() < 1e-6, "{how:?} {to:?}");
+                assert_eq!(read(&d, "n", Kind::Count), 4.0);
+                assert_eq!(read(&d, "n + 1", Kind::Count), 5.0);
+                assert!((read(&d, "a", Kind::Angle) - 30.0).abs() < 1e-9);
+            }
+        }
     }
 }

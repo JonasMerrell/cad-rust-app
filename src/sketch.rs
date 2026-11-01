@@ -1464,7 +1464,7 @@ mod tests {
 
     #[test]
     fn rectangle_with_dims() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let p: Vec<Id> = [(0.0, 0.0), (10.0, 1.0), (11.0, 7.0), (-1.0, 6.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
@@ -1488,7 +1488,7 @@ mod tests {
 
     #[test]
     fn circle_tangent_line() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let a = s.add_point(DVec2::new(0.0, 0.0));
@@ -1508,7 +1508,7 @@ mod tests {
 
     #[test]
     fn concentric_circles_take_a_radial_distance() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         // a circle and an arc sharing one centre (what Concentric leaves)
@@ -1556,7 +1556,7 @@ mod tests {
 
     #[test]
     fn reference_dimensions_measure_without_driving() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let (mut s, l) = defined_rectangle();
         let mut top = Dim::new("40", [0.0; 2]);
@@ -1572,7 +1572,7 @@ mod tests {
 
     #[test]
     fn conflicts_name_the_redundant_dimension() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let (mut s, l) = defined_rectangle();
         // a second driving width: any new width now fails, and the culprit is found
@@ -1599,7 +1599,7 @@ mod tests {
 
     #[test]
     fn equal_distance_keeps_offsets_even() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let a = s.add_point(DVec2::new(0.0, 0.0));
@@ -1619,7 +1619,7 @@ mod tests {
     fn tangent_at_a_shared_end_counts_once() {
         // a slot: two lines and two arcs, tangent where they meet, equal arcs, axis parallel:
         // position, angle, length and radius are free, so 5 DOF at any size and angle
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         for (scale, ang) in [(1.0, 0.0), (37.0, 2.0), (250.0, 0.7)] {
             let mut s = Sketch::default();
@@ -1655,7 +1655,7 @@ mod tests {
     #[test]
     fn curve_on_a_missing_point_does_not_panic() {
         // e.g. a line chain continued from a point an undo took away
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let b = s.add_point(DVec2::new(5.0, 0.0));
@@ -1695,7 +1695,7 @@ mod tests {
 
     #[test]
     fn point_on_ellipse_holds() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let c = s.add_point(DVec2::new(1.0, 2.0));
@@ -1717,7 +1717,7 @@ mod tests {
 
     #[test]
     fn constraints_the_solver_cannot_apply_are_reported() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let pts: Vec<Id> = [(0.0, 0.0), (5.0, 3.0), (10.0, 0.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
