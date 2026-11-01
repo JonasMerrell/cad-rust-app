@@ -191,8 +191,9 @@ impl Cpu {
 
     /// The exception to take now, if any.
     fn next_exception(&mut self, lines: u32) -> Option<u32> {
-        // asserted lines are pending, enabled or not
-        self.pending |= (lines as u64) << 16;
+        // asserted lines are pending, enabled or not, unless already active (a level-sensitive
+        // line still high when its handler returns is sampled again then)
+        self.pending |= ((lines as u64) << 16) & !self.active;
         let mut cand = self.pending & !self.active;
         // disabled IRQs are not taken
         cand &= !((!self.nvic_en as u64) << 16);
@@ -1255,5 +1256,65 @@ pub mod tests {
         assert_eq!(cpu.r[0], 1);
         assert_eq!(cpu.ipsr, 0);
         assert_eq!(cpu.r[13], 0x8000);
+    }
+
+    /// RAM whose IRQ 0 line is high while the word at 0x900 is non-zero (a level-sensitive
+    /// peripheral the handler acknowledges by clearing it).
+    struct LevelIrq(Ram);
+
+    impl Bus for LevelIrq {
+        fn read32(&mut self, a: u32) -> u32 {
+            self.0.read32(a)
+        }
+        fn read16(&mut self, a: u32) -> u16 {
+            self.0.read16(a)
+        }
+        fn read8(&mut self, a: u32) -> u8 {
+            self.0.read8(a)
+        }
+        fn write32(&mut self, a: u32, v: u32) {
+            self.0.write32(a, v)
+        }
+        fn write16(&mut self, a: u32, v: u16) {
+            self.0.write16(a, v)
+        }
+        fn write8(&mut self, a: u32, v: u8) {
+            self.0.write8(a, v)
+        }
+        fn irqs(&self) -> u32 {
+            (u32::from_le_bytes(self.0.0[0x900..0x904].try_into().unwrap()) != 0) as u32
+        }
+        fn native(&mut self, _: &mut Cpu, _: u32) -> Option<u32> {
+            None
+        }
+    }
+
+    #[test]
+    fn a_level_interrupt_runs_its_handler_once() {
+        let mut bus = LevelIrq(Ram(vec![0; 0x10000]));
+        bus.write32(0, 0x8000);
+        bus.write32(4, 0x101);
+        bus.write32(16 * 4, 0x201);
+        // main: b .
+        bus.write16(0x100, 0xe7fe);
+        // handler: adds r4, #1; movs r1, #0; movs r2, #0x90; lsls r2, r2, #4; str r1, [r2]; bx lr
+        for (k, h) in [0x3401u16, 0x2100, 0x2290, 0x0112, 0x6011, 0x4770].iter().enumerate() {
+            bus.write16(0x200 + 2 * k as u32, *h);
+        }
+        let mut cpu = Cpu::default();
+        cpu.reset(&mut bus, 0);
+        cpu.ppb_write(0xe000_e100, 1);
+        bus.write32(0x900, 1);
+        for _ in 0..50 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.r[4], 1, "the handler ran again after it cleared its source");
+        assert_eq!(cpu.ipsr, 0);
+        // asserted again: taken again
+        bus.write32(0x900, 1);
+        for _ in 0..50 {
+            cpu.step(&mut bus);
+        }
+        assert_eq!(cpu.r[4], 2);
     }
 }
