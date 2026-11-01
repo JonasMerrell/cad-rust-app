@@ -52,6 +52,11 @@ pub struct Session {
     pub base_dir: Option<std::path::PathBuf>,
     /// Rebuilds so far, to tell whether a failed call needs one to undo it.
     rebuilds: u64,
+    /// Set while a long computation (a simulation solve) should give up: the chat's Stop button.
+    pub cancel: Option<std::sync::Arc<std::sync::atomic::AtomicBool>>,
+    /// A tool panicked part way; the caller should not trust what it changed outside the active
+    /// Part Studio (the Part Studio itself is put back for modelling tools).
+    pub crashed: bool,
 }
 
 type R<T> = Result<T, String>;
@@ -69,6 +74,8 @@ impl Session {
             proj: HashMap::new(),
             base_dir: None,
             rebuilds: 0,
+            cancel: None,
+            crashed: false,
         }
     }
 
@@ -157,7 +164,7 @@ impl Session {
         let a = if a.is_null() { &empty } else { a };
         check_args(name, a)?;
         if !schema::MODELLING_TOOLS.contains(&name) {
-            return self.call_tool(name, a);
+            return self.call_guarded(name, a);
         }
         let (cur, doc, rebuilds) = (self.cur, self.doc.clone(), self.rebuilds);
         let old: Vec<(FeatId, String)> = self.result.features.iter().filter_map(|f| f.error.clone().map(|e| (f.id, e))).collect();
@@ -165,7 +172,7 @@ impl Session {
             s.doc = doc.clone();
             if s.rebuilds != rebuilds { s.rebuild() } else { Ok(()) }
         };
-        let (mut v, img) = match self.call_tool(name, a) {
+        let (mut v, img) = match self.call_guarded(name, a) {
             Ok(r) => r,
             Err(e) => {
                 if self.cur == cur {
@@ -190,6 +197,16 @@ impl Session {
             v["new_errors"] = json!(new);
         }
         Ok((v, img))
+    }
+
+    /// `call_tool`, with a panic turned into an error (and `crashed` set) so a server keeps
+    /// running and a modelling call is still undone.
+    fn call_guarded(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| self.call_tool(name, a)));
+        r.unwrap_or_else(|_| {
+            self.crashed = true;
+            Err(format!("{name} crashed (an internal error); describe shows what the document holds now"))
+        })
     }
 
     fn call_tool(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
@@ -1648,7 +1665,7 @@ pub(crate) fn tools() -> Value {
         {"name": "export_web", "description": "Save an interactive 3D page (.html, opens in a browser): with assembly, its slider, cylindrical and revolute mates move within their limits (sliders, dragging parts, arrow keys), gear and rack relations follow, explode steps drive an explode slider; without, the parts of a Part Studio (studio, default the active one). Also section planes, ghosting by material and part details. inline:false writes a .json and .bin beside the page (serve them over http).", "inputSchema": obj(json!({"path": {"type": "string"}, "assembly": {"type": "integer"}, "studio": {"type": "integer"}, "inline": {"type": "boolean"}}), &["path"])},
         {"name": "render_assembly", "description": "Shaded PNG of an assembly (view/direction/width/height/path as in render; fit_box for a close-up). explode: 0..1 runs through the explode steps (or spreads parts out by that factor when there are none).", "inputSchema": obj(json!({"assembly": {"type": "integer"}, "view": {"type": "string"}, "direction": {"type": "array"}, "explode": {"type": "number"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}, "fit_box": {"type": "array", "description": "[[x, y, z], [x, y, z]] mm: frame this box instead of the whole assembly (a close-up)"}}), &["assembly"])},
         {"name": "create_drawing", "description": "Add a Drawing tab (sheet A4/A3/A2/A1/Letter/Tabloid, default A3) with front, top, right and iso views of a Part Studio (standard_views:false for an empty sheet). Returns its index and drawing_info.", "inputSchema": obj(json!({"name": {"type": "string"}, "sheet": {"type": "string"}, "studio": {"type": "integer"}, "standard_views": {"type": "boolean"}}), &[])},
-        {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, body (one part of the studio, default all), or assembly (instances at their poses), balloons (assembly views), dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, through (section cut offset mm from the model centre), letter, position:[x,y] sheet mm, scale, hidden_lines, sheet}; section{view, at (view coord of the cut), line: horizontal|vertical, letter, scale, position} adds a lettered section A-A with a cutting line on the parent view; detail{view, center:[x,y] view coords, radius, position, scale, letter}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× ', suffix, tolerance: number (±) or {plus, minus} or {limits:true, plus, minus}} - dimensions attach to model edges and follow model changes; auto_dimensions{view} (overall size, hole positions from the lower-left corner, hole callouts like 2× Ø10 THRU ⌴Ø16 ↧5; regenerated when the model changes); title{part, part_no, material, stock (raw stock under the material; default the part's stock size, none leaves it out), revision, date, drawn_by, tolerance, projection: first|third, decimals}; note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
+        {"name": "drawing_add", "description": "Add items to a drawing. Types: view{studio, body (one part of the studio, default all), or assembly (instances at their poses), balloons (assembly views), dir: front|top|right|back|bottom|left|iso|section:front|section:top|section:right, through [x,y,z] (a model point the section cut goes through) or cut (offset mm from the model centre), letter, position:[x,y] sheet mm, scale, hidden_lines, sheet}; section{view, at (view coord of the cut), line: horizontal|vertical, letter, scale, position} adds a lettered section A-A with a cutting line on the parent view; detail{view, center:[x,y] view coords, radius, position, scale, letter}; dimension{view, kind: horizontal|vertical|aligned|radius|diameter|angle, a, b (view coords from drawing_info; radius/diameter: a = centre, b = point on circle or radius:r; angle: a-b first line, line2:[[x,y],[x,y]]), offset, prefix like '4× ', suffix, tolerance: number (±) or {plus, minus} or {limits:true, plus, minus}} - dimensions attach to model edges and follow model changes; auto_dimensions{view} (overall size, hole positions from the lower-left corner, hole callouts like 2× Ø10 THRU ⌴Ø16 ↧5; regenerated when the model changes); title{part, part_no, material, stock (raw stock under the material; default the part's stock size, none leaves it out), revision, date, drawn_by, tolerance, projection: first|third, decimals}; note{text, position, sheet}; gdt{kind: position|flatness|straightness|circularity|cylindricity|perpendicularity|parallelism|angularity|profileLine|profileSurface|concentricity|symmetry|runout|totalRunout, tolerance like 'Ø0.1', datums 'A B', position, leader:[x,y] sheet mm, sheet}; datum{letter, position, leader}; bom{assembly, position, sheet}; sheet{} adds a sheet. sheet numbers start at 1.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "items": {"type": "array"}}), &["drawing", "items"])},
         {"name": "drawing_info", "description": "A drawing's views (with dimensionable points, straight lines and circles in view coordinates), dimensions, notes and GD&T.", "inputSchema": obj(json!({"drawing": {"type": "integer"}}), &["drawing"])},
         {"name": "render_drawing", "description": "PNG of one drawing sheet (sheet: 1-based, width px) to check the layout.", "inputSchema": obj(json!({"drawing": {"type": "integer"}, "sheet": {"type": "integer"}, "width": {"type": "integer"}, "path": {"type": "string"}}), &["drawing"])}
     ])

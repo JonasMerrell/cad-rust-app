@@ -379,7 +379,12 @@ impl Session {
         self.project_drawing(di)?;
         let d = self.ws.drawings[di].clone();
         let size = drawing_ui::sheet_size(&d.sheet);
-        let sheet = a.get("sheet").and_then(|s| s.as_u64()).map(|s| s as usize - 1).unwrap_or(0);
+        let sheet = match a.get("sheet").and_then(|s| s.as_u64()) {
+            Some(0) => return Err("sheet numbers start at 1".into()),
+            Some(s) if s as usize > d.sheet_count() => return Err(format!("sheet {s}: the drawing has {} sheet(s)", d.sheet_count())),
+            Some(s) => s as usize - 1,
+            None => 0,
+        };
         Ok(match format {
             "pdf" => {
                 let pages: Vec<Vec<Prim>> = (0..d.sheet_count()).map(|i| drawing_ui::sheet_prims(self, &d, i)).collect();
@@ -1018,9 +1023,17 @@ impl Session {
                 let di = dwg_idx(a, self)?;
                 self.sync();
                 let items = a.get("items").and_then(|i| i.as_array()).ok_or("give items")?.clone();
+                // all or nothing: a bad item leaves the drawing as it was
+                let before = self.ws.drawings[di].clone();
                 let mut created = vec![];
-                for it in &items {
-                    created.push(self.drawing_item(di, it)?);
+                for (i, it) in items.iter().enumerate() {
+                    match self.drawing_item(di, it) {
+                        Ok(c) => created.push(c),
+                        Err(e) => {
+                            self.ws.drawings[di] = before;
+                            return Err(format!("items[{i}]: {e} (nothing was added)"));
+                        }
+                    }
                 }
                 json!({"created": created})
             }
@@ -1090,4 +1103,31 @@ fn tri_dist(p: DVec3, a: DVec3, b: DVec3, c: DVec3) -> f64 {
     let q = p - n * (p - a).dot(n);
     let inside = [(a, b), (b, c), (c, a)].iter().all(|(u, v)| (*v - *u).cross(q - *u).dot(n) >= -1e-12);
     if inside { (p - q).length() } else { seg_dist(p, a, b).min(seg_dist(p, b, c)).min(seg_dist(p, c, a)) }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::super::Session;
+    use crate::drawing::Drawing;
+    use serde_json::json;
+
+    /// drawing_add adds every item or none, and sheet numbers start at 1.
+    #[test]
+    fn drawing_add_is_all_or_nothing() {
+        let mut s = Session::new();
+        s.ws.drawings.push(Drawing { name: "D".into(), sheet: "A3".into(), ..Default::default() });
+        let bad = json!({"drawing": 0, "items": [{"type": "note", "text": "kept?", "position": [20, 20]}, {"type": "note", "text": "no position", "sheet": 4}]});
+        let e = s.call("drawing_add", &bad).unwrap_err();
+        assert!(e.contains("items[1]") && e.contains("nothing was added"), "{e}");
+        assert!(s.ws.drawings[0].notes.is_empty());
+        assert_eq!(s.ws.drawings[0].sheet_count(), 1);
+        let ok = json!({"drawing": 0, "items": [{"type": "note", "text": "a", "position": [20, 20]}, {"type": "note", "text": "b", "position": [20, 30]}]});
+        s.call("drawing_add", &ok).unwrap();
+        assert_eq!(s.ws.drawings[0].notes.len(), 2);
+
+        let e = s.export_drawing_tab(0, "svg", &json!({"sheet": 0})).unwrap_err();
+        assert!(e.contains("start at 1"), "{e}");
+        assert!(s.export_drawing_tab(0, "svg", &json!({"sheet": 3})).is_err());
+        assert!(s.export_drawing_tab(0, "svg", &json!({"sheet": 1})).is_ok());
+    }
 }
