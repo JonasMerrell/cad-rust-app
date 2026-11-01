@@ -411,7 +411,7 @@ pub fn footprint(name: &str) -> Option<Footprint> {
                 body_rect = ([-d / 2.0, -d / 2.0], [d / 2.0, d / 2.0]);
             }
             "TO-92" => {
-                f.pads = (0..3).map(|i| Pad { num: (i + 1).to_string(), at: [(i as f64 - 1.0) * 1.27, 0.0], size: [1.1, 1.8], shape: PadShape::Oval, drill: 0.75 }).collect();
+                f.pads = (0..3).map(|i| Pad { num: (i + 1).to_string(), at: [(i as f64 - 1.0) * 1.27, 0.0], size: [1.05, 1.5], shape: PadShape::Oval, drill: 0.75 }).collect();
                 f.pads[0].shape = PadShape::Rect;
                 f.silk = vec![G::Line([-2.4, -1.6], [2.4, -1.6])];
                 f.body = vec![Solid::Cyl { c: [0.0, 0.0], r: 2.4, z0: 0.0, h: 4.8 }];
