@@ -61,39 +61,10 @@ pub fn read_models(path: &Path) -> Result<Found, String> {
         let (format, bytes) = crate::import::storable(format, bytes, &name)?;
         return Ok(Found { files: vec![ModelFile { name, format, bytes }], skipped: vec![] });
     }
-    let entries = unzip(&bytes)?;
     let mut files = vec![];
     let mut skipped = vec![];
-    for (name, data) in entries {
-        let p = Path::new(&name);
-        // macOS resource forks and folders
-        if name.ends_with('/') || name.contains("__MACOSX") || p.file_name().map(|f| f.to_string_lossy().starts_with("._")).unwrap_or(false) {
-            continue;
-        }
-        if p.extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false) {
-            // a ZIP inside the ZIP (GrabCAD sometimes nests them)
-            if let Ok(inner) = unzip(&data) {
-                for (n, d) in inner {
-                    if let Some(f) = crate::import::format_of(Path::new(&n)) {
-                        files.push(ModelFile { name: stem(&n), format: f, bytes: d });
-                    }
-                }
-            }
-            continue;
-        }
-        match crate::import::format_of(p) {
-            Some(f) => files.push(ModelFile { name: stem(&name), format: f, bytes: data }),
-            None => {
-                let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-                if matches!(
-                    ext.as_str(),
-                    "sldprt" | "sldasm" | "ipt" | "iam" | "f3d" | "prt" | "asm" | "catpart" | "catproduct" | "x_b" | "3dm" | "skp" | "par" | "fcstd" | "dwg" | "sat"
-                ) {
-                    skipped.push(p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(name.clone()));
-                }
-            }
-        }
-    }
+    let mut budget = MAX_UNPACKED;
+    collect(&bytes, 0, &mut budget, &mut files, &mut skipped)?;
     if let Some(best) = files.iter().map(|f| rank(f.format)).min() {
         files.retain(|f| rank(f.format) == best);
     }
@@ -125,6 +96,58 @@ fn stem(name: &str) -> String {
     Path::new(name).file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| name.to_string())
 }
 
+/// Everything a ZIP may unpack to, in total: a download bigger than this is refused rather than
+/// filling memory (a ZIP bomb, or a whole assembly in native formats).
+pub const MAX_UNPACKED: usize = 1 << 30;
+
+/// macOS resource forks, folders and other entries that are never a model.
+fn junk(name: &str) -> bool {
+    let p = Path::new(name);
+    name.ends_with('/') || name.contains("__MACOSX") || p.file_name().map(|f| f.to_string_lossy().starts_with("._")).unwrap_or(true)
+}
+
+fn is_zip_name(name: &str) -> bool {
+    Path::new(name).extension().map(|e| e.eq_ignore_ascii_case("zip")).unwrap_or(false)
+}
+
+/// The model files of a ZIP into `files` and its native CAD files into `skipped`; ZIPs inside
+/// (GrabCAD sometimes nests them) are opened too, two levels deep. Only model files and ZIPs
+/// are unpacked, against `budget` bytes.
+fn collect(bytes: &[u8], depth: usize, budget: &mut usize, files: &mut Vec<ModelFile>, skipped: &mut Vec<String>) -> Result<(), String> {
+    let want = |n: &str| !junk(n) && (crate::import::format_of(Path::new(n)).is_some() || (depth < 2 && is_zip_name(n)));
+    let entries = unzip_entries(bytes, &want, budget)?;
+    for (name, data) in entries {
+        if junk(&name) {
+            continue;
+        }
+        let p = Path::new(&name);
+        let Some(data) = data else {
+            let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+            if matches!(
+                ext.as_str(),
+                "sldprt" | "sldasm" | "ipt" | "iam" | "f3d" | "prt" | "asm" | "catpart" | "catproduct" | "x_b" | "3dm" | "skp" | "par" | "fcstd" | "dwg" | "sat"
+            ) {
+                skipped.push(p.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or(name.clone()));
+            }
+            continue;
+        };
+        if is_zip_name(&name) {
+            // a damaged inner ZIP leaves the rest of the download in
+            if let Err(e) = collect(&data, depth + 1, budget, files, skipped) {
+                if e.contains("more than") {
+                    return Err(e);
+                }
+                eprintln!("{name}: {e}");
+            }
+            continue;
+        }
+        if let Some(f) = crate::import::format_of(p) {
+            files.push(ModelFile { name: stem(&name), format: f, bytes: data });
+        }
+    }
+    Ok(())
+}
+
 fn u16_at(b: &[u8], i: usize) -> Option<usize> {
     Some(u16::from_le_bytes(b.get(i..i + 2)?.try_into().ok()?) as usize)
 }
@@ -135,7 +158,15 @@ fn u32_at(b: &[u8], i: usize) -> Option<usize> {
 
 /// The files in a ZIP archive (stored or deflated), read through its central directory.
 pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
+    let mut budget = MAX_UNPACKED;
+    Ok(unzip_entries(b, &|_| true, &mut budget)?.into_iter().map(|(n, d)| (n, d.unwrap_or_default())).collect())
+}
+
+/// Every entry of a ZIP by name, unpacked (`Some`) only when `want` says so. What is unpacked
+/// counts against `budget`; going over it is an error.
+fn unzip_entries(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize) -> Result<Vec<(String, Option<Vec<u8>>)>, String> {
     let bad = || "the ZIP file is damaged or uses an unsupported format".to_string();
+    let too_big = || format!("the ZIP unpacks to more than {} MB", MAX_UNPACKED >> 20);
     // end of central directory: the last "PK\5\6" within the final 64 KiB
     let from = b.len().saturating_sub(65_557);
     let eocd = (from..b.len().saturating_sub(21)).rev().find(|&i| b[i..i + 4] == *b"PK\x05\x06").ok_or_else(bad)?;
@@ -146,6 +177,7 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         if b.get(p..p + 4) != Some(b"PK\x01\x02") {
             return Err(bad());
         }
+        let flags = u16_at(b, p + 8).ok_or_else(bad)?;
         let method = u16_at(b, p + 10).ok_or_else(bad)?;
         let csize = u32_at(b, p + 20).ok_or_else(bad)?;
         let usize_ = u32_at(b, p + 24).ok_or_else(bad)?;
@@ -153,8 +185,15 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let local = u32_at(b, p + 42).ok_or_else(bad)?;
         let name = String::from_utf8_lossy(b.get(p + 46..p + 46 + nlen).ok_or_else(bad)?).replace('\\', "/");
         p += 46 + nlen + xlen + clen;
+        if !want(&name) {
+            out.push((name, None));
+            continue;
+        }
         if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
             return Err("ZIP64 archives (over 4 GB) are not supported".into());
+        }
+        if flags & 1 != 0 {
+            return Err(format!("{name} is password-protected in the ZIP, which is not supported"));
         }
         if b.get(local..local + 4) != Some(b"PK\x03\x04") {
             return Err(bad());
@@ -164,14 +203,16 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let bytes = match method {
             0 => data.to_vec(),
             8 => {
-                // (the size is the archive's word for it: don't reserve gigabytes on it)
-                let mut v = Vec::with_capacity(usize_.min(64 << 20));
-                flate2::read::DeflateDecoder::new(data).read_to_end(&mut v).map_err(|e| format!("could not unpack {name}: {e}"))?;
+                // (the size is the archive's word for it: don't reserve gigabytes on it, and
+                // don't unpack past the budget whatever it says)
+                let mut v = Vec::with_capacity(usize_.min(64 << 20).min(*budget));
+                flate2::read::DeflateDecoder::new(data).take(*budget as u64 + 1).read_to_end(&mut v).map_err(|e| format!("could not unpack {name}: {e}"))?;
                 v
             }
             m => return Err(format!("{name} is compressed with method {m}, which is not supported")),
         };
-        out.push((name, bytes));
+        *budget = budget.checked_sub(bytes.len()).ok_or_else(too_big)?;
+        out.push((name, Some(bytes)));
     }
     Ok(out)
 }
@@ -295,6 +336,47 @@ mod tests {
         assert_eq!(f.files[0].name, "b");
         assert_eq!(f.skipped, vec!["c.SLDPRT".to_string()]);
         let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// Resource forks inside a nested ZIP are left out; its native files are reported.
+    #[test]
+    fn nested_zip_filters_and_reports() {
+        let inner = zip(&[("__MACOSX/._a.step", 0, b"junk".to_vec(), 4), ("._b.step", 0, b"junk".to_vec(), 4), ("c.step", 0, b"ISO-10303-21;".to_vec(), 13), ("d.SLDPRT", 0, b"x".to_vec(), 1)]);
+        let outer = zip(&[("model.zip", 0, inner.clone(), inner.len())]);
+        let (mut files, mut skipped) = (vec![], vec![]);
+        collect(&outer, 0, &mut { MAX_UNPACKED }, &mut files, &mut skipped).unwrap();
+        assert_eq!(files.iter().map(|f| f.name.as_str()).collect::<Vec<_>>(), vec!["c"]);
+        assert_eq!(skipped, vec!["d.SLDPRT".to_string()]);
+    }
+
+    /// Only model files are unpacked, and never past the budget.
+    #[test]
+    fn unpacking_is_limited() {
+        use std::io::Write;
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::best());
+        z.write_all(&vec![0u8; 1 << 20]).unwrap();
+        let big = z.finish().unwrap();
+        // a big render is not unpacked at all
+        let ok = zip(&[("render.png", 8, big.clone(), 1 << 20), ("a.stl", 0, b"solid".to_vec(), 5)]);
+        let mut budget = 1000;
+        let (mut files, mut skipped) = (vec![], vec![]);
+        collect(&ok, 0, &mut budget, &mut files, &mut skipped).unwrap();
+        assert_eq!(files.len(), 1);
+        assert_eq!(budget, 995);
+        // a model that unpacks past it is an error, whatever size the archive gives
+        let bomb = zip(&[("a.stl", 8, big, 10)]);
+        let e = collect(&bomb, 0, &mut 1000, &mut vec![], &mut vec![]).err().unwrap();
+        assert!(e.contains("more than"), "{e}");
+    }
+
+    #[test]
+    fn encrypted_entries_are_refused() {
+        let mut z = zip(&[("a.step", 0, b"secret".to_vec(), 6)]);
+        // the central directory's flags of the one entry: general purpose bit 0
+        let cd = z.windows(4).position(|w| w == b"PK\x01\x02").unwrap();
+        z[cd + 8] |= 1;
+        let e = unzip(&z).err().unwrap();
+        assert!(e.contains("password"), "{e}");
     }
 
     /// A ZIP of Parasolid parts where one can't be converted still imports the others.

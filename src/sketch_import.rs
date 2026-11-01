@@ -254,9 +254,14 @@ pub fn dxf(src: &str) -> Result<Drawing, String> {
         }
         i = j;
     }
-    let mut d = Drawing::default();
     let units = Xf { m: [scale, 0.0, 0.0, scale], o: DVec2::ZERO };
-    entities(&ents, &blocks, &units, &mut d, 0);
+    // model space; a drawing made only in a paper layout is read from there instead
+    let mut d = Drawing::default();
+    entities(&ents, &blocks, &units, &mut d, 0, false, &mut { MAX_EXPANDED });
+    if d.items.is_empty() && d.skipped.iter().any(|s| s.0 == PAPER) {
+        d = Drawing::default();
+        entities(&ents, &blocks, &units, &mut d, 0, true, &mut { MAX_EXPANDED });
+    }
     if d.items.is_empty() {
         return Err(if d.skipped.is_empty() { "the drawing has no geometry".into() } else { format!("nothing to import ({})", skipped_text(&d.skipped)) });
     }
@@ -268,27 +273,66 @@ fn unit_mm(code: i32) -> f64 {
     match code {
         1 => 25.4,
         2 => 304.8,
+        3 => 1_609_344.0,
         5 => 10.0,
         6 => 1000.0,
+        7 => 1e6,
         8 => 0.0000254,
         9 => 0.0254,
         10 => 914.4,
+        11 => 1e-7,
+        12 => 1e-6,
+        13 => 1e-3,
         14 => 100.0,
+        15 => 1e4,
+        16 => 1e5,
+        17 => 1e12,
+        18 => 149_597_870_700_000.0,
+        19 => 9.460_730_472_580_8e18,
+        20 => 3.085_677_581_491_367e19,
         _ => 1.0,
     }
 }
+
+/// Entities and block copies one import reads at most: nested arrays of blocks multiply.
+const MAX_EXPANDED: usize = 1_000_000;
+
+/// Name of the paper-space entities in `Drawing::skipped`.
+const PAPER: &str = "PAPER SPACE ENTITY";
 
 pub fn skipped_text(s: &[(String, usize)]) -> String {
     s.iter().map(|(t, n)| format!("{n} {}", t.to_lowercase())).collect::<Vec<_>>().join(", ")
 }
 
-fn entities(ents: &[(String, Groups)], blocks: &HashMap<String, (DVec2, Vec<(String, Groups)>)>, f: &Xf, d: &mut Drawing, depth: usize) {
+/// Read `ents` into `d` through `f`. `paper`: take the paper-space entities (group 67) instead of
+/// the model's. `budget`: entities and block copies left to read.
+#[allow(clippy::too_many_arguments)]
+fn entities(ents: &[(String, Groups)], blocks: &HashMap<String, (DVec2, Vec<(String, Groups)>)>, f: &Xf, d: &mut Drawing, depth: usize, paper: bool, budget: &mut usize) {
     let mut k = 0;
     while k < ents.len() {
         let (ty, g) = (&ents[k].0, &ents[k].1);
         k += 1;
-        // entities drawn in a mirrored object coordinate system (extrusion along -Z)
-        let ocs = if num(g, 230).unwrap_or(1.0) < 0.0 { Xf { m: [-1.0, 0.0, 0.0, 1.0], o: DVec2::ZERO } } else { Xf::ID };
+        if *budget == 0 {
+            d.skip("ENTITY OVER THE LIMIT");
+            continue;
+        }
+        *budget -= 1;
+        // the layout's title block and frame sit in ENTITIES too, marked paper space
+        if depth == 0 && (num(g, 67).unwrap_or(0.0) == 1.0) != paper {
+            if !matches!(ty.as_str(), "VERTEX" | "SEQEND" | "ATTRIB") {
+                d.skip(PAPER);
+            }
+            continue;
+        }
+        // entities drawn in a mirrored object coordinate system (extrusion along -Z); lines,
+        // splines, ellipses and 3D polylines are in world coordinates whatever their extrusion
+        let mirrored = num(g, 230).unwrap_or(1.0) < 0.0;
+        let in_ocs = match ty.as_str() {
+            "CIRCLE" | "ARC" | "LWPOLYLINE" | "INSERT" => true,
+            "POLYLINE" => num(g, 70).unwrap_or(0.0) as i64 & 8 == 0,
+            _ => false,
+        };
+        let ocs = if mirrored && in_ocs { Xf { m: [-1.0, 0.0, 0.0, 1.0], o: DVec2::ZERO } } else { Xf::ID };
         let f = ocs.then(f);
         let mut push = |it: Item| d.items.push(it.mapped(&f));
         match ty.as_str() {
@@ -296,7 +340,11 @@ fn entities(ents: &[(String, Groups)], blocks: &HashMap<String, (DVec2, Vec<(Str
             "CIRCLE" => push(Item::Circle { c: pt(g, 10), r: num(g, 40).unwrap_or(0.0) }),
             "ARC" => push(Item::Arc { c: pt(g, 10), r: num(g, 40).unwrap_or(0.0), a0: num(g, 50).unwrap_or(0.0).to_radians(), a1: num(g, 51).unwrap_or(360.0).to_radians() }),
             "ELLIPSE" => {
-                let (t0, t1) = (num(g, 41).unwrap_or(0.0), num(g, 42).unwrap_or(TAU));
+                let (mut t0, mut t1) = (num(g, 41).unwrap_or(0.0), num(g, 42).unwrap_or(TAU));
+                if mirrored {
+                    // running clockwise about +Z: the same curve is t ↦ -t counter-clockwise
+                    (t0, t1) = (-t1, -t0);
+                }
                 push(Item::Ellipse { c: pt(g, 10), major: pt(g, 11), ratio: num(g, 40).unwrap_or(1.0), t0, t1 });
             }
             "LWPOLYLINE" => {
@@ -379,7 +427,12 @@ fn entities(ents: &[(String, Groups)], blocks: &HashMap<String, (DVec2, Vec<(Str
                     for q in 0..cols.min(100) {
                         let off = DVec2::new(c * dx * q as f64 - s * dy * r as f64, s * dx * q as f64 + c * dy * r as f64);
                         let t = Xf { m: inner.m, o: inner.o + off }.then(&f);
-                        entities(list, blocks, &t, d, depth + 1);
+                        if *budget == 0 {
+                            d.skip("ENTITY OVER THE LIMIT");
+                            continue;
+                        }
+                        *budget -= 1;
+                        entities(list, blocks, &t, d, depth + 1, paper, budget);
                     }
                 }
             }
@@ -756,7 +809,13 @@ pub fn add_to_sketch(sk: &mut Sketch, d: &Drawing, scale: f64, offset: DVec2) ->
                     Geom::Arc { c: point(sk, c), a: point(sk, pa), b: point(sk, pb) }
                 }
             }
-            Item::Ellipse { c, major, ratio, t0, t1 } => {
+            Item::Ellipse { c, major, ratio, t0, mut t1 } => {
+                // sketch arcs run from t0 up to t1
+                if (t1 - t0).abs() < TAU - 1e-9 {
+                    while t1 <= t0 {
+                        t1 += TAU;
+                    }
+                }
                 let rmin = major.length() * ratio.abs();
                 let (cc, a) = (point(sk, c), point(sk, c + major));
                 if (t1 - t0).abs() >= TAU - 1e-9 {
@@ -825,6 +884,67 @@ mod tests {
         let regions = crate::regions::find_regions(&sk);
         assert_eq!(regions.len(), 1);
         assert!((regions[0].area - 16.0).abs() < 1e-6);
+    }
+
+    #[test]
+    fn dxf_mirrored_extrusion_only_flips_ocs_entities() {
+        let neg = "210\n0\n220\n0\n230\n-1\n";
+        let body = format!(
+            "0\nLINE\n10\n1\n20\n2\n11\n3\n21\n4\n{neg}\
+             0\nCIRCLE\n10\n5\n20\n6\n40\n1\n{neg}\
+             0\nSPLINE\n70\n8\n11\n1\n21\n1\n11\n2\n21\n3\n{neg}\
+             0\nELLIPSE\n10\n10\n20\n0\n11\n2\n21\n0\n40\n0.5\n41\n0\n42\n1.5707963267948966\n{neg}"
+        );
+        let d = dxf(&dxf_of(&body, 4)).unwrap();
+        // the line and the spline are in world coordinates
+        assert_eq!(d.items[0], Item::Line(DVec2::new(1.0, 2.0), DVec2::new(3.0, 4.0)));
+        assert_eq!(d.items[1], Item::Circle { c: DVec2::new(-5.0, 6.0), r: 1.0 });
+        assert_eq!(d.items[2], Item::Spline { pts: vec![DVec2::new(1.0, 1.0), DVec2::new(2.0, 3.0)], closed: false });
+        // the ellipse keeps its centre and runs clockwise: from the major axis end down to (10, -1)
+        let Item::Ellipse { c, major, ratio, t0, t1 } = d.items[3].clone() else { panic!("{:?}", d.items[3]) };
+        assert_eq!((c, major, ratio), (DVec2::new(10.0, 0.0), DVec2::new(2.0, 0.0), 0.5));
+        let at = |t: f64| c + major * t.cos() + major.perp() * ratio * t.sin();
+        let ends = [at(t0), at(t1)];
+        assert!(ends.iter().any(|p| p.distance(DVec2::new(12.0, 0.0)) < 1e-9) && ends.iter().any(|p| p.distance(DVec2::new(10.0, -1.0)) < 1e-9), "{ends:?}");
+    }
+
+    #[test]
+    fn dxf_ellipse_arc_across_zero_keeps_its_side() {
+        // counter-clockwise from 270° to 90°: the right half
+        let body = "0\nELLIPSE\n10\n0\n20\n0\n11\n4\n21\n0\n40\n0.5\n41\n4.71238898038469\n42\n1.5707963267948966\n";
+        let d = dxf(&dxf_of(body, 4)).unwrap();
+        let mut sk = Sketch::default();
+        assert_eq!(add_to_sketch(&mut sk, &d, 1.0, DVec2::ZERO), 1);
+        let Geom::EllipticalArc { t0, t1, .. } = sk.curves[0].geom else { panic!() };
+        assert!(t1 > t0 && ((t1 - t0) - std::f64::consts::PI).abs() < 1e-9, "{t0} {t1}");
+        // its middle is at t = 0: the point (4, 0)
+        assert!(((t0 + t1) / 2.0).rem_euclid(TAU) < 1e-9 || ((t0 + t1) / 2.0).rem_euclid(TAU) > TAU - 1e-9);
+    }
+
+    #[test]
+    fn dxf_units_and_paper_space() {
+        let d = dxf(&dxf_of("0\nCIRCLE\n10\n1000\n20\n0\n40\n500\n", 13)).unwrap();
+        assert_eq!(d.items[0], Item::Circle { c: DVec2::new(1.0, 0.0), r: 0.5 });
+        // the layout's frame is left out of a drawing with a model
+        let body = "0\nLINE\n10\n0\n20\n0\n11\n1\n21\n0\n0\nLINE\n67\n1\n10\n0\n20\n0\n11\n100\n21\n0\n";
+        let d = dxf(&dxf_of(body, 4)).unwrap();
+        assert_eq!(d.items, vec![Item::Line(DVec2::ZERO, DVec2::new(1.0, 0.0))]);
+        assert_eq!(d.skipped, vec![(PAPER.to_string(), 1)]);
+        // ...but is read when there is nothing else
+        let d = dxf(&dxf_of("0\nLINE\n67\n1\n10\n0\n20\n0\n11\n100\n21\n0\n", 4)).unwrap();
+        assert_eq!(d.items, vec![Item::Line(DVec2::ZERO, DVec2::new(100.0, 0.0))]);
+    }
+
+    #[test]
+    fn dxf_nested_arrays_stop_at_the_limit() {
+        // A: 100 x 100 copies of a line; B: 100 x 100 copies of A; the drawing: 100 x 100 of B
+        let src = "0\nSECTION\n2\nBLOCKS\n\
+                   0\nBLOCK\n2\nA\n10\n0\n20\n0\n0\nLINE\n10\n0\n20\n0\n11\n1\n21\n0\n0\nENDBLK\n\
+                   0\nBLOCK\n2\nB\n10\n0\n20\n0\n0\nINSERT\n2\nA\n10\n0\n20\n0\n70\n100\n71\n100\n44\n1\n45\n1\n0\nENDBLK\n\
+                   0\nENDSEC\n0\nSECTION\n2\nENTITIES\n0\nINSERT\n2\nB\n10\n0\n20\n0\n70\n100\n71\n100\n44\n100\n45\n100\n0\nENDSEC\n0\nEOF\n";
+        let d = dxf(src).unwrap();
+        assert!(d.items.len() <= MAX_EXPANDED, "{}", d.items.len());
+        assert!(d.skipped.iter().any(|s| s.0 == "ENTITY OVER THE LIMIT"), "{:?}", d.skipped);
     }
 
     #[test]

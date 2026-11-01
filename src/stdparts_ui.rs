@@ -163,6 +163,11 @@ pub fn poll(app: &mut App) {
             }
         }
     }
+    // the parts of a model of several files go in together: while any of its files is still
+    // building, the finished ones wait with it
+    let waiting: std::collections::HashSet<usize> = keep.iter().map(|p| p.studio).collect();
+    let (ready, later): (Vec<_>, Vec<_>) = ready.into_iter().partition(|(p, _)| p.body.is_some() || !waiting.contains(&p.studio));
+    keep.extend(later.into_iter().map(|(p, _)| p));
     app.asm.lib.pending = keep;
     // a model of several parts becomes a sub-assembly so it stays together
     let mut groups: Vec<(usize, usize, Vec<BodyId>)> = vec![];
@@ -186,11 +191,11 @@ pub fn poll(app: &mut App) {
         }
     }
     for (si, _, bodies) in groups {
-        if app.asm.lib.pending.iter().any(|p| p.studio == si) {
-            // wait for the rest of this model's files
+        let name = app.ws.studios[si].name.clone();
+        if bodies.is_empty() {
+            app.flash(format!("{name}: the import has no solids or surfaces to insert"), ToastKind::Error);
             continue;
         }
-        let name = app.ws.studios[si].name.clone();
         if bodies.len() == 1 {
             let n = part_name(app, si, bodies[0], &name);
             name_part(app, si, bodies[0], &n);

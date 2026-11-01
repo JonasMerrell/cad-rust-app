@@ -93,10 +93,13 @@ pub fn read_mesh(format: &str, bytes: &[u8], scale: f64) -> Result<Mesh, String>
 }
 
 fn read_stl(b: &[u8]) -> Result<Vec<[[f64; 3]; 3]>, String> {
-    // binary STL: 80-byte header, count, 50 bytes per triangle (some binary files start with "solid" too)
+    // binary STL: 80-byte header, count, 50 bytes per triangle (some binary files start with
+    // "solid" too, and some exporters leave bytes after the last triangle)
     if b.len() >= 84 {
         let n = u32::from_le_bytes([b[80], b[81], b[82], b[83]]) as usize;
-        if 84 + n * 50 == b.len() {
+        let head = &b[..b.len().min(1024)];
+        let ascii = head.trim_ascii_start().starts_with(b"solid") && head.windows(5).any(|w| w == b"facet");
+        if 84 + n * 50 == b.len() || (n > 0 && 84 + n * 50 < b.len() && !ascii) {
             let f = |o: usize| f32::from_le_bytes([b[o], b[o + 1], b[o + 2], b[o + 3]]) as f64;
             return Ok((0..n)
                 .map(|i| {
@@ -110,17 +113,31 @@ fn read_stl(b: &[u8]) -> Result<Vec<[[f64; 3]; 3]>, String> {
     if !text.trim_start().starts_with("solid") {
         return Err("this is not an STL file".into());
     }
-    let mut verts = vec![];
+    // vertices facet by facet, so one unreadable vertex loses its facet, not every one after it
+    let mut tris = vec![];
+    let mut cur: Vec<Option<[f64; 3]>> = vec![];
+    let flush = |cur: &mut Vec<Option<[f64; 3]>>, tris: &mut Vec<[[f64; 3]; 3]>| {
+        if let [Some(a), Some(b), Some(c)] = cur[..] {
+            tris.push([a, b, c]);
+        }
+        cur.clear();
+    };
     for line in text.lines() {
         let mut it = line.split_whitespace();
-        if it.next() == Some("vertex") {
-            let v: Vec<f64> = it.take(3).filter_map(|x| x.parse().ok()).collect();
-            if v.len() == 3 {
-                verts.push([v[0], v[1], v[2]]);
+        match it.next() {
+            Some("vertex") => {
+                if cur.len() == 3 {
+                    flush(&mut cur, &mut tris);
+                }
+                let v: Vec<f64> = it.take(3).map_while(|x| x.parse().ok()).filter(|x: &f64| x.is_finite()).collect();
+                cur.push((v.len() == 3).then(|| [v[0], v[1], v[2]]));
             }
+            Some("facet" | "outer" | "endloop" | "endfacet" | "endsolid") => flush(&mut cur, &mut tris),
+            _ => {}
         }
     }
-    Ok(verts.chunks_exact(3).map(|c| [c[0], c[1], c[2]]).collect())
+    flush(&mut cur, &mut tris);
+    Ok(tris)
 }
 
 fn read_obj(b: &[u8]) -> Result<Vec<[[f64; 3]; 3]>, String> {
@@ -226,8 +243,11 @@ pub fn face_spec(pts: &[f64], tris: &[u32], merge: bool) -> Vec<u32> {
     roots.sort_unstable();
     for r in roots {
         let ts = &groups[&r];
-        if ts.len() == 1 {
-            single(&mut out, ts[0]);
+        // coplanar neighbour by neighbour can still drift round a gently curved surface:
+        // only a group that is flat as a whole becomes one face
+        let (n0, a0) = (normals[ts[0]], p(tri(ts[0])[0]));
+        if ts.len() == 1 || ts.iter().any(|&t| tri(t).iter().any(|&v| (p(v) - a0).dot(n0).abs() >= tol)) {
+            ts.iter().for_each(|&t| single(&mut out, t));
             continue;
         }
         // boundary: directed edges whose reverse is not in the group
@@ -344,6 +364,56 @@ mod tests {
         assert_eq!(read_mesh("obj", obj.as_bytes(), 1.0).unwrap().triangles(), 2);
         let data = cube_stl();
         assert_eq!(unpack(&pack(data.as_bytes())).unwrap(), data.as_bytes());
+    }
+
+    #[test]
+    fn binary_stl_with_trailing_bytes() {
+        let mut b = b"solid exported by a CAD program".to_vec();
+        b.resize(80, b' ');
+        b.extend_from_slice(&2u32.to_le_bytes());
+        for t in [[[0f32, 0., 0.], [1., 0., 0.], [0., 1., 0.]], [[0., 0., 0.], [0., 1., 0.], [0., 0., 1.]]] {
+            b.extend_from_slice(&[0; 12]);
+            for v in t {
+                for x in v {
+                    b.extend_from_slice(&x.to_le_bytes());
+                }
+            }
+            b.extend_from_slice(&[0; 2]);
+        }
+        b.extend_from_slice(&[0; 7]);
+        let m = read_mesh("stl", &b, 1.0).unwrap();
+        assert_eq!(m.triangles(), 2);
+        assert_eq!(m.pts.len() / 3, 4);
+    }
+
+    #[test]
+    fn bad_ascii_stl_vertex_loses_only_its_facet() {
+        let mut s = cube_stl();
+        // spoil one vertex of the first facet
+        s = s.replacen("vertex 0 0 0", "vertex 0 0 1.#QNAN", 1);
+        let m = read_mesh("stl", s.as_bytes(), 1.0).unwrap();
+        assert_eq!(m.triangles(), 11);
+        assert_eq!(m.pts.len() / 3, 8);
+    }
+
+    #[test]
+    fn curved_strip_is_not_merged_into_one_face() {
+        // a fan of triangles round a large cylinder, each pair within the coplanar angle but the
+        // whole strip far from flat
+        let (r, n) = (1000.0f64, 2000usize);
+        let mut pts = vec![];
+        for i in 0..=n {
+            let a = 1e-3 * i as f64;
+            pts.extend([r * a.cos(), r * a.sin(), 0.0, r * a.cos(), r * a.sin(), 10.0]);
+        }
+        let mut tris = vec![];
+        for i in 0..n as u32 {
+            let (a, b, c, d) = (2 * i, 2 * i + 2, 2 * i + 3, 2 * i + 1);
+            tris.extend([a, b, c, a, c, d]);
+        }
+        let spec = face_spec(&pts, &tris, true);
+        // every triangle on its own: 9 numbers each
+        assert_eq!(spec.len(), 9 * 2 * n);
     }
 
     #[test]
