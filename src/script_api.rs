@@ -109,7 +109,9 @@ fn register_linalg(e: &mut Engine) {
     e.register_fn("*", |a: V3, k: f64| V3(a.0 * k));
     e.register_fn("*", |k: f64, a: V3| V3(a.0 * k));
     e.register_fn("*", |a: V3, k: i64| V3(a.0 * k as f64));
+    e.register_fn("*", |k: i64, a: V3| V3(a.0 * k as f64));
     e.register_fn("/", |a: V3, k: f64| V3(a.0 / k));
+    e.register_fn("/", |a: V3, k: i64| V3(a.0 / k as f64));
     e.register_fn("==", |a: V3, b: V3| a == b);
     e.register_fn("dot", |a: Dynamic, b: Dynamic| -> Res<f64> { Ok(v3(&a)?.dot(v3(&b)?)) });
     e.register_fn("cross", |a: Dynamic, b: Dynamic| -> Res<V3> { Ok(V3(v3(&a)?.cross(v3(&b)?))) });
@@ -152,6 +154,9 @@ fn register_linalg(e: &mut Engine) {
     e.register_fn("*", |a: M3, b: M3| M3(a.0 * b.0));
     e.register_fn("*", |a: M3, v: V3| V3(a.0 * v.0));
     e.register_fn("*", |a: M3, k: f64| M3(a.0 * k));
+    e.register_fn("*", |a: M3, k: i64| M3(a.0 * k as f64));
+    e.register_fn("*", |k: f64, a: M3| M3(a.0 * k));
+    e.register_fn("*", |k: i64, a: M3| M3(a.0 * k as f64));
     e.register_fn("+", |a: M3, b: M3| M3(a.0 + b.0));
     e.register_fn("-", |a: M3, b: M3| M3(a.0 - b.0));
     e.register_fn("to_string", |m: &mut M3| format!("mat3({:?})", m.0.transpose().to_cols_array_2d()));
@@ -568,9 +573,17 @@ fn register_build(e: &mut Engine) {
         }
         Ok(wrap(Shape::cylinder(v3(&base)?, r, v3(&axis)?.normalize_or(DVec3::Z), h)))
     });
-    e.register_fn("sphere_at", |c: Dynamic, r: Dynamic| -> Res<S> { Ok(wrap(Shape::sphere(num(&r)?).at(v3(&c)?).build())) });
+    e.register_fn("sphere_at", |c: Dynamic, r: Dynamic| -> Res<S> {
+        let r = num(&r)?;
+        if r <= 1e-7 {
+            return err("sphere needs a positive radius");
+        }
+        Ok(wrap(Shape::sphere(r).at(v3(&c)?).build()))
+    });
     e.register_fn("cone", |base: Dynamic, axis: Dynamic, r1: Dynamic, r2: Dynamic, h: Dynamic| -> Res<S> {
-        let c = Shape::cone().bottom_radius(num(&r1)?).top_radius(num(&r2)?).height(num(&h)?).build();
+        let (r1, r2, h) = (num(&r1)?, num(&r2)?, num(&h)?);
+        crate::script::cone_ok(r1, r2, h)?;
+        let c = Shape::cone().bottom_radius(r1).top_radius(r2).height(h).build();
         let n = v3(&axis)?.normalize_or(DVec3::Z);
         Ok(wrap(occ_err(occ::transform(&c, z_to(n), v3(&base)?))?))
     });
@@ -765,7 +778,15 @@ fn register_queries(e: &mut Engine) {
     e.register_fn("hash", |s: &mut S| shape_hash(&s.0));
     // "in", "out", "on" for each point
     let names = |v: Vec<i32>| -> Array { v.into_iter().map(|c| Dynamic::from(["in", "out", "on", "unknown"][c.clamp(0, 3) as usize])).collect() };
-    e.register_fn("classify", move |s: &mut S, pts: Array, tol: Dynamic| -> Res<Array> { Ok(names(occ_err(occ::classify(&s.0, &v3s(&pts)?, num(&tol)?))?)) });
+    // an array of points, or one point written as [x, y, z]
+    e.register_fn("classify", move |s: &mut S, pts: Array, tol: Dynamic| -> Res<Dynamic> {
+        if !pts.is_empty() && pts.iter().all(|x| x.as_float().is_ok() || x.as_int().is_ok()) {
+            let p = v3(&Dynamic::from_array(pts))?;
+            let v = occ_err(occ::classify(&s.0, &[p], num(&tol)?))?;
+            return Ok(["in", "out", "on", "unknown"][v[0].clamp(0, 3) as usize].into());
+        }
+        Ok(names(occ_err(occ::classify(&s.0, &v3s(&pts)?, num(&tol)?))?).into())
+    });
     e.register_fn("classify", move |s: &mut S, p: V3, tol: Dynamic| -> Res<String> {
         let v = occ_err(occ::classify(&s.0, &[p.0], num(&tol)?))?;
         Ok(["in", "out", "on", "unknown"][v[0].clamp(0, 3) as usize].into())
@@ -837,9 +858,17 @@ pub fn to_json(d: &Dynamic) -> serde_json::Value {
     json!(d.to_string())
 }
 
-fn register_files(e: &mut Engine) {
+fn register_data(e: &mut Engine) {
     e.register_fn("parse_json", |s: &str| -> Res<Dynamic> { Ok(from_json(&serde_json::from_str(s).map_err(|e| format!("JSON: {e}"))?)) });
     e.register_fn("to_json", |d: Dynamic| -> String { serde_json::to_string(&to_json(&d)).unwrap_or_default() });
+    e.register_fn("parse_yaml", |s: &str| -> Res<Dynamic> {
+        let v: serde_json::Value = serde_yaml::from_str(s).map_err(|e| format!("YAML: {e}"))?;
+        Ok(from_json(&v))
+    });
+    e.register_fn("time", || -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) });
+}
+
+fn register_files(e: &mut Engine) {
     e.register_fn("read_text", |p: &str| -> Res<String> { std::fs::read_to_string(p).map_err(|e| format!("can't open {p}: {e}").into()) });
     e.register_fn("write_text", |p: &str, s: &str| -> Res<()> { std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into()) });
     e.register_fn("read_json", |p: &str| -> Res<Dynamic> {
@@ -851,10 +880,7 @@ fn register_files(e: &mut Engine) {
         let v: serde_json::Value = serde_yaml::from_str(&t).map_err(|e| format!("{p}: {e}"))?;
         Ok(from_json(&v))
     });
-    e.register_fn("parse_yaml", |s: &str| -> Res<Dynamic> {
-        let v: serde_json::Value = serde_yaml::from_str(s).map_err(|e| format!("YAML: {e}"))?;
-        Ok(from_json(&v))
-    });
+    
     e.register_fn("write_json", |p: &str, d: Dynamic| -> Res<()> {
         let s = serde_json::to_string_pretty(&to_json(&d)).unwrap_or_default();
         std::fs::write(p, s).map_err(|e| format!("can't write {p}: {e}").into())
@@ -877,18 +903,26 @@ fn register_files(e: &mut Engine) {
         c.write_stl_with_tolerance(p, num(&deflection)?).map_err(|e| format!("can't write {p}: {e:?}").into())
     });
     e.register_fn("import_step", |p: &str| -> Res<S> { Ok(wrap(Shape::read_step(p).map_err(|e| format!("can't open {p}: {e:?}"))?)) });
-    e.register_fn("time", || -> f64 { std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs_f64()).unwrap_or(0.0) });
+    
 }
 
-/// Add the whole API to an engine.
+/// Add the API to an engine: everything except reading and writing files (custom features in a
+/// document get this much, so opening a document can't touch the user's files).
 pub fn register(e: &mut Engine) {
     register_linalg(e);
     register_mass(e);
     register_topology(e);
     register_build(e);
     register_queries(e);
-    register_files(e);
+    register_data(e);
     crate::script_num::register(e);
+}
+
+/// Add the file functions (reading, writing, STEP/STL import and export, renders to PNG): only
+/// for scripts the user runs themselves (`rcad script`).
+pub fn register_io(e: &mut Engine) {
+    register_files(e);
+    crate::script_num::register_render(e);
 }
 
 // ---------------------------------------------------------------- headless runner
@@ -903,6 +937,7 @@ pub fn run_file(path: &str, args: &[String]) -> Result<serde_json::Value, String
 pub fn run_source(src: &str, args: &[String], path: Option<&std::path::Path>) -> Result<serde_json::Value, String> {
     let log = Rc::new(RefCell::new(vec![]));
     let mut e = crate::script::engine_with(log, true);
+    register_io(&mut e);
     e.set_max_operations(0);
     e.set_max_array_size(0);
     if let Some(dir) = path.and_then(|p| p.parent()) {
@@ -991,6 +1026,39 @@ mod tests {
         assert_eq!(s, vec!["in", "out", "on"]);
         let msg: String = eval(r#"let m = "no error"; try { block([0, 0, 0], [10, 10, 10]).fillet([], 0); cylinder(vec3(0, 0, 0), vec3(0, 0, 1), -1, 5); } catch (e) { m = `${e}`; } m"#);
         assert!(msg.contains("positive radius"), "{msg}");
+        let one: String = eval(r#"block([0, 0, 0], [10, 10, 10]).classify([5, 5, 5], 1e-6)"#);
+        assert_eq!(one, "in");
+        // zero sizes throw a catchable error instead of reaching OCCT
+        for src in ["cube(0, 1, 1)", "sphere(0)", "torus(5, 0)", "cone(0, 0, 5)", "cone(2, 2, 5)", "sphere_at([0, 0, 0], -1)"] {
+            let msg: String = eval(&format!(r#"let m = "no error"; try {{ {src}; }} catch (e) {{ m = `${{e}}`; }} m"#));
+            assert!(msg.contains("needs"), "{src}: {msg}");
+        }
+    }
+
+    #[test]
+    fn vectors_mix_with_integers_and_methods_take_vec3() {
+        let v: V3 = eval("vec3(2, 4, 6) / 2 + 2 * vec3(1, 0, 0)");
+        assert_eq!(v.0, DVec3::new(3.0, 2.0, 3.0));
+        let m: M3 = eval("2 * identity() * 3");
+        assert_eq!(m.0, DMat3::IDENTITY * 6.0);
+        // the placement methods take Vec3 values and [x, y] arrays as SCRIPTING.md says
+        let c: V3 = eval("cube(2, 2, 2).place(vec3(10, 0, 0), vec3(0, 0, 1)).move([1, 1]).rotate(vec3(0, 0, 1), 0).mirror(vec3(0, 1, 0)).centroid()");
+        assert!(c.0.distance(DVec3::new(12.0, -2.0, 1.0)) < 1e-9, "{:?}", c.0);
+    }
+
+    #[test]
+    fn custom_features_cannot_touch_files() {
+        let def = crate::script::CustomDef { name: "x".into(), source: r#"write_text("/tmp/rcad-should-not-exist.txt", "x"); cube(1, 1, 1)"#.into(), ..Default::default() };
+        let e = crate::script::run(&def, vec![], &[]).err().unwrap_or_default();
+        assert!(e.contains("write_text"), "{e}");
+        assert!(!std::path::Path::new("/tmp/rcad-should-not-exist.txt").exists());
+        let def = crate::script::CustomDef { name: "x".into(), source: r#"import "foo" as f; cube(1, 1, 1)"#.into(), ..Default::default() };
+        assert!(crate::script::run(&def, vec![], &[]).is_err());
+        // the headless runner keeps them
+        let path = std::env::temp_dir().join(format!("rcad-script-io-{}.txt", std::process::id()));
+        let src = format!(r#"write_text({:?}, "hi"); read_text({:?})"#, path.display().to_string(), path.display().to_string());
+        assert_eq!(run_source(&src, &[], None).unwrap(), serde_json::json!("hi"));
+        let _ = std::fs::remove_file(path);
     }
 
     #[test]

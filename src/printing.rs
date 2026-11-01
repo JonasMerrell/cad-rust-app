@@ -90,7 +90,8 @@ pub fn classify(m: &crate::kernel::BodyMesh, floor: f64, overhang_deg: f64, min_
     use glam::DVec3;
     let p = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
     let tris: Vec<[DVec3; 3]> = m.indices.chunks(3).map(|t| [p(t[0]), p(t[1]), p(t[2])]).collect();
-    let limit = (90.0 - overhang_deg).to_radians().sin(); // downward normal z below -limit is an overhang
+    // a face tilted θ from vertical, facing down, has normal z = −sin θ: past the limit is an overhang
+    let limit = overhang_deg.to_radians().sin();
     let mut out = vec![0u8; tris.len()];
     let grid = Grid::new(&tris);
     for (i, t) in tris.iter().enumerate() {

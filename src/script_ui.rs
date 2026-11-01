@@ -155,6 +155,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
             return;
         }
         app.checkpoint();
+        // an undo may have removed the definition being edited: save it as a new one then
+        let index = index.filter(|i| *i < app.doc.custom_features.len());
         match index {
             Some(i) => {
                 let old = app.doc.custom_features[i].name.clone();
@@ -181,7 +183,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         app.flash_info("Saved · it is on the toolbar", Some(std::time::Duration::from_secs(2)));
     }
     if delete {
-        if let Some(i) = app.script_editor.as_ref().and_then(|e| e.index) {
+        if let Some(i) = app.script_editor.as_ref().and_then(|e| e.index).filter(|i| *i < app.doc.custom_features.len()) {
             app.checkpoint();
             app.doc.custom_features.remove(i);
             app.changed();

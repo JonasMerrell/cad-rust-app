@@ -62,8 +62,47 @@ pub enum Kind {
     Count,
 }
 
+/// What a value carries: nothing (a plain number, read in the document's units in a length
+/// field), a length in mm, or an angle in degrees.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum Dim {
+    None,
+    Len,
+    Ang,
+}
+
+/// Resolved document variables. Derefs to the values as a length field reads them (mm, or degrees
+/// for angles); a variable written as a plain number ("4", "2 * 15") is also kept as that number,
+/// so a count or angle field reads it as it is written whatever the document's units.
+#[derive(Clone, Debug, Default)]
+pub struct Vars {
+    vals: HashMap<String, f64>,
+    dims: HashMap<String, (f64, Dim)>,
+}
+
+impl std::ops::Deref for Vars {
+    type Target = HashMap<String, f64>;
+    fn deref(&self) -> &HashMap<String, f64> {
+        &self.vals
+    }
+}
+
+/// Values already in mm or degrees, each carrying its unit.
+impl From<HashMap<String, f64>> for Vars {
+    fn from(vals: HashMap<String, f64>) -> Vars {
+        let dims = vals.iter().map(|(k, v)| (k.clone(), (*v, Dim::Len))).collect();
+        Vars { vals, dims }
+    }
+}
+
+impl Vars {
+    fn lookup(&self, name: &str) -> Option<V> {
+        self.dims.get(name).map(|&(v, dim)| V { v, dim })
+    }
+}
+
 pub struct Env<'a> {
-    pub vars: &'a HashMap<String, f64>,
+    pub vars: &'a Vars,
     pub units: Units,
 }
 
@@ -118,12 +157,12 @@ fn lex(s: &str) -> Result<Vec<Tok>, String> {
     Ok(out)
 }
 
-/// A value carries whether a unit was attached, so `10` in a length field means
-/// 10 document units but `10 mm` is explicit.
+/// A value with what it carries, so `10` in a length field means 10 document units but `10 mm`
+/// is explicit, and `30 deg` stays degrees inside `sin`.
 #[derive(Clone, Copy)]
 struct V {
     v: f64,
-    dim: bool,
+    dim: Dim,
 }
 
 struct P<'a, 'b> {
@@ -131,6 +170,9 @@ struct P<'a, 'b> {
     i: usize,
     env: &'a Env<'b>,
     kind: Kind,
+    /// Units that plain numbers are read in: the document's, or the unit written after a
+    /// parenthesised group, as in `(w + 1) mm`.
+    units: Units,
 }
 
 impl P<'_, '_> {
@@ -145,15 +187,28 @@ impl P<'_, '_> {
             false
         }
     }
+    /// Plain numbers added to (or compared with) a length are lengths in the current units, so
+    /// `w + 1` in an inch document adds an inch. Other fields (counts, angles) leave them alone.
+    fn unify(&self, a: V, b: V) -> (V, V, Dim) {
+        let k = if self.kind == Kind::Length { self.units.scale() } else { 1.0 };
+        match (a.dim, b.dim) {
+            (Dim::None, Dim::Len) => (V { v: a.v * k, dim: Dim::Len }, b, Dim::Len),
+            (Dim::Len, Dim::None) => (a, V { v: b.v * k, dim: Dim::Len }, Dim::Len),
+            (Dim::None, d) => (a, b, d),
+            (d, _) => (a, b, d),
+        }
+    }
     fn expr(&mut self) -> Result<V, String> {
         let mut a = self.term()?;
         loop {
             if self.eat('+') {
                 let b = self.term()?;
-                a = V { v: a.v + b.v, dim: a.dim || b.dim };
+                let (x, y, dim) = self.unify(a, b);
+                a = V { v: x.v + y.v, dim };
             } else if self.eat('-') {
                 let b = self.term()?;
-                a = V { v: a.v - b.v, dim: a.dim || b.dim };
+                let (x, y, dim) = self.unify(a, b);
+                a = V { v: x.v - y.v, dim };
             } else {
                 return Ok(a);
             }
@@ -164,16 +219,21 @@ impl P<'_, '_> {
         loop {
             if self.eat('*') {
                 let b = self.unary()?;
-                a = V { v: a.v * b.v, dim: a.dim || b.dim };
+                a = V { v: a.v * b.v, dim: if a.dim == Dim::None { b.dim } else { a.dim } };
             } else if self.eat('/') {
                 let b = self.unary()?;
                 if b.v == 0.0 {
                     return Err("division by zero".into());
                 }
-                a = V { v: a.v / b.v, dim: a.dim && !b.dim };
+                // a length over a length is a ratio
+                a = V { v: a.v / b.v, dim: if b.dim == Dim::None { a.dim } else { Dim::None } };
             } else if self.eat('%') {
                 let b = self.unary()?;
-                a = V { v: a.v % b.v, dim: a.dim };
+                let (x, y, dim) = self.unify(a, b);
+                if y.v == 0.0 {
+                    return Err("division by zero".into());
+                }
+                a = V { v: x.v % y.v, dim };
             } else {
                 return Ok(a);
             }
@@ -197,26 +257,55 @@ impl P<'_, '_> {
         }
         Ok(a)
     }
-    /// A primary optionally followed by a unit suffix (`10 mm`, `30deg`).
+    /// A primary optionally followed by a unit suffix (`10 mm`, `30deg`). A value that already
+    /// carries a unit (a variable written with one) keeps it.
     fn postfix(&mut self) -> Result<V, String> {
         let mut a = self.primary()?;
         if let Some(Tok::Id(id)) = self.peek().cloned() {
-            if let Some(f) = unit_factor(&id) {
+            if let Some((f, dim)) = unit_factor(&id) {
                 self.i += 1;
-                a = V { v: a.v * f, dim: true };
+                if a.dim == Dim::None {
+                    a = V { v: a.v * f, dim };
+                }
             }
         }
         Ok(a)
+    }
+    /// The length unit written right after the group that opens at token `open`, if any.
+    fn group_unit(&self, open: usize) -> Option<Units> {
+        let mut depth = 0;
+        for k in open..self.t.len() {
+            match self.t[k] {
+                Tok::Op('(') => depth += 1,
+                Tok::Op(')') => {
+                    depth -= 1;
+                    if depth == 0 {
+                        return match self.t.get(k + 1) {
+                            Some(Tok::Id(id)) => length_unit(id),
+                            _ => None,
+                        };
+                    }
+                }
+                _ => {}
+            }
+        }
+        None
     }
     fn primary(&mut self) -> Result<V, String> {
         match self.peek().cloned() {
             Some(Tok::Num(n)) => {
                 self.i += 1;
-                Ok(V { v: n, dim: false })
+                Ok(V { v: n, dim: Dim::None })
             }
             Some(Tok::Op('(')) => {
+                let outer = self.units;
+                if let Some(u) = self.group_unit(self.i) {
+                    self.units = u;
+                }
                 self.i += 1;
-                let v = self.expr()?;
+                let v = self.expr();
+                self.units = outer;
+                let v = v?;
                 if !self.eat(')') {
                     return Err("missing )".into());
                 }
@@ -234,14 +323,14 @@ impl P<'_, '_> {
                     }
                     return self.call(&id, &args);
                 }
-                match id.as_str() {
-                    "pi" | "PI" => return Ok(V { v: std::f64::consts::PI, dim: false }),
-                    "e" => return Ok(V { v: std::f64::consts::E, dim: false }),
-                    _ => {}
+                // document variables come before the built-in constants, so a variable may be called `e`
+                if let Some(v) = self.env.vars.lookup(&id) {
+                    return Ok(v);
                 }
-                if let Some(v) = self.env.vars.get(&id) {
-                    // Variables are stored already resolved (mm / degrees).
-                    return Ok(V { v: *v, dim: true });
+                match id.as_str() {
+                    "pi" | "PI" => return Ok(V { v: std::f64::consts::PI, dim: Dim::None }),
+                    "e" => return Ok(V { v: std::f64::consts::E, dim: Dim::None }),
+                    _ => {}
                 }
                 Err(format!("unknown variable '{id}'"))
             }
@@ -250,70 +339,93 @@ impl P<'_, '_> {
     }
     fn call(&mut self, f: &str, a: &[V]) -> Result<V, String> {
         let x = a[0].v;
-        let trig_in = |v: V| if v.dim { v.v } else { v.v.to_radians() };
-        let r = match (f, a.len()) {
-            ("sin", 1) => trig_in(a[0]).sin(),
-            ("cos", 1) => trig_in(a[0]).cos(),
-            ("tan", 1) => trig_in(a[0]).tan(),
-            ("asin", 1) => return Ok(V { v: x.asin().to_degrees(), dim: false }),
-            ("acos", 1) => return Ok(V { v: x.acos().to_degrees(), dim: false }),
-            ("atan", 1) => return Ok(V { v: x.atan().to_degrees(), dim: false }),
-            ("sqrt", 1) => return Ok(V { v: x.sqrt(), dim: a[0].dim }),
-            ("abs", 1) => return Ok(V { v: x.abs(), dim: a[0].dim }),
-            ("round", 1) => return Ok(V { v: x.round(), dim: a[0].dim }),
-            ("floor", 1) => return Ok(V { v: x.floor(), dim: a[0].dim }),
-            ("ceil", 1) => return Ok(V { v: x.ceil(), dim: a[0].dim }),
-            ("min", _) => return Ok(V { v: a.iter().map(|v| v.v).fold(f64::INFINITY, f64::min), dim: a[0].dim }),
-            ("max", _) => return Ok(V { v: a.iter().map(|v| v.v).fold(f64::NEG_INFINITY, f64::max), dim: a[0].dim }),
+        // angles are kept in degrees (`rad` converts to them), and plain numbers are degrees too
+        let plain = |v: f64| V { v, dim: Dim::None };
+        let same = |v: f64| V { v, dim: a[0].dim };
+        Ok(match (f, a.len()) {
+            ("sin", 1) => plain(x.to_radians().sin()),
+            ("cos", 1) => plain(x.to_radians().cos()),
+            ("tan", 1) => plain(x.to_radians().tan()),
+            ("asin", 1) => plain(x.asin().to_degrees()),
+            ("acos", 1) => plain(x.acos().to_degrees()),
+            ("atan", 1) => plain(x.atan().to_degrees()),
+            ("sqrt", 1) => same(x.sqrt()),
+            ("abs", 1) => same(x.abs()),
+            ("round", 1) => same(x.round()),
+            ("floor", 1) => same(x.floor()),
+            ("ceil", 1) => same(x.ceil()),
+            ("min", _) | ("max", _) => {
+                let mut acc = a[0];
+                for b in &a[1..] {
+                    let (p, q, dim) = self.unify(acc, *b);
+                    acc = V { v: if f == "min" { p.v.min(q.v) } else { p.v.max(q.v) }, dim };
+                }
+                acc
+            }
             _ => return Err(format!("unknown function {f}")),
-        };
-        Ok(V { v: r, dim: false })
+        })
     }
 }
 
-fn unit_factor(id: &str) -> Option<f64> {
+fn unit_factor(id: &str) -> Option<(f64, Dim)> {
+    if let Some(u) = length_unit(id) {
+        return Some((u.scale(), Dim::Len));
+    }
     Some(match id {
-        "mm" => 1.0,
-        "cm" => 10.0,
-        "m" => 1000.0,
-        "in" | "inch" => 25.4,
-        "ft" => 304.8,
-        "deg" => 1.0,
-        "rad" => 180.0 / std::f64::consts::PI,
+        "deg" => (1.0, Dim::Ang),
+        "rad" => (180.0 / std::f64::consts::PI, Dim::Ang),
         _ => return None,
     })
 }
 
-/// Evaluate `src`. Lengths come back in mm, angles in degrees.
-pub fn eval(src: &str, kind: Kind, env: &Env) -> Result<f64, String> {
+fn length_unit(id: &str) -> Option<Units> {
+    Some(match id {
+        "mm" => Units::Mm,
+        "cm" => Units::Cm,
+        "m" => Units::M,
+        "in" | "inch" => Units::In,
+        "ft" => Units::Ft,
+        _ => return None,
+    })
+}
+
+fn eval_v(src: &str, kind: Kind, env: &Env) -> Result<V, String> {
     let t = lex(src)?;
     if t.is_empty() {
         return Err("empty".into());
     }
-    let mut p = P { t, i: 0, env, kind };
+    let mut p = P { t, i: 0, env, kind, units: env.units };
     let v = p.expr()?;
     if p.i != p.t.len() {
         return Err("unexpected text after value".into());
     }
-    let _ = p.kind;
     if !v.v.is_finite() {
         return Err("not a number".into());
     }
+    Ok(v)
+}
+
+/// Evaluate `src`. Lengths come back in mm, angles in degrees.
+pub fn eval(src: &str, kind: Kind, env: &Env) -> Result<f64, String> {
+    let v = eval_v(src, kind, env)?;
     Ok(match kind {
-        Kind::Length if !v.dim => v.v * env.units.scale(),
+        Kind::Length if v.dim == Dim::None => v.v * env.units.scale(),
         _ => v.v,
     })
 }
 
-/// Evaluate document variables in order; later ones may reference earlier ones.
-pub fn resolve_vars(vars: &[(String, String)], units: Units) -> (HashMap<String, f64>, Vec<Option<String>>) {
-    let mut map = HashMap::new();
+/// Evaluate document variables in order; later ones may reference earlier ones. A variable written
+/// as a plain number keeps that number for count and angle fields, and is read in the document's
+/// units by length fields.
+pub fn resolve_vars(vars: &[(String, String)], units: Units) -> (Vars, Vec<Option<String>>) {
+    let mut map = Vars::default();
     let mut errs = vec![];
     for (name, src) in vars {
         let env = Env { vars: &map, units };
-        match eval(src, Kind::Length, &env) {
+        match eval_v(src, Kind::Length, &env) {
             Ok(v) => {
-                map.insert(name.clone(), v);
+                map.vals.insert(name.clone(), if v.dim == Dim::None { v.v * units.scale() } else { v.v });
+                map.dims.insert(name.clone(), (v.v, v.dim));
                 errs.push(None);
             }
             Err(e) => errs.push(Some(e)),
@@ -329,6 +441,7 @@ mod tests {
     fn basics() {
         let mut vars = HashMap::new();
         vars.insert("width".to_string(), 40.0);
+        let vars = Vars::from(vars);
         let env = Env { vars: &vars, units: Units::Mm };
         assert_eq!(eval("width / 2", Kind::Length, &env).unwrap(), 20.0);
         assert_eq!(eval("1 in", Kind::Length, &env).unwrap(), 25.4);
@@ -337,5 +450,68 @@ mod tests {
         assert_eq!(eval("2", Kind::Length, &env).unwrap(), 50.8);
         assert_eq!(eval("10 mm", Kind::Length, &env).unwrap(), 10.0);
         assert!(eval("foo", Kind::Length, &env).is_err());
+    }
+
+    fn close(a: f64, b: f64) -> bool {
+        (a - b).abs() < 1e-9 * b.abs().max(1.0)
+    }
+
+    fn doc(units: Units, vars: &[(&str, &str)]) -> Vars {
+        let pairs: Vec<(String, String)> = vars.iter().map(|(k, v)| (k.to_string(), v.to_string())).collect();
+        let (v, errs) = resolve_vars(&pairs, units);
+        assert!(errs.iter().all(|e| e.is_none()), "{errs:?}");
+        v
+    }
+
+    #[test]
+    fn trig_takes_degrees_with_or_without_a_unit() {
+        let vars = doc(Units::Mm, &[("a", "30"), ("b", "30 deg"), ("c", "(pi / 6) rad")]);
+        let env = Env { vars: &vars, units: Units::Mm };
+        for src in ["sin(30)", "sin(30 deg)", "sin(30°)", "sin((pi / 6) rad)", "sin(a)", "sin(b)", "sin(c)", "sin(a + 0 deg)"] {
+            assert!(close(eval(src, Kind::Count, &env).unwrap(), 0.5), "{src}");
+        }
+        assert!(close(eval("10 * cos(a)", Kind::Length, &env).unwrap(), 10.0 * 3f64.sqrt() / 2.0));
+        assert!(close(eval("asin(0.5)", Kind::Angle, &env).unwrap(), 30.0));
+        assert!(close(eval("1 rad", Kind::Angle, &env).unwrap(), 180.0 / std::f64::consts::PI));
+    }
+
+    #[test]
+    fn mm_documents_read_as_before() {
+        let vars = doc(Units::Mm, &[("w", "40"), ("h", "w / 2"), ("n", "4"), ("ang", "30")]);
+        let env = Env { vars: &vars, units: Units::Mm };
+        assert_eq!(vars["w"], 40.0);
+        assert_eq!(vars["h"], 20.0);
+        assert_eq!(eval("w + 1", Kind::Length, &env).unwrap(), 41.0);
+        assert_eq!(eval("w + 1 in", Kind::Length, &env).unwrap(), 65.4);
+        assert_eq!(eval("max(w, 50)", Kind::Length, &env).unwrap(), 50.0);
+        assert_eq!(eval("n", Kind::Count, &env).unwrap(), 4.0);
+        assert_eq!(eval("n * 2 + 1", Kind::Count, &env).unwrap(), 9.0);
+        assert_eq!(eval("ang", Kind::Angle, &env).unwrap(), 30.0);
+        assert_eq!(eval("(2 * 4) mm", Kind::Length, &env).unwrap(), 8.0);
+    }
+
+    #[test]
+    fn inch_documents_read_plain_numbers_in_inches() {
+        let vars = doc(Units::In, &[("w", "2"), ("n", "4"), ("ang", "30"), ("m", "10 mm"), ("e", "3")]);
+        let env = Env { vars: &vars, units: Units::In };
+        // as a length a plain variable is in inches; as a count or an angle it is the number written
+        assert!(close(vars["w"], 50.8));
+        assert!(close(eval("w", Kind::Length, &env).unwrap(), 50.8));
+        assert_eq!(eval("n", Kind::Count, &env).unwrap(), 4.0);
+        assert_eq!(eval("n + 1", Kind::Count, &env).unwrap(), 5.0);
+        assert_eq!(eval("ang", Kind::Angle, &env).unwrap(), 30.0);
+        assert!(close(eval("sin(ang)", Kind::Count, &env).unwrap(), 0.5));
+        // plain numbers mixed with lengths are inches too
+        assert!(close(eval("w + 1", Kind::Length, &env).unwrap(), 76.2));
+        assert!(close(eval("1 in + 1", Kind::Length, &env).unwrap(), 50.8));
+        assert!(close(eval("m + 1", Kind::Length, &env).unwrap(), 35.4));
+        assert!(close(eval("max(m, 1)", Kind::Length, &env).unwrap(), 25.4));
+        assert!(close(eval("m * 2", Kind::Length, &env).unwrap(), 20.0));
+        assert!(close(eval("m / 2 mm", Kind::Count, &env).unwrap(), 5.0));
+        assert!(close(eval("10 mm", Kind::Length, &env).unwrap(), 10.0));
+        // a unit after a group reads the plain numbers inside it in that unit
+        assert!(close(eval("(m + 1) mm", Kind::Length, &env).unwrap(), 11.0));
+        // a variable may be called e
+        assert_eq!(eval("e", Kind::Count, &env).unwrap(), 3.0);
     }
 }

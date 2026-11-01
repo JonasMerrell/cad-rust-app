@@ -231,6 +231,11 @@ impl Scene {
                 return Err(format!("morph {}: mesh out of range", m.name));
             }
         }
+        for b in &self.boxes {
+            if b.node >= n {
+                return Err(format!("box {}: node out of range", b.name));
+            }
+        }
         for mk in &self.markers {
             if mk.node >= n || mk.relative.is_some_and(|r| r >= n) {
                 return Err(format!("marker {}: node out of range", mk.name));
@@ -330,7 +335,8 @@ pub fn write(scene: &Scene, meshes: &[Mesh], path: &std::path::Path, inline: boo
     let mut spec = serde_json::to_value(scene).map_err(|e| e.to_string())?;
     spec["meshes"] = Value::Array(refs);
     spec["format"] = json!(1);
-    let spec = serde_json::to_string(&spec).map_err(|e| e.to_string())?.replace("</", "<\\/");
+    // no "<" at all inside the page's script ("</script>" would end it, "<!--" confuse the parser)
+    let spec = serde_json::to_string(&spec).map_err(|e| e.to_string())?.replace('<', "\\u003c");
     let title = html_escape(&scene.title);
     let data = if inline {
         let b64 = base64::engine::general_purpose::STANDARD.encode(&blob.bytes);
@@ -377,6 +383,14 @@ mod tests {
         let bin = std::fs::read(dir.join("t.bin")).unwrap();
         // one position, index and edge buffer for the two identical meshes: 24 + 12 + 12 bytes
         assert_eq!(bin.len(), 48);
+        // names can't break out of the page's script
+        s.parts[1].name = "<!--<script></script>".into();
+        write(&s, &[cube(), cube()], &dir.join("t.html"), true).unwrap();
+        let page = std::fs::read_to_string(dir.join("t.html")).unwrap();
+        assert!(page.contains("\\u003c!--\\u003cscript>") && !page.contains("<!--<script>"));
+        s.boxes.push(BoxNote { name: "b".into(), node: 9, lo: [0.; 3], hi: [1.; 3] });
+        assert!(write(&s, &[cube(), cube()], &dir.join("t.html"), true).is_err());
+        s.boxes.clear();
         s.parts[0].node = 7;
         assert!(write(&s, &[cube(), cube()], &dir.join("t.html"), true).is_err());
         let _ = std::fs::remove_dir_all(&dir);

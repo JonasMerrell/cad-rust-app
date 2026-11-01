@@ -11,7 +11,9 @@ chamfers, shells and booleans also throw when the result is not a valid solid or
 inside-out result is turned right way out). Results
 are deterministic: the same script gives the same numbers on every run.
 
-Custom features (`define_custom_feature`) get the same API.
+Custom features (`define_custom_feature`) get the same API except the file functions under *Files and
+output* (reading and writing files, STEP/STL import and export, `render`, `render_views`) and
+`import`: a document's scripts run whenever it rebuilds, so they can't touch the user's files.
 
 Units are millimetres and degrees. Vectors can be `vec3(x, y, z)` values or `[x, y, z]` arrays, and
 `[x, y]` means z = 0. Rhai's own `sin`, `cos` and `tan` take radians: `deg(30)` converts degrees to
@@ -112,6 +114,7 @@ its components along `u` and `v`.
 
 ## Files and output
 
+Only in `rcad script` (custom features get just `parse_json`, `parse_yaml` and `to_json`):
 `read_json(path)`, `read_yaml(path)`, `parse_json(text)`, `parse_yaml(text)`, `write_json(path, value)`,
 `read_text`, `write_text`, `to_json(value)`; `import_step(path)`; `export_step(shape or [shapes], path)`
 (an array becomes one file with a body per shape), `export_stl(shape or [shapes], path[, deflection])`.

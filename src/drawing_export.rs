@@ -9,11 +9,48 @@ fn esc_pdf(s: &str) -> String {
         .map(|c| match c {
             '(' | ')' | '\\' => format!("\\{c}"),
             c if c.is_ascii() => c.to_string(),
+            '−' => "-".into(),
+            // WinAnsiEncoding's extra characters in 0x80–0x9f
+            c if winansi_extra(c).is_some() => format!("\\{:03o}", winansi_extra(c).unwrap()),
             // WinAnsiEncoding covers the Latin-1 range (Ø, °, ±, ×, …)
             c if (c as u32) >= 0xa0 && (c as u32) <= 0xff => format!("\\{:03o}", c as u32),
             _ => "?".into(),
         })
         .collect()
+}
+
+/// Code of a character WinAnsiEncoding has in 0x80–0x9f (where Latin-1 has control codes).
+fn winansi_extra(c: char) -> Option<u8> {
+    Some(match c {
+        '€' => 0x80,
+        '‚' => 0x82,
+        'ƒ' => 0x83,
+        '„' => 0x84,
+        '…' => 0x85,
+        '†' => 0x86,
+        '‡' => 0x87,
+        'ˆ' => 0x88,
+        '‰' => 0x89,
+        'Š' => 0x8a,
+        '‹' => 0x8b,
+        'Œ' => 0x8c,
+        'Ž' => 0x8e,
+        '‘' => 0x91,
+        '’' => 0x92,
+        '“' => 0x93,
+        '”' => 0x94,
+        '•' => 0x95,
+        '–' => 0x96,
+        '—' => 0x97,
+        '˜' => 0x98,
+        '™' => 0x99,
+        'š' => 0x9a,
+        '›' => 0x9b,
+        'œ' => 0x9c,
+        'ž' => 0x9e,
+        'Ÿ' => 0x9f,
+        _ => return None,
+    })
 }
 
 pub fn pdf(prims: &[Prim], size: [f64; 2]) -> Vec<u8> {
@@ -251,7 +288,8 @@ pub fn dxf(prims: &[Prim]) -> String {
             3 | 4 => {
                 // radius: centre and the point on the circle; diameter: the two ends
                 let (def, other) = if info.kind == 4 { ([2.0 * p1[0] - p2[0], 2.0 * p1[1] - p2[1]], p2) } else { (p1, p2) };
-                ents.push_str(&head(info.kind, def));
+                // DXF numbers them the other way round: 3 is a diameter, 4 a radius
+                ents.push_str(&head(if info.kind == 4 { 3 } else { 4 }, def));
                 ents.push_str(&format!("15\n{}\n25\n{}\n35\n0\n40\n0\n", f(other[0]), f(other[1])));
             }
             5 if info.pts.len() == 4 => {
@@ -364,6 +402,7 @@ mod tests {
         let xref_at: usize = s.rsplit("startxref\n").next().unwrap().lines().next().unwrap().parse().unwrap();
         assert!(s[xref_at..].starts_with("xref"));
         assert!(s.contains("Hi \\(there\\)"));
+        assert_eq!(esc_pdf("+0.1/−0.05 Ø10 … – x"), "+0.1/-0.05 \\33010 \\205 \\226 x");
         assert!(dxf(&prims).contains("LINE"));
         // circles stay circles, layers carry line types, Ø is written the DXF way
         let prims = vec![
@@ -376,7 +415,7 @@ mod tests {
             Prim::End,
         ];
         let d = dxf(&prims);
-        for want in ["$ACADVER", "AC1009", "0\nCIRCLE\n8\nVISIBLE", "0\nARC\n8\nHIDDEN", "2\nHIDDEN\n70\n0", "2\nCENTER\n70\n0", "0\nLINE\n8\nCENTER", "0\nDIMENSION", "*D1", "%%c10", "\\U+00D7"] {
+        for want in ["$ACADVER", "AC1009", "0\nCIRCLE\n8\nVISIBLE", "0\nARC\n8\nHIDDEN", "2\nHIDDEN\n70\n0", "2\nCENTER\n70\n0", "0\nLINE\n8\nCENTER", "0\nDIMENSION", "*D1", "%%c10", "\\U+00D7", "0\nDIMENSION\n8\nDIMENSIONS\n2\n*D1\n3\nSTANDARD\n10\n45.0000\n20\n50.0000\n30\n0\n11\n62.0000\n21\n55.0000\n31\n0\n70\n35\n"] {
             assert!(d.contains(want), "{want}");
         }
         assert!(!d.contains('Ø'));
