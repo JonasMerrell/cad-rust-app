@@ -167,6 +167,83 @@ impl Workspace {
         }
     }
 
+    /// Whether tab `t` exists.
+    pub fn has_tab(&self, t: Tab) -> bool {
+        match t {
+            Tab::Studio(i) => i < self.studios.len(),
+            Tab::Assembly(i) => i < self.assemblies.len(),
+            Tab::Drawing(i) => i < self.drawings.len(),
+            Tab::Cam(i) => i < self.cams.len(),
+            Tab::Sim(i) => i < self.sims.len(),
+            Tab::Pcb(i) => i < self.pcbs.len(),
+        }
+    }
+
+    /// After Part Studio `i` was removed from `studios`: drop what used it and renumber what used
+    /// later ones (assembly instances, drawing views, manufacture and simulation tabs).
+    pub fn fix_refs_after_studio_removed(&mut self, i: usize) {
+        let fix = |k: usize| if k > i { k - 1 } else { k };
+        for a in &mut self.assemblies {
+            a.instances.retain(|x| x.sub.is_some() || x.studio != i);
+            for x in a.instances.iter_mut().filter(|x| x.sub.is_none()) {
+                x.studio = fix(x.studio);
+            }
+        }
+        for d in &mut self.drawings {
+            // assembly views name an assembly; their studio number means nothing
+            d.views.retain(|v| v.assembly.is_some() || v.studio != i);
+            for v in d.views.iter_mut().filter(|v| v.assembly.is_none()) {
+                v.studio = fix(v.studio);
+            }
+        }
+        for c in &mut self.cams {
+            if c.studio == i {
+                c.studio = 0;
+                c.bodies.clear();
+            } else {
+                c.studio = fix(c.studio);
+            }
+        }
+        for c in &mut self.sims {
+            if c.studio == i {
+                c.studio = 0;
+                c.bodies.clear();
+                c.supports.iter_mut().for_each(|x| x.faces.clear());
+                c.loads.iter_mut().for_each(|x| x.faces.clear());
+            } else {
+                c.studio = fix(c.studio);
+            }
+        }
+    }
+
+    /// Remove assembly `i` and what refers to it: instances of it in other assemblies, drawing
+    /// views of it and circuit links to its mates; later assemblies are renumbered.
+    pub fn remove_assembly(&mut self, i: usize) {
+        if i >= self.assemblies.len() {
+            return;
+        }
+        self.assemblies.remove(i);
+        let fix = |k: usize| if k > i { k - 1 } else { k };
+        for a in &mut self.assemblies {
+            a.instances.retain(|x| x.sub != Some(i));
+            for x in &mut a.instances {
+                x.sub = x.sub.map(fix);
+            }
+        }
+        for d in &mut self.drawings {
+            d.views.retain(|v| v.assembly != Some(i));
+            for v in &mut d.views {
+                v.assembly = v.assembly.map(fix);
+            }
+        }
+        for p in &mut self.pcbs {
+            p.sim.links.retain(|l| l.assembly != i);
+            for l in &mut p.sim.links {
+                l.assembly = fix(l.assembly);
+            }
+        }
+    }
+
     /// Load a workspace, or a single Part Studio document saved by older versions.
     pub fn from_json(s: &str) -> Result<Workspace, String> {
         if let Ok(w) = serde_json::from_str::<Workspace>(s) {
@@ -220,6 +297,27 @@ mod tests {
         assert_eq!(w.tabs(), vec![Tab::Assembly(0), Tab::Studio(0), Tab::Drawing(0)]);
         let back = Workspace::from_json(&w.to_json()).unwrap();
         assert_eq!(back.tabs(), w.tabs());
+    }
+
+    #[test]
+    fn deleting_tabs_renumbers_drawing_views() {
+        use crate::drawing::{DrawView, Drawing};
+        let mut w = Workspace::default();
+        w.studios.push(Studio { name: "B".into(), doc: Document::default() });
+        w.assemblies = vec![Default::default(), Default::default(), Default::default()];
+        let view = |studio: usize, assembly: Option<usize>| DrawView { studio, assembly, ..Default::default() };
+        w.drawings.push(Drawing { views: vec![view(0, Some(0)), view(0, Some(2)), view(1, None), view(0, None)], ..Default::default() });
+        // deleting Part Studio 1 keeps the assembly views (they carry studio 0)
+        w.studios.remove(0);
+        w.fix_refs_after_studio_removed(0);
+        let v = &w.drawings[0].views;
+        assert_eq!(v.len(), 3);
+        assert_eq!((v[2].studio, v[2].assembly), (0, None));
+        // deleting assembly 1 drops its view and the view of assembly 3 follows it
+        w.remove_assembly(0);
+        let v: Vec<Option<usize>> = w.drawings[0].views.iter().map(|v| v.assembly).collect();
+        assert_eq!(v, vec![Some(1), None]);
+        assert!(w.has_tab(Tab::Assembly(1)) && !w.has_tab(Tab::Assembly(2)) && !w.has_tab(Tab::Pcb(0)));
     }
 
     #[test]

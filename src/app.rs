@@ -288,7 +288,7 @@ impl App {
             cc.egui_ctx.set_zoom_factor(z);
         }
         app.mark_saved();
-        if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with("--")) {
+        if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
             app.open_path(std::path::PathBuf::from(p));
         } else {
             app.home.open = true;
@@ -378,7 +378,8 @@ impl App {
             return crate::pcb_ui::undo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
-            return crate::asm_ui::undo(self);
+            crate::asm_ui::undo(self);
+            return self.leave_missing_tab();
         }
         if let Some(s) = &mut self.sketch {
             if let Some(d) = s.undo.pop() {
@@ -413,7 +414,8 @@ impl App {
             return crate::pcb_ui::redo(self);
         }
         if let crate::workspace::Tab::Assembly(_) | crate::workspace::Tab::Drawing(_) = self.tab {
-            return crate::asm_ui::redo(self);
+            crate::asm_ui::redo(self);
+            return self.leave_missing_tab();
         }
         if let Some(s) = &mut self.sketch {
             if let Some(d) = s.redo.pop() {
@@ -430,6 +432,22 @@ impl App {
             self.dialog = None;
             self.changed();
         }
+    }
+
+    /// The shown tab went away (an undo step from before it existed): show the Part Studio.
+    fn leave_missing_tab(&mut self) {
+        if !self.ws.has_tab(self.tab) {
+            self.switch_tab(crate::workspace::Tab::Studio(self.cur_studio));
+        }
+    }
+
+    /// Drop the undo steps of the Assembly/Drawing, Manufacture and Simulation tabs: they hold
+    /// whole tabs and tab numbers, which a tab operation (delete, restore, …) makes wrong.
+    pub fn clear_tab_histories(&mut self) {
+        self.asm.undo.clear();
+        self.asm.redo.clear();
+        crate::cam_ui::clear_history(self);
+        crate::fea_ui::clear_history(self);
     }
 
     /// "Undo", or what a tab-level undo would bring back.
@@ -661,8 +679,11 @@ impl App {
         self.first_fit = true;
         self.session.fitted_asm.clear();
         self.tab = crate::workspace::Tab::Studio(0);
+        // results still coming for the previous document must not land in this one
+        self.kernel.invalidate();
         self.changed();
-        let active = self.ws.active;
+        // (a damaged or hand-edited file may name a tab that isn't there)
+        let active = if self.ws.has_tab(self.ws.active) { self.ws.active } else { crate::workspace::Tab::Studio(0) };
         self.switch_tab(active);
     }
 
@@ -695,6 +716,8 @@ impl App {
         }
         self.doc = self.ws.studios[self.cur_studio].doc.clone();
         self.studio_results.clear();
+        self.kernel.invalidate();
+        self.dirty_model = true;
         if old != new {
             self.asm = Default::default();
             self.dwg = Default::default();
@@ -835,14 +858,21 @@ impl App {
             Some(p) if !ask => self.save_to(p),
             _ => {
                 let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part.json".into());
-                self.with_save_path("Save as", "Part", &["json"], &name, |a, p| a.save_to(p));
+                self.with_save_path("Save as", "Part", &["json"], &name, |a, mut p| {
+                    // a name typed without the extension would not show up under Open
+                    if p.extension().is_none() {
+                        p.set_extension("json");
+                    }
+                    a.save_to(p)
+                });
             }
         }
     }
 
     pub fn save_to(&mut self, p: std::path::PathBuf) {
         self.sync_ws();
-        match std::fs::write(&p, self.ws.to_json()) {
+        let json = serde_json::to_string_pretty(&self.ws).map_err(|e| e.to_string());
+        match json.and_then(|j| crate::session::write_atomic(&p, j.as_bytes()).map_err(|e| e.to_string())) {
             Ok(()) => {
                 let committed = crate::vcs_ui::after_save(self, &p);
                 let secs = if committed.is_empty() { 2 } else { 4 };
@@ -850,7 +880,11 @@ impl App {
                 self.path = Some(p.clone());
                 self.saved_ok(&p);
             }
-            Err(e) => self.flash(format!("Could not save {}: {e}", p.display()), ToastKind::Error),
+            Err(e) => {
+                // what the save was for (closing, opening another document) doesn't happen
+                self.session.after_save = None;
+                self.flash(format!("Could not save {}: {e}", p.display()), ToastKind::Error)
+            }
         }
     }
 
@@ -2711,6 +2745,12 @@ impl App {
             ui.end_row();
         });
         if let Some(i) = remove {
+            // a value being edited stays with its variable
+            self.editing_var = match self.editing_var.take() {
+                Some((k, _)) if k == i => None,
+                Some((k, t)) if k > i => Some((k - 1, t)),
+                e => e,
+            };
             self.checkpoint();
             self.doc.variables.remove(i);
             self.changed();
@@ -3028,6 +3068,11 @@ impl App {
         let tab = self.tab;
         let path = self.path.clone();
         let (saved, fitted) = (self.session.saved_hash, std::mem::take(&mut self.session.fitted_asm));
+        // histories are kept by Part Studio number: only while the studios are the same ones
+        let names = |w: &crate::workspace::Workspace| w.studios.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        if names(&self.ws) != names(&ws) {
+            undo.clear();
+        }
         self.load_workspace(ws);
         self.first_fit = false;
         self.path = path;
@@ -3105,12 +3150,17 @@ impl App {
             }
             "new-assembly" => {
                 let n = self.ws.assemblies.len() + 1;
+                // (earlier assembly/drawing undo steps would take the new tab away again)
+                self.asm.undo.clear();
+                self.asm.redo.clear();
                 self.ws.assemblies.push(crate::assembly::Assembly { name: format!("Assembly {n}"), ..Default::default() });
                 self.switch_tab(Tab::Assembly(n - 1));
                 self.asm.insert_open = true;
             }
             "new-drawing" => {
                 let n = self.ws.drawings.len() + 1;
+                self.asm.undo.clear();
+                self.asm.redo.clear();
                 self.ws.drawings.push(crate::drawing::Drawing { name: format!("Drawing {n}"), sheet: "A3".into(), ..Default::default() });
                 self.switch_tab(Tab::Drawing(n - 1));
                 crate::drawing_ui::add_standard_views(self);
@@ -3145,6 +3195,10 @@ impl App {
             "duplicate" => {
                 self.sync_ws();
                 self.ws_checkpoint(format!("duplicate “{}”", name_of(&self.ws, t).unwrap_or_default()), None, matches!(t, Tab::Studio(_)));
+                if matches!(t, Tab::Assembly(_) | Tab::Drawing(_)) {
+                    self.asm.undo.clear();
+                    self.asm.redo.clear();
+                }
                 match t {
                     Tab::Studio(i) => {
                         let mut s = self.ws.studios[i].clone();
@@ -3204,36 +3258,10 @@ impl App {
                         self.cur_studio = fix(self.cur_studio);
                         self.studio_results = std::mem::take(&mut self.studio_results).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
                         self.studio_undo = std::mem::take(&mut self.studio_undo).into_iter().filter(|(k, _)| *k != i).map(|(k, v)| (fix(k), v)).collect();
-                        for a in &mut self.ws.assemblies {
-                            a.instances.retain(|x| x.sub.is_some() || x.studio != i);
-                            for x in a.instances.iter_mut().filter(|x| x.sub.is_none()) {
-                                x.studio = fix(x.studio);
-                            }
-                        }
-                        for d in &mut self.ws.drawings {
-                            d.views.retain(|v| v.studio != i);
-                            for v in &mut d.views {
-                                v.studio = fix(v.studio);
-                            }
-                        }
-                        for c in &mut self.ws.cams {
-                            if c.studio == i {
-                                c.studio = 0;
-                                c.bodies.clear();
-                            } else {
-                                c.studio = fix(c.studio);
-                            }
-                        }
-                        for c in &mut self.ws.sims {
-                            if c.studio == i {
-                                c.studio = 0;
-                                c.bodies.clear();
-                                c.supports.iter_mut().for_each(|x| x.faces.clear());
-                                c.loads.iter_mut().for_each(|x| x.faces.clear());
-                            } else {
-                                c.studio = fix(c.studio);
-                            }
-                        }
+                        self.ws.fix_refs_after_studio_removed(i);
+                        // rebuilds asked for under the old numbering would land on the wrong studio
+                        self.kernel.invalidate();
+                        self.dirty_model = true;
                         // Derived features follow their studio; ones from the deleted one now fail
                         for (k, st) in self.ws.studios.iter_mut().enumerate() {
                             let d = if k == self.cur_studio { &mut self.doc } else { &mut st.doc };
@@ -3246,14 +3274,9 @@ impl App {
                         self.tab = Tab::Studio(self.cur_studio);
                     }
                     Tab::Assembly(i) => {
-                        self.ws.assemblies.remove(i);
-                        // drop instances of it in other assemblies and renumber the rest
-                        for a in &mut self.ws.assemblies {
-                            a.instances.retain(|x| x.sub != Some(i));
-                            for x in &mut a.instances {
-                                x.sub = x.sub.map(|k| if k > i { k - 1 } else { k });
-                            }
-                        }
+                        // with instances of it in other assemblies, drawing views of it and circuit links
+                        self.ws.remove_assembly(i);
+                        self.session.fitted_asm.clear();
                     }
                     Tab::Drawing(i) => {
                         self.ws.drawings.remove(i);
@@ -3277,6 +3300,8 @@ impl App {
                     log::info!("removed {pruned} mates whose parts were deleted");
                 }
                 self.ws.forget_tab(t);
+                // the other tabs' undo steps hold the old numbering
+                self.clear_tab_histories();
                 self.asm.scene_dirty = true;
                 self.dwg.dirty = true;
                 self.ws_mark();

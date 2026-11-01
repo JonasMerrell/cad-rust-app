@@ -68,7 +68,7 @@ fn save(list: &[Recent]) {
     if let Some(p) = list_path() {
         let _ = std::fs::create_dir_all(p.parent().unwrap());
         if let Ok(s) = serde_json::to_string_pretty(list) {
-            let _ = std::fs::write(p, s);
+            let _ = crate::session::write_atomic(&p, s.as_bytes());
         }
     }
 }
