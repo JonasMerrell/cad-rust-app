@@ -331,6 +331,7 @@ pub fn run(study: &Study, input: &Input, mesh: Arc<Mesh>, progress: &dyn Fn(&str
     // reactions: the holding BCs in order, then the periodic pairs (none) and crackh3d's own pins
     let holding: Vec<u64> = problem.bcs.iter().zip(&ids).filter(|(b, _)| b.kind.constrains()).map(|(_, id)| *id).collect();
     let reactions = holding.into_iter().zip(&sol.reactions).map(|(id, r)| (id, DVec3::from(r.force))).collect();
-    let mass = mesh.tets.iter().map(|t| mat.rho * crate::fea::tet10_volume(&mesh, t)).sum();
+    // curved elements' own volume, not their corners' straight tetrahedron
+    let mass = (0..mesh.tets.len()).map(|ei| mat.rho * crate::fea_solve::element_volume(&mesh, ei)).sum();
     Ok(Outcome { mesh, material, mat, body_mats: vec![], solution: Solution::Static { u, stress, reactions }, warnings: std::mem::take(warnings), mass, peak_stress: None })
 }

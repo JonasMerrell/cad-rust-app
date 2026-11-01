@@ -261,7 +261,8 @@ fn request_projections(app: &mut App) {
     }
 }
 
-/// Front, top, right and isometric views laid out third-angle, scaled to the sheet.
+/// Front, top, right and isometric views laid out third-angle (first-angle when the title block
+/// says so), scaled to the sheet.
 pub fn add_standard_views(app: &mut App) {
     let studio = app.cur_studio;
     let sheet = dwg(app).map(|d| sheet_size(&d.sheet)).unwrap_or([420.0, 297.0]);
@@ -292,7 +293,42 @@ pub fn add_standard_views(app: &mut App) {
         let id = d.next_id;
         d.views.push(DrawView { id, studio, dir: dir.into(), pos, scale, sheet: sheet_no, ..Default::default() });
     }
+    if d.title.first_angle {
+        mirror_projection(d);
+    }
     app.dwg.fitted = false;
+}
+
+/// Switch a drawing's orthographic views between third-angle and first-angle placement: around each
+/// front view (per sheet, part and assembly), the views beside it (right, left) and above or below it
+/// (top, bottom) swap sides. Their positions are mirrored about the middle of the group, so the
+/// group keeps the area it had. Section, detail and isometric views stay where they are.
+pub fn mirror_projection(d: &mut Drawing) {
+    let fronts: Vec<DrawView> = d.views.iter().filter(|v| v.dir == "front" && v.detail.is_none()).cloned().collect();
+    for f in fronts {
+        let same = |v: &DrawView| v.id != f.id && v.detail.is_none() && v.sheet == f.sheet && v.studio == f.studio && v.assembly == f.assembly && v.body == f.body;
+        let side: Vec<u64> = d.views.iter().filter(|v| same(v) && matches!(v.dir.as_str(), "right" | "left") && (v.pos[1] - f.pos[1]).abs() < 1.0).map(|v| v.id).collect();
+        let over: Vec<u64> = d.views.iter().filter(|v| same(v) && matches!(v.dir.as_str(), "top" | "bottom") && (v.pos[0] - f.pos[0]).abs() < 1.0).map(|v| v.id).collect();
+        // along x the front view and the views beside it swap; the views above or below follow the
+        // front view across (and the other way round along y)
+        let mirror = |d: &mut Drawing, ids: &[u64], follow: &[u64], axis: usize| {
+            if ids.is_empty() {
+                return;
+            }
+            let all: Vec<f64> = d.views.iter().filter(|v| v.id == f.id || ids.contains(&v.id)).map(|v| v.pos[axis]).collect();
+            let m = all.iter().cloned().fold(f64::INFINITY, f64::min) + all.iter().cloned().fold(f64::NEG_INFINITY, f64::max);
+            let shift = m - 2.0 * f.pos[axis];
+            for v in d.views.iter_mut() {
+                if v.id == f.id || ids.contains(&v.id) {
+                    v.pos[axis] = m - v.pos[axis];
+                } else if follow.contains(&v.id) {
+                    v.pos[axis] += shift;
+                }
+            }
+        };
+        mirror(d, &side, &over, 0);
+        mirror(d, &over, &side, 1);
+    }
 }
 
 pub fn nice_scale(raw: f64) -> f64 {
@@ -1229,7 +1265,7 @@ fn balloon_prims(app: &dyn DocCtx, v: &DrawView, p: &ProjView, out: &mut Vec<Pri
         // the BOM's rows in order: first leaf of each (studio, body)
         let mut k: Vec<(usize, BodyId)> = vec![];
         for x in &a.instances {
-            for l in crate::assembly::leaves(&app.ws().assemblies, x) {
+            for l in crate::assembly::leaves_with(&app.ws().assemblies, x, true) {
                 if !k.contains(&(l.studio, l.body)) {
                     k.push((l.studio, l.body));
                 }
@@ -1339,8 +1375,10 @@ fn projection_symbol(out: &mut Vec<Prim>, c: [f64; 2], first_angle: bool) {
     let (h0, h1, len) = (1.6, 3.0, 7.0);
     let l = |out: &mut Vec<Prim>, a: [f64; 2], b: [f64; 2]| out.push(Prim::Line { a, b, w: 0.25, dashed: false, color: INK });
     let (xa, xb) = (cone_x - len / 2.0, cone_x + len / 2.0);
-    // the cone's side view, narrow end on the left; its end view beside it
-    let (ha, hb) = (h0, h1);
+    // the cone's side view, wide end on the left and narrow end on the right (ISO 5456-2, the same
+    // in both symbols); its end view, seen from the narrow end, beside it: on the right in
+    // third-angle (the cone points at it), on the left in first-angle
+    let (ha, hb) = (h1, h0);
     l(out, [xa, c[1] - ha], [xa, c[1] + ha]);
     l(out, [xb, c[1] - hb], [xb, c[1] + hb]);
     l(out, [xa, c[1] + ha], [xb, c[1] + hb]);
@@ -2222,6 +2260,10 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 });
                 if changed {
                     let d = &mut app.ws.drawings[di];
+                    if t.first_angle != d.title.first_angle {
+                        // the views move to the other projection's places
+                        mirror_projection(d);
+                    }
                     d.title = t;
                     d.name = name;
                     d.decimals = (dec >= 0).then_some(dec as u8);
@@ -2402,11 +2444,17 @@ fn dim_props(app: &mut App, ui: &mut Ui, di: usize, id: u64) {
             Some(DimTol::Deviation { .. }) => 2,
             Some(DimTol::Limits { .. }) => 3,
         };
-        let (mut up, mut low) = match dm.tol {
+        // tolerances are kept in mm and edited in the document's units, as the dimension shows them
+        let studio = app.ws.drawings[di].views.iter().find(|v| v.id == dm.view).map(|v| v.studio);
+        let units = studio.map(|s| units_of(&*app, s)).unwrap_or_default();
+        let us = units.scale();
+        let (up0, low0) = match dm.tol {
             Some(DimTol::Symmetric { value }) => (value, value),
             Some(DimTol::Deviation { upper, lower }) | Some(DimTol::Limits { upper, lower }) => (upper, lower),
             None => (0.1, 0.1),
         };
+        let (mut up, mut low) = (up0 / us, low0 / us);
+        let unit = format!(" {}", units.label());
         ui.horizontal(|ui| {
             ui.label("Tolerance");
             egui::ComboBox::from_id_salt("dim-tol").selected_text(kinds[k]).show_ui(ui, |ui| {
@@ -2417,12 +2465,15 @@ fn dim_props(app: &mut App, ui: &mut Ui, di: usize, id: u64) {
         });
         if k > 0 {
             ui.horizontal(|ui| {
-                ui.add(egui::DragValue::new(&mut up).speed(0.01).range(0.0..=1000.0).prefix(if k == 1 { "±" } else { "+" }));
+                ui.add(egui::DragValue::new(&mut up).speed(0.01 / us).range(0.0..=1000.0 / us).prefix(if k == 1 { "±" } else { "+" }).suffix(unit.as_str()));
                 if k > 1 {
-                    ui.add(egui::DragValue::new(&mut low).speed(0.01).range(0.0..=1000.0).prefix("−"));
+                    ui.add(egui::DragValue::new(&mut low).speed(0.01 / us).range(0.0..=1000.0 / us).prefix("−").suffix(unit.as_str()));
                 }
             });
         }
+        // back to mm, leaving untouched values exactly as they were
+        let up = if up == up0 / us { up0 } else { up * us };
+        let low = if low == low0 / us { low0 } else { low * us };
         dm.tol = match k {
             1 => Some(DimTol::Symmetric { value: up }),
             2 => Some(DimTol::Deviation { upper: up, lower: low }),
@@ -2979,6 +3030,52 @@ fn export(app: &mut App, format: &str) {
 mod tests {
     use super::*;
     use crate::kernel::{ProjEdge, ProjHole};
+
+    #[test]
+    fn projection_symbols_follow_iso() {
+        // the cone's narrow end (the shorter vertical line) and the end view's circles
+        let parts = |first: bool| {
+            let mut out = vec![];
+            projection_symbol(&mut out, [0.0, 0.0], first);
+            let mut ends: Vec<(f64, f64)> = out.iter().filter_map(|p| match p {
+                Prim::Line { a, b, .. } if (a[0] - b[0]).abs() < 1e-9 => Some((a[0], (a[1] - b[1]).abs())),
+                _ => None,
+            }).collect();
+            ends.sort_by(|x, y| x.1.total_cmp(&y.1));
+            let circles = out.iter().find_map(|p| match p {
+                Prim::Arc { c, .. } => Some(c[0]),
+                _ => None,
+            }).unwrap();
+            let wide = ends[1].0;
+            (ends[0].0, wide, circles)
+        };
+        for first in [false, true] {
+            let (narrow, wide, circles) = parts(first);
+            // the same cone in both: wide end on the left, narrow end on the right
+            assert!(narrow > wide);
+            // third-angle: the end view to the right, where the cone points; first-angle: to the left
+            assert_eq!(circles > narrow, !first, "first angle {first}");
+            assert_eq!(circles < wide, first, "first angle {first}");
+        }
+    }
+
+    #[test]
+    fn first_angle_mirrors_the_standard_views() {
+        let mut d = Drawing::default();
+        for (id, dir, pos) in [(1, "front", [60.0, 80.0]), (2, "top", [60.0, 140.0]), (3, "right", [130.0, 80.0]), (4, "iso", [300.0, 200.0])] {
+            d.views.push(DrawView { id, dir: dir.into(), pos, scale: 1.0, ..Default::default() });
+        }
+        let before: Vec<[f64; 2]> = d.views.iter().map(|v| v.pos).collect();
+        mirror_projection(&mut d);
+        let pos = |id: u64| d.views.iter().find(|v| v.id == id).unwrap().pos;
+        // the top view under the front view, the right view on its left, in the same area
+        assert!(pos(2)[1] < pos(1)[1] && pos(2)[0] == pos(1)[0]);
+        assert!(pos(3)[0] < pos(1)[0] && pos(3)[1] == pos(1)[1]);
+        assert_eq!(pos(1), [130.0, 140.0]);
+        assert_eq!(pos(4), [300.0, 200.0]);
+        mirror_projection(&mut d);
+        assert_eq!(d.views.iter().map(|v| v.pos).collect::<Vec<_>>(), before);
+    }
 
     fn circle(c: [f64; 2], r: f64, a0: f64, a1: f64) -> Vec<[f64; 2]> {
         (0..=40).map(|i| {

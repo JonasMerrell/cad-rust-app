@@ -340,7 +340,8 @@ fn periodic_ui(app: &mut App, ui: &mut Ui, id: u64) {
     row(ui, "B moves by", |ui| {
         ui.vertical(|ui| vec3(ui, &mut q.jump, 0.001, " mm")).response.on_hover_text("B's displacement relative to A's: zero for plain periodicity, or a mean strain times the offset");
     });
-    if let Some(d) = auto.or(q.offset.map(glam::DVec3::from)) {
+    // the offset the solve uses: the pair's own when set
+    if let Some(d) = q.offset.map(glam::DVec3::from).or(auto) {
         let l = d.length();
         if l > 0.0 {
             let e = glam::DVec3::from(q.jump).dot(d) / (l * l);

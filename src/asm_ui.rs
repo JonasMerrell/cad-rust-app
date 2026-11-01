@@ -831,7 +831,8 @@ pub struct BomRow {
 
 pub fn bom(app: &dyn crate::drawing_ui::DocCtx, a: &Assembly) -> Vec<BomRow> {
     let mut rows: Vec<((usize, crate::doc::BodyId), BomRow)> = vec![];
-    for leaf in a.instances.iter().flat_map(|x| assembly::leaves(&app.ws().assemblies, x).into_iter().map(move |l| (x, l))) {
+    // hidden parts are only out of sight: they are still in the assembly, at every level
+    for leaf in a.instances.iter().flat_map(|x| assembly::leaves_with(&app.ws().assemblies, x, true).into_iter().map(move |l| (x, l))) {
         let (x, l) = leaf;
         let key = (l.studio, l.body);
         if let Some(r) = rows.iter_mut().find(|r| r.0 == key) {

@@ -477,6 +477,12 @@ pub fn body_loads(mesh: &Mesh, g: DVec3, rho: impl Fn(usize) -> f64, f: &mut [f6
     }
 }
 
+/// Volume of element `ei`, curved edges included (mm³); 0 for an inverted element.
+pub fn element_volume(mesh: &Mesh, ei: usize) -> f64 {
+    let x = coords(mesh, &mesh.tets[ei]);
+    GP.iter().filter_map(|l| grads(&x, *l)).map(|(_, d)| d / 24.0).sum()
+}
+
 pub fn area_of(mesh: &Mesh, faces: &[usize]) -> f64 {
     faces
         .iter()
@@ -714,19 +720,130 @@ fn modes_of(sys: &mut System, p: &Problem, count: usize, cancel: &dyn Fn() -> bo
     let shifted: Vec<f64> = sys.k.iter().zip(&sys.m).map(|(k, m)| k - sigma * m).collect();
     let llt = sys.factor(&shifted)?;
     let mut m_steps = (2 * want + 20).min(n - rigid.len());
+    // parts of the mesh that hang together, for telling motions as a whole from vibration
+    let comps = components(p.mesh);
     loop {
         let (vals, vecs, ok) = lanczos(sys, &llt, m_steps, want, &rigid, cancel)?;
         if ok || m_steps >= n - rigid.len() {
+            let mut flexible = false;
             for (theta, x) in vals.into_iter().zip(vecs) {
                 let lam = sigma + 1.0 / theta;
-                let freq = lam.max(0.0).sqrt() / std::f64::consts::TAU;
+                let shape = expand(sys, &x, p.mesh.nodes.len());
+                // supports that leave a part free to slide or turn (a single roller plane, a part that
+                // touches nothing held) give modes that are motions as a whole at about 0 Hz: flag them,
+                // as for a part with no supports, rather than report them as vibration
+                // (a part on soft springs also moves as a whole, but at a real frequency: only motions
+                // with next to no stiffness count)
+                let mechanism = !flexible && lam.abs() < 1e-10 * kd / md.max(1e-300) && is_rigid_motion(p.mesh, &comps, &shape);
+                flexible |= !mechanism;
+                let freq = if mechanism { 0.0 } else { lam.max(0.0).sqrt() / std::f64::consts::TAU };
                 let (participation, loss) = describe(sys, &x);
-                out.push(Mode { freq, shape: expand(sys, &x, p.mesh.nodes.len()), participation, loss, rigid: false });
+                out.push(Mode { freq, shape, participation, loss: if mechanism { 0.0 } else { loss }, rigid: mechanism });
             }
             return Ok(out);
         }
         m_steps = (m_steps * 2).min(n - rigid.len());
     }
+}
+
+/// Connected part of the mesh each node belongs to (through its elements); unused nodes get their own.
+fn components(mesh: &Mesh) -> Vec<u32> {
+    let nn = mesh.nodes.len();
+    let mut parent: Vec<u32> = (0..nn as u32).collect();
+    fn find(parent: &mut [u32], mut a: u32) -> u32 {
+        while parent[a as usize] != a {
+            parent[a as usize] = parent[parent[a as usize] as usize];
+            a = parent[a as usize];
+        }
+        a
+    }
+    for t in &mesh.tets {
+        for v in &t[1..] {
+            let (a, b) = (find(&mut parent, t[0]), find(&mut parent, *v));
+            if a != b {
+                parent[a as usize] = b;
+            }
+        }
+    }
+    (0..nn as u32).map(|i| find(&mut parent, i)).collect()
+}
+
+/// Whether a displacement field (3 per node) is a rigid-body motion of each connected part: the best
+/// fitting translation and rotation of every part leaves less than a thousandth of it unexplained.
+/// Vibration always bends or stretches something, far more than that.
+pub fn is_rigid_motion(mesh: &Mesh, comps: &[u32], u: &[f64]) -> bool {
+    let total: f64 = u.iter().map(|x| x * x).sum();
+    if !(total > 0.0) {
+        return false;
+    }
+    let mut groups: std::collections::HashMap<u32, Vec<usize>> = std::collections::HashMap::new();
+    for (i, c) in comps.iter().enumerate() {
+        groups.entry(*c).or_default().push(i);
+    }
+    let mut resid = 0.0;
+    for nodes in groups.values() {
+        let c = nodes.iter().fold(DVec3::ZERO, |a, i| a + mesh.nodes[*i]) / nodes.len() as f64;
+        let size = nodes.iter().map(|i| (mesh.nodes[*i] - c).length()).fold(0.0, f64::max).max(1e-12);
+        // u ≈ t + w × r, with r scaled by the part's size so the normal equations stay well conditioned
+        let rows = |r: DVec3| -> [[f64; 6]; 3] {
+            [[1.0, 0.0, 0.0, 0.0, r.z, -r.y], [0.0, 1.0, 0.0, -r.z, 0.0, r.x], [0.0, 0.0, 1.0, r.y, -r.x, 0.0]]
+        };
+        let mut a = [[0.0f64; 6]; 6];
+        let mut b = [0.0f64; 6];
+        for &i in nodes {
+            let r = rows((mesh.nodes[i] - c) / size);
+            for (k, row) in r.iter().enumerate() {
+                let ui = u[3 * i + k];
+                for p in 0..6 {
+                    b[p] += row[p] * ui;
+                    for q in 0..6 {
+                        a[p][q] += row[p] * row[q];
+                    }
+                }
+            }
+        }
+        let x = solve6(a, b);
+        for &i in nodes {
+            let r = rows((mesh.nodes[i] - c) / size);
+            for (k, row) in r.iter().enumerate() {
+                let fit: f64 = (0..6).map(|p| row[p] * x[p]).sum();
+                resid += (u[3 * i + k] - fit).powi(2);
+            }
+        }
+    }
+    resid < 1e-6 * total
+}
+
+/// Solve a small symmetric system by Gaussian elimination with partial pivoting (directions it does
+/// not determine, such as the rotation of a part that is a single line of nodes, come out zero).
+fn solve6(mut a: [[f64; 6]; 6], mut b: [f64; 6]) -> [f64; 6] {
+    let scale = (0..6).map(|i| a[i][i].abs()).fold(0.0, f64::max).max(1e-300);
+    let mut skip = [false; 6];
+    for col in 0..6 {
+        let piv = (col..6).max_by(|x, y| a[*x][col].abs().total_cmp(&a[*y][col].abs())).unwrap();
+        if a[piv][col].abs() < 1e-12 * scale {
+            skip[col] = true;
+            continue;
+        }
+        a.swap(col, piv);
+        b.swap(col, piv);
+        for r in col + 1..6 {
+            let f = a[r][col] / a[col][col];
+            for k in col..6 {
+                a[r][k] -= f * a[col][k];
+            }
+            b[r] -= f * b[col];
+        }
+    }
+    let mut x = [0.0; 6];
+    for col in (0..6).rev() {
+        if skip[col] {
+            continue;
+        }
+        let s: f64 = (col + 1..6).map(|k| a[col][k] * x[k]).sum();
+        x[col] = (b[col] - s) / a[col][col];
+    }
+    x
 }
 
 /// Lanczos with full reorthogonalisation in the M inner product on (K − σM)⁻¹M, kept M-orthogonal to the
@@ -981,7 +1098,15 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
     let mut sys = assemble(p, cancel)?;
     let free = is_free(p);
     let modes = modes_of(&mut sys, p, if free { 7 } else { 1 }, cancel)?;
-    let f1 = modes.last().map(|m| m.freq).unwrap_or(0.0).max(1e-6);
+    // a part the supports leave free to slide or turn has a 0 Hz mode: there is no lowest natural
+    // frequency to size the run and its damping by, and nothing stops the motion
+    let Some(f1) = modes.iter().find(|m| !m.rigid).map(|m| m.freq.max(1e-6)) else {
+        return Err(if free {
+            "The parts float apart: they don't touch, so each one moves on its own. Add supports or join the parts".into()
+        } else {
+            "The supports don't hold the part fully: it can still slide or turn as a whole (a 0 Hz mode). Add supports, or remove them all to let it float".into()
+        });
+    };
     let (w1, w2) = (std::f64::consts::TAU * f1, std::f64::consts::TAU * f1 * 5.0);
     let ar = 2.0 * s.damping * w1 * w2 / (w1 + w2);
     let br = 2.0 * s.damping / (w1 + w2);
@@ -1015,6 +1140,9 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
     let mut max_disp = vec![0.0];
     let (mut tm, mut tc, mut ku, mut ke) = (vec![0.0; n], vec![0.0; n], vec![0.0; n], vec![0.0; n]);
     let mut mu = vec![0.0; n];
+    // the step with the largest displacement that no kept frame matches: (its largest displacement, time, field)
+    let mut peak: Option<(f64, f64, Vec<f64>)> = None;
+    let mut kept_max = 0.0f64;
     for step in 1..=steps {
         if step % 16 == 0 {
             if cancel() {
@@ -1062,7 +1190,18 @@ pub fn transient(p: &Problem, s: &TransientSettings, progress: &dyn Fn(f32), can
         if step as f64 >= next_frame - 1e-9 || step == steps {
             frames.push((t, full));
             next_frame += every;
+            kept_max = kept_max.max(md);
+            if peak.as_ref().is_some_and(|p| md >= p.0) {
+                peak = None;
+            }
+        } else if md > kept_max && peak.as_ref().is_none_or(|p| md > p.0) {
+            // the largest response falls between kept frames: keep it too, so its stress isn't missed
+            peak = Some((md, t, full));
         }
+    }
+    if let Some((_, t, u)) = peak {
+        let at = frames.partition_point(|f| f.0 < t);
+        frames.insert(at, (t, u));
     }
     // ring-down only means something once an impact is over and something damps it
     let damped = s.damping > 0.0 || !sys.k_eta.is_empty();
@@ -1135,8 +1274,42 @@ mod tests {
         let s = TransientSettings { duration: Some(3.0 / modes[0].freq), steps: 120, damping: 0.0, profile: Profile::Step, frames: 10 };
         let t = transient(&p, &s, &|_| {}, &|| false).unwrap();
         let peak = t.max_disp.iter().copied().fold(0.0, f64::max);
+        // the step with the largest displacement is among the kept frames, so its stress is seen
+        let framed = t.frames.iter().map(|f| crate::fea::max_mag(&f.1)).fold(0.0, f64::max);
+        assert!((framed - peak).abs() <= 1e-12 * peak, "{framed} {peak}");
+        assert!(t.frames.windows(2).all(|w| w[0].0 < w[1].0));
         let max_static = u.chunks(3).map(|c| (c[0] * c[0] + c[1] * c[1] + c[2] * c[2]).sqrt()).fold(0.0, f64::max);
         assert!((peak / max_static - 2.0).abs() < 0.08, "{}", peak / max_static);
+    }
+
+    #[test]
+    fn a_single_roller_plane_leaves_motions_as_a_whole() {
+        // the beam held only by a roller on its end (x fixed there): it can still slide along y and z and
+        // turn about x, three motions with no stiffness
+        let m = mesh(&beam(), 3.4, &Default::default(), &|| false).unwrap();
+        let end: Vec<(u32, DVec3)> = m.faces.iter().filter(|f| f.1 == 0).flat_map(|f| f.0).map(|v| (v, DVec3::X)).collect();
+        let mut force = vec![0.0; 3 * m.nodes.len()];
+        let tip: Vec<usize> = (0..m.faces.len()).filter(|i| m.faces[*i].1 == 1).collect();
+        traction_loads(&m, &tip, |_| DVec3::new(0.0, 0.0, -1.0), &mut force);
+        let p = Problem { mesh: &m, mat: STEEL, body_mats: vec![], fixes: vec![Fix::Roller(end)], force, couplings: vec![], masses: vec![] };
+        let modes = modal(&p, 5, &|| false).unwrap();
+        assert!(modes[..3].iter().all(|m| m.rigid && m.freq == 0.0), "{:?}", modes.iter().map(|m| (m.freq, m.rigid)).collect::<Vec<_>>());
+        assert!(modes[3..].iter().all(|m| !m.rigid && m.freq > 100.0), "{:?}", modes.iter().map(|m| (m.freq, m.rigid)).collect::<Vec<_>>());
+        // a time history has nothing to size itself by, and nothing stops the motion: say so
+        let s = TransientSettings { duration: None, steps: 50, damping: 0.02, profile: Profile::Step, frames: 10 };
+        let e = transient(&p, &s, &|_| {}, &|| false).err().expect("not held");
+        assert!(e.contains("don't hold"), "{e}");
+    }
+
+    #[test]
+    fn rigid_motion_is_told_from_bending() {
+        let m = mesh(&beam(), 5.0, &Default::default(), &|| false).unwrap();
+        let comps = components(&m);
+        // a turn about z plus a shift, and a bending shape
+        let turn: Vec<f64> = m.nodes.iter().flat_map(|p| (DVec3::Z.cross(*p) * 1e-3 + DVec3::new(0.1, 0.0, 0.2)).to_array()).collect();
+        let bend: Vec<f64> = m.nodes.iter().flat_map(|p| [0.0, 0.0, (p.x / 100.0).powi(2)]).collect();
+        assert!(is_rigid_motion(&m, &comps, &turn));
+        assert!(!is_rigid_motion(&m, &comps, &bend));
     }
 
     #[test]
