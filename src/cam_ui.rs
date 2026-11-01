@@ -51,6 +51,9 @@ pub struct CamUi {
     sim_mesh: Vec<([DVec3; 3], u8)>,
     undo: Vec<Cam>,
     redo: Vec<Cam>,
+    /// The setup (Manufacture tab index) `undo` and `redo` belong to; the other setups' histories are parked in `histories`.
+    undo_of: Option<usize>,
+    histories: std::collections::HashMap<usize, (Vec<Cam>, Vec<Cam>)>,
     last_ck: Option<Instant>,
     /// Picking edges for this deburr operation.
     pub pick_edges: Option<u64>,
@@ -110,7 +113,37 @@ pub fn cam_mut(app: &mut App) -> Option<&mut Cam> {
     app.ws.cams.get_mut(i)
 }
 
+/// Each setup keeps its own undo history: bring in the open one's, and drop the picks made in the setup
+/// before (operation ids are only unique within a setup).
+pub(crate) fn sync_setup(app: &mut App) {
+    let Some(ci) = cam_index(app) else { return };
+    if app.cam.undo_of == Some(ci) {
+        return;
+    }
+    if let Some(prev) = app.cam.undo_of {
+        let h = (std::mem::take(&mut app.cam.undo), std::mem::take(&mut app.cam.redo));
+        app.cam.histories.insert(prev, h);
+        app.cam.sel_op = None;
+        app.cam.sel_tool = None;
+        app.cam.pick_edges = None;
+    }
+    let (u, r) = app.cam.histories.remove(&ci).unwrap_or_default();
+    app.cam.undo = u;
+    app.cam.redo = r;
+    app.cam.undo_of = Some(ci);
+    app.cam.last_ck = None;
+}
+
+/// (undo steps, redo steps) of the open setup.
+fn history_len(app: &App) -> (usize, usize) {
+    match cam_index(app) {
+        Some(ci) if app.cam.undo_of != Some(ci) => app.cam.histories.get(&ci).map(|h| (h.0.len(), h.1.len())).unwrap_or((0, 0)),
+        _ => (app.cam.undo.len(), app.cam.redo.len()),
+    }
+}
+
 pub fn undo(app: &mut App) {
+    sync_setup(app);
     let Some(i) = cam_index(app) else { return };
     if let Some(c) = app.cam.undo.pop() {
         let cur = std::mem::replace(&mut app.ws.cams[i], c);
@@ -120,6 +153,7 @@ pub fn undo(app: &mut App) {
 }
 
 pub fn redo(app: &mut App) {
+    sync_setup(app);
     let Some(i) = cam_index(app) else { return };
     if let Some(c) = app.cam.redo.pop() {
         let cur = std::mem::replace(&mut app.ws.cams[i], c);
@@ -129,15 +163,16 @@ pub fn redo(app: &mut App) {
 }
 
 pub fn can_undo(app: &App) -> bool {
-    !app.cam.undo.is_empty()
+    history_len(app).0 > 0
 }
 
 pub fn can_redo(app: &App) -> bool {
-    !app.cam.redo.is_empty()
+    history_len(app).1 > 0
 }
 
 /// Record an undo step with the state before an edit (edits closer together than a second share one step).
 fn record(app: &mut App, before: Cam) {
+    sync_setup(app);
     let now = Instant::now();
     if app.cam.last_ck.map(|t| now.duration_since(t).as_secs_f32() > 1.0).unwrap_or(true) {
         app.cam.undo.push(before);
@@ -152,6 +187,7 @@ fn record(app: &mut App, before: Cam) {
 
 /// Edit the open Manufacture tab with an undo step.
 fn edit(app: &mut App, f: impl FnOnce(&mut Cam)) {
+    sync_setup(app);
     let Some(c) = cam(app).cloned() else { return };
     app.cam.last_ck = None;
     if let Some(m) = cam_mut(app) {
@@ -297,6 +333,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
 // ---------------------------------------------------------------- toolbar
 
 pub fn toolbar(app: &mut App, ui: &mut Ui) {
+    sync_setup(app);
     App::group(ui, |ui| {
         for (k, icon) in [(OpKind::Face, "camFace"), (OpKind::Clear, "camClear"), (OpKind::Pocket, "camPocket"), (OpKind::Contour, "camContour"), (OpKind::Chamfer, "chamfer")] {
             if app.tool_button(ui, icon, k.label(), k.description(), matches!(k, OpKind::Clear | OpKind::Contour), false, true).clicked() {
@@ -402,6 +439,7 @@ pub(crate) fn add_op(app: &mut App, k: OpKind) {
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     use egui::Key;
+    sync_setup(app);
     let pressed = |k: Key| ctx.input(|i| i.key_pressed(k));
     // no Ctrl combinations here yet; Ctrl+letter is not the letter's tool
     if ctx.egui_wants_keyboard_input() || crate::app::key_mods(ctx).0 {
@@ -494,6 +532,8 @@ fn opt(ui: &mut Ui, label: &str, v: &mut Option<f64>, auto: f64, unit: &str, tip
 }
 
 pub fn sidebar(app: &mut App, ui: &mut Ui) {
+    sync_setup(app);
+    let ci = cam_index(app);
     let Some(before) = cam(app).cloned() else {
         ui.label("No Manufacture tab");
         return;
@@ -535,7 +575,12 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             section(ui, page.title(), |ui| setup_ui(app, ui, page));
         }
     });
-    if cam(app).map(|c| *c != before).unwrap_or(false) {
+    // a pick of another node ends picking edges for a deburr
+    if app.cam.pick_edges.is_some() && app.cam.pick_edges != app.cam.sel_op {
+        app.cam.pick_edges = None;
+    }
+    // (when the tree opened another setup, `before` is the one left, not an edit of this one)
+    if cam_index(app) == ci && cam(app).map(|c| *c != before).unwrap_or(false) {
         record(app, before);
     }
 }
@@ -634,6 +679,7 @@ fn work_tree(app: &mut App, ui: &mut Ui) {
     }
     if let Some(i) = go {
         app.switch_tab(Tab::Cam(i));
+        sync_setup(app);
     }
 }
 
@@ -1200,11 +1246,7 @@ fn setup_ui(app: &mut App, ui: &mut Ui, page: Page) {
             "left" => "right",
             _ => "left",
         };
-        let n = app.ws.cams.len() + 1;
-        let mut name = format!("{} side 2", c.name);
-        while app.ws.cams.iter().any(|x| x.name == name) {
-            name = format!("Manufacture {n}");
-        }
+        let name = side_name(&c.name, &app.ws.cams);
         let next = Cam { name, follows: c.name.clone(), orient: flip.into(), tilt: [0.0; 2], ops: vec![], stock: cam::Stock { carried: None, ..c.stock.clone() }, soft_jaws: None, jaws_of: String::new(), ..c };
         app.ws.cams.push(next);
         let t = Tab::Cam(app.ws.cams.len() - 1);
@@ -1217,6 +1259,11 @@ fn setup_ui(app: &mut App, ui: &mut Ui, page: Page) {
     if page == Page::Part && app.studio_bodies(studio).is_empty() {
         ui.label(RichText::new("This Part Studio has no parts yet").color(theme::error_soft()));
     }
+}
+
+/// A name for a setup that carries on from `base`: "<base> side 2", or side 3, 4… when that is taken.
+fn side_name(base: &str, cams: &[Cam]) -> String {
+    (2..).map(|k| format!("{base} side {k}")).find(|n| !cams.iter().any(|c| &c.name == n)).unwrap_or_default()
 }
 
 /// Make sure a Part Studio's parts have been built.
@@ -1343,7 +1390,7 @@ fn ops_ui(app: &mut App, ui: &mut Ui) {
     let ops: Vec<(u64, OpKind, String, bool, String)> =
         c.ops.iter().map(|o| (o.id, o.kind, o.name.clone(), o.suppressed, c.tool(o.tool).map(|t| format!("T{}", t.number)).unwrap_or("no tool".into()))).collect();
     let open = !app.cam.folded.contains("ops");
-    let total: f64 = app.cam.paths.iter().map(|p| p.time).sum();
+    let total = cam(app).map(|c| cam_paths::cycle_time(c, &app.cam.paths)).unwrap_or_default();
     let note = if app.cam.computing { "updating…".to_string() } else if app.cam.paths.is_empty() { ops.len().to_string() } else { fmt_time(total) };
     let (r, _, slot) = tree_row(ui, 1, Some(open), "features", "Operations", &note, false, false, 24.0, false);
     if r.on_hover_text(if app.cam.paths.is_empty() { String::new() } else { format!("Cycle time {}", fmt_time(total)) }).clicked() {
@@ -1758,12 +1805,13 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "every edge the tool reaches");
             num(ui, "Sharper than", &mut o.edge_angle, "°", 5.0..=170.0, 1.0);
             row(ui, "Edges", |ui| {
-                if o.edges.is_empty() {
+                if o.edges.is_empty() && o.edge_picks.is_empty() {
                     ui.label(RichText::new("every sharp edge").color(theme::muted()).size(12.0));
                 } else {
-                    ui.label(format!("{} picked", o.edges.len()));
+                    ui.label(format!("{} picked", o.edges.len() + o.edge_picks.len()));
                     if ui.small_button("All edges").clicked() {
                         o.edges.clear();
+                        o.edge_picks.clear();
                     }
                 }
             });
@@ -1857,6 +1905,8 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     let Some(ci) = cam_index(app) else { return };
     let material = app.ws.cams[ci].stock.material.clone();
     let (max_rpm, min_rpm) = (app.ws.cams[ci].max_rpm, app.ws.cams[ci].min_rpm);
+    // the other tools' numbers, which this one must not share
+    let others: Vec<(u32, String)> = app.ws.cams[ci].tools.iter().filter(|t| t.id != id).map(|t| (t.number, t.describe())).collect();
     let Some(t) = app.ws.cams[ci].tools.iter_mut().find(|t| t.id == id) else { return };
     ui.label(RichText::new(t.describe()).color(theme::muted()).size(12.0));
     tool_preview(ui, t);
@@ -1866,6 +1916,9 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
     row(ui, "Number", |ui| {
         ui.add(egui::DragValue::new(&mut t.number).range(1..=999).prefix("T"));
     });
+    if let Some(other) = others.iter().find(|o| o.0 == t.number) {
+        ui.label(RichText::new(format!("T{} is taken by {}: give each tool its own number", t.number, other.1)).color(theme::error_soft()).size(12.0));
+    }
     row(ui, "Type", |ui| {
         egui::ComboBox::from_id_salt("cam-tool-kind").selected_text(t.kind.label()).show_ui(ui, |ui| {
             for k in ToolKind::ALL {
@@ -2484,8 +2537,8 @@ fn build_scene(app: &App) -> SceneData {
                 s.polyline(&v, 2.0, rgba(Color32::from_rgb(0xd0, 0x60, 0xd0), 0.9), false);
             }
         }
-        for e in &op.edges {
-            s.point(to(DVec3::from(*e) + origin), 9.0, rgba(theme::accent(), 1.0));
+        for e in crate::cam_3d::deburr_picks(op, part, origin) {
+            s.point(to(e), 9.0, rgba(theme::accent(), 1.0));
         }
     }
     // the tool where the simulation is
@@ -2522,6 +2575,7 @@ fn build_scene(app: &App) -> SceneData {
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
     let ctx = ui.ctx().clone();
+    sync_setup(app);
     if let Some(c) = cam(app) {
         let s = c.studio;
         ensure_built(app, s);
@@ -2543,18 +2597,28 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
         app.cam.scene_dirty = true;
     }
-    if let (Some(id), true) = (app.cam.pick_edges, resp.clicked()) {
+    // only while the deburr picking edges is the one shown
+    let picking = app.cam.pick_edges.filter(|id| app.cam.sel_op == Some(*id) && cam(app).and_then(|c| c.op(*id)).is_some_and(|o| o.kind == OpKind::Deburr));
+    if app.cam.pick_edges.is_some() && picking.is_none() {
+        app.cam.pick_edges = None;
+    }
+    if let (Some(id), true) = (picking, resp.clicked()) {
         if let (Some(pos), Some(part), Some(c)) = (resp.interact_pointer_pos(), app.cam.part.clone(), cam(app)) {
             let local = Vec2::new(pos.x - rect.left(), pos.y - rect.top());
             let origin = cam_paths::work_origin(c, &part);
             let angle = c.op(id).map(|o| o.edge_angle).unwrap_or(30.0);
             let scr = |p: DVec3| app.camera.project(p.as_vec3());
-            let existing: Vec<[f64; 3]> = c.op(id).map(|o| o.edges.clone()).unwrap_or_default();
+            // the picks given in work coordinates come first, then those picked here (part coordinates)
+            let (n_work, existing) = c.op(id).map(|o| (o.edges.len(), crate::cam_3d::deburr_picks(o, &part, origin))).unwrap_or_default();
             // clicking a pick again removes it
-            if let Some(k) = existing.iter().position(|e| scr(DVec3::from(*e) + origin).distance(local) < 8.0) {
+            if let Some(k) = existing.iter().position(|e| scr(*e).distance(local) < 8.0) {
                 edit(app, |c| {
                     if let Some(o) = c.ops.iter_mut().find(|o| o.id == id) {
-                        o.edges.remove(k);
+                        if k < n_work {
+                            o.edges.remove(k);
+                        } else {
+                            o.edge_picks.remove(k - n_work);
+                        }
                     }
                 });
             } else {
@@ -2571,10 +2635,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     }
                 }
                 if let Some((_, p)) = best {
-                    let q = ((p - origin) * 1000.0).round() / 1000.0;
+                    // kept on the part, so changes to the stock or the work zero don't move it off its edge
+                    let q = (part.to_part(p) * 1000.0).round() / 1000.0;
                     edit(app, |c| {
                         if let Some(o) = c.ops.iter_mut().find(|o| o.id == id) {
-                            o.edges.push(q.to_array());
+                            o.edge_picks.push(q.to_array());
                         }
                     });
                 }
@@ -2606,7 +2671,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let painter = ui.painter_at(rect);
     crate::viewport::view_cube(app, ui, rect);
     // summary in the corner
-    let total: f64 = app.cam.paths.iter().map(|p| p.time).sum();
+    let total = cam(app).map(|c| cam_paths::cycle_time(c, &app.cam.paths)).unwrap_or_default();
     let mut lines = vec![];
     if app.cam.computing {
         lines.push("Making toolpaths…".to_string());
@@ -2691,4 +2756,18 @@ fn sim_card(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
         egui::ScrollArea::vertical().id_salt("cam-sim-card").max_height(room.height() - 44.0).show(ui, |ui| sim_ui(app, ui));
     });
     app.cam.sim_card = Some(r.response.rect);
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn side_names_skip_taken_ones() {
+        let cams = |names: &[&str]| names.iter().map(|n| Cam { name: n.to_string(), ..Default::default() }).collect::<Vec<_>>();
+        assert_eq!(side_name("Manufacture 1", &cams(&["Manufacture 1"])), "Manufacture 1 side 2");
+        // taken names, among them the old fallback "Manufacture <count + 1>", no longer loop forever
+        let c = cams(&["Manufacture 1", "Manufacture 1 side 2", "Manufacture 4"]);
+        assert_eq!(side_name("Manufacture 1", &c), "Manufacture 1 side 3");
+    }
 }

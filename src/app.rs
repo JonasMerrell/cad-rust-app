@@ -3065,6 +3065,10 @@ impl App {
                                 for c in self.ws.cams.iter_mut().filter(|c| c.follows == old) {
                                     c.follows = text.clone();
                                 }
+                                // and the tab that machines its soft jaws
+                                for c in self.ws.cams.iter_mut().filter(|c| c.jaws_of == old) {
+                                    c.jaws_of = text.clone();
+                                }
                             }
                             Tab::Sim(i) => self.ws.sims[i].name = text,
                             Tab::Pcb(i) => self.ws.pcbs[i].name = text,

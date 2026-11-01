@@ -624,7 +624,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         let extra = match name.as_str() {
             "create_cam" | "edit_cam" => serde_fields(&crate::cam::Cam::default(), &["tools", "ops", "next_id", "soft_jaws", "jaws_of"], "setup field"),
             "cam_tool" => serde_fields(&crate::cam::Tool::default(), &["id", "kind", "holder_name"], "tool field"),
-            "cam_op" => serde_fields(&crate::cam::Operation::default(), &["id", "kind", "tool"], "operation field"),
+            "cam_op" => serde_fields(&crate::cam::Operation::default(), &["id", "kind", "tool", "edge_picks"], "operation field"),
             "cam_soft_jaws" => serde_fields(&crate::cam::SoftJaws::default(), &[], "soft jaw field"),
             _ => Map::new(),
         };

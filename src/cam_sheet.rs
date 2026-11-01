@@ -449,7 +449,7 @@ pub fn sheet(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> St
 pub fn html(cam: &Cam, part: &Part, paths: &[Toolpath], vis: &Visuals) -> String {
     let o = cam_paths::work_origin(cam, part);
     let (lo, hi) = cam_paths::stock_box(cam, part);
-    let total: f64 = paths.iter().map(|p| p.time).sum();
+    let total = cam_paths::cycle_time(cam, paths);
     let used: Vec<u64> = cam.tools.iter().map(|t| t.id).filter(|id| paths.iter().any(|p| p.tool == *id && !p.moves.is_empty())).collect();
     let mut s = String::new();
     let _ = write!(
@@ -593,6 +593,8 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         let desc = t.describe();
         let name = if t.name.is_empty() || t.name == desc { esc(&desc) } else { format!("{}<div class=\"muted\">{}</div>", esc(&t.name), esc(&desc)) };
         let holder = if t.holder_name.is_empty() { format!("Ø{} mm", fmt_mm(t.holder_diameter)) } else { esc(&t.holder_name) };
+        // what the program runs: scaled with a capped spindle speed and capped at the machine's top feed
+        let (feed, plunge) = cam.feeds(t);
         let _ = write!(
             s,
             "<tr><td class=\"draw\">{}</td><td>T{}</td><td>{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td class=\"n\">{}</td><td>{}</td><td class=\"n\">{} rpm</td><td class=\"n\">{} / {}</td><td>{}</td></tr>",
@@ -605,8 +607,8 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             fmt_mm(t.stickout),
             if t.kind == ToolKind::Tap && t.tapping_head { format!("{holder}, self-reversing tapping head") } else { holder },
             cam.spindle_rpm(t).round(),
-            t.feed.round(),
-            t.plunge_feed.round(),
+            feed.round(),
+            plunge.round(),
             ops.join(", ")
         );
     }
@@ -664,7 +666,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         let _ = write!(cards, "<div class=\"body\"><table class=\"kv\">");
         for (k, v) in [
             ("Tool", esc(&t.describe())),
-            ("Speed / feed", format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), t.feed.round())),
+            ("Speed / feed", format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), cam.feeds(t).0.round())),
             ("Z top / bottom", z.clone()),
             ("Stepdown / over", step.clone()),
             ("Leave side / floor", leave.clone()),
@@ -764,6 +766,14 @@ mod tests {
         assert!(h.contains("<svg class=\"tool\"") && h.contains("Operation by operation") && h.contains("class=\"l ax x\""));
         assert!(h.contains("Face 1") && h.contains("Contour 1") && h.contains(">T1<") && h.contains("Clamp"));
         assert!(h.contains("Ø6 flat end mill"));
+        // a tool set faster than the spindle goes: the sheet shows the feeds the program runs
+        let mut fast = c.clone();
+        fast.max_rpm = 10000.0;
+        fast.tools[0].rpm = 20000.0;
+        fast.tools[0].feed = 1234.0;
+        fast.tools[0].plunge_feed = 300.0;
+        let h = html(&fast, &part, &paths, &vis);
+        assert!(h.contains("617 / 150") && h.contains("10000 rpm / 617 mm/min") && !h.contains("1234"));
     }
 }
 
