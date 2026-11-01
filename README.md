@@ -129,7 +129,7 @@ crash detection, and post G-code for GRBL, LinuxCNC, Fanuc, Mach3 or rcnc.
 - **Output:** G-code with G2/G3 arcs (including helices), tool probing after a change, your own start,
   tool-change and end code, operation templates, printable setup sheets (with pictures of the setup,
   each toolpath and the simulation), and **Send to rcnc**, which loads the
-  program and its tools straight into the controller.
+  program, its tools and its setup sheet straight into the controller.
 
 </details>
 

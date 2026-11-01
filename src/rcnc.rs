@@ -1,5 +1,6 @@
 //! Send posted G-code straight to rcnc, the CNC controller (github.com/JonasMerrell/rcnc), when it runs on
-//! this computer: it listens on 127.0.0.1 and loads the program and its tools, so there is no file to save and open.
+//! this computer: it listens on 127.0.0.1 and loads the program, its tools and its setup sheet, so there is no file
+//! to save and open.
 
 use std::time::Duration;
 
@@ -11,7 +12,8 @@ use crate::cam_paths::Toolpath;
 /// rcnc's local port (rcnc `crates/app/src/link.rs`).
 pub const PORT: u16 = 7350;
 
-/// The program and the tools it uses, as rcnc's `POST /program` takes them.
+/// The program and the tools it uses, as rcnc's `POST /program` takes them. The caller can add the
+/// setup sheet as `setup_sheet` (an HTML page), which rcnc shows with the program.
 pub fn payload(cam: &Cam, paths: &[Toolpath], name: &str, gcode: String) -> Value {
     let mut tools: Vec<Value> = vec![];
     let mut seen: Vec<u64> = vec![];
