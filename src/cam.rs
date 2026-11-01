@@ -414,6 +414,17 @@ fn material(name: &str) -> (f64, f64) {
     MATERIALS.iter().find(|m| m.0.eq_ignore_ascii_case(name)).map(|m| (m.1, m.2)).unwrap_or((300.0, 1.0))
 }
 
+/// The cutting speed (m/min) a tool is made for in a stock material: carbide's, or about a third of it for HSS
+/// and cobalt.
+pub fn cutting_speed(tool: &Tool, stock: &str) -> f64 {
+    let vc = material(stock).0;
+    if tool.material != "carbide" {
+        vc * 0.35
+    } else {
+        vc
+    }
+}
+
 /// Suggested spindle speed, feed, plunge feed, stepdown and stepover for a tool in a stock material.
 /// `max_rpm` is the spindle's limit, `min_rpm` the slowest it keeps its torque at (0: no limit).
 pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64, min_rpm: f64) {

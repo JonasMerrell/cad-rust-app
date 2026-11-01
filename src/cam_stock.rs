@@ -53,6 +53,28 @@ impl StockMap {
         self.column(x, y).map(|(lo, hi)| (hi as f64) > z + tol && (lo as f64) < z).unwrap_or(false)
     }
 
+    /// Highest material within `r` of (x, y) (EMPTY where there is none).
+    pub fn top_near(&self, x: f64, y: f64, r: f64) -> f64 {
+        let n = (r / self.cell).ceil() as i64 + 1;
+        let ci = ((x - self.x0) / self.cell).round() as i64;
+        let cj = ((y - self.y0) / self.cell).round() as i64;
+        let mut best = EMPTY;
+        for j in (cj - n).max(0)..=(cj + n).min(self.ny as i64 - 1) {
+            let dy = self.y0 + j as f64 * self.cell - y;
+            for i in (ci - n).max(0)..=(ci + n).min(self.nx as i64 - 1) {
+                let dx = self.x0 + i as f64 * self.cell - x;
+                if dx * dx + dy * dy > (r + self.cell) * (r + self.cell) {
+                    continue;
+                }
+                let k = j as usize * self.nx + i as usize;
+                if self.hi[k] > self.lo[k] {
+                    best = best.max(self.hi[k]);
+                }
+            }
+        }
+        best as f64
+    }
+
     /// Highest material anywhere.
     pub fn max_top(&self) -> f64 {
         self.hi.iter().zip(&self.lo).filter(|(h, l)| h > l).map(|(h, _)| *h).fold(EMPTY, f32::max) as f64
