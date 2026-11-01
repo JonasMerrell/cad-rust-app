@@ -1830,8 +1830,7 @@ fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool)
     };
     let shape = match format.as_str() {
         "step" | "iges" => {
-            let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{key:x}.{}", std::process::id(), if format == "iges" { "igs" } else { "step" }));
-            std::fs::write(&path, &bytes).map_err(|e| e.to_string())?;
+            let path = import_temp_file(&bytes, if format == "iges" { "igs" } else { "step" })?;
             let s = if format == "iges" { Shape::read_iges(&path) } else { Shape::read_step(&path) }.map_err(|e| format!("could not read the {} file: {e:?}", format.to_uppercase()));
             let _ = std::fs::remove_file(&path);
             let s = s?;
@@ -1851,6 +1850,31 @@ fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool)
         m.insert(key, dup(&shape));
     }
     Ok(shape)
+}
+
+/// Write `bytes` to a new file of its own in the temp folder for OCCT to read: created
+/// exclusively under a random name, so it never follows a link planted there or meets another
+/// reader's file.
+fn import_temp_file(bytes: &[u8], ext: &str) -> R<std::path::PathBuf> {
+    use std::hash::{BuildHasher, Hasher};
+    use std::io::Write;
+    let mut last = String::new();
+    for _ in 0..16 {
+        let mut h = std::collections::hash_map::RandomState::new().build_hasher();
+        h.write_u128(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
+        let path = std::env::temp_dir().join(format!("cad-rust-import-{}-{:016x}.{ext}", std::process::id(), h.finish()));
+        match std::fs::OpenOptions::new().write(true).create_new(true).open(&path) {
+            Ok(mut f) => {
+                if let Err(e) = f.write_all(bytes) {
+                    let _ = std::fs::remove_file(&path);
+                    return Err(e.to_string());
+                }
+                return Ok(path);
+            }
+            Err(e) => last = e.to_string(),
+        }
+    }
+    Err(format!("could not make a temporary file for the import: {last}"))
 }
 
 // ------------------------------------------------------------------ helpers
