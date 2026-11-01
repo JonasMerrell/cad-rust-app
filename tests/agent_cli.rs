@@ -147,3 +147,28 @@ fn mcp_protocol_and_errors() {
     let (err, text) = m.call("open_document", json!({"path": "missing.json"}));
     assert!(err && text.contains("can't open missing.json"), "{text}");
 }
+
+/// A CAM call that fails part way leaves the Manufacture tab as it was: no half-made operation
+/// (the operation used to be added before its sketch was looked up).
+#[test]
+fn failed_cam_op_adds_nothing() {
+    let dir = scratch("camop");
+    let script = dir.join("cam.json");
+    let steps = json!([
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [40, 30]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 10}}},
+        {"tool": "create_cam", "args": {}},
+        {"tool": "cam_op", "args": {"cam": 0, "kind": "trace", "sketches": ["no such sketch"]}},
+        {"tool": "cam_info", "args": {"cam": 0}}
+    ]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let o = Command::new(exe()).arg("run").arg(&script).current_dir(&dir).output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 6, "{}", String::from_utf8_lossy(&o.stderr));
+    for l in &lines[..4] {
+        assert!(l.get("error").is_none(), "{l}");
+    }
+    assert!(lines[4]["error"].as_str().unwrap().contains("no sketch"), "{}", lines[4]);
+    assert_eq!(lines[5]["result"]["operations"], json!([]), "{}", lines[5]);
+}

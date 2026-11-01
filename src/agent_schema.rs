@@ -892,6 +892,19 @@ mod tests {
         assert!(validate(&schema("create_sketch"), &json!({"plane": {"kind": "face", "point": [0, 0, 5], "normal": [0, 0, 1]}}), "").is_ok());
     }
 
+    /// What drawing_add's description says about a section view's cut matches its schema.
+    #[test]
+    fn drawing_add_describes_through_as_its_schema_does() {
+        let tools = crate::agent::tools();
+        let t = tools.as_array().unwrap().iter().find(|t| t["name"] == "drawing_add").unwrap();
+        let desc = t["description"].as_str().unwrap();
+        assert!(desc.contains("through [x,y,z]") && desc.contains("cut (offset"), "{desc}");
+        let item = &t["inputSchema"]["properties"]["items"]["items"];
+        assert!(validate(item, &json!({"type": "view", "dir": "section:front", "through": [0, 0, 5]}), "").is_ok());
+        assert!(validate(item, &json!({"type": "view", "dir": "section:front", "cut": 5}), "").is_ok());
+        assert!(validate(item, &json!({"type": "view", "dir": "section:front", "through": 5}), "").is_err());
+    }
+
     #[test]
     fn suggestions() {
         assert_eq!(did_you_mean("dept", ["depth", "draft", "end"]), "; did you mean 'depth'?");

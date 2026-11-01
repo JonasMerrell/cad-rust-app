@@ -3429,8 +3429,11 @@ impl eframe::App for App {
             }
             return;
         }
-        crate::palette::shortcut(self, &ctx);
-        self.shortcuts(&ctx);
+        // while Claude changes the document the editor is locked (claude_ui), keys included
+        if !self.claude.busy() {
+            crate::palette::shortcut(self, &ctx);
+            self.shortcuts(&ctx);
+        }
         // frame an Assembly tab the first time it is shown, once its parts are built
         if let crate::workspace::Tab::Assembly(i) = self.tab {
             let built = (0..self.ws.studios.len()).all(|k| k == self.cur_studio || self.studio_results.contains_key(&k));

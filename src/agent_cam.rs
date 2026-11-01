@@ -346,7 +346,22 @@ impl Session {
         }))
     }
 
+    /// The CAM tools. One that fails leaves the Manufacture tabs as they were (an operation
+    /// added before a bad setting was found, a post changed before the export failed, …).
     pub(super) fn cam_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
+        const CHANGES_CAMS: [&str; 7] = ["create_cam", "edit_cam", "import_tool_library", "cam_tool", "cam_op", "cam_template", "export_gcode"];
+        if !CHANGES_CAMS.contains(&name) {
+            return self.cam_call_inner(name, a);
+        }
+        let before = self.ws.cams.clone();
+        let r = self.cam_call_inner(name, a);
+        if r.is_err() {
+            self.ws.cams = before;
+        }
+        r
+    }
+
+    fn cam_call_inner(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
         let empty = Map::new();
         let args = a.as_object().unwrap_or(&empty);
         let v = match name {

@@ -27,8 +27,17 @@ pub struct ClaudeUi {
     before: Option<(String, usize)>,
     changed: bool,
     login: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
+    /// A "Check" running off the UI thread.
+    check: Option<std::sync::mpsc::Receiver<Result<String, String>>>,
     login_status: Option<Result<String, String>>,
     width: f32,
+    /// Where the current model request's streamed text starts: entries, and the length of the
+    /// last entry's text when the request continues it.
+    attempt: (usize, Option<usize>),
+    /// `App::content_hash` when Claude's last request ended, to notice later edits before
+    /// "Undo last request" throws them away.
+    after_hash: Option<u64>,
+    confirm_revert: bool,
 }
 
 impl Default for ClaudeUi {
@@ -46,13 +55,22 @@ impl Default for ClaudeUi {
             before: None,
             changed: false,
             login: None,
+            check: None,
             login_status: None,
             width: 360.0,
+            attempt: (0, None),
+            after_hash: None,
+            confirm_revert: false,
         }
     }
 }
 
 impl ClaudeUi {
+    /// Claude is working on the document: the editor is locked meanwhile.
+    pub fn busy(&self) -> bool {
+        self.busy
+    }
+
     fn configured(&self) -> bool {
         match self.settings.auth {
             Auth::ApiKey => self.settings.key().is_some(),
@@ -69,6 +87,7 @@ pub fn toggle(app: &mut App) {
 pub fn panel(app: &mut App, ui: &mut Ui) {
     poll(app, ui.ctx());
     if !app.claude.open || app.phone {
+        lock_editor(app, ui.ctx(), ui.ctx().content_rect());
         return;
     }
     let frame = Frame::new().fill(theme::panel()).inner_margin(Margin { left: 12, right: 10, top: 8, bottom: 8 });
@@ -93,6 +112,35 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
         app.claude.width = (app.claude.width - h.drag_delta().x).clamp(260.0, 700.0);
     }
     ui.painter().vline(rect.left(), rect.y_range(), egui::Stroke::new(1.0, theme::border()));
+    let screen = ui.ctx().content_rect();
+    lock_editor(app, ui.ctx(), egui::Rect::from_min_max(screen.min, egui::pos2(rect.left() - 4.0, screen.max.y)));
+}
+
+/// While Claude works on its copy of the document, edits in the editor would be overwritten by
+/// its next change: cover the editor (`area`) so it can't be edited, with a Stop button.
+/// Keyboard shortcuts are held back by the caller (`ClaudeUi::busy`).
+fn lock_editor(app: &mut App, ctx: &egui::Context, area: egui::Rect) {
+    if !app.claude.busy || area.width() <= 0.0 {
+        return;
+    }
+    let stop = egui::Area::new(egui::Id::new("claude-lock")).order(egui::Order::Foreground).fixed_pos(area.min).show(ctx, |ui| {
+        let (r, _) = ui.allocate_exact_size(area.size(), egui::Sense::click_and_drag());
+        ui.painter().rect_filled(r, 0.0, egui::Color32::from_black_alpha(40));
+        let card = egui::Rect::from_center_size(egui::pos2(r.center().x, r.top() + 60.0), egui::vec2(300.0, 64.0));
+        let mut stop = false;
+        ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
+            Frame::new().fill(theme::panel()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
+                ui.label(RichText::new("Claude is changing the document").size(12.5).color(theme::text()));
+                stop = ui.button("Stop to edit it yourself").clicked();
+            });
+        });
+        stop
+    });
+    if stop.inner {
+        if let Some(w) = &app.claude.worker {
+            w.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+    }
 }
 
 fn header(app: &mut App, ui: &mut Ui) {
@@ -118,6 +166,17 @@ fn header(app: &mut App, ui: &mut Ui) {
             }
         });
     });
+}
+
+/// Run a check that starts a program (and may wait on the network) without freezing the window.
+fn off_thread(ctx: &egui::Context, f: fn() -> Result<String, String>) -> std::sync::mpsc::Receiver<Result<String, String>> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    let ctx = ctx.clone();
+    std::thread::spawn(move || {
+        let _ = tx.send(f());
+        ctx.request_repaint();
+    });
+    rx
 }
 
 fn settings(app: &mut App, ui: &mut Ui) {
@@ -190,8 +249,8 @@ fn settings(app: &mut App, ui: &mut Ui) {
                     });
                     c.login = Some(rx);
                 }
-                if ui.add_enabled(!waiting, egui::Button::new("Check")).clicked() {
-                    c.login_status = Some(crate::claude::console_status());
+                if ui.add_enabled(!waiting && c.check.is_none(), egui::Button::new("Check")).clicked() {
+                    c.check = Some(off_thread(ui.ctx(), crate::claude::console_status));
                 }
             });
         }
@@ -200,8 +259,8 @@ fn settings(app: &mut App, ui: &mut Ui) {
                 ui,
                 "Runs the Claude Code CLI on this computer with its own login, so requests use your Claude plan (or whatever Claude Code is signed in with). Install Claude Code and run claude once to sign in.",
             );
-            if ui.button("Check").clicked() {
-                c.login_status = Some(crate::claude::claude_code_version());
+            if ui.add_enabled(c.check.is_none(), egui::Button::new("Check")).clicked() {
+                c.check = Some(off_thread(ui.ctx(), crate::claude::claude_code_version));
             }
         }
     }
@@ -209,6 +268,21 @@ fn settings(app: &mut App, ui: &mut Ui) {
         if let Ok(r) = rx.try_recv() {
             c.login_status = Some(r);
             c.login = None;
+        }
+    }
+    if let Some(rx) = &c.check {
+        match rx.try_recv() {
+            Ok(r) => {
+                c.login_status = Some(r);
+                c.check = None;
+            }
+            Err(std::sync::mpsc::TryRecvError::Disconnected) => c.check = None,
+            Err(std::sync::mpsc::TryRecvError::Empty) => {
+                ui.horizontal(|ui| {
+                    ui.spinner();
+                    muted(ui, "Checking…");
+                });
+            }
         }
     }
     if let Some(s) = &c.login_status {
@@ -318,10 +392,22 @@ fn chat(app: &mut App, ui: &mut Ui) {
         send(app, ui.ctx());
     }
     if revert {
-        let (json, studio) = app.claude.before.take().unwrap();
-        if let Ok(ws) = crate::workspace::Workspace::from_json(&json) {
-            app.apply_agent_workspace(ws, studio);
-            app.claude.entries.push(Entry::Notice { text: "Undid the last request's changes.".into(), error: false });
+        // edits made since would go too: say so, and undo on the second click
+        app.sync_ws();
+        let edited = app.claude.after_hash.is_some_and(|h| h != app.content_hash());
+        if edited && !app.claude.confirm_revert {
+            app.claude.confirm_revert = true;
+            app.claude.entries.push(Entry::Notice {
+                text: "The document has changed since Claude's request. Undoing the request also discards those changes; click Undo last request again to go ahead.".into(),
+                error: true,
+            });
+        } else {
+            let (json, studio) = app.claude.before.take().unwrap();
+            app.claude.confirm_revert = false;
+            if let Ok(ws) = crate::workspace::Workspace::from_json(&json) {
+                app.apply_agent_workspace(ws, studio);
+                app.claude.entries.push(Entry::Notice { text: "Undid the last request's changes.".into(), error: false });
+            }
         }
     }
 }
@@ -387,6 +473,8 @@ fn send(app: &mut App, ctx: &egui::Context) {
     let worker = c.worker.get_or_insert_with(|| Worker::start(ctx.clone()));
     c.before = Some((ws.clone(), studio));
     c.changed = false;
+    c.after_hash = None;
+    c.confirm_revert = false;
     c.busy = true;
     c.entries.push(Entry::User(text.clone()));
     let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone() });
@@ -453,8 +541,27 @@ fn poll(app: &mut App, ctx: &egui::Context) {
                 }
             }
             FromWorker::Notice(t) => c.entries.push(Entry::Notice { text: t, error: false }),
+            FromWorker::Attempt => {
+                let last = match c.entries.last() {
+                    Some(Entry::Assistant(s) | Entry::Thinking(s)) => Some(s.len()),
+                    _ => None,
+                };
+                c.attempt = (c.entries.len(), last);
+            }
+            FromWorker::Rewind => {
+                // the request is sent again: its partial text would show twice
+                let (n, last) = c.attempt;
+                c.entries.truncate(n);
+                if let (Some(l), Some(Entry::Assistant(s) | Entry::Thinking(s))) = (last, c.entries.last_mut()) {
+                    s.truncate(l);
+                }
+            }
             FromWorker::Done { error } => {
                 c.busy = false;
+                app.sync_ws();
+                let h = app.content_hash();
+                let c = &mut app.claude;
+                c.after_hash = Some(h);
                 if let Some(e) = error {
                     c.entries.push(Entry::Notice { text: e, error: true });
                 }

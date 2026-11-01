@@ -356,7 +356,10 @@ impl Session {
                 *l = (stage.to_string(), step);
             }
         };
-        let o = fea::run(&st, &input, None, &progress, &|| false)?;
+        // the chat's Stop button ends a long solve
+        let cancel = self.cancel.clone();
+        let stopped = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
+        let o = fea::run(&st, &input, None, &progress, &stopped)?;
         Ok((st, o))
     }
 

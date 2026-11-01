@@ -165,17 +165,37 @@ enum Delta<'a> {
     Thinking(&'a str),
 }
 
+#[derive(Debug)]
 struct Failure {
     message: String,
     retry: Option<Duration>,
+    /// The HTTP status of a rejected request.
+    status: Option<u16>,
+    /// Claude declined the request (`stop_reason: refusal`).
+    refused: bool,
 }
 
 fn fail(message: impl Into<String>) -> Failure {
-    Failure { message: message.into(), retry: None }
+    Failure { message: message.into(), retry: None, status: None, refused: false }
+}
+
+impl Failure {
+    /// The request itself was the problem (or Claude declined it): resending the same
+    /// conversation would fail the same way.
+    fn rejects_history(&self) -> bool {
+        self.refused || matches!(self.status, Some(400 | 413 | 422))
+    }
+}
+
+/// A streamed reply: the assembled message, and the ids of tool calls whose input did not arrive
+/// as valid JSON (their `input` is left `{}`).
+struct Reply {
+    msg: Value,
+    bad_inputs: Vec<String>,
 }
 
 /// One streamed Messages API call. Returns the assembled message.
-fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str], stop: &AtomicBool, on: &mut dyn FnMut(Delta)) -> Result<Value, Failure> {
+fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str], stop: &AtomicBool, on: &mut dyn FnMut(Delta)) -> Result<Reply, Failure> {
     let base = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| API_URL.into());
     let mut req = agent.post(&format!("{}/v1/messages", base.trim_end_matches('/'))).set("content-type", "application/json").set("anthropic-version", API_VERSION);
     let mut betas = betas.to_vec();
@@ -202,25 +222,37 @@ fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str]
                 _ => format!("Claude API error {code}: {msg}"),
             };
             let retry = if code == 429 || code == 529 || code >= 500 { Some(retry.unwrap_or(Duration::from_secs(5))) } else { None };
-            return Err(Failure { message, retry });
+            return Err(Failure { message, retry, status: Some(code), refused: false });
         }
-        Err(e) => return Err(Failure { message: format!("Could not reach the Claude API: {e}"), retry: Some(Duration::from_secs(3)) }),
+        Err(e) => return Err(Failure { message: format!("Could not reach the Claude API: {e}"), retry: Some(Duration::from_secs(3)), status: None, refused: false }),
     };
+    read_stream(BufReader::new(resp.into_reader()), stop, on)
+}
 
+/// Assemble a message from its server-sent events. A stream that ends before `message_stop`
+/// (a dropped connection, a proxy timeout) is a failure, not a shorter reply: its last blocks
+/// may be cut off, a tool call's input included.
+fn read_stream(reader: impl BufRead, stop: &AtomicBool, on: &mut dyn FnMut(Delta)) -> Result<Reply, Failure> {
     let mut msg = json!({});
     let mut blocks: Vec<Value> = vec![];
     // tool inputs arrive as JSON text in pieces
     let mut partial: Vec<String> = vec![];
-    for line in BufReader::new(resp.into_reader()).lines() {
+    let mut bad_inputs = vec![];
+    let mut complete = false;
+    for line in reader.lines() {
         if stop.load(Ordering::Relaxed) {
             return Err(fail("Stopped"));
         }
-        let line = line.map_err(|e| Failure { message: format!("The connection dropped: {e}"), retry: None })?;
+        let line = line.map_err(|e| Failure { message: format!("The connection dropped: {e}"), retry: Some(Duration::from_secs(3)), status: None, refused: false })?;
         let Some(data) = line.strip_prefix("data:") else { continue };
         let Ok(ev) = serde_json::from_str::<Value>(data.trim()) else { continue };
         let i = ev["index"].as_u64().unwrap_or(0) as usize;
         match ev["type"].as_str().unwrap_or("") {
             "message_start" => msg = ev["message"].clone(),
+            "message_stop" => {
+                complete = true;
+                break;
+            }
             "content_block_start" => {
                 while blocks.len() <= i {
                     blocks.push(Value::Null);
@@ -251,9 +283,12 @@ fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str]
                 if let Some(b) = blocks.get_mut(i) {
                     if b["type"] == "tool_use" && !partial[i].trim().is_empty() {
                         match serde_json::from_str::<Value>(&partial[i]) {
-                            Ok(v) => b["input"] = v,
-                            // answered with an error result in run_tools
-                            Err(_) => b["input"] = json!({"__invalid_json": partial[i].clone()}),
+                            Ok(v) if v.is_object() => b["input"] = v,
+                            // the block keeps its shape (input {}); run_tools answers it with an error
+                            _ => {
+                                b["input"] = json!({});
+                                bad_inputs.push(b["id"].as_str().unwrap_or("").to_string());
+                            }
                         }
                     }
                 }
@@ -271,13 +306,17 @@ fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str]
             "error" => {
                 let kind = ev["error"]["type"].as_str().unwrap_or("");
                 let retry = matches!(kind, "overloaded_error" | "api_error").then(|| Duration::from_secs(5));
-                return Err(Failure { message: format!("Claude API error: {}", ev["error"]["message"].as_str().unwrap_or(kind)), retry });
+                let status = (kind == "invalid_request_error").then_some(400);
+                return Err(Failure { message: format!("Claude API error: {}", ev["error"]["message"].as_str().unwrap_or(kind)), retry, status, refused: false });
             }
             _ => {}
         }
     }
+    if !complete {
+        return Err(Failure { message: "The reply from the Claude API was cut off".into(), retry: Some(Duration::from_secs(3)), status: None, refused: false });
+    }
     msg["content"] = Value::Array(blocks.into_iter().filter(|b| !b.is_null()).collect());
-    Ok(msg)
+    Ok(Reply { msg, bad_inputs })
 }
 
 // ---------------------------------------------------------------- worker
@@ -312,6 +351,10 @@ pub enum FromWorker {
         studio: usize,
     },
     Notice(String),
+    /// A model request starts: text and thinking that follow belong to it.
+    Attempt,
+    /// That request failed and will be sent again: drop what it streamed.
+    Rewind,
     Done {
         error: Option<String>,
     },
@@ -336,7 +379,7 @@ impl Worker {
                     let _ = wtx.send(e);
                     ctx.request_repaint();
                 };
-                let mut chat = Chat::new();
+                let mut chat = Chat::new(st.clone());
                 while let Ok(m) = wrx.recv() {
                     match m {
                         ToWorker::Reset => {
@@ -358,18 +401,76 @@ impl Worker {
 
 struct Chat {
     session: Option<crate::agent::Session>,
-    /// The document as the session last saw it, to skip reloading an unchanged one.
+    /// The document as the session last saw it (and its active Part Studio), to skip reloading an
+    /// unchanged one and to go back to after a tool crashes.
     seen: String,
+    seen_studio: usize,
     messages: Vec<Value>,
     tools: Value,
     http: ureq::Agent,
+    /// The Stop button: also stops long solves inside a tool.
+    stop: Arc<AtomicBool>,
     /// Claude Code: the conversation to resume, and where its MCP server reaches us.
     cc_session: Option<String>,
     bridge: Option<Bridge>,
 }
 
+/// Tool-result images kept in the conversation: past `MAX_IMAGES`, all but the newest
+/// `KEEP_IMAGES` are replaced by a note (in one go, so the history changes rarely).
+const MAX_IMAGES: usize = 16;
+const KEEP_IMAGES: usize = 4;
+
+/// Replace older tool-result images with a short note once there are more than `MAX_IMAGES`.
+/// That edits earlier turns, and a thinking block is only valid while everything before it is
+/// unchanged, so the thinking blocks from the first edited message on are removed too. Call it
+/// between turns (never in the middle of a tool round). Returns whether anything changed.
+fn prune_images(messages: &mut [Value]) -> bool {
+    let mut at = vec![];
+    for (mi, m) in messages.iter().enumerate().filter(|(_, m)| m["role"] == "user") {
+        for (bi, b) in m["content"].as_array().into_iter().flatten().enumerate().filter(|(_, b)| b["type"] == "tool_result") {
+            for (ci, c) in b["content"].as_array().into_iter().flatten().enumerate() {
+                if c["type"] == "image" {
+                    at.push((mi, bi, ci));
+                }
+            }
+        }
+    }
+    if at.len() <= MAX_IMAGES {
+        return false;
+    }
+    let old = &at[..at.len() - KEEP_IMAGES];
+    for &(mi, bi, ci) in old {
+        messages[mi]["content"][bi]["content"][ci] = json!({"type": "text", "text": "[image removed from the conversation to save space; render again to see it]"});
+    }
+    for m in messages[old[0].0..].iter_mut().filter(|m| m["role"] == "assistant") {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.retain(|b| !matches!(b["type"].as_str(), Some("thinking" | "redacted_thinking")));
+            if c.is_empty() {
+                c.push(json!({"type": "text", "text": "(no text)"}));
+            }
+        }
+    }
+    true
+}
+
+/// Where the conversation stood before a turn, to put it back when the API rejects the turn.
+struct Mark {
+    len: usize,
+    /// The turn's text went into this many blocks of an unanswered user message.
+    merged: Option<usize>,
+}
+
+fn rewind(messages: &mut Vec<Value>, mark: &Mark) {
+    messages.truncate(mark.len);
+    if let (Some(n), Some(m)) = (mark.merged, messages.last_mut()) {
+        if let Some(c) = m["content"].as_array_mut() {
+            c.truncate(n);
+        }
+    }
+}
+
 impl Chat {
-    fn new() -> Chat {
+    fn new(stop: Arc<AtomicBool>) -> Chat {
         let tools: Vec<Value> = crate::agent::tools()
             .as_array()
             .into_iter()
@@ -378,27 +479,48 @@ impl Chat {
             .map(|t| json!({"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"], "eager_input_streaming": true}))
             .collect();
         let http = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(600)).try_proxy_from_env(true).build();
-        Chat { session: None, seen: String::new(), messages: vec![], tools: Value::Array(tools), http, cc_session: None, bridge: None }
+        Chat { session: None, seen: String::new(), seen_studio: 0, messages: vec![], tools: Value::Array(tools), http, stop, cc_session: None, bridge: None }
     }
 
     fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let cred = if settings.auth == Auth::ClaudeCode { None } else { Some(credentials(settings)?) };
         // start from what is open in the editor
+        let stop_flag = self.stop.clone();
         let session = self.session.get_or_insert_with(crate::agent::Session::new);
+        session.cancel = Some(stop_flag);
         if ws != self.seen {
             let w = crate::workspace::Workspace::from_json(ws)?;
             session.load_workspace(w, studio)?;
-            self.seen = session.workspace_json().0;
+            let (json, cur) = session.workspace_json();
+            self.seen = json;
+            self.seen_studio = cur;
         }
         let prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
         let Some(cred) = cred else { return self.claude_code_turn(&prompt, settings, stop, send) };
+        prune_images(&mut self.messages);
         let user = json!({"type": "text", "text": prompt});
-        // after a stopped or failed turn the history already ends with the user's side
+        // after a stopped turn the history already ends with the user's side
+        let mut mark = Mark { len: self.messages.len(), merged: None };
         match self.messages.last_mut() {
-            Some(m) if m["role"] == "user" => m["content"].as_array_mut().unwrap().push(user),
+            Some(m) if m["role"] == "user" => {
+                let c = m["content"].as_array_mut().unwrap();
+                mark.merged = Some(c.len());
+                c.push(user);
+            }
             _ => self.messages.push(json!({"role": "user", "content": [user]})),
         }
+        let r = self.api_turn(&cred, settings, stop, send);
+        if let Err(f) = &r {
+            if f.rejects_history() {
+                // resending this turn would fail the same way: leave it out of the conversation
+                rewind(&mut self.messages, &mark);
+                return Err(format!("{} (this request was left out of the conversation, but changes already made stay)", f.message));
+            }
+        }
+        r.map_err(|f| f.message)
+    }
 
+    fn api_turn(&mut self, cred: &Cred, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), Failure> {
         let mut betas = vec![];
         let mut body = json!({
             "model": settings.model,
@@ -418,29 +540,36 @@ impl Chat {
 
         for _ in 0..MAX_STEPS {
             if stop.load(Ordering::Relaxed) {
-                return Err("Stopped".into());
+                return Err(fail("Stopped"));
             }
             body["messages"] = Value::Array(self.messages.clone());
             let mut tries = 0;
-            let msg = loop {
+            let reply = loop {
                 let mut on = |d: Delta| match d {
                     Delta::Text(t) => send(FromWorker::Text(t.into())),
                     Delta::Thinking(t) => send(FromWorker::Thinking(t.into())),
                 };
-                match stream_message(&self.http, &cred, &body, &betas, stop, &mut on) {
+                send(FromWorker::Attempt);
+                match stream_message(&self.http, cred, &body, &betas, stop, &mut on) {
                     Ok(m) => break m,
-                    Err(Failure { message, retry: Some(wait) }) if tries < 3 && !stop.load(Ordering::Relaxed) => {
+                    Err(Failure { message, retry: Some(wait), .. }) if tries < 3 && !stop.load(Ordering::Relaxed) => {
                         tries += 1;
+                        send(FromWorker::Rewind);
                         send(FromWorker::Notice(format!("{message}; retrying in {} s", wait.as_secs())));
-                        std::thread::sleep(wait.min(Duration::from_secs(60)));
+                        // wait, but let Stop end it
+                        let until = std::time::Instant::now() + wait.min(Duration::from_secs(60));
+                        while std::time::Instant::now() < until && !stop.load(Ordering::Relaxed) {
+                            std::thread::sleep(Duration::from_millis(100));
+                        }
                     }
-                    Err(f) => return Err(f.message),
+                    Err(f) => return Err(f),
                 }
             };
+            let msg = reply.msg;
             let stop_reason = msg["stop_reason"].as_str().unwrap_or("").to_string();
             if stop_reason == "refusal" {
                 let cat = msg["stop_details"]["category"].as_str().map(|c| format!(" ({c})")).unwrap_or_default();
-                return Err(format!("Claude declined this request{cat}. Try rephrasing it."));
+                return Err(Failure { refused: true, ..fail(format!("Claude declined this request{cat}. Try rephrasing it.")) });
             }
             let content = msg["content"].as_array().cloned().unwrap_or_default();
             if content.is_empty() {
@@ -455,7 +584,7 @@ impl Chat {
                 }
                 return Ok(());
             }
-            let results = self.run_tools(&calls, stop, send);
+            let results = self.run_tools(&calls, &reply.bad_inputs, stop, send);
             self.messages.push(json!({"role": "user", "content": results}));
             if stop_reason == "max_tokens" {
                 send(FromWorker::Notice("The reply hit the length limit.".into()));
@@ -467,7 +596,7 @@ impl Chat {
     }
 
     /// Run Claude's tool calls on the session, sending changed documents to the editor.
-    fn run_tools(&mut self, calls: &[Value], stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Vec<Value> {
+    fn run_tools(&mut self, calls: &[Value], bad_inputs: &[String], stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Vec<Value> {
         let mut results = vec![];
         for c in calls {
             let id = c["id"].clone();
@@ -475,7 +604,14 @@ impl Chat {
                 results.push(json!({"type": "tool_result", "tool_use_id": id, "content": "Stopped by the user before this ran.", "is_error": true}));
                 continue;
             }
-            let (text, png, failed) = self.run_tool(c["name"].as_str().unwrap_or(""), &c["input"], send);
+            let name = c["name"].as_str().unwrap_or("");
+            let (text, png, failed) = if bad_inputs.iter().any(|b| Some(b.as_str()) == id.as_str()) {
+                send(FromWorker::ToolStart { name: name.into(), detail: "(input cut off)".into() });
+                send(FromWorker::ToolDone { ok: false, summary: "invalid input".into(), image: None });
+                ("The tool input was not valid JSON (it may have been cut off); send the call again.".to_string(), None, true)
+            } else {
+                self.run_tool(name, &c["input"], send)
+            };
             let mut content = vec![json!({"type": "text", "text": text})];
             if let Some(png) = &png {
                 content.push(json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}}));
@@ -488,7 +624,7 @@ impl Chat {
     /// Run one tool on the session: result text, an optional PNG, and whether it failed.
     fn run_tool(&mut self, name: &str, input: &Value, send: &dyn Fn(FromWorker)) -> (String, Option<Vec<u8>>, bool) {
         send(FromWorker::ToolStart { name: name.into(), detail: short(&input.to_string(), 160) });
-        if input.get("__invalid_json").is_some() || !input.is_object() {
+        if !input.is_object() {
             send(FromWorker::ToolDone { ok: false, summary: "invalid input".into(), image: None });
             return ("The tool input was not valid JSON; send the call again.".into(), None, true);
         }
@@ -496,8 +632,26 @@ impl Chat {
             send(FromWorker::ToolDone { ok: false, summary: "not available here".into(), image: None });
             return (format!("{name} is not available in the editor; the user opens and saves documents themselves."), None, true);
         }
+        if let Err(e) = check_outputs(name, input) {
+            send(FromWorker::ToolDone { ok: false, summary: short(&e, 200), image: None });
+            return (e, None, true);
+        }
         let session = self.session.as_mut().unwrap();
-        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.call(name, input))).unwrap_or_else(|_| Err(format!("{name} crashed")));
+        let r = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| session.call(name, input))).unwrap_or_else(|_| {
+            session.crashed = true;
+            Err(format!("{name} crashed"))
+        });
+        if std::mem::take(&mut session.crashed) {
+            // the call stopped half way: go back to the document as the editor has it
+            let back = crate::workspace::Workspace::from_json(&self.seen).and_then(|w| session.load_workspace(w, self.seen_studio));
+            let e = match (r, back) {
+                (Err(e), Ok(())) => format!("{e}; the document was put back as it was before this call"),
+                (Err(e), Err(b)) => format!("{e}; the document could not be put back ({b})"),
+                (Ok(_), _) => format!("{name} crashed"),
+            };
+            send(FromWorker::ToolDone { ok: false, summary: short(&e, 200), image: None });
+            return (e, None, true);
+        }
         let out = match r {
             Ok((v, img)) => {
                 let mut text = v.to_string();
@@ -522,9 +676,86 @@ impl Chat {
         let (ws, studio) = session.workspace_json();
         if ws != self.seen {
             self.seen = ws.clone();
+            self.seen_studio = studio;
             send(FromWorker::Workspace { json: ws, studio });
         }
         out
+    }
+}
+
+/// File types a tool writes, by the argument that names the output.
+fn output_types(name: &str, a: &Value) -> Option<(&'static str, Vec<String>)> {
+    let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+    Some(match name {
+        "export" => (
+            "path",
+            match a["format"].as_str().unwrap_or("") {
+                "step" => list(&["step", "stp"]),
+                "iges" => list(&["iges", "igs"]),
+                f => vec![f.to_string()],
+            },
+        ),
+        "render" | "render_assembly" | "render_cam" | "render_drawing" | "render_simulation" | "simulate_cam" | "render_pcb" | "simulate_pcb" => ("path", list(&["png"])),
+        "export_drawing" => {
+            const ALL: [&str; 4] = ["pdf", "svg", "dxf", "png"];
+            let ext = a["path"].as_str().and_then(|p| std::path::Path::new(p).extension()).map(|e| e.to_string_lossy().to_lowercase());
+            let format = a["format"].as_str().map(|f| f.to_lowercase()).or(ext).filter(|f| ALL.contains(&f.as_str()));
+            ("path", format.map(|f| vec![f]).unwrap_or_else(|| list(&ALL)))
+        }
+        "export_web" | "export_setup_sheet" => ("path", list(&["html", "htm"])),
+        "export_gcode" => ("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"])),
+        "export_pcb" => ("path", list(&["zip"])),
+        "cam_soft_jaws" => ("export_step", list(&["step", "stp"])),
+        _ => return None,
+    })
+}
+
+/// The chat panel's limits on what Claude's tool calls may touch outside the document (the
+/// command line and MCP server have none): an existing file is only overwritten by a file of its
+/// own type, so a wrong path can't replace the user's document or an unrelated file; and the
+/// slicer gets the model only at the address the user set or on this computer or network.
+fn check_outputs(name: &str, a: &Value) -> Result<(), String> {
+    if name == "send_to_slicer" {
+        if let Some(url) = a["url"].as_str() {
+            if url.trim() != crate::printing::load().orcaweb.trim() && !local_url(url) {
+                return Err(format!("send_to_slicer: {url} is not the slicer address set in rCAD or an address on this computer or local network; leave url out to use the setting"));
+            }
+        }
+        return Ok(());
+    }
+    let Some((key, types)) = output_types(name, a) else { return Ok(()) };
+    let Some(path) = a[key].as_str() else { return Ok(()) };
+    let p = std::path::Path::new(path);
+    if !p.is_file() {
+        return Ok(());
+    }
+    let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+    if types.iter().any(|t| *t == ext) {
+        return Ok(());
+    }
+    Err(format!("{path} already exists and is not a .{} file, so it was not overwritten; write to another path", types.first().map(|s| s.as_str()).unwrap_or("?")))
+}
+
+/// An http(s) address on this computer or a private network.
+fn local_url(url: &str) -> bool {
+    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else { return false };
+    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
+    if authority.contains('@') {
+        return false;
+    }
+    let host = if let Some(h) = authority.strip_prefix('[') {
+        h.split(']').next().unwrap_or("")
+    } else {
+        authority.split(':').next().unwrap_or("")
+    };
+    let host = host.to_ascii_lowercase();
+    if host == "localhost" || host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".home.arpa") {
+        return true;
+    }
+    match host.parse::<std::net::IpAddr>() {
+        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
+        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
+        Err(_) => false,
     }
 }
 
@@ -627,6 +858,13 @@ impl Bridge {
         });
         Ok(Bridge { addr, token, rx })
     }
+
+    /// Answer every waiting call with an error instead of running it.
+    fn refuse_pending(&self) {
+        while let Ok(c) = self.rx.try_recv() {
+            let _ = c.reply.send(json!({"content": [{"type": "text", "text": "The request in the rCAD chat was stopped, so this call did not run."}], "isError": true}));
+        }
+    }
 }
 
 /// Lines Claude Code prints, read on their own thread.
@@ -674,6 +912,14 @@ impl Chat {
     }
 
     fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+        // calls left from a run that was stopped must not run now
+        bridge.refuse_pending();
+        let r = self.claude_code_child(bridge, prompt, settings, stop, send);
+        bridge.refuse_pending();
+        r
+    }
+
+    fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let (addr, token) = (&bridge.addr, &bridge.token);
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge", addr, "--token", token]}}});
@@ -777,5 +1023,153 @@ impl Chat {
             return Err(format!("Claude Code stopped ({status}){}", if tail.is_empty() { String::new() } else { format!(": {tail}") }));
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn sse(events: &[Value]) -> String {
+        events.iter().map(|e| format!("event: {}\ndata: {}\n\n", e["type"].as_str().unwrap(), e)).collect()
+    }
+
+    fn read(text: &str) -> Result<Reply, Failure> {
+        read_stream(std::io::Cursor::new(text.as_bytes().to_vec()), &AtomicBool::new(false), &mut |_| {})
+    }
+
+    fn reply_events() -> Vec<Value> {
+        vec![
+            json!({"type": "message_start", "message": {"role": "assistant", "content": [], "usage": {"input_tokens": 5}}}),
+            json!({"type": "ping"}),
+            json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "Making "}}),
+            json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": "a plate."}}),
+            json!({"type": "content_block_stop", "index": 0}),
+            json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": "t1", "name": "describe", "input": {}}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "{\"a\": "}}),
+            json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "1}"}}),
+            json!({"type": "content_block_stop", "index": 1}),
+            json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}}),
+            json!({"type": "message_stop"}),
+        ]
+    }
+
+    #[test]
+    fn a_whole_stream_is_assembled() {
+        let r = read(&sse(&reply_events())).unwrap();
+        assert_eq!(r.msg["content"][0]["text"], "Making a plate.");
+        assert_eq!(r.msg["content"][1]["input"], json!({"a": 1}));
+        assert_eq!(r.msg["stop_reason"], "tool_use");
+        assert_eq!(r.msg["usage"]["output_tokens"], 9);
+        assert!(r.bad_inputs.is_empty());
+    }
+
+    /// A connection that ends mid-reply is a failure to retry, not a reply whose tool call runs
+    /// with the input it had so far.
+    #[test]
+    fn a_cut_off_stream_fails() {
+        let ev = reply_events();
+        for n in [3, 8, 10, 11] {
+            let f = read(&sse(&ev[..n])).err().unwrap_or_else(|| panic!("{n} events read as a whole reply"));
+            assert!(f.retry.is_some() && !f.rejects_history(), "{f:?}");
+        }
+    }
+
+    /// Tool input that isn't JSON keeps the block's shape and is reported by id.
+    #[test]
+    fn bad_tool_input_keeps_the_block() {
+        let mut ev = reply_events();
+        ev[8] = json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": "1"}});
+        let r = read(&sse(&ev)).unwrap();
+        assert_eq!(r.msg["content"][1]["input"], json!({}));
+        assert_eq!(r.msg["content"][1]["id"], "t1");
+        assert_eq!(r.bad_inputs, vec!["t1".to_string()]);
+    }
+
+    #[test]
+    fn stream_errors() {
+        let mut ev = reply_events()[..4].to_vec();
+        ev.push(json!({"type": "error", "error": {"type": "overloaded_error", "message": "Overloaded"}}));
+        let f = read(&sse(&ev)).err().unwrap();
+        assert!(f.retry.is_some() && f.message.contains("Overloaded"));
+        ev.pop();
+        ev.push(json!({"type": "error", "error": {"type": "invalid_request_error", "message": "too long"}}));
+        assert!(read(&sse(&ev)).err().unwrap().rejects_history());
+    }
+
+    fn tool_round(i: usize) -> [Value; 2] {
+        [
+            json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "tool_use", "id": format!("r{i}"), "name": "render", "input": {}}]}),
+            json!({"role": "user", "content": [{"type": "tool_result", "tool_use_id": format!("r{i}"), "content": [{"type": "text", "text": "{}"}, {"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": "AA=="}}]}]}),
+        ]
+    }
+
+    #[test]
+    fn old_images_are_dropped_with_the_thinking_after_them() {
+        let mut m = vec![json!({"role": "user", "content": [{"type": "text", "text": "hi"}]})];
+        for i in 0..MAX_IMAGES {
+            m.extend(tool_round(i));
+        }
+        assert!(!prune_images(&mut m));
+        m.extend(tool_round(MAX_IMAGES));
+        m.push(json!({"role": "assistant", "content": [{"type": "thinking", "thinking": "t", "signature": "s"}, {"type": "text", "text": "done"}]}));
+        let before = m.clone();
+        assert!(prune_images(&mut m));
+        let images = m.iter().flat_map(|x| x["content"].as_array().unwrap().iter()).filter(|b| b["type"] == "tool_result").flat_map(|b| b["content"].as_array().unwrap().iter()).filter(|c| c["type"] == "image").count();
+        assert_eq!(images, KEEP_IMAGES);
+        // the first edited message is the first tool result; thinking before it stays
+        assert_eq!(m[1], before[1]);
+        for x in &m[2..] {
+            assert!(x["content"].as_array().unwrap().iter().all(|b| b["type"] != "thinking"), "{x}");
+            assert!(!x["content"].as_array().unwrap().is_empty());
+        }
+        assert_eq!(m.len(), before.len());
+    }
+
+    #[test]
+    fn a_rejected_turn_is_taken_back_out() {
+        let first = json!({"role": "user", "content": [{"type": "text", "text": "a"}]});
+        let mut m = vec![first.clone(), json!({"role": "assistant", "content": [{"type": "text", "text": "b"}]})];
+        let mark = Mark { len: m.len(), merged: None };
+        m.push(json!({"role": "user", "content": [{"type": "text", "text": "refused"}]}));
+        m.extend(tool_round(0));
+        rewind(&mut m, &mark);
+        assert_eq!(m.len(), 2);
+        // a turn merged into a stopped turn's user message only takes its own text back out
+        let mut m = vec![first.clone()];
+        let mark = Mark { len: 1, merged: Some(1) };
+        m[0]["content"].as_array_mut().unwrap().push(json!({"type": "text", "text": "refused"}));
+        rewind(&mut m, &mark);
+        assert_eq!(m, vec![first]);
+    }
+
+    #[test]
+    fn local_slicer_addresses() {
+        for u in ["http://localhost:8080/", "https://192.168.1.20/orca", "http://10.0.0.5", "http://172.20.1.1:5000", "http://[::1]:80/", "http://printer.local/", "http://127.0.0.1"] {
+            assert!(local_url(u), "{u}");
+        }
+        for u in ["https://example.com/", "http://8.8.8.8/", "ftp://localhost/", "http://user@localhost/", "http://localhost.evil.com/", "http://172.32.0.1/", "file:///etc/passwd"] {
+            assert!(!local_url(u), "{u}");
+        }
+    }
+
+    #[test]
+    fn exports_do_not_overwrite_other_files() {
+        let d = std::env::temp_dir().join(format!("rcad-chat-out-{}", std::process::id()));
+        std::fs::create_dir_all(&d).unwrap();
+        let doc = d.join("part.json");
+        let stl = d.join("part.stl");
+        std::fs::write(&doc, "{}").unwrap();
+        std::fs::write(&stl, "solid").unwrap();
+        let (doc, stl) = (doc.to_string_lossy().to_string(), stl.to_string_lossy().to_string());
+        assert!(check_outputs("export", &json!({"format": "stl", "path": doc})).is_err());
+        assert!(check_outputs("render", &json!({"path": doc})).is_err());
+        assert!(check_outputs("export", &json!({"format": "stl", "path": stl})).is_ok());
+        assert!(check_outputs("export", &json!({"format": "step", "path": d.join("new.json").to_string_lossy()})).is_ok());
+        assert!(check_outputs("cam_soft_jaws", &json!({"cam": 0, "export_step": doc})).is_err());
+        assert!(check_outputs("export_drawing", &json!({"path": doc})).is_err());
+        assert!(check_outputs("describe", &json!({})).is_ok());
+        let _ = std::fs::remove_dir_all(&d);
     }
 }
