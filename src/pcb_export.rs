@@ -532,18 +532,23 @@ impl Gerber {
 
 fn copper_layer(p: &Pcb, pads: &[WPad], fills: &[Fill], l: Layer) -> String {
     let mut g = Gerber::new();
-    // pours first (dark outer, clear holes), biggest first, then everything drawn over them
-    let mut zones: Vec<(usize, f64)> = p.board.zones.iter().enumerate().filter(|(_, z)| z.layer == l).map(|(i, _)| (i, fills.get(i).map(|f| crate::cam_paths::shapes_area(f)).unwrap_or(0.0))).collect();
-    zones.sort_by(|a, b| b.1.total_cmp(&a.1));
-    for (zi, _) in zones {
-        for piece in fills.get(zi).into_iter().flatten() {
-            g.polarity(true);
-            g.region(&piece[0]);
-            if piece.len() > 1 {
-                g.polarity(false);
-                for h in &piece[1..] {
-                    g.region(h);
-                }
+    // pours first (dark outer, clear holes), every piece by the size of its outer contour, biggest
+    // first: a clear hole wipes whatever was drawn before it, and a pour (or island) inside a hole
+    // is always smaller than the piece around it, so it is drawn after the hole is cleared
+    let mut pieces: Vec<(f64, &Vec<Contour>)> = vec![];
+    for (zi, _) in p.board.zones.iter().enumerate().filter(|(_, z)| z.layer == l) {
+        for piece in fills.get(zi).into_iter().flatten().filter(|x| !x.is_empty()) {
+            pieces.push((crate::cam_paths::area(&piece[0]).abs(), piece));
+        }
+    }
+    pieces.sort_by(|a, b| b.0.total_cmp(&a.0));
+    for (_, piece) in pieces {
+        g.polarity(true);
+        g.region(&piece[0]);
+        if piece.len() > 1 {
+            g.polarity(false);
+            for h in &piece[1..] {
+                g.region(h);
             }
         }
     }
@@ -633,7 +638,10 @@ fn excellon(holes: &[(P, f64)], plated: bool) -> String {
 
 /// Every fabrication file: (file name, contents).
 pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
+    let mut p = p.clone();
     let nl = p.netlist();
+    p.retag_copper(&nl);
+    let p = &p;
     let pads = p.pads(&nl);
     let fills = pcb::fill_zones(p, &nl, &pads);
     let base: String = p.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
@@ -788,6 +796,8 @@ pub fn export(p: &Pcb, path: &std::path::Path) -> Result<Vec<String>, String> {
 // ---------------------------------------------------------------- 3D
 
 const BOARD_DEF: &str = "PCB board";
+/// The value naming which PCB part (by id) a footprint feature is.
+const PART_KEY: &str = "pcb_part";
 
 fn fp_def_name(fp: &str) -> String {
     format!("PCB footprint {fp}")
@@ -857,17 +867,31 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
         None => doc.custom_features.push(def),
     };
     set_def(doc, CustomDef { name: BOARD_DEF.into(), params: vec![pd("thickness", "number", "1.6")], selection: String::new(), source: board_script(&p) });
-    let mut wanted: Vec<String> = vec!["Board".into()];
-    let upsert = |doc: &mut crate::doc::Document, title: &str, def: &str, values: std::collections::BTreeMap<String, String>, color: [u8; 3]| {
-        let existing = doc.features.iter().position(|f| f.name == title && matches!(&f.op, Op::Custom { .. }));
+    let mut kept: Vec<crate::doc::FeatId> = vec![];
+    let ours = |op: &Op| matches!(op, Op::Custom { name, .. } if name == BOARD_DEF || name.starts_with("PCB footprint "));
+    let part_of = |op: &Op| match op {
+        Op::Custom { values, .. } => values.get(PART_KEY).cloned(),
+        _ => None,
+    };
+    // a part's feature is found by the part's id (kept in its values; the kernel only reads the
+    // definition's parameters), or in documents made before that by its title
+    let mut upsert = |doc: &mut crate::doc::Document, title: &str, def: &str, values: std::collections::BTreeMap<String, String>, color: [u8; 3]| {
+        let key = values.get(PART_KEY).cloned();
+        let free = |f: &crate::doc::Feature| ours(&f.op) && !kept.contains(&f.id);
+        let existing = key
+            .as_ref()
+            .and_then(|k| doc.features.iter().position(|f| free(f) && part_of(&f.op).as_ref() == Some(k)))
+            .or_else(|| doc.features.iter().position(|f| free(f) && f.name == title && part_of(&f.op).is_none()));
         let op = Op::Custom { name: def.into(), values, refs: vec![], select: String::new(), op: BoolOp::New };
         let fid = match existing {
             Some(i) => {
                 doc.features[i].op = op;
+                doc.features[i].name = title.to_string();
                 doc.features[i].id
             }
             None => doc.insert(title.to_string(), op),
         };
+        kept.push(fid);
         let key = crate::doc::body_key((fid, 0));
         let props = doc.parts.entry(key).or_insert_with(PartProps::default);
         props.name = Some(title.to_string());
@@ -895,17 +919,12 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
         v.insert("rot".to_string(), num(part.rot));
         v.insert("bottom".to_string(), part.bottom.to_string());
         v.insert("thickness".to_string(), num(p.board.thickness));
+        v.insert(PART_KEY.to_string(), part.id.to_string());
         let title = format!("{} {}", part.reference, part.value);
         upsert(doc, &title, &def, v, fp.color);
-        wanted.push(title);
     }
     // parts gone from the PCB
-    let gone: Vec<crate::doc::FeatId> = doc
-        .features
-        .iter()
-        .filter(|f| matches!(&f.op, Op::Custom { name, .. } if name == BOARD_DEF || name.starts_with("PCB footprint ")) && !wanted.contains(&f.name))
-        .map(|f| f.id)
-        .collect();
+    let gone: Vec<crate::doc::FeatId> = doc.features.iter().filter(|f| ours(&f.op) && !kept.contains(&f.id)).map(|f| f.id).collect();
     doc.features.retain(|f| !gone.contains(&f.id));
     Ok(si)
 }
@@ -933,6 +952,53 @@ mod tests {
         assert_eq!(&z[..4], b"PK\x03\x04");
         assert!(bom_csv(&p).contains("\"330\",\"R1\",\"R_0805\""));
         assert!(cpl_csv(&p).contains("R1,15.0000mm,20.0000mm,Top,0"));
+    }
+
+    #[test]
+    fn nested_pours_survive_the_outer_pours_hole() {
+        // a VCC ring round a bigger-than-the-ring GND pour, on one layer
+        let mut p = Pcb::new("nest");
+        let sq = |a: f64, b: f64| vec![[a, a], [b, a], [b, b], [a, b]];
+        p.board.zones.push(pcb::Zone { net: "GND".into(), layer: Layer::Top, outline: sq(5.0, 45.0) });
+        p.board.zones.push(pcb::Zone { net: "VCC".into(), layer: Layer::Top, outline: sq(0.0, 50.0) });
+        let mut hole = sq(4.0, 46.0);
+        hole.reverse();
+        let fills: Vec<Fill> = vec![vec![vec![sq(5.0, 45.0)]], vec![vec![sq(0.5, 49.5), hole]]];
+        let g = copper_layer(&p, &[], &fills, Layer::Top);
+        let gnd = g.find("X5000000Y5000000D02*").expect("the GND pour is drawn");
+        let clear = g.rfind("%LPC*%").expect("the ring's hole is cleared");
+        assert!(gnd > clear, "{g}");
+    }
+
+    #[test]
+    fn studio_features_follow_their_parts() {
+        use crate::doc::Op;
+        let mut ws = crate::workspace::Workspace::default();
+        ws.pcbs.push(crate::pcb::tests::led_board());
+        let si = to_studio(&mut ws, 0).unwrap();
+        let fid = |ws: &crate::workspace::Workspace, name: &str| ws.studios[si].doc.features.iter().find(|f| f.name == name).map(|f| f.id);
+        let r1 = fid(&ws, "R1 330").unwrap();
+        // a new value keeps the feature (assemblies use it), under its new title
+        ws.pcbs[0].parts[0].value = "470".into();
+        to_studio(&mut ws, 0).unwrap();
+        assert_eq!(fid(&ws, "R1 470"), Some(r1));
+        // two parts with one title are two bodies
+        let mut twin = ws.pcbs[0].parts[0].clone();
+        twin.id = 99;
+        twin.at = [40.0, 30.0];
+        ws.pcbs[0].parts.push(twin);
+        to_studio(&mut ws, 0).unwrap();
+        assert_eq!(ws.studios[si].doc.features.iter().filter(|f| f.name == "R1 470").count(), 2);
+        // documents from before the ids are matched by title
+        for f in &mut ws.studios[si].doc.features {
+            if let Op::Custom { values, .. } = &mut f.op {
+                values.remove(PART_KEY);
+            }
+        }
+        let n = ws.studios[si].doc.features.len();
+        to_studio(&mut ws, 0).unwrap();
+        assert_eq!(ws.studios[si].doc.features.len(), n);
+        assert_eq!(fid(&ws, "R1 470"), Some(r1));
     }
 
     #[test]

@@ -10,6 +10,8 @@ use crate::pcb_lib::P;
 
 const FREE: i32 = -1;
 const WALL: i32 = -2;
+/// The map vias are checked on (half-width via_d / 2).
+const VIA_MAP: usize = 2;
 
 /// Per layer, which cells something of half-width `h` may use: FREE, WALL, or only one net's.
 struct Map {
@@ -44,8 +46,12 @@ impl Grid {
 
     /// Mark the cells within `extra` (plus each map's half-width and the clearance) of a piece of copper.
     fn mark(&mut self, cu: &Cu, layer: Option<Layer>, net: i32, clearance: f64) {
+        self.mark_maps(0..self.maps.len(), cu, layer, net, clearance);
+    }
+
+    fn mark_maps(&mut self, maps: std::ops::Range<usize>, cu: &Cu, layer: Option<Layer>, net: i32, clearance: f64) {
         let (lo, hi) = cu.bbox();
-        for mi in 0..self.maps.len() {
+        for mi in maps {
             let r = clearance + self.maps[mi].h + self.g * 0.5;
             let x0 = (((lo[0] - r - self.lo[0]) / self.g).floor().max(0.0)) as usize;
             let y0 = (((lo[1] - r - self.lo[1]) / self.g).floor().max(0.0)) as usize;
@@ -98,6 +104,7 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
     let mut tried: Vec<(String, [i64; 4])> = vec![];
     for _pass in 0..3 {
         let nl = p.netlist();
+        p.retag_copper(&nl);
         let pads = p.pads(&nl);
         let fills = pcb::fill_zones(p, &nl, &pads);
         let its = pcb::items(p, &nl, &pads, &fills);
@@ -198,6 +205,10 @@ fn build(p: &Pcb, base: &[Item]) -> Grid {
     for h in &p.board.holes {
         grid.mark(&Cu::Seg { a: h.at, b: h.at, r: h.d / 2.0 }, None, WALL, r.clearance);
     }
+    // no vias in surface mount pads, even of their own net (solder would wick down the hole)
+    for it in base.iter().filter(|it| matches!(it.kind, pcb::ItemKind::Pad(_)) && it.layer.is_some()) {
+        grid.mark_maps(VIA_MAP..VIA_MAP + 1, &it.cu, it.layer, WALL, r.clearance);
+    }
     grid
 }
 
@@ -219,7 +230,7 @@ fn search(grid: &Grid, mi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Laye
     };
     let via_cost = (1.2 / grid.g) as f32 + 4.0;
     let track = &grid.maps[mi].m;
-    let via = &grid.maps[2].m;
+    let via = &grid.maps[VIA_MAP].m;
     // the start and end cells sit on the net's own copper
     for l in la {
         let s = st(sx, sy, li(*l));
@@ -474,6 +485,31 @@ mod tests {
         assert_eq!(out.routed, 3);
         let nl = p.netlist();
         let pads = p.pads(&nl);
+        let issues = pcb::drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().all(|i| !i.error), "{issues:?}");
+    }
+
+    #[test]
+    fn no_vias_in_surface_mount_pads() {
+        // the LED under the resistor on the bottom: its net needs a via, and the bottom's
+        // preferred y direction pulls it towards the resistor's pad
+        let mut p = crate::pcb::tests::led_board();
+        p.parts[0].at = [25.0, 8.0];
+        p.parts[0].rot = 90.0;
+        p.parts[1].at = [25.0, 32.0];
+        p.parts[1].rot = 90.0;
+        p.parts[1].bottom = true;
+        let out = autoroute(&mut p, None);
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        assert!(out.vias > 0);
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        for v in &p.board.vias {
+            let via = Cu::Seg { a: v.at, b: v.at, r: v.d / 2.0 };
+            for pad in pads.iter().filter(|x| x.layer.is_some()) {
+                assert!(via.gap(&pad.cu()) > 0.0, "via at {:?} in {} pad {}", v.at, p.parts[pad.part].reference, pad.num);
+            }
+        }
         let issues = pcb::drc(&p, &nl, &pads, &[]);
         assert!(issues.iter().all(|i| !i.error), "{issues:?}");
     }

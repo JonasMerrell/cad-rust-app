@@ -657,6 +657,7 @@ impl App {
         self.dwg = Default::default();
         self.cam = Default::default();
         self.fea = Default::default();
+        self.pcb = Default::default();
         self.first_fit = true;
         self.session.fitted_asm.clear();
         self.tab = crate::workspace::Tab::Studio(0);
@@ -700,6 +701,8 @@ impl App {
             self.cam = Default::default();
             self.fea = Default::default();
             self.pcb = Default::default();
+        } else {
+            self.pcb.external_change();
         }
         self.picks.clear();
         if self.result.bodies.is_empty() {
@@ -771,6 +774,9 @@ impl App {
             self.dwg.dirty = true;
             self.cam.scene_dirty = true;
             self.fea.scene_dirty = true;
+        }
+        if let Tab::Pcb(i) = t {
+            self.pcb.enter_tab(i);
         }
         self.picks.clear();
         self.hover = None;

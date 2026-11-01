@@ -104,6 +104,8 @@ pub struct PcbUi {
     pin_text: String,
     pin_text_for: Option<u64>,
     pub sim: crate::circuit_ui::SimUi,
+    /// The PCB tab the history and selection belong to.
+    tab: Option<usize>,
 }
 
 impl Default for PcbUi {
@@ -138,6 +140,7 @@ impl Default for PcbUi {
             pin_text: String::new(),
             pin_text_for: None,
             sim: Default::default(),
+            tab: None,
         }
     }
 }
@@ -151,6 +154,37 @@ fn index(app: &App) -> Option<usize> {
 
 fn pcb_ref(app: &App) -> Option<&Pcb> {
     index(app).map(|i| &app.ws.pcbs[i])
+}
+
+impl PcbUi {
+    /// Going to a PCB tab: the undo history and selection of another tab don't carry over.
+    pub fn enter_tab(&mut self, i: usize) {
+        if self.tab.is_some_and(|t| t != i) {
+            self.undo.clear();
+            self.redo.clear();
+            self.last_ck = None;
+            self.forget_selection();
+            self.fitted = [false; 2];
+        }
+        self.tab = Some(i);
+    }
+
+    /// The PCBs were changed from outside the editor (Claude): rebuild the derived data and drop
+    /// selections that may point at moved or deleted items.
+    pub fn external_change(&mut self) {
+        self.forget_selection();
+    }
+
+    fn forget_selection(&mut self) {
+        self.dirty = true;
+        self.sel = None;
+        self.drag = None;
+        self.route = None;
+        self.wire.clear();
+        self.zone_pts.clear();
+        self.issues = None;
+        self.highlight = None;
+    }
 }
 
 pub fn undo(app: &mut App) {
@@ -220,8 +254,10 @@ fn refresh(app: &mut App) {
     if !app.pcb.dirty && app.pcb.cache.pcb == Some(i) {
         return;
     }
+    // copper follows its net when a schematic edit renames it
+    let nl = app.ws.pcbs[i].netlist();
+    app.ws.pcbs[i].retag_copper(&nl);
     let p = &app.ws.pcbs[i];
-    let nl = p.netlist();
     let pads = p.pads(&nl);
     // pours are slow to refill: keep the old fill while a part is being dragged
     let fills = if app.pcb.drag.is_some() && app.pcb.cache.pcb == Some(i) && app.pcb.cache.fills.len() == p.board.zones.len() {
@@ -391,13 +427,18 @@ fn rotate_sel(app: &mut App) {
     let view = app.pcb.view;
     match app.pcb.sel {
         Some(Sel::Part(i)) => edit(app, |p| {
+            let Some(part) = p.parts.get_mut(i) else { return };
             if view == View::Schematic {
-                p.parts[i].sch_rot = (p.parts[i].sch_rot + 1) % 4;
+                part.sch_rot = (part.sch_rot + 1) % 4;
             } else {
-                p.parts[i].rot = (p.parts[i].rot + 90.0).rem_euclid(360.0);
+                part.rot = (part.rot + 90.0).rem_euclid(360.0);
             }
         }),
-        Some(Sel::Label(i)) => edit(app, |p| p.labels[i].rot = (p.labels[i].rot + 1) % 4),
+        Some(Sel::Label(i)) => edit(app, |p| {
+            if let Some(l) = p.labels.get_mut(i) {
+                l.rot = (l.rot + 1) % 4;
+            }
+        }),
         _ => {}
     }
 }
@@ -410,10 +451,11 @@ fn mirror_sel(app: &mut App) {
     let view = app.pcb.view;
     if let Some(Sel::Part(i)) = app.pcb.sel {
         edit(app, |p| {
+            let Some(part) = p.parts.get_mut(i) else { return };
             if view == View::Schematic {
-                p.parts[i].sch_mirror = !p.parts[i].sch_mirror;
+                part.sch_mirror = !part.sch_mirror;
             } else {
-                p.parts[i].bottom = !p.parts[i].bottom;
+                part.bottom = !part.bottom;
             }
         });
     }
@@ -857,20 +899,31 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
     let (mut w, mut h) = (hi[0] - lo[0], hi[1] - lo[1]);
     // the corner radius of a rectangular outline (its first point sits where the bottom-right arc starts)
     let r0 = if b.outline.len() > 4 { (hi[0] - b.outline[0][0]).max(0.0) } else { 0.0 };
-    let mut r = r0;
-    row(ui, "Size", |ui| {
-        ui.add(egui::DragValue::new(&mut w).speed(0.5).range(5.0..=1000.0).suffix(" mm").max_decimals(2));
-        ui.label("×");
-        ui.add(egui::DragValue::new(&mut h).speed(0.5).range(5.0..=1000.0).suffix(" mm").max_decimals(2));
-    });
-    row(ui, "Corners", |ui| {
-        ui.add(egui::DragValue::new(&mut r).speed(0.1).range(0.0..=50.0).suffix(" mm").max_decimals(2)).on_hover_text("Corner radius");
-    });
-    if (w - (hi[0] - lo[0])).abs() > 1e-9 || (h - (hi[1] - lo[1])).abs() > 1e-9 || (r - r0).abs() > 1e-9 {
-        b.outline = pcb::rect_outline(w, h, r).into_iter().map(|q| pcb::add(q, lo)).collect();
-        for z in &mut b.zones {
-            if z.outline.len() >= 3 {
-                z.outline = b.outline.clone();
+    // only an outline made by rect_outline can be resized here; others are kept as they are
+    let made = pcb::rect_outline(w, h, r0);
+    let rect = made.len() == b.outline.len() && made.iter().zip(&b.outline).all(|(m, o)| pcb::dist(pcb::add(*m, lo), *o) < 1e-6);
+    if !rect {
+        row(ui, "Size", |ui| {
+            ui.label(format!("{w:.2} × {h:.2} mm (custom outline)"));
+        });
+    } else {
+        let mut r = r0;
+        let mut changed = false;
+        row(ui, "Size", |ui| {
+            changed |= ui.add(egui::DragValue::new(&mut w).speed(0.5).range(5.0..=1000.0).clamp_existing_to_range(false).suffix(" mm").max_decimals(2)).changed();
+            ui.label("×");
+            changed |= ui.add(egui::DragValue::new(&mut h).speed(0.5).range(5.0..=1000.0).clamp_existing_to_range(false).suffix(" mm").max_decimals(2)).changed();
+        });
+        row(ui, "Corners", |ui| {
+            changed |= ui.add(egui::DragValue::new(&mut r).speed(0.1).range(0.0..=50.0).clamp_existing_to_range(false).suffix(" mm").max_decimals(2)).on_hover_text("Corner radius").changed();
+        });
+        if changed {
+            let old = std::mem::replace(&mut b.outline, pcb::rect_outline(w, h, r).into_iter().map(|q| pcb::add(q, lo)).collect());
+            // pours over the whole board follow it; pours drawn by hand stay
+            for z in &mut b.zones {
+                if z.outline == old {
+                    z.outline = b.outline.clone();
+                }
             }
         }
     }
