@@ -261,7 +261,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("sketch_constrain", "constraints") => arr(
             json!({"type": "object", "required": ["type"], "additionalProperties": false, "description": "one constraint by point and curve ids (see the tool description)", "properties": {
-                "type": en(&["coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "horizontal_pts", "vertical_pts", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fix", "distance", "axis_distance", "point_line_distance", "length", "radius", "diameter", "angle", "equal_distance"], "constraint type"),
+                "type": en(&["coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "horizontal_pts", "vertical_pts", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fix", "distance", "axis_distance", "point_line_distance", "length", "radius", "diameter", "radial_distance", "angle", "equal_distance"], "constraint type"),
                 "a": t("integer", "first point or curve id"), "b": t("integer", "second point or curve id"), "p": t("integer", "point id"), "l": t("integer", "line id"), "c": t("integer", "circle or arc id"),
                 "q": t("integer", "equal_distance: second point id"), "m": t("integer", "equal_distance: second line id"),
                 "driven": t("boolean", "dimensions: a reference that measures and drives nothing"),
@@ -435,7 +435,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"})}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),
@@ -483,6 +483,28 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("simulate_cam" | "render_cam" | "render_simulation" | "solve_simulation", "width") => width(900),
         ("simulate_cam" | "render_cam" | "render_simulation" | "solve_simulation", "height") => height(700),
         ("render_cam", "operation") => t("integer", "only this operation id"),
+        ("create_cam" | "edit_cam", "on_table") => xyz("where the setup sits on the machine model's table, from its table point, mm"),
+        ("cam_machine", "cam") => common("cam").unwrap(),
+        ("cam_machine", "import") => t("string", "STEP or Parasolid (.x_t) assembly of the machine to read"),
+        ("cam_machine", "name") => t("string", "machine name, or a path to a machine .json file"),
+        ("cam_machine", "carriers") => json!({"type": "object", "properties": {}, "additionalProperties": en(&["base", "x", "y", "z"], "what carries it"), "description": "part or assembly name → base, x, y or z"}),
+        ("cam_machine", "rides") => json!({"type": "array", "items": en(&["base", "x", "y", "z"], "carrier"), "minItems": 3, "maxItems": 3, "description": "what the X, Y and Z axes ride on"}),
+        ("cam_machine", "spindle_on") => en(&["base", "x", "y", "z"], "what carries the spindle"),
+        ("cam_machine", "table_on") => en(&["base", "x", "y", "z"], "what carries the work"),
+        ("cam_machine", "travel") => json!({"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2}, "minItems": 3, "maxItems": 3, "description": "[[min, max] for X, Y, Z], mm from the modelled position"}),
+        ("cam_machine", "spindle") => xyz("where the tool comes out, model coordinates"),
+        ("cam_machine", "table") => xyz("the table point setups are placed from, model coordinates"),
+        ("cam_machine", "holders") => t("boolean", "tool holders hang below the spindle point"),
+        ("cam_machine", "remove") => arr(t("string", "part or assembly name"), "take these parts off the machine"),
+        ("cam_machine", "add") => arr(
+            obj(
+                json!({"name": t("string", "name (replaces parts of that name)"), "step": t("string", "STEP or Parasolid (.x_t) file of it"), "cylinder": json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "[diameter, height]"}), "box": xyz("[x, y, z] size"), "at": xyz("where the middle of its bottom goes, from the table point")}),
+                &["name"],
+                "something standing on the table",
+            ),
+            "add things that ride on the table",
+        ),
+        ("cam_machine", "on_table") => xyz("with cam: where the setup sits from the table point"),
         ("cam_template", "save") => t("string", "save the operations as a template of this name"),
         ("cam_template", "apply") => t("string", "add this template's operations"),
         ("cam_template", "delete") => t("string", "delete this template"),
@@ -602,7 +624,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         let extra = match name.as_str() {
             "create_cam" | "edit_cam" => serde_fields(&crate::cam::Cam::default(), &["tools", "ops", "next_id", "soft_jaws", "jaws_of"], "setup field"),
             "cam_tool" => serde_fields(&crate::cam::Tool::default(), &["id", "kind", "holder_name"], "tool field"),
-            "cam_op" => serde_fields(&crate::cam::Operation::default(), &["id", "kind", "tool"], "operation field"),
+            "cam_op" => serde_fields(&crate::cam::Operation::default(), &["id", "kind", "tool", "edge_picks"], "operation field"),
             "cam_soft_jaws" => serde_fields(&crate::cam::SoftJaws::default(), &[], "soft jaw field"),
             _ => Map::new(),
         };

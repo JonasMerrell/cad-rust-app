@@ -51,7 +51,9 @@ pub struct Status {
 
 fn command(dir: &Path, args: &[&str], env: &[(String, String)]) -> Command {
     let mut c = Command::new("git");
-    c.current_dir(dir).args(args).stdin(Stdio::null()).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
+    // never take a folder that merely looks like a bare repository (one unpacked from a ZIP, say)
+    // as the repository: its config could run commands
+    c.current_dir(dir).args(["-c", "safe.bareRepository=explicit"]).args(args).stdin(Stdio::null()).env("GIT_TERMINAL_PROMPT", "0").env("LC_ALL", "C");
     for (k, v) in env {
         c.env(k, v);
     }
@@ -125,11 +127,17 @@ pub fn is_tracked_cached(file: &Path) -> bool {
     tracked
 }
 
-/// Start tracking a document: make its folder a repository (unless it is in one already),
-/// turn on commit-on-save and commit the document.
+/// Start tracking a document: make its folder a repository (unless it is in one already, and
+/// it isn't a project folder inside another repository), turn on commit-on-save and commit the document.
 pub fn init(file: &Path, who: &Identity) -> Result<Status, String> {
     let dir = folder_of(file);
-    if locate(file).is_none() {
+    // a project folder (named after its document) gets a repository of its own, even inside
+    // another one (a home folder kept in git, say), so its commits and pushes stay its own
+    let own = match locate(file) {
+        None => true,
+        Some((root, _)) => crate::project::is_project_folder(file) && std::fs::canonicalize(&dir).ok() != Some(root),
+    };
+    if own {
         git(&dir, &["init", "-q"])?;
         // "main" whatever init.defaultBranch says (git init -b needs git 2.28)
         git(&dir, &["symbolic-ref", "HEAD", "refs/heads/main"])?;
@@ -150,6 +158,45 @@ pub fn init(file: &Path, who: &Identity) -> Result<Status, String> {
         let _ = commit(&root, ".gitignore", "Ignore temporary files", false, who);
     }
     status(file).ok_or_else(|| "the repository could not be read".into())
+}
+
+/// Settings kept from a repository's config when a project is imported: the ones that make it
+/// work and find its remote. The rest (core.fsmonitor, core.hooksPath, filters, core.sshCommand
+/// and the like) can run commands, so an archive from someone else doesn't get to set them.
+fn keep_imported(key: &str) -> bool {
+    matches!(
+        key,
+        "core.repositoryformatversion" | "core.filemode" | "core.ignorecase" | "core.symlinks" | "core.precomposeunicode" | "core.logallrefupdates" | "extensions.objectformat" | "rcad.autocommit" | "user.name" | "user.email" | "remote.origin.url" | "remote.origin.fetch"
+    ) || (key.starts_with("branch.") && (key.ends_with(".remote") || key.ends_with(".merge")))
+}
+
+/// Write `git_dir`'s config from an imported repository's `config`, keeping only the safe settings.
+pub fn write_imported_config(git_dir: &Path, config: Option<&[u8]>) -> Result<(), String> {
+    let out = git_dir.join("config");
+    let tmp = git_dir.join("config.imported");
+    // read with `git config -f` (which only reads the file), from outside the project
+    let mut entries = vec![];
+    if let Some(c) = config {
+        std::fs::write(&tmp, c).map_err(|e| e.to_string())?;
+        let list = git(&std::env::temp_dir(), &["config", "-f", &tmp.to_string_lossy(), "-z", "--get-regexp", "."]);
+        let _ = std::fs::remove_file(&tmp);
+        for e in list.unwrap_or_default().split('\0') {
+            if let Some((k, v)) = e.split_once('\n') {
+                if keep_imported(&k.to_ascii_lowercase()) {
+                    entries.push((k.to_string(), v.to_string()));
+                }
+            }
+        }
+    }
+    // written by hand, so the repository works even without git to write the rest
+    let version = entries.iter().find(|(k, _)| k.eq_ignore_ascii_case("core.repositoryformatversion")).map(|(_, v)| v.trim()).filter(|v| *v == "0" || *v == "1").unwrap_or("0");
+    std::fs::write(&out, format!("[core]\n\trepositoryformatversion = {version}\n")).map_err(|e| e.to_string())?;
+    let file = out.to_string_lossy().into_owned();
+    for (k, v) in entries.iter().filter(|(k, _)| !k.eq_ignore_ascii_case("core.repositoryformatversion")) {
+        // (best effort: a setting git won't write back is left out)
+        let _ = git(&std::env::temp_dir(), &["config", "-f", &file, "--add", k, v]);
+    }
+    Ok(())
 }
 
 /// How many other things the document's folder holds (counting to 100), to suggest a folder of
@@ -247,8 +294,9 @@ pub fn history(root: &Path, rel: &str, max: usize) -> Vec<Commit> {
 /// The document as it was in a commit.
 pub fn file_at(root: &Path, hash: &str, rel: &str) -> Result<String, String> {
     // the path may have been different then (history follows renames)
-    let names = git(root, &["log", "-n1", "--follow", "--name-only", "--format=", hash, "--", rel]).unwrap_or_default();
-    let path = names.lines().map(str::trim).find(|l| !l.is_empty()).unwrap_or(rel).to_string();
+    // -z: the name as it is (without it git quotes names with accents and the like)
+    let names = git(root, &["log", "-n1", "--follow", "-z", "--name-only", "--format=", hash, "--", rel]).unwrap_or_default();
+    let path = names.split(['\0', '\n']).find(|l| !l.is_empty()).unwrap_or(rel).to_string();
     git(root, &["show", &format!("{hash}:{path}")])
 }
 
@@ -259,7 +307,7 @@ pub fn status(file: &Path) -> Option<Status> {
     s.branch = git(&root, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).unwrap_or_else(|_| "detached".into());
     s.has_commits = git_ok(&root, &["rev-parse", "-q", "--verify", "HEAD"]);
     // NUL separated: "XY path", with renames followed by their old path
-    let porcelain = git(&root, &["status", "--porcelain", "-z", "--untracked-files=normal"]).unwrap_or_default();
+    let porcelain = git(&root, &["status", "--porcelain", "-z", "--untracked-files=all"]).unwrap_or_default();
     let mut entries = porcelain.split('\0');
     while let Some(e) = entries.next() {
         if e.len() < 4 {
@@ -697,6 +745,60 @@ mod tests {
         assert_eq!(pull(&s.root, None).unwrap(), "Pulled the latest main from ".to_string() + dir.join("remote").to_str().unwrap());
         let ws = Workspace::from_json(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(ws.studios[0].doc.features.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn accented_names_and_untracked_folders() {
+        if version().is_none() {
+            return;
+        }
+        let dir = scratch("accents");
+        let file = dir.join("Halterung ü.json");
+        std::fs::write(&file, ws_with(&["A"]).to_json()).unwrap();
+        let s = init(&file, &who()).unwrap();
+        // git quotes such names in its listings unless asked not to
+        let ws2 = ws_with(&["A", "B"]);
+        assert_eq!(save_message(&s.root, &s.rel, &ws2), "Part Studio 1: added B");
+        assert!(Workspace::from_json(&file_at(&s.root, "HEAD", &s.rel).unwrap()).is_ok());
+        // a new document in a new folder: git lists only the folder unless asked for every file
+        let sub = dir.join("sub").join("Teil.json");
+        std::fs::create_dir_all(sub.parent().unwrap()).unwrap();
+        std::fs::write(&sub, ws2.to_json()).unwrap();
+        assert!(status(&sub).unwrap().changed);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn project_folder_in_another_repository_gets_its_own() {
+        if version().is_none() {
+            return;
+        }
+        let dir = scratch("outer");
+        git(&dir, &["init", "-q"]).unwrap();
+        let file = dir.join("Arm").join("Arm.json");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, ws_with(&["A"]).to_json()).unwrap();
+        let s = init(&file, &who()).unwrap();
+        assert_eq!(s.root, std::fs::canonicalize(file.parent().unwrap()).unwrap());
+        assert_eq!(s.rel, "Arm.json");
+        // the outer repository has no commits of it
+        assert!(!git_ok(&dir, &["rev-parse", "-q", "--verify", "HEAD"]));
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn imported_config_keeps_only_safe_settings() {
+        if version().is_none() {
+            return;
+        }
+        let dir = scratch("cfg");
+        let cfg = b"[core]\n\trepositoryformatversion = 0\n\tfsmonitor = touch PWNED\n\thooksPath = /tmp\n[remote \"origin\"]\n\turl = https://github.com/a/b.git\n\tuploadpack = touch PWNED\n[branch \"main\"]\n\tremote = origin\n\tmerge = refs/heads/main\n[filter \"x\"]\n\tclean = touch PWNED\n";
+        write_imported_config(&dir, Some(cfg)).unwrap();
+        let out = std::fs::read_to_string(dir.join("config")).unwrap();
+        assert!(!out.contains("PWNED") && !out.contains("hooksPath"), "{out}");
+        assert!(out.contains("https://github.com/a/b.git") && out.contains("refs/heads/main"), "{out}");
+        assert!(!dir.join("config.imported").exists());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

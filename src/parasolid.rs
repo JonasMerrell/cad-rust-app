@@ -258,7 +258,12 @@ impl Reader {
     fn field(&mut self) -> Result<Field, String> {
         let name = self.string()?;
         let class = self.int()?;
-        let n = self.int()? as u32;
+        let n = self.int()?;
+        // a count of 0 (one value), 1 (a per-node count) or a small fixed array
+        if !(0..=10_000).contains(&n) {
+            return self.err("bad field count");
+        }
+        let n = n as u32;
         let code = if class != 0 {
             Code::Ptr
         } else {
@@ -409,6 +414,9 @@ impl Xt {
                 return r.err("bad length");
             }
             let index = r.int()?;
+            if var as usize > r.d.len() - r.p.min(r.d.len()) {
+                return r.err("bad length");
+            }
             let mut vals = Vec::with_capacity(fields.len());
             for f in fields.iter() {
                 let count = if !f.sent {
@@ -420,7 +428,8 @@ impl Xt {
                         n => n as usize,
                     }
                 };
-                let mut v = Vec::with_capacity(count * f.code.width());
+                // every value takes at least a character, so a damaged count can't ask for more
+                let mut v = Vec::with_capacity((count * f.code.width()).min(r.d.len() - r.p.min(r.d.len())));
                 for _ in 0..count {
                     match f.code {
                         Code::Char | Code::Logical => v.push(r.ch()? as f64),
@@ -512,31 +521,33 @@ impl Xt {
                 used.insert(n.ptr("part"));
             }
         }
-        let mut roots: Vec<u32> = self.nodes.iter().filter(|(i, n)| n.t == 10 && !used.contains(i)).map(|(i, _)| *i).collect();
-        if roots.is_empty() {
-            roots = self.nodes.iter().filter(|(i, n)| n.t == 12 && !used.contains(i)).map(|(i, _)| *i).collect();
-        }
+        // top-level assemblies, and bodies no assembly places (they sit where they are)
+        let mut roots: Vec<u32> = self.nodes.iter().filter(|(i, n)| (n.t == 10 || n.t == 12) && !used.contains(i)).map(|(i, _)| *i).collect();
         roots.sort();
         let mut out = vec![];
         for r in roots {
-            self.walk(r, Xf::IDENTITY, &mut out, 0);
+            self.walk(r, Xf::IDENTITY, &mut out, &mut vec![]);
         }
         out
     }
 
-    fn walk(&self, i: u32, xf: Xf, out: &mut Vec<(u32, Xf)>, depth: usize) {
+    /// `path` holds the assemblies above `i`, so a damaged file whose assembly holds itself
+    /// can't loop; the count limit stops a damaged file from placing bodies without end.
+    fn walk(&self, i: u32, xf: Xf, out: &mut Vec<(u32, Xf)>, path: &mut Vec<u32>) {
         let Some(n) = self.node(i) else { return };
-        if depth > 32 {
+        if path.len() > 32 || path.contains(&i) || out.len() >= 100_000 {
             return;
         }
         match n.t {
             12 => out.push((i, xf)),
             10 => {
+                path.push(i);
                 for inst in self.chain(n.ptr("sub_instance"), "next_in_part") {
                     let Some(inst) = self.node(inst) else { continue };
                     let local = self.node(inst.ptr("transform")).map(Xf::of).unwrap_or(Xf::IDENTITY);
-                    self.walk(inst.ptr("part"), xf.then(local), out, depth + 1);
+                    self.walk(inst.ptr("part"), xf.then(local), out, path);
                 }
+                path.pop();
             }
             _ => {}
         }
@@ -634,6 +645,10 @@ struct Conv<'a> {
 
 const MM: f64 = 1000.0;
 
+/// How deeply geometry may be built on other geometry (an offset of an offset, a trimmed
+/// curve of a trimmed curve) before a file counts as damaged rather than looping for ever.
+const NEST: usize = 8;
+
 impl Conv<'_> {
     fn p(&self, v: DVec3) -> DVec3 {
         (self.xf.m * v + self.xf.t) * MM
@@ -664,6 +679,9 @@ impl Conv<'_> {
         let solid = body.num("body_kind") == 1.0;
         let mut items = vec![];
         let mut open_faces = vec![];
+        // a sheet's faces have void on both sides, so each is in one shell's back faces and
+        // in one shell's front faces: write it once
+        let mut seen = std::collections::HashSet::new();
         for r in xt.chain(body.ptr("region"), "next") {
             let region = xt.node_of(r, &[19])?;
             let is_solid = region.ch("kind") == b'S';
@@ -677,6 +695,9 @@ impl Conv<'_> {
                 let mut pts = vec![];
                 for (first, next, outward) in [("back_faces", "next_back", true), ("front_faces", "next_front", false)] {
                     for f in xt.chain(shell.ptr(first), next) {
+                        if !solid && !seen.insert(f) {
+                            continue;
+                        }
                         match self.face(f, &mut pts) {
                             Ok(e) if outward || !solid => faces.push(e),
                             Ok(e) => faces.push(self.s.add(format!("ORIENTED_FACE('',*,#{e},.F.)"))),
@@ -801,13 +822,20 @@ impl Conv<'_> {
 
     /// A point on a closed curve (in mm), for the vertex STEP needs.
     fn start_point(&self, c: u32) -> Result<DVec3, String> {
+        self.start_point_at(c, 0)
+    }
+
+    fn start_point_at(&self, c: u32, depth: usize) -> Result<DVec3, String> {
+        if depth > NEST {
+            return Err("curve built on itself".into());
+        }
         let n = self.xt.node_of(c, &[30, 31, 32, 38, 133, 134, 137])?;
         Ok(match n.t {
             31 => self.p(n.v3("centre") + n.v3("x_axis").normalize_or_zero() * n.num("radius")),
             32 => self.p(n.v3("centre") + n.v3("x_axis").normalize_or_zero() * n.num("major")),
             133 => self.p(n.v3("point_1")),
             _ => {
-                let pts = self.curve_points(c)?;
+                let pts = self.curve_points_at(c, depth)?;
                 *pts.first().ok_or("empty curve")?
             }
         })
@@ -815,6 +843,13 @@ impl Conv<'_> {
 
     /// A curve's STEP entity and whether it runs the curve's own way.
     fn curve(&mut self, c: u32) -> Result<(usize, bool), String> {
+        self.curve_at(c, 0)
+    }
+
+    fn curve_at(&mut self, c: u32, depth: usize) -> Result<(usize, bool), String> {
+        if depth > NEST {
+            return Err("curve built on itself".into());
+        }
         let xt = self.xt;
         let n = xt.node_of(c, &[30, 31, 32, 38, 133, 134, 137])?;
         let plus = n.plus("orientation");
@@ -837,7 +872,7 @@ impl Conv<'_> {
                 self.s.add(format!("ELLIPSE('',#{a},{},{})", real(ra), real(rb)))
             }
             133 => {
-                let (e, p) = self.curve(n.ptr("basis"))?;
+                let (e, p) = self.curve_at(n.ptr("basis"), depth + 1)?;
                 return Ok((e, p == plus));
             }
             134 => {
@@ -847,7 +882,7 @@ impl Conv<'_> {
             }
             _ => {
                 // intersection and surface-parametric curves: a cubic through points along them
-                let pts = self.curve_points(c)?;
+                let pts = self.curve_points_at(c, depth)?;
                 self.s.fit(&pts)
             }
         };
@@ -855,7 +890,10 @@ impl Conv<'_> {
     }
 
     /// Points (in mm, in the curve's own direction) along an intersection or surface-parametric curve.
-    fn curve_points(&self, c: u32) -> Result<Vec<DVec3>, String> {
+    fn curve_points_at(&self, c: u32, depth: usize) -> Result<Vec<DVec3>, String> {
+        if depth > NEST {
+            return Err("curve built on itself".into());
+        }
         let xt = self.xt;
         let n = xt.node_of(c, &[38, 133, 134, 137])?;
         match n.t {
@@ -868,7 +906,7 @@ impl Conv<'_> {
                 }
                 Ok(pts)
             }
-            133 => self.curve_points(n.ptr("basis")),
+            133 => self.curve_points_at(n.ptr("basis"), depth + 1),
             134 => {
                 let b = self.bspline(n.ptr("nurbs"))?;
                 Ok((0..=64).map(|i| self.p(b.eval(i as f64 / 64.0))).collect())
@@ -878,6 +916,9 @@ impl Conv<'_> {
                 let surf = xt.node_of(n.ptr("surface"), &[50, 51, 52, 53, 54])?;
                 // a straight line in a plane's parameters needs only its ends
                 let steps = if surf.t == 50 && b.degree == 1 { b.poles.len() - 1 } else { 48 };
+                if steps == 0 {
+                    return Err("surface curve without length".into());
+                }
                 let mut out = vec![];
                 for i in 0..=steps {
                     let uv = if surf.t == 50 && b.degree == 1 { DVec3::from_slice(&b.poles[i][..3]) } else { b.eval(i as f64 / steps as f64) };
@@ -902,6 +943,13 @@ impl Conv<'_> {
 
     /// A surface's STEP entity and whether its normal is the surface's own.
     fn surface(&mut self, s: u32) -> Result<(usize, bool), String> {
+        self.surface_at(s, 0)
+    }
+
+    fn surface_at(&mut self, s: u32, depth: usize) -> Result<(usize, bool), String> {
+        if depth > NEST {
+            return Err("surface built on itself".into());
+        }
         let xt = self.xt;
         let n = xt.node(s).ok_or("face without a surface")?;
         let plus = n.plus("orientation");
@@ -935,7 +983,7 @@ impl Conv<'_> {
                 self.s.add(format!("TOROIDAL_SURFACE('',#{a},{},{})", real(ra), real(rb)))
             }
             60 => {
-                let (b, bp) = self.surface(n.ptr("surface"))?;
+                let (b, bp) = self.surface_at(n.ptr("surface"), depth + 1)?;
                 let mut d = self.len(n.num("offset"));
                 if !bp {
                     d = -d;
@@ -957,7 +1005,17 @@ impl Conv<'_> {
                 let (um, uk) = list("u_knot_mult", "u_knots")?;
                 let (vm, vk) = list("v_knot_mult", "v_knots")?;
                 let w = if rational { dim.max(4) } else { dim.max(3) };
-                if verts.len() < nu * nv * w || um.iter().sum::<usize>() != nu + ud + 1 || vm.iter().sum::<usize>() != nv + vd + 1 {
+                let odd_mult = |m: &[usize], d: usize| m.iter().any(|&m| m == 0 || m > d + 1);
+                if nu < 2
+                    || nv < 2
+                    || odd_mult(&um, ud)
+                    || odd_mult(&vm, vd)
+                    || um.len() != uk.len()
+                    || vm.len() != vk.len()
+                    || verts.len() < nu * nv * w
+                    || um.iter().sum::<usize>() != nu + ud + 1
+                    || vm.iter().sum::<usize>() != nv + vd + 1
+                {
                     return Err("periodic or odd B-spline surface".into());
                 }
                 let mut poles = vec![];
@@ -1030,10 +1088,13 @@ struct Bspline {
 
 impl Bspline {
     fn new(degree: usize, dim: usize, rational: bool, verts: &[f64], mults: Vec<usize>, knots: Vec<f64>) -> Result<Bspline, String> {
-        if dim == 0 || degree == 0 || mults.len() != knots.len() {
+        if dim == 0 || degree == 0 || mults.len() != knots.len() || verts.len() % dim != 0 || (rational && dim < 2) {
             return Err("odd B-spline curve".into());
         }
         let n = verts.len() / dim;
+        if n < 2 || n <= degree || mults.iter().any(|&m| m == 0 || m > degree + 1) {
+            return Err("B-spline curve with too few vertices".into());
+        }
         if mults.iter().sum::<usize>() != n + degree + 1 {
             return Err("periodic B-spline curves aren't supported yet".into());
         }
@@ -1243,7 +1304,7 @@ impl Step {
 }
 
 #[cfg(test)]
-mod tests {
+pub(crate) mod tests {
     use super::*;
 
     /// Writes a .x_t in the plain 13006 schema, node by node, filling unnamed fields with zeros.
@@ -1257,14 +1318,20 @@ mod tests {
             let _ = write!(self.out, "{t} {i} ");
             for f in fields.iter() {
                 let v = vals.iter().find(|(n, _)| *n == f.name).map(|(_, v)| v.to_string());
-                let count = if f.n == 0 { 1 } else { f.n as usize };
+                // a fixed array can be given whole, as numbers with spaces between
+                let whole = f.code != Code::Vector && v.as_deref().is_some_and(|v| v.contains(' '));
+                let count = if f.n == 0 || whole { 1 } else { f.n as usize };
                 for _ in 0..count {
                     match f.code {
                         Code::Char => self.out.push_str(v.as_deref().unwrap_or("+")),
                         Code::Logical => self.out.push_str(v.as_deref().unwrap_or("F")),
-                        Code::Vector => {
-                            let _ = write!(self.out, "{} ", v.clone().unwrap_or("?".into()));
-                        }
+                        // a null is a lone '?' with no space after it
+                        Code::Vector => match &v {
+                            Some(v) => {
+                                let _ = write!(self.out, "{v} ");
+                            }
+                            None => self.out.push('?'),
+                        },
                         _ => {
                             let _ = write!(self.out, "{} ", v.clone().unwrap_or("0".into()));
                         }
@@ -1275,83 +1342,115 @@ mod tests {
     }
 
     /// A 10 mm cube (0..0.01 m) as one solid body, with a name.
-    fn cube() -> String {
+    pub(crate) fn cube() -> String {
+        boxes(&[([0.0; 3], 0.01, false)], false)
+    }
+
+    /// Axis-aligned boxes (corner, size in metres, is a cavity) as the shells of one body named
+    /// Cube: a solid whose cavities are inner shells of its solid region, or with `sheet` a sheet
+    /// body whose faces have the one (void) shell on both sides.
+    fn boxes(list: &[([f64; 3], f64, bool)], sheet: bool) -> String {
         let mut w = Writer { out: String::from("**END_OF_HEADER*****\nT4 TEST17 SCH_1300000_130060 ") };
-        let c = 0.01;
-        let corner = |k: usize| [(k & 1) as f64 * c, ((k >> 1) & 1) as f64 * c, ((k >> 2) & 1) as f64 * c];
-        // nodes: body 1, regions 2 (void) 3 (solid), shell 4; faces 10.., loops 20.., planes 30..,
-        // edges 40.., lines 60.., vertices 80.., points 90.., fins 100..
-        w.node(12, 1, &[("body_kind", "1"), ("region", "2"), ("annotations", "200")]);
-        w.node(19, 2, &[("body", "1"), ("next", "3"), ("kind", "V")]);
-        w.node(19, 3, &[("body", "1"), ("prev", "2"), ("shell", "4"), ("kind", "S")]);
-        let faces: [(usize, [usize; 4]); 6] = [
-            // outward normal axis, and corners counter-clockwise seen from outside
-            (0, [0, 4, 6, 2]), // x = 0, normal -x
-            (1, [1, 3, 7, 5]), // x = c
-            (2, [0, 1, 5, 4]), // y = 0
-            (3, [2, 6, 7, 3]), // y = c
-            (4, [0, 2, 3, 1]), // z = 0
-            (5, [4, 5, 7, 6]), // z = c
-        ];
-        let mut edges: Vec<(usize, usize)> = vec![];
-        let mut fins = vec![];
-        for (fi, (_, ring)) in faces.iter().enumerate() {
-            for k in 0..4 {
-                let (a, b) = (ring[k], ring[(k + 1) % 4]);
-                let (e, sense) = match edges.iter().position(|&(x, y)| (x, y) == (b, a)) {
-                    Some(e) => (e, '-'),
-                    None => {
-                        edges.push((a, b));
-                        (edges.len() - 1, '+')
-                    }
-                };
-                fins.push((fi, k, e, sense, b));
+        // nodes: body 1, regions 2 (void) 3 (solid), shells 4..; per box (o = 1000 k) faces o+10..,
+        // loops o+20.., planes o+30.., edges o+40.., lines o+60.., vertices o+80.., points o+90.., fins o+100..
+        let kind = if sheet { "3" } else { "1" };
+        w.node(12, 1, &[("body_kind", kind), ("region", "2"), ("annotations", "200")]);
+        w.node(19, 2, &[("body", "1"), ("next", if sheet { "0" } else { "3" }), ("shell", if sheet { "4" } else { "0" }), ("kind", "V")]);
+        if !sheet {
+            w.node(19, 3, &[("body", "1"), ("prev", "2"), ("shell", "4"), ("kind", "S")]);
+        }
+        for (bk, &(origin, c, cavity)) in list.iter().enumerate() {
+            let o = 1000 * bk;
+            let corner = |k: usize| [origin[0] + (k & 1) as f64 * c, origin[1] + ((k >> 1) & 1) as f64 * c, origin[2] + ((k >> 2) & 1) as f64 * c];
+            let mut faces: [(usize, [usize; 4]); 6] = [
+                // outward normal axis, and corners counter-clockwise seen from outside
+                (0, [0, 4, 6, 2]), // x = 0, normal -x
+                (1, [1, 3, 7, 5]), // x = c
+                (2, [0, 1, 5, 4]), // y = 0
+                (3, [2, 6, 7, 3]), // y = c
+                (4, [0, 2, 3, 1]), // z = 0
+                (5, [4, 5, 7, 6]), // z = c
+            ];
+            if cavity {
+                // the material is outside: normals point into the box, loops turn the other way
+                for f in faces.iter_mut() {
+                    f.1.reverse();
+                }
+            }
+            let mut edges: Vec<(usize, usize)> = vec![];
+            let mut fins = vec![];
+            for (fi, (_, ring)) in faces.iter().enumerate() {
+                for k in 0..4 {
+                    let (a, b) = (ring[k], ring[(k + 1) % 4]);
+                    let (e, sense) = match edges.iter().position(|&(x, y)| (x, y) == (b, a)) {
+                        Some(e) => (e, '-'),
+                        None => {
+                            edges.push((a, b));
+                            (edges.len() - 1, '+')
+                        }
+                    };
+                    fins.push((fi, k, e, sense, b));
+                }
+            }
+            let id = |n: usize| (o + n).to_string();
+            let next_shell = if bk + 1 < list.len() { (5 + bk).to_string() } else { "0".into() };
+            let region = if sheet { "2" } else { "3" };
+            let mut shell = vec![("region", region.to_string()), ("back_faces", id(10)), ("next", next_shell)];
+            if sheet {
+                shell.push(("front_faces", id(10)));
+            }
+            let shell: Vec<(&str, &str)> = shell.iter().map(|(a, b)| (*a, b.as_str())).collect();
+            w.node(13, 4 + bk as u32, &shell);
+            for (fi, (axis, ring)) in faces.iter().enumerate() {
+                let next = if fi < 5 { id(10 + fi + 1) } else { "0".into() };
+                let (s, l, sh) = (id(30 + fi), id(20 + fi), (4 + bk).to_string());
+                let mut v = vec![("next_back", next.as_str()), ("loop", &l), ("back_shell", &sh), ("surface", &s), ("sense", "+")];
+                if sheet {
+                    v.extend([("next_front", next.as_str()), ("front_shell", &sh)]);
+                }
+                w.node(14, (o + 10 + fi) as u32, &v);
+                w.node(15, (o + 20 + fi) as u32, &[("fin", &id(100 + fi * 4)), ("face", &id(10 + fi))]);
+                let mut n = [0.0; 3];
+                n[axis / 2] = if (axis % 2 == 1) != cavity { 1.0 } else { -1.0 };
+                let p = corner(ring[0]);
+                let x = if axis / 2 == 0 { "0 1 0" } else { "1 0 0" };
+                w.node(50, (o + 30 + fi) as u32, &[("pvec", &format!("{} {} {}", p[0], p[1], p[2])), ("normal", &format!("{} {} {}", n[0], n[1], n[2])), ("x_axis", x)]);
+            }
+            for (k, &(fi, i, e, sense, vend)) in fins.iter().enumerate() {
+                let fwd = o + 100 + fi * 4 + (i + 1) % 4;
+                let bwd = o + 100 + fi * 4 + (i + 3) % 4;
+                let other = fins.iter().position(|f| f.2 == e && f.3 != sense).unwrap() + o + 100;
+                let s = sense.to_string();
+                let vals = [
+                    ("loop", id(20 + fi)),
+                    ("forward", fwd.to_string()),
+                    ("backward", bwd.to_string()),
+                    ("vertex", id(80 + vend)),
+                    ("other", other.to_string()),
+                    ("edge", id(40 + e)),
+                ];
+                let mut v: Vec<(&str, &str)> = vals.iter().map(|(a, b)| (*a, b.as_str())).collect();
+                v.push(("sense", &s));
+                w.node(17, (o + 100 + k) as u32, &v);
+            }
+            for (e, &(a, b)) in edges.iter().enumerate() {
+                let fin = fins.iter().position(|f| f.2 == e && f.3 == '+').unwrap() + o + 100;
+                w.node(16, (o + 40 + e) as u32, &[("fin", &fin.to_string()), ("curve", &id(60 + e)), ("owner", "1")]);
+                let (pa, pb) = (corner(a), corner(b));
+                let d = [(pb[0] - pa[0]) / c, (pb[1] - pa[1]) / c, (pb[2] - pa[2]) / c];
+                w.node(30, (o + 60 + e) as u32, &[("pvec", &format!("{} {} {}", pa[0], pa[1], pa[2])), ("direction", &format!("{} {} {}", d[0], d[1], d[2]))]);
+            }
+            for k in 0..8 {
+                let p = corner(k);
+                w.node(18, (o + 80 + k) as u32, &[("point", &id(90 + k)), ("owner", "1")]);
+                w.node(29, (o + 90 + k) as u32, &[("pvec", &format!("{} {} {}", p[0], p[1], p[2]))]);
             }
         }
-        let back: Vec<u32> = (0..6).map(|f| 10 + f).collect();
-        w.node(13, 4, &[("region", "3"), ("back_faces", "10")]);
-        for (fi, (axis, ring)) in faces.iter().enumerate() {
-            let next = if fi < 5 { back[fi + 1].to_string() } else { "0".into() };
-            let s = (30 + fi).to_string();
-            let l = (20 + fi).to_string();
-            w.node(14, 10 + fi as u32, &[("next_back", &next), ("loop", &l), ("back_shell", "4"), ("surface", &s), ("sense", "+")]);
-            let fin0 = (100 + fi * 4).to_string();
-            w.node(15, 20 + fi as u32, &[("fin", &fin0), ("face", &(10 + fi).to_string())]);
-            let mut n = [0.0; 3];
-            n[axis / 2] = if axis % 2 == 1 { 1.0 } else { -1.0 };
-            let p = corner(ring[0]);
-            let x = if axis / 2 == 0 { "0 1 0" } else { "1 0 0" };
-            w.node(50, 30 + fi as u32, &[("pvec", &format!("{} {} {}", p[0], p[1], p[2])), ("normal", &format!("{} {} {}", n[0], n[1], n[2])), ("x_axis", x)]);
-        }
-        for (k, &(fi, i, e, sense, vend)) in fins.iter().enumerate() {
-            let fwd = 100 + fi * 4 + (i + 1) % 4;
-            let bwd = 100 + fi * 4 + (i + 3) % 4;
-            let other = fins.iter().position(|f| f.2 == e && f.3 != sense).unwrap() + 100;
-            let s = sense.to_string();
-            let vals = [
-                ("loop", (20 + fi).to_string()),
-                ("forward", fwd.to_string()),
-                ("backward", bwd.to_string()),
-                ("vertex", (80 + vend).to_string()),
-                ("other", other.to_string()),
-                ("edge", (40 + e).to_string()),
-            ];
-            let mut v: Vec<(&str, &str)> = vals.iter().map(|(a, b)| (*a, b.as_str())).collect();
-            v.push(("sense", &s));
-            w.node(17, 100 + k as u32, &v);
-        }
-        for (e, &(a, b)) in edges.iter().enumerate() {
-            let fin = fins.iter().position(|f| f.2 == e && f.3 == '+').unwrap() + 100;
-            w.node(16, 40 + e as u32, &[("fin", &fin.to_string()), ("curve", &(60 + e).to_string()), ("owner", "1")]);
-            let (pa, pb) = (corner(a), corner(b));
-            let d = [(pb[0] - pa[0]) / c, (pb[1] - pa[1]) / c, (pb[2] - pa[2]) / c];
-            w.node(30, 60 + e as u32, &[("pvec", &format!("{} {} {}", pa[0], pa[1], pa[2])), ("direction", &format!("{} {} {}", d[0], d[1], d[2]))]);
-        }
-        for k in 0..8 {
-            let p = corner(k);
-            w.node(18, 80 + k as u32, &[("point", &(90 + k).to_string()), ("owner", "1")]);
-            w.node(29, 90 + k as u32, &[("pvec", &format!("{} {} {}", p[0], p[1], p[2]))]);
-        }
+        name_and_wrap(w)
+    }
+
+    /// Ends a file: names node 1 "Cube" (attribute 200), adds the terminator and wraps at 80 columns.
+    fn name_and_wrap(mut w: Writer) -> String {
         // its name: an attribute (81) of definition 201 named by 202, holding text 203
         w.out.push_str("81 1 200 0 201 1 0 0 0 0 203 ");
         w.out.push_str("80 1 201 0 202 8017 0 0 0 0 0 0 0 0 0 FFFFFFFFFFFFFF3 ");
@@ -1380,6 +1479,115 @@ mod tests {
             }
         }
         wrapped
+    }
+
+    /// The STEP read back by OpenCascade the way an import is: (valid, volume in mm³).
+    fn occ_read(step: &str, tag: &str) -> (bool, f64) {
+        let path = std::env::temp_dir().join(format!("rcad-parasolid-{tag}-{}.step", std::process::id()));
+        std::fs::write(&path, step).unwrap();
+        let s = opencascade::primitives::Shape::read_step(&path).unwrap();
+        let _ = std::fs::remove_file(&path);
+        (crate::occ::is_valid(&s), crate::kernel::volume(&s))
+    }
+
+    #[test]
+    fn a_sheet_body_has_each_face_once() {
+        let c = to_step(boxes(&[([0.0; 3], 0.01, false)], true).as_bytes(), "sheet").unwrap();
+        assert_eq!(c.step.matches("ADVANCED_FACE").count(), 6, "{}", c.step);
+        assert!(c.step.contains("OPEN_SHELL") && !c.step.contains("CLOSED_SHELL"));
+    }
+
+    #[test]
+    fn a_cavity_is_left_out_of_the_volume() {
+        // a 10 mm cube with a 2 mm cube of nothing inside it
+        let x = boxes(&[([0.0; 3], 0.01, false), ([0.004; 3], 0.002, true)], false);
+        let c = to_step(x.as_bytes(), "hollow").unwrap();
+        assert!(c.step.contains("BREP_WITH_VOIDS"));
+        let (valid, vol) = occ_read(&c.step, "hollow");
+        assert!(valid);
+        assert!((vol - 992.0).abs() < 1e-3, "volume {vol}");
+    }
+
+    /// A ball: one face on a sphere, with no loops at all.
+    fn ball() -> String {
+        let mut w = Writer { out: String::from("**END_OF_HEADER*****\nT4 TEST17 SCH_1300000_130060 ") };
+        w.node(12, 1, &[("body_kind", "1"), ("region", "2"), ("annotations", "200")]);
+        w.node(19, 2, &[("body", "1"), ("next", "3"), ("kind", "V")]);
+        w.node(19, 3, &[("body", "1"), ("prev", "2"), ("shell", "4"), ("kind", "S")]);
+        w.node(13, 4, &[("region", "3"), ("back_faces", "10")]);
+        w.node(14, 10, &[("back_shell", "4"), ("surface", "30"), ("sense", "+")]);
+        w.node(53, 30, &[("centre", "0 0 0"), ("radius", "0.005"), ("axis", "0 0 1"), ("x_axis", "1 0 0")]);
+        name_and_wrap(w)
+    }
+
+    #[test]
+    fn a_face_without_loops_reads_back() {
+        let c = to_step(ball().as_bytes(), "ball").unwrap();
+        // the face has no bounds at all; OpenCascade gives it the sphere's natural ones
+        assert!(c.step.contains("ADVANCED_FACE('',(),"));
+        let (valid, vol) = occ_read(&c.step, "ball");
+        assert!(valid);
+        let want = 4.0 / 3.0 * std::f64::consts::PI * 125.0;
+        assert!((vol - want).abs() < 0.01 * want, "volume {vol}, want {want}");
+    }
+
+    /// Nodes in the 13006 schema without the cube's name, ended and wrapped.
+    fn file(nodes: impl FnOnce(&mut Writer)) -> String {
+        let mut w = Writer { out: String::from("**END_OF_HEADER*****\nT4 TEST17 SCH_1300000_130060 ") };
+        nodes(&mut w);
+        w.out.push_str("1 0");
+        w.out
+    }
+
+    #[test]
+    fn bodies_outside_the_assembly_are_kept() {
+        // assembly 2 places body 5 (moved 1 m in x); body 6 isn't in any assembly
+        let x = file(|w| {
+            w.node(10, 2, &[("sub_instance", "3")]);
+            w.node(11, 3, &[("part", "5"), ("assembly", "2"), ("transform", "4")]);
+            w.node(100, 4, &[("rotation", "1 0 0 0 1 0 0 0 1"), ("translation", "1 0 0"), ("scale", "1")]);
+            w.node(12, 5, &[("body_kind", "1")]);
+            w.node(12, 6, &[("body_kind", "1")]);
+        });
+        let xt = Xt::parse(x.as_bytes()).unwrap();
+        let b = xt.placed_bodies();
+        assert_eq!(b.iter().map(|b| b.0).collect::<Vec<_>>(), vec![5, 6]);
+        assert_eq!(b[0].1.t, DVec3::X);
+        assert_eq!(b[1].1.t, DVec3::ZERO);
+    }
+
+    #[test]
+    fn damaged_files_give_errors_not_crashes() {
+        // assembly 2 (placed by root 1) holds itself and body 6
+        let x = file(|w| {
+            w.node(10, 1, &[("sub_instance", "5")]);
+            w.node(11, 5, &[("part", "2")]);
+            w.node(10, 2, &[("sub_instance", "3")]);
+            w.node(11, 3, &[("part", "2"), ("next_in_part", "4")]);
+            w.node(11, 4, &[("part", "6")]);
+            w.node(12, 6, &[("body_kind", "1")]);
+        });
+        let xt = Xt::parse(x.as_bytes()).unwrap();
+        assert_eq!(xt.placed_bodies().iter().map(|b| b.0).collect::<Vec<_>>(), vec![6]);
+        // an offset surface of itself, a trimmed curve of itself
+        let x = file(|w| {
+            w.node(60, 7, &[("surface", "7"), ("offset", "0.001")]);
+            w.node(133, 8, &[("basis", "8")]);
+        });
+        let xt = Xt::parse(x.as_bytes()).unwrap();
+        let mut s = Step::default();
+        let mut c = Conv { xt: &xt, s: &mut s, xf: Xf::IDENTITY, verts: HashMap::new(), edges: HashMap::new(), skipped: 0 };
+        assert!(c.surface(7).is_err());
+        assert!(c.curve(8).is_err());
+        let _ = c.start_point(8);
+        // B-spline vertices that don't fill whole points, or too few of them
+        assert!(Bspline::new(1, 4, true, &[0.0; 10], vec![2, 2], vec![0.0, 1.0]).is_err());
+        assert!(Bspline::new(1, 3, false, &[0.0; 3], vec![1, 1], vec![0.0, 1.0]).is_err());
+        assert!(Bspline::new(2, 3, false, &[0.0; 9], vec![2, 4], vec![0.0, 1.0]).is_err());
+        // a length far past the end of the file
+        assert!(Xt::parse(b"**END_OF_HEADER\nT4 test17 SCH_1300000_130060 84 40000000 5 abc").is_err());
+        // an embedded schema field with a negative count
+        assert!(Xt::parse(b"**END_OF_HEADER\nT4 test23 SCH_3801231_38101_13006249 0 29 6 CCCCDCA5 extra0 -1 1 dZ7 1 0 0 0 1 2 3 42 1 0").is_err());
     }
 
     #[test]

@@ -98,10 +98,25 @@ pub fn read_models(path: &Path) -> Result<Found, String> {
         files.retain(|f| rank(f.format) == best);
     }
     files.sort_by(|a, b| a.name.cmp(&b.name));
-    for f in &mut files {
-        let (format, bytes) = crate::import::storable(f.format, std::mem::take(&mut f.bytes), &f.name).map_err(|e| format!("{}: {e}", f.name))?;
-        f.format = format;
-        f.bytes = bytes;
+    // one file that can't be converted (a Parasolid part with geometry rCAD can't read yet)
+    // leaves the others in: only when none of them works is it an error
+    let mut failed = vec![];
+    files.retain_mut(|f| match crate::import::storable(f.format, std::mem::take(&mut f.bytes), &f.name) {
+        Ok((format, bytes)) => {
+            f.format = format;
+            f.bytes = bytes;
+            true
+        }
+        Err(e) => {
+            failed.push(format!("{}: {e}", f.name));
+            false
+        }
+    });
+    if files.is_empty() && !failed.is_empty() {
+        return Err(failed.join("; "));
+    }
+    for e in &failed {
+        eprintln!("left out of the import: {e}");
     }
     Ok(Found { files, skipped })
 }
@@ -149,7 +164,8 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let bytes = match method {
             0 => data.to_vec(),
             8 => {
-                let mut v = Vec::with_capacity(usize_);
+                // (the size is the archive's word for it: don't reserve gigabytes on it)
+                let mut v = Vec::with_capacity(usize_.min(64 << 20));
                 flate2::read::DeflateDecoder::new(data).read_to_end(&mut v).map_err(|e| format!("could not unpack {name}: {e}"))?;
                 v
             }
@@ -219,17 +235,11 @@ mod tests {
         assert_eq!(search_url("M5 & nut"), "https://grabcad.com/library/software/step-slash-iges?query=M5+%26+nut");
     }
 
-    /// A tiny ZIP made by hand: one stored file and one deflated file.
-    #[test]
-    fn unzip_stored_and_deflated() {
-        use std::io::Write;
-        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
-        z.write_all(b"ISO-10303-21; deflated").unwrap();
-        let deflated = z.finish().unwrap();
-        let files: Vec<(&str, u16, Vec<u8>, usize)> = vec![("a/part.step", 0, b"ISO-10303-21; stored".to_vec(), 20), ("b.STP", 8, deflated, 22), ("c.SLDPRT", 0, b"x".to_vec(), 1)];
+    /// A ZIP made by hand from (name, method, data, uncompressed size).
+    fn zip(files: &[(&str, u16, Vec<u8>, usize)]) -> Vec<u8> {
         let mut out = vec![];
         let mut cd = vec![];
-        for (name, method, data, usz) in &files {
+        for (name, method, data, usz) in files {
             let off = out.len() as u32;
             out.extend_from_slice(b"PK\x03\x04");
             out.extend_from_slice(&[20, 0, 0, 0]);
@@ -261,6 +271,18 @@ mod tests {
         out.extend_from_slice(&(cd.len() as u32).to_le_bytes());
         out.extend_from_slice(&cd_off.to_le_bytes());
         out.extend_from_slice(&[0, 0]);
+        out
+    }
+
+    /// A tiny ZIP made by hand: one stored file and one deflated file.
+    #[test]
+    fn unzip_stored_and_deflated() {
+        use std::io::Write;
+        let mut z = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+        z.write_all(b"ISO-10303-21; deflated").unwrap();
+        let deflated = z.finish().unwrap();
+        let files: Vec<(&str, u16, Vec<u8>, usize)> = vec![("a/part.step", 0, b"ISO-10303-21; stored".to_vec(), 20), ("b.STP", 8, deflated, 22), ("c.SLDPRT", 0, b"x".to_vec(), 1)];
+        let out = zip(&files);
         let e = unzip(&out).unwrap();
         assert_eq!(e[0].1, b"ISO-10303-21; stored");
         assert_eq!(e[1].1, b"ISO-10303-21; deflated");
@@ -272,6 +294,27 @@ mod tests {
         assert_eq!(f.files.len(), 2);
         assert_eq!(f.files[0].name, "b");
         assert_eq!(f.skipped, vec!["c.SLDPRT".to_string()]);
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    /// A ZIP of Parasolid parts where one can't be converted still imports the others.
+    #[test]
+    fn one_bad_part_leaves_the_others() {
+        let good = crate::parasolid::tests::cube().into_bytes();
+        let bad = b"**END_OF_HEADER\nT4 test17 SCH_1300000_130060 67 1 0 1 0".to_vec();
+        let files: Vec<(&str, u16, Vec<u8>, usize)> = vec![("a.x_t", 0, good.clone(), good.len()), ("b.x_t", 0, bad.clone(), bad.len())];
+        let dir = std::env::temp_dir().join(format!("grabcad-test-bad-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("model.zip");
+        std::fs::write(&p, zip(&files)).unwrap();
+        let f = read_models(&p).unwrap();
+        assert_eq!(f.files.len(), 1);
+        assert_eq!(f.files[0].name, "a");
+        assert_eq!(f.files[0].format, "step");
+        // with only the bad one it's an error that says why
+        std::fs::write(&p, zip(&files[1..])).unwrap();
+        let e = read_models(&p).err().unwrap();
+        assert!(e.contains("b: ") && e.contains("type 67"), "{e}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }

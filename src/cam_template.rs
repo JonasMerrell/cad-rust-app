@@ -71,7 +71,7 @@ pub fn from_cam(cam: &Cam, name: &str, ids: &[u64]) -> Template {
         .ops
         .iter()
         .filter(|o| if ids.is_empty() { !o.suppressed } else { ids.contains(&o.id) })
-        .map(|o| Operation { top: None, bottom: None, at: None, points: vec![], edges: vec![], sketches: vec![], ..o.clone() })
+        .map(|o| Operation { top: None, bottom: None, at: None, points: vec![], edges: vec![], edge_picks: vec![], sketches: vec![], ..o.clone() })
         .collect();
     let tools = cam.tools.iter().filter(|t| ops.iter().any(|o| o.tool == t.id)).cloned().collect();
     Template { name: name.trim().to_string(), tools, ops }

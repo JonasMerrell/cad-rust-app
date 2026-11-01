@@ -1321,6 +1321,12 @@ pub(crate) fn pencil(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
 
 // ---------------------------------------------------------------- deburr / 3D chamfer
 
+/// A deburr's picked points in setup coordinates: those given in work coordinates (`edges`) and those
+/// picked in the view (`edge_picks`, part coordinates).
+pub fn deburr_picks(op: &Operation, part: &Part, origin: DVec3) -> Vec<DVec3> {
+    op.edges.iter().map(|p| DVec3::from(*p) + origin).chain(op.edge_picks.iter().map(|p| part.rot * DVec3::from(*p))).collect()
+}
+
 /// Sharp convex edges that a vertical tool can reach (not the vertical ones), as chains of points with the
 /// outward horizontal direction of each edge, and whether the chain closes.
 pub fn sharp_edges(part: &Part, min_angle: f64) -> Vec<(Vec<DVec3>, Vec<DVec2>, bool)> {
@@ -1447,7 +1453,7 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
         tp.warnings.push(format!("a {} mm chamfer is too wide for this tool", crate::cam::fmt_mm(w)));
         return;
     }
-    let picks: Vec<DVec3> = op.edges.iter().map(|p| DVec3::from(*p) + ctx.origin).collect();
+    let picks = deburr_picks(op, ctx.geo.part, ctx.origin);
     let mut runs = vec![];
     let mut s = Scratch::default();
     let mut chains = sharp_edges(ctx.geo.part, op.edge_angle.clamp(5.0, 170.0));
@@ -2298,6 +2304,15 @@ mod tests {
         let o = crate::cam_paths::work_origin(&c, &part);
         c.op_mut(id).unwrap().edges = vec![[20.0 - o.x, -o.y, 10.0 - o.z]];
         let picked = &generate(&c, &part)[0];
+        let ys: Vec<f64> = picked.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[1]) } else { None }).collect();
+        assert!(!ys.is_empty() && ys.iter().all(|y| *y < 1.0), "{ys:?}");
+        // picked in the view (part coordinates): still on that edge after the stock and work zero move
+        c.op_mut(id).unwrap().edges.clear();
+        c.op_mut(id).unwrap().edge_picks = vec![part.to_part(DVec3::new(20.0, 0.0, 10.0)).to_array()];
+        c.stock.side += 3.0;
+        c.stock.top += 2.0;
+        let picked = &generate(&c, &part)[0];
+        assert!(picked.warnings.is_empty(), "{:?}", picked.warnings);
         let ys: Vec<f64> = picked.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[1]) } else { None }).collect();
         assert!(!ys.is_empty() && ys.iter().all(|y| *y < 1.0), "{ys:?}");
     }

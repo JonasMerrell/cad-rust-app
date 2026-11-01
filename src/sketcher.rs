@@ -440,6 +440,31 @@ pub fn cancel(app: &mut App) {
     app.changed();
 }
 
+/// After undo or redo inside a sketch: in-progress tool steps (a line chain, clicks, dimension picks, an open
+/// dimension box, a drag) refer to points and constraint indices of the old state, so drop them, and keep
+/// only the selected items that still exist.
+pub fn after_undo(app: &mut App) {
+    let Some(sess) = app.sketch.as_ref() else { return };
+    let Some((sk, _)) = sketch_of(&app.doc, sess.feature) else { return };
+    let exists = |x: &Sel| match *x {
+        Sel::Point(p) => sk.point(p).is_some(),
+        Sel::Curve(c) => sk.curve(c).is_some(),
+        Sel::Constraint(i) => i < sk.constraints.len(),
+    };
+    let sel: HashSet<Sel> = sess.sel.iter().copied().filter(|x| exists(x)).collect();
+    let order: Vec<Sel> = sess.order.iter().copied().filter(|x| exists(x)).collect();
+    let s = app.sketch.as_mut().unwrap();
+    s.chain = None;
+    s.clicks.clear();
+    s.dim_pending.clear();
+    s.dim_edit = None;
+    s.drag = None;
+    s.typed = None;
+    s.conflicts.clear();
+    s.sel = sel;
+    s.order = order;
+}
+
 // ---------------------------------------------------------------- toolbar
 
 pub fn toolbar(app: &mut App, ui: &mut Ui) {
@@ -1155,6 +1180,11 @@ fn open_dim_edit(app: &mut App, i: usize) {
 
 // ---------------------------------------------------------------- creation
 
+/// Curves (other than lines) that a point can be constrained onto.
+fn holds_points(g: &Geom) -> bool {
+    matches!(g, Geom::Circle { .. } | Geom::Arc { .. } | Geom::Ellipse { .. } | Geom::EllipticalArc { .. })
+}
+
 /// Use an existing point when snapped to one, else create one (adding an
 /// on-curve or origin constraint for curve/origin snaps).
 fn point_at(app: &mut App, p: DVec2, snp: Option<Snap>) -> Id {
@@ -1163,11 +1193,12 @@ fn point_at(app: &mut App, p: DVec2, snp: Option<Snap>) -> Id {
         Some(Snap::Curve(c)) => {
             let sk = app.sk_mut();
             let id = sk.add_point(p);
-            let k = match sk.curve(c).map(|x| &x.geom) {
-                Some(Geom::Line { .. }) => Constraint::PointOnLine { p: id, l: c },
-                _ => Constraint::PointOnCircle { p: id, c },
-            };
-            sk.constraints.push(k);
+            // splines and outlines can't hold a point: it is only placed there
+            match sk.curve(c).map(|x| &x.geom) {
+                Some(Geom::Line { .. }) => sk.constraints.push(Constraint::PointOnLine { p: id, l: c }),
+                Some(g) if holds_points(g) => sk.constraints.push(Constraint::PointOnCircle { p: id, c }),
+                _ => {}
+            }
             id
         }
         Some(Snap::Origin) => {
@@ -1305,12 +1336,7 @@ fn commit_typed(app: &mut App, text: &str) {
             app.after_sketch_edit();
         }
         Tool::Rect | Tool::CenterRect => {
-            let parts: Vec<&str> = text.split(|c| c == ',' || c == 'x' || c == '×' || c == '*').filter(|s| !s.trim().is_empty()).collect();
-            let (wt, ht) = match parts.as_slice() {
-                [w] => (*w, *w),
-                [w, h, ..] => (*w, *h),
-                _ => return,
-            };
+            let Some((wt, ht)) = split_size(text) else { return };
             let (Ok(w), Ok(h)) = (eval(wt), eval(ht)) else {
                 app.flash(format!("\"{text}\" is not a size (type width, height)"), ToastKind::Error);
                 return;
@@ -1352,6 +1378,44 @@ fn commit_typed(app: &mut App, text: &str) {
             app.after_sketch_edit();
         }
         _ => {}
+    }
+}
+
+/// A typed rectangle size, "width, height" (or "w x h", "w × h", "w*h"), or one value for a square.
+/// Only separators outside parentheses count, and an `x` only when it isn't part of a name, so
+/// expressions such as `max(10, w)` or a variable `box_w` stay whole.
+fn split_size(text: &str) -> Option<(&str, &str)> {
+    let cs: Vec<(usize, char)> = text.char_indices().collect();
+    let name = |c: char| c.is_alphanumeric() || c == '_';
+    let find = |sep: &dyn Fn(usize, char) -> bool| -> Option<usize> {
+        let mut depth = 0i32;
+        for (k, &(_, c)) in cs.iter().enumerate() {
+            match c {
+                '(' => depth += 1,
+                ')' => depth -= 1,
+                _ if depth == 0 && sep(k, c) => return Some(k),
+                _ => {}
+            }
+        }
+        None
+    };
+    let lone_x = |k: usize, c: char| {
+        let before = k.checked_sub(1).map(|j| cs[j].1);
+        let after = cs.get(k + 1).map(|x| x.1);
+        c == 'x' && before.is_some_and(|b| !name(b) || b.is_ascii_digit()) && after.is_some_and(|a| !name(a) || a.is_ascii_digit())
+    };
+    let k = find(&|_, c| c == ',' || c == '×').or_else(|| find(&lone_x)).or_else(|| find(&|_, c| c == '*'));
+    let (w, h) = match k {
+        Some(k) => {
+            let at = cs[k].0;
+            (&text[..at], &text[at + cs[k].1.len_utf8()..])
+        }
+        None => (text, text),
+    };
+    match (w.trim(), h.trim()) {
+        ("", "") => None,
+        ("", x) | (x, "") => Some((x, x)),
+        (w, h) => Some((w, h)),
     }
 }
 
@@ -1462,7 +1526,7 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
             match tool {
                 Tool::Arc => make_center_arc(app, pts[0], pts[1], pts[2], s1, s2, snp, construction),
                 Tool::Arc3 => make_arc3(app, pts[0], pts[1], pts[2], s1, s2, construction),
-                _ => make_slot(app, pts[0], pts[1], pts[2], construction),
+                _ => make_slot(app, pts[0], pts[1], pts[2], s1, s2, construction),
             }
             app.after_sketch_edit();
         }
@@ -1695,16 +1759,20 @@ fn circumcenter(a: DVec2, b: DVec2, c: DVec2) -> Option<DVec2> {
     Some(DVec2::new((a2 * (b.y - c.y) + b2 * (c.y - a.y) + c2 * (a.y - b.y)) / d, (a2 * (c.x - b.x) + b2 * (a.x - c.x) + c2 * (b.x - a.x)) / d))
 }
 
-fn make_slot(app: &mut App, c1: DVec2, c2: DVec2, w: DVec2, construction: bool) {
+fn make_slot(app: &mut App, c1: DVec2, c2: DVec2, w: DVec2, s1: Option<Snap>, s2: Option<Snap>, construction: bool) {
     let d = c2 - c1;
     if d.length() < 1e-9 {
         return;
     }
     let n = d.perp().normalize();
     let r = ((w - c1).dot(n)).abs().max(1e-3);
+    // the end centres join whatever the clicks snapped to
+    let a = point_at(app, c1, s1);
+    let b = point_at(app, c2, s2);
+    if a == b {
+        return;
+    }
     let sk = app.sk_mut();
-    let a = sk.add_point(c1);
-    let b = sk.add_point(c2);
     let p1 = sk.add_point(c1 + n * r);
     let p2 = sk.add_point(c2 + n * r);
     let p3 = sk.add_point(c2 - n * r);
@@ -2038,13 +2106,18 @@ fn fillet_corner(app: &mut App, pid: Id, r: f64) -> Result<(), String> {
     if lines.len() != 2 {
         return Err("A sketch fillet needs a corner where exactly two lines meet".into());
     }
+    // the corner point goes away: nothing else may be built on it (an arc's centre or end, a circle's centre)
+    if sk.curves.iter().any(|c| !matches!(c.geom, Geom::Line { .. }) && Sketch::curve_points(&c.geom).contains(&pid)) || sk.texts.iter().any(|t| t.anchor == pid) {
+        return Err("Other curves use that corner point, so it can't be rounded off".into());
+    }
     let p = sk.pv(pid);
     let (l1, o1) = lines[0];
     let (l2, o2) = lines[1];
     let u = (sk.pv(o1) - p).normalize();
     let v = (sk.pv(o2) - p).normalize();
     let half = u.angle_to(v).abs() / 2.0;
-    if half < 1e-3 || (std::f64::consts::FRAC_PI_2 - half).abs() > std::f64::consts::FRAC_PI_2 - 1e-3 {
+    // folded back onto each other, or running straight on: no corner to round
+    if half < 1e-3 || (std::f64::consts::FRAC_PI_2 - half).abs() < 1e-3 {
         return Err("Those lines are parallel".into());
     }
     let t = r / half.tan();
@@ -2071,7 +2144,8 @@ fn fillet_corner(app: &mut App, pid: Id, r: f64) -> Result<(), String> {
             }
         }
     }
-    sk.constraints.retain(|k| !k.refs().contains(&pid));
+    // shortened lines: their length and midpoint constraints no longer apply (as in trim)
+    sk.constraints.retain(|k| !k.refs().contains(&pid) && !matches!(k, Constraint::Length { l, .. } | Constraint::Midpoint { l, .. } if *l == l1 || *l == l2));
     sk.points.retain(|x| x.id != pid);
     let ccw = (q1 - c).perp_dot(q2 - c) > 0.0;
     let arc = if ccw { sk.add_curve(Geom::Arc { c: cid, a: n1, b: n2 }, false) } else { sk.add_curve(Geom::Arc { c: cid, a: n2, b: n1 }, false) };
@@ -2332,6 +2406,17 @@ fn offset_curves(sk: &Sketch, ids: &[Id], side: DVec2, d: f64, label: &str) -> R
         }
         // corner arcs around the original corners, tangent to the lines they join
         let is_line = |i: usize| matches!(new[i], OffEl::Line { .. });
+        // joints that were smooth (an arc and a line or arc meeting tangentially) stay smooth
+        for k in 0..corners {
+            let j = (k + 1) % n;
+            if shared[k].is_some() && !(is_line(k) && is_line(j)) {
+                let v = sk.pv(joints[k]);
+                let (t1, t2) = (els[k].tangent(v), els[j].tangent(v));
+                if t1.perp_dot(t2).abs() < 1e-6 && t1.dot(t2) > 0.0 {
+                    out.constraints.push(Constraint::Tangent { a: curve_ids[k], b: curve_ids[j], inner: false });
+                }
+            }
+        }
         let mut linked: Vec<usize> = (0..n).collect();
         fn root(l: &mut [usize], i: usize) -> usize {
             if l[i] != i {
@@ -2684,7 +2769,9 @@ pub fn constrain(app: &mut App, kind: &str) {
     let pts: Vec<Id> = sel.iter().filter_map(|s| if let Sel::Point(p) = s { Some(*p) } else { None }).collect();
     let curves: Vec<&Curve> = sel.iter().filter_map(|s| if let Sel::Curve(c) = s { sk.curve(*c) } else { None }).collect();
     let lines: Vec<Id> = curves.iter().filter(|c| matches!(c.geom, Geom::Line { .. })).map(|c| c.id).collect();
-    let circles: Vec<Id> = curves.iter().filter(|c| !matches!(c.geom, Geom::Line { .. })).map(|c| c.id).collect();
+    // only circles and arcs: the solver has no tangency, equality or centre for ellipses, splines or outlines
+    let circles: Vec<Id> = curves.iter().filter(|c| matches!(c.geom, Geom::Circle { .. } | Geom::Arc { .. })).map(|c| c.id).collect();
+    let others = curves.iter().filter(|c| !matches!(c.geom, Geom::Line { .. } | Geom::Circle { .. } | Geom::Arc { .. })).count();
     let n = pts.len() + curves.len();
     let (label, help) = CONSTRAINTS.iter().find(|c| c.0 == kind).map(|c| (c.1, c.3)).unwrap_or(("", ""));
     let err = format!("{label} needs {help}.");
@@ -2698,7 +2785,8 @@ pub fn constrain(app: &mut App, kind: &str) {
                 let c = curves[0];
                 let k = match c.geom {
                     Geom::Line { .. } => Constraint::PointOnLine { p: pts[0], l: c.id },
-                    _ => Constraint::PointOnCircle { p: pts[0], c: c.id },
+                    ref g if holds_points(g) => Constraint::PointOnCircle { p: pts[0], c: c.id },
+                    _ => return app.flash("A point can't be held on a spline or outline", ToastKind::Error),
                 };
                 return coincide_on_curve(app, pts[0], c.id, k);
             } else {
@@ -2734,7 +2822,7 @@ pub fn constrain(app: &mut App, kind: &str) {
             }
         }
         "tangent" => {
-            if curves.len() == 2 && n == 2 && !circles.is_empty() {
+            if curves.len() == 2 && n == 2 && !circles.is_empty() && others == 0 {
                 let (a, b) = (curves[0].id, curves[1].id);
                 let inner = if circles.len() == 2 {
                     let r = |id: Id| -> (DVec2, f64) {
@@ -2775,9 +2863,11 @@ pub fn constrain(app: &mut App, kind: &str) {
             }
         }
         "concentric" => {
-            if circles.len() == 2 && n == 2 {
+            // circles, arcs and ellipses have a centre point (outlines and splines have none)
+            let centred: Vec<Id> = curves.iter().filter(|c| holds_points(&c.geom)).map(|c| c.id).collect();
+            if centred.len() == 2 && n == 2 {
                 let c = |id: Id| Sketch::curve_points(&sk.curve(id).unwrap().geom)[0];
-                merges.push((c(circles[1]), c(circles[0])));
+                merges.push((c(centred[1]), c(centred[0])));
             } else {
                 return app.flash(err, ToastKind::Error);
             }
@@ -2816,11 +2906,15 @@ pub fn constrain(app: &mut App, kind: &str) {
     for (from, to) in merges {
         sk.merge_point(from, to);
     }
+    let first = sk.constraints.len();
     sk.constraints.extend(add);
     app.sketch.as_mut().unwrap().sel.clear();
     app.after_sketch_edit();
-    if let Some(e) = app.sketch.as_ref().unwrap().status.error.clone() {
+    let st = &app.sketch.as_ref().unwrap().status;
+    if let Some(e) = st.error.clone() {
         app.flash(e, ToastKind::Error);
+    } else if st.unsupported.iter().any(|i| *i >= first) {
+        app.flash(format!("{label} can't be applied to that geometry"), ToastKind::Error);
     }
 }
 
@@ -2996,7 +3090,18 @@ fn build_dimension(app: &App, pending: &[Sel], at: DVec2) -> Option<Constraint> 
         }
         [Sel::Curve(c1), Sel::Curve(c2)] if circular(c1) && circular(c2) => {
             let (a, b) = (center(c1), center(c2));
-            linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
+            // concentric: the gap between them, measured from the smaller one out
+            if a == b || (sk.pv(b) - sk.pv(a)).length() < 1e-9 {
+                let radius = |id: Id| sk.measure(&Constraint::Radius { c: id, dim: mk(String::new()) }).unwrap_or(0.0);
+                let (ra, rb) = (radius(c1), radius(c2));
+                if (rb - ra).abs() < 1e-9 {
+                    return None;
+                }
+                let (a, b, gap) = if ra < rb { (c1, c2, rb - ra) } else { (c2, c1, ra - rb) };
+                Constraint::RadialDistance { a, b, dim: mk(fmt_len(gap)) }
+            } else {
+                    linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
+            }
         }
         _ => return None,
     };
@@ -3136,7 +3241,7 @@ fn dim_anchor(sk: &Sketch, c: &Constraint) -> Option<DVec2> {
                 _ => Some(pp),
             }
         }
-        Radius { c, .. } | Diameter { c, .. } => center(*c),
+        Radius { c, .. } | Diameter { c, .. } | RadialDistance { a: c, .. } => center(*c),
         Angle { a, b, .. } => {
             let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) else {
                 return None;
@@ -3550,6 +3655,20 @@ fn draw_dim(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, rect: e
             arrow_line(painter, ts(start), ts(rim), stroke);
             painter.line_segment([ts(rim), lp], stroke);
         }
+        RadialDistance { a, b, .. } => {
+            let r = |id: Id| sk.measure(&Radius { c: id, dim: d.clone() }).unwrap_or(0.0);
+            let (ctr, ra, rb) = (anchor, r(*a), r(*b));
+            // along the label's direction, from the inner circle out to the outer one
+            let w = DVec2::from(d.offset);
+            let dir = w.normalize_or(DVec2::X);
+            let (p, q) = (ctr + dir * ra, ctr + dir * rb);
+            arrow_line(painter, ts(p), ts(q), stroke);
+            // a label off the arrow gets a leader from the nearer rim
+            let t = w.length();
+            if t > rb || t < ra {
+                painter.line_segment([ts(if t > rb { q } else { p }), lp], stroke);
+            }
+        }
         Angle { a, b, .. } => {
             if let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) {
                 let u1 = (sk.pv(*q) - sk.pv(*p)).normalize();
@@ -3795,6 +3914,8 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                 let new = text.trim().to_string();
                 if new != old {
                     let was_ok = app.sketch.as_ref().unwrap().status.error.is_none();
+                    // a value that gets put back is no edit: it keeps the redo steps
+                    let redo = app.sketch.as_ref().unwrap().redo.clone();
                     app.sk_checkpoint();
                     if let Some(d) = app.sk_mut().constraints.get_mut(i).and_then(|c| c.dim_mut()) {
                         d.expr = new.clone();
@@ -3806,6 +3927,12 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                             Some(Constraint::Length { l, .. }) => sk.curve(*l).map(|c| Sketch::curve_points(&c.geom)).and_then(|p| p.first().copied()).into_iter().collect(),
                             Some(Constraint::Distance { a, .. }) | Some(Constraint::AxisDistance { a, .. }) => vec![*a],
                             Some(Constraint::PointLineDistance { p, .. }) => vec![*p],
+                            // the inner circle stays, the outer one grows
+                            Some(Constraint::RadialDistance { a, .. }) => {
+                                let mut h = vec![*a];
+                                h.extend(sk.curve(*a).map(|c| Sketch::curve_points(&c.geom)).unwrap_or_default());
+                                h
+                            }
                             _ => vec![],
                         }
                     };
@@ -3825,6 +3952,7 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                             d.expr = old;
                         }
                         app.sketch.as_mut().unwrap().undo.pop();
+                        app.sketch.as_mut().unwrap().redo = redo;
                         app.after_sketch_edit();
                         let msg = match describe_conflicts(app, &conflicts) {
                             Some(what) => format!("{new} can't be met: it conflicts with {what} (highlighted)"),
@@ -3844,6 +3972,20 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn typed_sizes_split_outside_names_and_brackets() {
+        assert_eq!(split_size("40, 20"), Some(("40", "20")));
+        assert_eq!(split_size("40x20"), Some(("40", "20")));
+        assert_eq!(split_size("40 mm x 20 mm"), Some(("40 mm", "20 mm")));
+        assert_eq!(split_size("40×20"), Some(("40", "20")));
+        assert_eq!(split_size("40*20"), Some(("40", "20")));
+        assert_eq!(split_size("25"), Some(("25", "25")));
+        assert_eq!(split_size("max(10, 20), 5"), Some(("max(10, 20)", "5")));
+        assert_eq!(split_size("box_w, 2*h"), Some(("box_w", "2*h")));
+        assert_eq!(split_size("box_w"), Some(("box_w", "box_w")));
+        assert_eq!(split_size("(w+2)x(h+2)"), Some(("(w+2)", "(h+2)")));
+    }
 
     #[test]
     fn label_position_picks_the_measured_direction() {
@@ -3909,6 +4051,42 @@ mod tests {
                 assert!((line_dist(&out, l[i], out.pv(p)) - 8.0).abs() < 1e-6);
             }
         }
+    }
+
+    /// Offsetting a slot: the new lines and arcs meet tangentially, and stay so when the copy is dragged.
+    #[test]
+    fn offset_slot_keeps_its_tangents() {
+        let mut sk = Sketch::default();
+        let (c1, c2, n) = (DVec2::ZERO, DVec2::new(20.0, 0.0), DVec2::new(0.0, 4.0));
+        let a = sk.add_point(c1);
+        let b = sk.add_point(c2);
+        let p: Vec<Id> = [c1 + n, c2 + n, c2 - n, c1 - n].iter().map(|v| sk.add_point(*v)).collect();
+        let l1 = sk.add_curve(Geom::Line { a: p[0], b: p[1] }, false);
+        let l2 = sk.add_curve(Geom::Line { a: p[2], b: p[3] }, false);
+        let a1 = sk.add_curve(Geom::Arc { c: b, a: p[2], b: p[1] }, false);
+        let a2 = sk.add_curve(Geom::Arc { c: a, a: p[0], b: p[3] }, false);
+        for (l, ar) in [(l1, a1), (l1, a2), (l2, a1), (l2, a2)] {
+            sk.constraints.push(Constraint::Tangent { a: l, b: ar, inner: false });
+        }
+        for q in [a, b] {
+            let v = sk.pv(q);
+            sk.constraints.push(Constraint::Fix { p: q, x: v.x, y: v.y });
+        }
+        sk.constraints.push(Constraint::Equal { a: a1, b: a2 });
+        sk.constraints.push(Constraint::Radius { c: a1, dim: Dim::new("4", [0.0; 2]) });
+        let before = sk.constraints.len();
+        let mut out = offset_curves(&sk, &[l1, a1, l2, a2], DVec2::new(10.0, 20.0), 2.0, "2").unwrap();
+        let tangents = out.constraints[before..].iter().filter(|k| matches!(k, Constraint::Tangent { .. })).count();
+        assert_eq!(tangents, 4);
+        let st = env_solve(&mut out);
+        assert!(st.ok && st.dof == 0, "{st:?}");
+        // drag an end of the copy's straight side along it: the copy must not leave the arcs
+        let Some(Geom::Line { a: q, .. }) = out.curves.iter().rev().find(|c| matches!(c.geom, Geom::Line { .. })).map(|c| c.geom.clone()) else { panic!() };
+        let v = out.pv(q);
+        out.point_mut(q).unwrap().x = v.x + 3.0;
+        let vars = std::collections::HashMap::new();
+        assert!(out.solve(&Env { vars: &vars, units: crate::expr::Units::Mm }, &[q]).ok);
+        assert!((out.pv(q) - v).length() < 1e-6, "{} {v}", out.pv(q));
     }
 
     #[test]

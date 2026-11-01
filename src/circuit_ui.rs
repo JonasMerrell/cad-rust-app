@@ -170,19 +170,22 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
 fn si_edit(ui: &mut Ui, id: &str, v: &mut f64, unit: &str, auto: Option<&str>) {
     let key = ui.make_persistent_id(id);
     let shown = if auto.is_some() && *v == 0.0 { String::new() } else { si(*v, unit).replace(' ', "") };
-    let mut text: String = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or(shown);
+    let mut text: String = ui.data_mut(|d| d.get_temp::<String>(key)).unwrap_or_else(|| shown.clone());
     let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(90.0).hint_text(auto.unwrap_or("")));
     if r.has_focus() {
         ui.data_mut(|d| d.insert_temp(key, text.clone()));
     } else {
         ui.data_mut(|d| d.remove::<String>(key));
     }
-    if r.lost_focus() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter))) {
+    // only an edit changes the value: the shown text is rounded to three digits
+    if (r.lost_focus() || (r.has_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter)))) && text != shown {
         if text.trim().is_empty() && auto.is_some() {
             *v = 0.0;
         } else if let Some(x) = circuit::parse_si(&text) {
             *v = x;
         }
+        ui.data_mut(|d| d.remove::<String>(key));
+    } else if r.lost_focus() {
         ui.data_mut(|d| d.remove::<String>(key));
     }
 }
@@ -313,7 +316,9 @@ fn linkable_mates(app: &App) -> Vec<(usize, u64, String, bool, Option<[f64; 2]>)
     let mut v = vec![];
     for (ai, a) in app.ws.assemblies.iter().enumerate() {
         for m in a.mates.iter().filter(|m| matches!(m.kind, MateKind::Revolute | MateKind::Slider | MateKind::Cylindrical) && !m.suppressed) {
-            v.push((ai, m.id, format!("{} › {} ({})", a.name, m.name, m.kind.label().to_lowercase()), m.kind == MateKind::Slider, m.limits));
+            // a cylindrical mate's limits are its slide (mm); what links read on it is the angle
+            let limits = if m.kind == MateKind::Cylindrical { None } else { m.limits };
+            v.push((ai, m.id, format!("{} › {} ({})", a.name, m.name, m.kind.label().to_lowercase()), m.kind == MateKind::Slider, limits));
         }
     }
     v
@@ -805,6 +810,21 @@ fn value_now(out: &SimOut, s: &Sig, cursor: Option<f64>) -> f64 {
     }
 }
 
+/// A result for display at the plot cursor: the value (operating point, transient) or, for an
+/// AC sweep, the gain and phase at the cursor's frequency (else the first one).
+fn value_text(out: &SimOut, s: &Sig, cursor: Option<f64>) -> String {
+    if out.kind != Kind::Ac {
+        return sv(value_now(out, s, cursor), s.unit);
+    }
+    if out.x.is_empty() || s.re.is_empty() || s.im.len() != s.re.len() {
+        return String::new();
+    }
+    let f = cursor.unwrap_or(out.x[0]);
+    let k = out.x.partition_point(|x| *x < f).min(s.re.len() - 1);
+    let (re, im) = (s.re[k], s.im[k]);
+    format!("{:.1} dB ∠{:.0}° at {}", circuit::db(re, im), im.atan2(re).to_degrees(), si(out.x[k], "Hz"))
+}
+
 /// Where a net's value tag goes: by its first label, else its first pin.
 fn tag_spot(p: &Pcb, nl: &Netlist, net: &str) -> Option<P> {
     let ni = nl.by_name(net)?;
@@ -870,7 +890,7 @@ pub fn overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
             if let Some(at) = at {
                 painter.circle_stroke(xf.s(at), 7.0, Stroke::new(2.0, col));
                 if let Some(s) = out.and_then(|o| o.probe(q).map(|s| (o, s))) {
-                    tag(at, sv(value_now(s.0, &s.1, app.pcb.sim.cursor), "A"), col);
+                    tag(at, value_text(s.0, &s.1, app.pcb.sim.cursor), col);
                 }
             }
         }
@@ -882,7 +902,7 @@ pub fn overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         if let Some(q) = probe_at(p, nl, h, tol) {
             let mut text = q.clone();
             if let Some(s) = out.and_then(|o| o.probe(&q).map(|s| (o, s))) {
-                text = format!("{q} = {}", sv(value_now(s.0, &s.1, app.pcb.sim.cursor), s.1.unit));
+                text = format!("{q} = {}", value_text(s.0, &s.1, app.pcb.sim.cursor));
             }
             if let Some(i) = part_at(p, h).filter(|_| q.starts_with("I(")) {
                 let m = circuit::model(&p.parts[i], &p.sim).map(|m| circuit::describe(&m)).unwrap_or_else(|e| e);

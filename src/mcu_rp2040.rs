@@ -222,8 +222,13 @@ struct Slice {
     div: u32,
     cc: u32,
     top: u32,
-    /// The counter while stopped.
+    /// Where the counter stands in its period while it doesn't count by time (stopped, gated
+    /// off by its B input, or counting B's edges).
     ctr: u32,
+    /// Not counting by time: DIVMODE gated with B low, or counting B's edges.
+    held: bool,
+    /// B edges towards the next count, in sixteenths (the divider applies to the edges).
+    edges: u32,
     /// While running: the time (ps) the counter was last at 0 in its first period.
     origin: f64,
     next_wrap: f64,
@@ -238,8 +243,53 @@ impl Slice {
     fn len(&self) -> u64 {
         (self.top as u64 + 1) * if self.csr & 2 != 0 { 2 } else { 1 }
     }
-    fn on(&self) -> bool {
+    /// The slice is enabled.
+    fn en(&self) -> bool {
         self.csr & 1 != 0
+    }
+    /// Enabled and counting by time (from `origin`).
+    fn on(&self) -> bool {
+        self.en() && !self.held
+    }
+    /// DIVMODE: 0 free running, 1 gated by B, 2 B's rising edges, 3 B's falling edges.
+    fn divmode(&self) -> u32 {
+        (self.csr >> 4) & 3
+    }
+    /// The divider in sixteenths.
+    fn div16(&self) -> u32 {
+        let int = (self.div >> 4) & 0xff;
+        if int == 0 { 256 * 16 } else { int * 16 + (self.div & 15) }
+    }
+    /// Start or stop counting by time, keeping its place.
+    fn set_held(&mut self, held: bool, t: f64, period: f64) {
+        if held == self.held {
+            return;
+        }
+        if self.en() {
+            if held {
+                self.ctr = self.pos(t, period).0 as u32;
+            } else {
+                let c = self.ctr;
+                self.held = false;
+                self.set_origin(t, c, period);
+            }
+        }
+        self.held = held;
+    }
+    /// One count by an edge of B; true when it wraps.
+    fn count_edge(&mut self) -> bool {
+        self.edges += 16;
+        let d = self.div16();
+        let mut wrapped = false;
+        while self.edges >= d {
+            self.edges -= d;
+            let n = self.len();
+            let p = self.ctr as u64;
+            let next = if p + 1 >= n { 0 } else { p + 1 };
+            self.ctr = next as u32;
+            wrapped |= next == 0;
+        }
+        wrapped
     }
     /// Position in the period (ticks) at time t.
     fn pos(&self, t: f64, period: f64) -> (u64, f64) {
@@ -248,12 +298,9 @@ impl Slice {
         (k % self.len(), self.origin + (k - k % self.len()) as f64 * tick)
     }
     fn counter(&self, t: f64, period: f64) -> u32 {
-        if !self.on() {
-            return self.ctr;
-        }
-        let (p, _) = self.pos(t, period);
         let top = self.top as u64;
-        (if p <= top { p } else { 2 * top + 1 - p }) as u32
+        let p = if self.on() { self.pos(t, period).0 } else { self.ctr as u64 };
+        (if p <= top || p >= self.len() { p } else { 2 * top + 1 - p }) as u32
     }
     fn level(&self, ch: usize, t: f64, period: f64) -> bool {
         let cc = (self.cc >> (16 * ch)) & 0xffff;
@@ -354,7 +401,8 @@ impl Uart {
             let ones = (0..wlen).filter(|k| byte >> k & 1 != 0).count() as u32;
             let even = self.lcr & 4 != 0;
             let stick = self.lcr & 0x80 != 0;
-            v.push(if stick { !even } else { (ones % 2 == 1) != even });
+            // even parity: the bit makes the count of ones even (it is their XOR)
+            v.push(if stick { !even } else { (ones % 2 == 1) == even });
         }
         v.push(true);
         if self.lcr & 8 != 0 {
@@ -837,8 +885,10 @@ impl Chip {
                 l |= 1 << n;
             }
         }
-        let ch = l ^ self.level;
+        let old = self.level;
+        let ch = l ^ old;
         if ch != 0 {
+            self.pwm_inputs(old, l);
             for n in 0..NPIN {
                 if ch >> n & 1 != 0 {
                     let bit = if l >> n & 1 != 0 { 8 } else { 4 };
@@ -847,6 +897,36 @@ impl Chip {
             }
         }
         self.level = l;
+    }
+
+    /// The level of slice k's B input: any pin with the PWM function on that channel.
+    fn pwm_b(&self, k: usize, level: u32) -> bool {
+        (0..NPIN).any(|n| n & 1 == 1 && (n >> 1) & 7 == k && self.ctrl[n] & 0x1f == 4 && level >> n & 1 != 0)
+    }
+
+    /// Slices whose DIVMODE makes their B pin an input: gate them or count its edges.
+    fn pwm_inputs(&mut self, old: u32, new: u32) {
+        let (now, per) = (self.now as f64, self.period as f64);
+        for k in 0..8 {
+            if !self.pwm[k].en() || self.pwm[k].divmode() == 0 {
+                continue;
+            }
+            let (was, b) = (self.pwm_b(k, old), self.pwm_b(k, new));
+            if was == b {
+                continue;
+            }
+            let s = &mut self.pwm[k];
+            match s.divmode() {
+                1 => s.set_held(!b, now, per),
+                m => {
+                    if (m == 2) == b && s.count_edge() {
+                        self.pwm_intr |= 1 << k;
+                    }
+                }
+            }
+            self.dirty = true;
+            self.next_due = 0;
+        }
     }
 
     fn gpio_in(&self) -> u32 {
@@ -1548,7 +1628,7 @@ impl Chip {
             };
         }
         match off {
-            0xa0 => (0..8).map(|k| (self.pwm[k].on() as u32) << k).sum(),
+            0xa0 => (0..8).map(|k| (self.pwm[k].en() as u32) << k).sum(),
             0xa4 => self.pwm_intr,
             0xa8 => self.pwm_inte,
             0xac => self.pwm_intf,
@@ -1560,12 +1640,16 @@ impl Chip {
     fn set_enable(&mut self, k: usize, on: bool) {
         let (now, per) = (self.now as f64, self.period as f64);
         let s = &mut self.pwm[k];
-        if on && !s.on() {
+        if on && !s.en() {
             s.csr |= 1;
-            let c = s.ctr;
-            s.set_origin(now, c, per);
-        } else if !on && s.on() {
-            s.ctr = s.counter(now, per);
+            if !s.held {
+                let c = s.ctr;
+                s.set_origin(now, c, per);
+            }
+        } else if !on && s.en() {
+            if !s.held {
+                s.ctr = s.pos(now, per).0 as u32;
+            }
             s.csr &= !1;
         }
     }
@@ -1581,18 +1665,40 @@ impl Chip {
                 0 => {
                     let new = m(self.pwm[k].csr);
                     self.set_enable(k, new & 1 != 0);
+                    let b = self.pwm_b(k, self.level);
                     let s = &mut self.pwm[k];
-                    let c = s.counter(now, per);
-                    s.csr = (new & 0x3f & !1) | (s.csr & 1);
-                    // phase advance / retard: one count
-                    if new & 0x80 != 0 && s.on() {
-                        s.origin -= s.tick(per);
+                    let same_mode = (new ^ s.csr) & 2 == 0;
+                    // where it is in its period (which keeps a phase-correct count's direction),
+                    // or its count when the mode changes
+                    let mut c = match (s.on(), same_mode) {
+                        (true, true) => s.pos(now, per).0,
+                        (false, true) => s.ctr as u64,
+                        _ => s.counter(now, per) as u64,
+                    };
+                    if (new >> 4) & 3 != s.divmode() {
+                        s.edges = 0;
                     }
-                    if new & 0x40 != 0 && s.on() {
-                        s.origin += s.tick(per);
+                    s.csr = (new & 0x3f & !1) | (s.csr & 1);
+                    // gated by B, or counting its edges: not by time
+                    s.held = match s.divmode() {
+                        0 => false,
+                        1 => !b,
+                        _ => true,
+                    };
+                    if s.en() {
+                        // phase advance / retard: one count forward or held back by one
+                        let n = s.len();
+                        if new & 0x80 != 0 {
+                            c = (c + 1) % n;
+                        }
+                        if new & 0x40 != 0 {
+                            c = (c + n - 1) % n;
+                        }
                     }
                     if s.on() {
-                        s.set_origin(now, c, per);
+                        s.set_origin(now, c as u32, per);
+                    } else {
+                        s.ctr = c as u32;
                     }
                 }
                 4 => {
@@ -1625,7 +1731,7 @@ impl Chip {
         }
         match off {
             0xa0 => {
-                let cur: u32 = (0..8).map(|k| (self.pwm[k].on() as u32) << k).sum();
+                let cur: u32 = (0..8).map(|k| (self.pwm[k].en() as u32) << k).sum();
                 let new = m(cur);
                 for k in 0..8 {
                     self.set_enable(k, new >> k & 1 != 0);
@@ -2144,7 +2250,20 @@ impl Rp2040 {
                 if self.cpu[k].sleeping {
                     let lines = self.chip.lines(k);
                     if !self.cpu[k].would_wake(lines) {
-                        continue;
+                        // asleep while the other core runs: its clock, and so its SysTick, keeps
+                        // up with the chip (SysTick can be what wakes it)
+                        let now = self.chip.now;
+                        let per = self.chip.period;
+                        if self.t[k] + per <= now {
+                            let cycles = (now - self.t[k]) / per;
+                            let t1 = self.t[k] + cycles * per;
+                            let us = t1 / 1_000_000 - self.t[k] / 1_000_000;
+                            self.cpu[k].idle(cycles, us as u32);
+                            self.t[k] = t1;
+                        }
+                        if !self.cpu[k].would_wake(lines) {
+                            continue;
+                        }
                     }
                     self.t[k] = self.t[k].max(self.chip.now);
                 }
@@ -2330,6 +2449,95 @@ mod tests {
         assert!(!s.level(0, 251.0 * 8000.0, 8000.0));
         assert_eq!(s.next_edge(1.0, 8000.0), 250.0 * 8000.0);
         assert_eq!(s.next_edge(250.0 * 8000.0, 8000.0), 1000.0 * 8000.0);
+    }
+
+    #[test]
+    fn uart_parity_bits() {
+        // 8 data bits with parity: start, 8 data, parity, stop
+        let mut u = Uart { lcr: 0x60 | 2 | 4, ..Default::default() };
+        // even parity: one 1 in the data, so the parity bit is 1
+        assert_eq!(u.frame(0x01)[9], true);
+        assert_eq!(u.frame(0x03)[9], false);
+        // odd parity
+        u.lcr = 0x60 | 2;
+        assert_eq!(u.frame(0x01)[9], false);
+        assert_eq!(u.frame(0x03)[9], true);
+        // stick parity: EPS set sends 0
+        u.lcr = 0x60 | 2 | 4 | 0x80;
+        assert_eq!(u.frame(0x01)[9], false);
+    }
+
+    fn pwm_chip() -> Chip {
+        let mut c = Chip::new(&Firmware { flash: vec![0; 512], ..Default::default() });
+        c.pwm_write(0x10, 99, !0);
+        c
+    }
+
+    #[test]
+    fn pwm_phase_advance_and_retard() {
+        let mut c = pwm_chip();
+        let tick = c.period;
+        c.pwm_write(0, 1, !0);
+        c.now = 10 * tick + tick / 2;
+        assert_eq!(c.pwm_read(8), 10);
+        c.pwm_write(0, 1 | 0x80, !0);
+        assert_eq!(c.pwm_read(8), 11);
+        c.pwm_write(0, 1 | 0x40, !0);
+        c.pwm_write(0, 1 | 0x40, !0);
+        assert_eq!(c.pwm_read(8), 9);
+        // and it runs on from there
+        c.now += 5 * tick;
+        assert_eq!(c.pwm_read(8), 14);
+        // the bits don't stick
+        assert_eq!(c.pwm_read(0) & 0xc0, 0);
+    }
+
+    #[test]
+    fn pwm_counts_and_gates_on_its_b_input() {
+        let mut c = pwm_chip();
+        let tick = c.period;
+        // GP1 is slice 0's B input
+        c.ctrl[1] = 4;
+        c.ext = 1 << 1;
+        let set_b = |c: &mut Chip, hi: bool| {
+            c.ext_level = if hi { 1 << 1 } else { 0 };
+            c.update_levels();
+        };
+        // rising edges
+        c.pwm_write(0, 1 | 2 << 4, !0);
+        for _ in 0..3 {
+            c.now += 7 * tick;
+            set_b(&mut c, true);
+            c.now += 7 * tick;
+            set_b(&mut c, false);
+        }
+        assert_eq!(c.pwm_read(8), 3);
+        // falling edges count one more after the next high pulse
+        c.pwm_write(0, 1 | 3 << 4, !0);
+        set_b(&mut c, true);
+        assert_eq!(c.pwm_read(8), 3);
+        set_b(&mut c, false);
+        assert_eq!(c.pwm_read(8), 4);
+        // gated: counts by time only while B is high
+        c.pwm_write(8, 0, !0);
+        c.pwm_write(0, 1 | 1 << 4, !0);
+        c.now += 20 * tick;
+        assert_eq!(c.pwm_read(8), 0);
+        set_b(&mut c, true);
+        c.now += 30 * tick + tick / 2;
+        set_b(&mut c, false);
+        c.now += 20 * tick;
+        assert_eq!(c.pwm_read(8), 30);
+        // edges wrap at TOP and raise the wrap interrupt
+        c.pwm_write(0x10, 1, !0);
+        c.pwm_write(8, 0, !0);
+        c.pwm_write(0, 1 | 2 << 4, !0);
+        for _ in 0..2 {
+            set_b(&mut c, true);
+            set_b(&mut c, false);
+        }
+        assert_eq!(c.pwm_read(8), 0);
+        assert_eq!(c.pwm_read(0xa4) & 1, 1);
     }
 
     #[test]

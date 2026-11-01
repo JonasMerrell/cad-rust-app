@@ -847,8 +847,12 @@ pub struct Operation {
     /// 3D finishing: only where the surface slopes between these angles (degrees from horizontal).
     pub slope_min: f64,
     pub slope_max: f64,
-    /// Deburr: points (work coordinates) on the edges to chamfer; empty = every sharp edge.
+    /// Deburr: points (work coordinates) on the edges to chamfer; empty (with `edge_picks`) = every sharp edge.
     pub edges: Vec<[f64; 3]>,
+    /// Deburr: points picked on the edges in the view, in the part's own coordinates, so they stay on
+    /// the part when the stock, the work zero or the setup's orientation changes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_picks: Vec<[f64; 3]>,
     /// Deburr: edges sharper than this angle between faces, degrees.
     pub edge_angle: f64,
     /// Rest machining: only cut where the earlier operations (and setups) left material.
@@ -905,6 +909,7 @@ impl Default for Operation {
             slope_min: 0.0,
             slope_max: 90.0,
             edges: vec![],
+            edge_picks: vec![],
             edge_angle: 30.0,
             rest: false,
             ref_diameter: 0.0,
@@ -967,6 +972,10 @@ fn is_zero(v: &f64) -> bool {
     *v == 0.0
 }
 
+fn is_zero3(t: &[f64; 3]) -> bool {
+    t.iter().all(|v| *v == 0.0)
+}
+
 fn is_zero2(t: &[f64; 2]) -> bool {
     t[0] == 0.0 && t[1] == 0.0
 }
@@ -1021,11 +1030,15 @@ pub struct Machine {
     pub tool_changer: bool,
     /// Seconds to wait after starting the spindle before cutting (a VFD spindle needs a few to come up to speed).
     pub spin_up: f64,
+    /// The machine's own geometry for the simulation (a machine in ~/.config/cad-rust-app/machines, or a
+    /// path to a machine file); empty = none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub model: String,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0 }
+        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0, model: String::new() }
     }
 }
 
@@ -1137,9 +1150,12 @@ pub struct SoftJaws {
     /// jaws go to a Part Studio to export (STEP) rather than to a machining setup.
     pub printed: bool,
     /// 3D printed as one block instead of two jaws: it goes in between the vise jaws, sits on the vise bed and
-    /// is squeezed round the part (the gap is filled in).
+    /// is squeezed round the part. The gap is a slit down the middle, open at the ends with `flare` radius
+    /// rounds, that stops `web` above the bottom so the halves stay joined (0: two halves).
     #[serde(skip_serializing_if = "std::ops::Not::not")]
     pub one_piece: bool,
+    pub web: f64,
+    pub flare: f64,
     /// How the jaws bolt into the vise: screw holes, and the vise steel around them (None: plain blanks).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub mount: Option<JawMount>,
@@ -1230,7 +1246,7 @@ pub fn jaw_mount(name: &str) -> Option<(JawMount, f64, f64)> {
 
 impl Default for SoftJaws {
     fn default() -> Self {
-        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false, one_piece: false, mount: None }
+        SoftJaws { width: 150.0, thickness: 25.0, height: 40.0, grip: 6.0, gap: 4.0, clearance: 0.05, cutter: 6.0, material: "Aluminium".into(), printed: false, one_piece: false, web: 1.5, flare: 5.0, mount: None }
     }
 }
 
@@ -1251,7 +1267,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone() };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true
@@ -1303,6 +1319,10 @@ pub struct Cam {
     pub arcs: bool,
     /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
     pub fixtures: Vec<Fixture>,
+    /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
+    /// at the bottom of the stock or of the lowest fixture.
+    #[serde(skip_serializing_if = "is_zero3")]
+    pub on_table: [f64; 3],
     /// Hold the part in soft jaws shaped to it (they act as fixtures).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub soft_jaws: Option<SoftJaws>,
@@ -1340,6 +1360,7 @@ impl Default for Cam {
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
+            on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),
             probe: Probe::default(),
@@ -1440,6 +1461,14 @@ impl Cam {
         } else {
             t.rpm
         }
+    }
+
+    /// The cutting and plunge feeds a tool really runs at: scaled with its speed when the spindle caps it
+    /// (same chip load), then capped at the machine's top feed.
+    pub fn feeds(&self, t: &Tool) -> (f64, f64) {
+        let slow = if t.rpm > 0.0 { self.spindle_rpm(t) / t.rpm } else { 1.0 };
+        let cap = |f: f64| if self.machine.max_feed > 0.0 { f.min(self.machine.max_feed) } else { f };
+        (cap((t.feed * slow).max(1.0)), cap((t.plunge_feed * slow).max(1.0)))
     }
 
     /// The coolant an operation runs with: the operation's (when it asks for it), else the tool's, else the setup's.
@@ -1599,6 +1628,18 @@ pub fn new_setup(name: String, studio: usize, cams: &[Cam], saved: Option<Machin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feeds_follow_the_capped_spindle_and_the_top_feed() {
+        let mut c = Cam { max_rpm: 24000.0, ..Default::default() };
+        c.machine.max_feed = 0.0;
+        let t = Tool { rpm: 30000.0, feed: 2000.0, plunge_feed: 500.0, ..Default::default() };
+        assert_eq!(c.feeds(&t), (1600.0, 400.0));
+        c.machine.max_feed = 1500.0;
+        assert_eq!(c.feeds(&t), (1500.0, 400.0));
+        let slow = Tool { rpm: 10000.0, feed: 800.0, plunge_feed: 200.0, ..Default::default() };
+        assert_eq!(c.feeds(&slow), (800.0, 200.0));
+    }
 
     #[test]
     fn coolant_reads_old_files_and_follows_the_setup() {

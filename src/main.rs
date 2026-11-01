@@ -10,6 +10,8 @@ mod cam;
 mod cam_3d;
 mod cam_engrave;
 mod cam_jaws;
+mod cam_machine;
+mod cam_machine_ui;
 mod cam_sheet;
 mod cam_template;
 mod cam_tool_import;
@@ -147,6 +149,8 @@ fn main() -> eframe::Result {
             return Ok(());
         }
         Some("--kernel-worker") => {}
+        // (the machine importer reads STEP assemblies in a child process, see cam_machine::import_step)
+        Some("--step-parts") if args.len() == 4 => std::process::exit(cam_machine::step_parts_main(&args[2], &args[3])),
         // (-psn_… is what older macOS Finder passes)
         Some(a) if a.starts_with('-') && !a.starts_with("-psn") => {
             eprintln!("unknown option {a}\n\n{}", usage(&prog));

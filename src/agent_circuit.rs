@@ -345,7 +345,9 @@ impl Session {
             if !matches!(mate.kind, MateKind::Revolute | MateKind::Slider | MateKind::Cylindrical) {
                 return Err(format!("links[{k}]: {} is a {} mate; link to a revolute, slider or cylindrical mate", mate.name, mate.kind.label().to_lowercase()));
             }
-            let mut link = crate::circuit_mech::new_link(&x.reference, role, ai, mate.id, mate.kind == MateKind::Slider, mate.limits);
+            // a cylindrical mate's limits are travel (mm) but its sensors read its angle
+            let limits = if mate.kind == MateKind::Cylindrical { None } else { mate.limits };
+            let mut link = crate::circuit_mech::new_link(&x.reference, role, ai, mate.id, mate.kind == MateKind::Slider, limits);
             if let Some(r) = l.get("ratio").and_then(|v| v.as_f64()) {
                 if r <= 0.0 {
                     return Err(format!("links[{k}]: ratio must be positive"));

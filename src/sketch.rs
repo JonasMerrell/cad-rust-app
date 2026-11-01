@@ -188,6 +188,12 @@ pub enum Constraint {
         c: Id,
         dim: Dim,
     },
+    /// Gap between two concentric circles or arcs: the radius of `b` less the radius of `a`.
+    RadialDistance {
+        a: Id,
+        b: Id,
+        dim: Dim,
+    },
     /// Angle from line `a` to line `b` in degrees.
     Angle {
         a: Id,
@@ -213,6 +219,7 @@ impl Constraint {
             | Length { dim, .. }
             | Radius { dim, .. }
             | Diameter { dim, .. }
+            | RadialDistance { dim, .. }
             | Angle { dim, .. } => Some(dim),
             _ => None,
         }
@@ -227,6 +234,7 @@ impl Constraint {
             | Length { dim, .. }
             | Radius { dim, .. }
             | Diameter { dim, .. }
+            | RadialDistance { dim, .. }
             | Angle { dim, .. } => Some(dim),
             _ => None,
         }
@@ -255,6 +263,7 @@ impl Constraint {
             | Equal { a, b }
             | Distance { a, b, .. }
             | AxisDistance { a, b, .. }
+            | RadialDistance { a, b, .. }
             | Angle { a, b, .. } => vec![a, b],
         }
     }
@@ -345,6 +354,8 @@ pub struct SolveStatus {
     pub error: Option<String>,
     /// Constraint indices whose dimension expression failed.
     pub bad_dims: Vec<usize>,
+    /// Indices of other constraints the solver can't apply (e.g. tangent to a spline): they hold nothing.
+    pub unsupported: Vec<usize>,
 }
 
 impl Sketch {
@@ -468,6 +479,9 @@ impl Sketch {
                 _ => {}
             }
         }
+        for t in &mut self.texts {
+            sub(&mut t.anchor);
+        }
         self.points.retain(|p| p.id != from);
         // Drop constraints that became degenerate (e.g. distance between a point and itself).
         self.constraints.retain(|k| match k {
@@ -491,6 +505,13 @@ impl Sketch {
     /// Delete the given points/curves/constraints (by id / index) and anything depending on them.
     pub fn delete(&mut self, ids: &HashSet<Id>, constraint_idx: &HashSet<usize>) {
         let mut dead: HashSet<Id> = ids.clone();
+        // a text's outlines are regenerated from it: deleting one deletes the text (anchor and all outlines)
+        for t in &self.texts {
+            if t.curves.iter().any(|c| ids.contains(c)) {
+                dead.insert(t.anchor);
+                dead.extend(t.curves.iter().copied());
+            }
+        }
         for c in &self.curves {
             if Self::curve_points(&c.geom).iter().any(|p| dead.contains(p)) {
                 dead.insert(c.id);
@@ -508,6 +529,8 @@ impl Sketch {
             i += 1;
             keep
         });
+        let points: HashSet<Id> = self.points.iter().map(|p| p.id).collect();
+        self.texts.retain(|t| points.contains(&t.anchor));
     }
 
     // ---------------------------------------------------------------- solver
@@ -520,13 +543,17 @@ impl Sketch {
     /// Solve with the constraints at the indices in `skip` left out.
     fn solve_without(&mut self, env: &Env, hold: &[Id], skip: &[usize]) -> SolveStatus {
         let sys = System::build(self, env, skip);
-        let mut st = SolveStatus { bad_dims: sys.bad_dims.clone(), ..Default::default() };
+        let mut st = SolveStatus { bad_dims: sys.bad_dims.clone(), unsupported: sys.unsupported.clone(), ..Default::default() };
         let mut x = sys.x0.clone();
         let mut w = vec![1.0; x.len()];
         for h in hold {
             if let Some(&i) = sys.pidx.get(h) {
                 w[i] = 1e4;
                 w[i + 1] = 1e4;
+            }
+            // a held circle keeps its radius too
+            if let Some(&i) = sys.ridx.get(h) {
+                w[i] = 1e4;
             }
         }
         let mut ok = false;
@@ -623,6 +650,7 @@ impl Sketch {
             }
             Radius { c, .. } => radius(c)?,
             Diameter { c, .. } => 2.0 * radius(c)?,
+            RadialDistance { a, b, .. } => radius(b)? - radius(a)?,
             Angle { a, b, .. } => {
                 let ((p, q), (r, t)) = (line(a)?, line(b)?);
                 // the residual allows theta and theta + 180°: report the one in [0, 180)
@@ -717,18 +745,33 @@ enum Res {
         d: f64,
     },
     RadiusIs(RIdx, f64),
-    /// The radius to `p` (an end shared with line a-b) is perpendicular to the line.
-    PerpAt {
+    /// `p` on the full ellipse with centre `c`, major-axis end `a` and minor radius param `r`:
+    /// (elliptic radius - 1) scaled by the minor radius, about the distance off it near the curve.
+    PointEllipse {
         p: usize,
         c: usize,
         a: usize,
-        b: usize,
+        r: usize,
     },
-    /// `p` (an end two arcs share) lies on the line through both centres.
+    /// radius `b` - radius `a` = d (signed, so the inner circle stays inside)
+    RadiusGap(RIdx, RIdx, f64),
+    /// The line from `p` (an end it shares with an arc about `c`) to its other end `q` leaves
+    /// along the arc's tangent there: `side` times the radius turned a quarter counter-clockwise.
+    /// Fixing the side (rather than asking only that line and radius be perpendicular) keeps a
+    /// smooth joint from folding back into a cusp when the sketch is dragged or re-dimensioned.
+    PerpAt {
+        p: usize,
+        c: usize,
+        q: usize,
+        side: f64,
+    },
+    /// `p` (an end two arcs share) lies on the line through both centres, with the centres on
+    /// the same side of `p` (`side` 1) or on opposite sides (-1).
     CollinearAt {
         p: usize,
         c1: usize,
         c2: usize,
+        side: f64,
     },
     /// |dist(p, line a-b)| - |dist(q, line c-d)|
     EqualDist {
@@ -761,6 +804,7 @@ struct System {
     ridx: HashMap<Id, usize>,
     res: Vec<Res>,
     bad_dims: Vec<usize>,
+    unsupported: Vec<usize>,
 }
 
 fn p2(x: &[f64], i: usize) -> DVec2 {
@@ -828,15 +872,26 @@ impl Res {
                 out.push((dd.perp_dot(p2(x, p) - p2(x, a)) / l).abs() - d)
             }
             Res::RadiusIs(r, v) => out.push(rad(x, r) - v),
-            Res::PerpAt { p, c, a, b } => {
-                let u = (p2(x, p) - p2(x, c)).normalize_or_zero();
-                let v = (p2(x, b) - p2(x, a)).normalize_or_zero();
-                out.push(u.dot(v) * 10.0)
+            Res::PointEllipse { p, c, a, r } => {
+                let u = p2(x, a) - p2(x, c);
+                let big = u.length().max(1e-9);
+                let small = x[r].abs().max(1e-9);
+                let d = p2(x, p) - p2(x, c);
+                let (ex, ey) = (d.dot(u) / big, d.perp_dot(u) / big);
+                out.push(((ex / big).hypot(ey / small) - 1.0) * big.min(small))
             }
-            Res::CollinearAt { p, c1, c2 } => {
-                let u = (p2(x, p) - p2(x, c1)).normalize_or_zero();
-                let v = (p2(x, p) - p2(x, c2)).normalize_or_zero();
-                out.push(u.perp_dot(v) * 10.0)
+            Res::RadiusGap(a, b, d) => out.push(rad(x, b) - rad(x, a) - d),
+            // the angle off the wanted direction: zero on one branch only, unlike a dot product,
+            // and as steep as before (sin ≈ angle) near the solution
+            Res::PerpAt { p, c, q, side } => {
+                let t = (p2(x, p) - p2(x, c)).perp() * side;
+                let w = p2(x, q) - p2(x, p);
+                out.push(t.perp_dot(w).atan2(t.dot(w)) * 10.0)
+            }
+            Res::CollinearAt { p, c1, c2, side } => {
+                let u = p2(x, p) - p2(x, c1);
+                let v = (p2(x, p) - p2(x, c2)) * side;
+                out.push(u.perp_dot(v).atan2(u.dot(v)) * 10.0)
             }
             Res::EqualDist { p, a, b, q, c, d } => {
                 let dist = |p: usize, a: usize, b: usize| {
@@ -869,12 +924,13 @@ impl Res {
             Res::Parallel(a, b, c, d) | Res::Perp(a, b, c, d) | Res::Angle(a, b, c, d, _) | Res::EqualLen(a, b, c, d) => [pt(a), pt(b), pt(c), pt(d)].concat(),
             Res::LineCircleTangent { a, b, c, r: rr } => [pt(a).to_vec(), pt(b).to_vec(), pt(c).to_vec(), r(rr)].concat(),
             Res::CircleCircle { c1, r1, c2, r2, .. } => [pt(c1).to_vec(), r(r1), pt(c2).to_vec(), r(r2)].concat(),
-            Res::EqualR(a, b) => [r(a), r(b)].concat(),
+            Res::EqualR(a, b) | Res::RadiusGap(a, b, _) => [r(a), r(b)].concat(),
             Res::RadiusIs(rr, _) => r(rr),
+            Res::PointEllipse { p, c, a, r } => [pt(p).to_vec(), pt(c).to_vec(), pt(a).to_vec(), vec![r]].concat(),
             Res::Symmetric { p, q, a, b } => [pt(p), pt(q), pt(a), pt(b)].concat(),
             Res::EqualDist { p, a, b, q, c, d } => [pt(p), pt(a), pt(b), pt(q), pt(c), pt(d)].concat(),
-            Res::PerpAt { p, c, a, b } => [pt(p), pt(c), pt(a), pt(b)].concat(),
-            Res::CollinearAt { p, c1, c2 } => [pt(p), pt(c1), pt(c2)].concat(),
+            Res::PerpAt { p, c, q, .. } => [pt(p), pt(c), pt(q)].concat(),
+            Res::CollinearAt { p, c1, c2, .. } => [pt(p), pt(c1), pt(c2)].concat(),
         };
         v.sort_unstable();
         v.dedup();
@@ -900,22 +956,31 @@ impl System {
         }
         let mut res = vec![];
         let curve = |id: Id| s.curve(id).map(|c| c.geom.clone());
+        // (a curve naming a point that no longer exists builds nothing rather than panicking)
         let line = |id: Id| match curve(id) {
-            Some(Geom::Line { a, b }) => Some((pidx[&a], pidx[&b])),
+            Some(Geom::Line { a, b }) => Some((*pidx.get(&a)?, *pidx.get(&b)?)),
             _ => None,
         };
         let circ = |id: Id| match curve(id) {
-            Some(Geom::Circle { c, .. }) => Some((pidx[&c], RIdx::Param(ridx[&id]))),
-            Some(Geom::Arc { c, a, .. }) => Some((pidx[&c], RIdx::Pts(pidx[&c], pidx[&a]))),
+            Some(Geom::Circle { c, .. }) => Some((*pidx.get(&c)?, RIdx::Param(*ridx.get(&id)?))),
+            Some(Geom::Arc { c, a, .. }) => Some((*pidx.get(&c)?, RIdx::Pts(*pidx.get(&c)?, *pidx.get(&a)?))),
+            _ => None,
+        };
+        // ellipse (or elliptical arc): centre, end of the major axis, minor radius parameter
+        let ellipse = |id: Id| match curve(id) {
+            Some(Geom::Ellipse { c, a, .. }) | Some(Geom::EllipticalArc { c, a, .. }) => Some((*pidx.get(&c)?, *pidx.get(&a)?, *ridx.get(&id)?)),
             _ => None,
         };
         // arcs: implicit equal radius of both ends
         for c in &s.curves {
             if let Geom::Arc { c, a, b } = c.geom {
-                res.push(Res::PointCircle { p: pidx[&b], c: pidx[&c], r: RIdx::Pts(pidx[&c], pidx[&a]) });
+                if let (Some(&b), Some(&c), Some(&a)) = (pidx.get(&b), pidx.get(&c), pidx.get(&a)) {
+                    res.push(Res::PointCircle { p: b, c, r: RIdx::Pts(c, a) });
+                }
             }
         }
         let mut bad_dims = vec![];
+        let mut unsupported = vec![];
         for (ki, k) in s.constraints.iter().enumerate() {
             // reference dimensions only measure
             if skip.contains(&ki) || k.dim().map(|d| d.driven).unwrap_or(false) {
@@ -931,8 +996,12 @@ impl System {
                         vec![Res::PointLine { p: pi(*p)?, a, b }]
                     }
                     PointOnCircle { p, c } => {
-                        let (cc, r) = circ(*c)?;
-                        vec![Res::PointCircle { p: pi(*p)?, c: cc, r }]
+                        if let Some((cc, a, r)) = ellipse(*c) {
+                            vec![Res::PointEllipse { p: pi(*p)?, c: cc, a, r }]
+                        } else {
+                            let (cc, r) = circ(*c)?;
+                            vec![Res::PointCircle { p: pi(*p)?, c: cc, r }]
+                        }
                     }
                     Horizontal { l } => {
                         let (a, b) = line(*l)?;
@@ -969,9 +1038,37 @@ impl System {
                         let shared = ends(*a).into_iter().find(|p| ends(*b).contains(p));
                         let (ca, cb) = (centre(*a), centre(*b));
                         if let Some(p) = shared.filter(|_| ca.is_some() || cb.is_some()) {
-                            match (line(*a).or(line(*b)), ca, cb) {
-                                (Some((la, lb)), Some(c), None) | (Some((la, lb)), None, Some(c)) => vec![Res::PerpAt { p: pi(p)?, c: pi(c)?, a: la, b: lb }],
-                                (None, Some(c1), Some(c2)) => vec![Res::CollinearAt { p: pi(p)?, c1: pi(c1)?, c2: pi(c2)? }],
+                            // A joint is smooth unless it already is an exact cusp (a sketch saved that way keeps
+                            // it). The current geometry can't simply pick the nearer branch: a drag moves points
+                            // before solving, often far enough to tip a joint past the halfway mark.
+                            let side = |want: DVec2, have: DVec2, smooth: f64| {
+                                let cos = want.normalize_or_zero().dot(have.normalize_or_zero()) * smooth;
+                                if cos < -(1.0 - 1e-8) { -smooth } else { smooth }
+                            };
+                            // +1 where the arc ends at p (a counter-clockwise arc runs a -> b), else -1
+                            let ends_at = |id: Id| match curve(id) {
+                                Some(Geom::Arc { b: end, .. }) if end == p => 1.0,
+                                _ => -1.0,
+                            };
+                            let lines = [*a, *b].into_iter().find_map(|id| match curve(id) {
+                                Some(Geom::Line { a: la, b: lb }) => Some((la, lb)),
+                                _ => None,
+                            });
+                            match (lines, ca, cb) {
+                                (Some((la, lb)), Some(c), None) | (Some((la, lb)), None, Some(c)) => {
+                                    let q = if la == p { lb } else { la };
+                                    let arc = if ca.is_some() { *a } else { *b };
+                                    // leaving where the arc ends continues its way round; arriving where it starts too
+                                    let side = side((s.pv(p) - s.pv(c)).perp(), s.pv(q) - s.pv(p), ends_at(arc));
+                                    vec![Res::PerpAt { p: pi(p)?, c: pi(c)?, q: pi(q)?, side }]
+                                }
+                                (None, Some(c1), Some(c2)) => {
+                                    // arcs joined end to start curve the same way (centres on one side of p);
+                                    // end to end or start to start they make an S (centres either side)
+                                    let smooth = -ends_at(*a) * ends_at(*b);
+                                    let side = side(s.pv(p) - s.pv(c1), s.pv(p) - s.pv(c2), smooth);
+                                    vec![Res::CollinearAt { p: pi(p)?, c1: pi(c1)?, c2: pi(c2)?, side }]
+                                }
                                 _ => return None,
                             }
                         } else if let Some((la, lb)) = line(*a) {
@@ -1017,6 +1114,7 @@ impl System {
                     }
                     Radius { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)?)],
                     Diameter { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)? / 2.0)],
+                    RadialDistance { a, b, dim } => vec![Res::RadiusGap(circ(*a)?.1, circ(*b)?.1, val(dim, Kind::Length)?)],
                     Angle { a, b, dim } => {
                         let (p, q) = line(*a)?;
                         let (r, t) = line(*b)?;
@@ -1034,11 +1132,13 @@ impl System {
                 None => {
                     if k.dim().is_some() {
                         bad_dims.push(ki)
+                    } else {
+                        unsupported.push(ki)
                     }
                 }
             }
         }
-        System { x0, pidx, ridx, res, bad_dims }
+        System { x0, pidx, ridx, res, bad_dims, unsupported }
     }
 
     fn residuals(&self, x: &[f64]) -> Vec<f64> {
@@ -1406,6 +1506,39 @@ mod tests {
         assert!((d - r).abs() < 1e-6, "{d} {r}");
     }
 
+    #[test]
+    fn concentric_circles_take_a_radial_distance() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        // a circle and an arc sharing one centre (what Concentric leaves)
+        let c = s.add_point(DVec2::new(5.0, 5.0));
+        let inner = s.add_curve(Geom::Circle { c, r: 10.0 }, false);
+        let a = s.add_point(DVec2::new(19.0, 5.0));
+        let b = s.add_point(DVec2::new(5.0, 19.0));
+        let outer = s.add_curve(Geom::Arc { c, a, b }, false);
+        s.constraints.push(Constraint::Fix { p: c, x: 5.0, y: 5.0 });
+        s.constraints.push(Constraint::Diameter { c: inner, dim: Dim::new("20", [0.0; 2]) });
+        let k = Constraint::RadialDistance { a: inner, b: outer, dim: Dim::new("6", [0.0; 2]) };
+        assert!((s.measure(&k).unwrap() - 4.0).abs() < 1e-9);
+        s.constraints.push(k);
+        let st = s.solve(&env, &[]);
+        assert!(st.ok, "{st:?}");
+        assert!((s.measure(&s.constraints[2]).unwrap() - 6.0).abs() < 1e-6);
+        assert!(((s.pv(a) - s.pv(c)).length() - 16.0).abs() < 1e-6);
+        // only the arc's two end angles are left free
+        assert_eq!(st.dof, 2);
+        // held, the inner circle keeps its size while the gap changes
+        s.constraints.remove(1);
+        s.constraints[1].dim_mut().unwrap().expr = "8".into();
+        assert!(s.solve(&env, &[inner, c]).ok);
+        assert!((s.measure(&Constraint::Radius { c: inner, dim: Dim::new("", [0.0; 2]) }).unwrap() - 10.0).abs() < 1e-3);
+        assert!(((s.pv(a) - s.pv(c)).length() - 18.0).abs() < 1e-3);
+        // it saves under its own name
+        let json = serde_json::to_string(&s.constraints[1]).unwrap();
+        assert!(json.contains("radial_distance"), "{json}");
+    }
+
     /// A rectangle fixed at the origin with width and height dimensions: (sketch, lines).
     fn defined_rectangle() -> (Sketch, Vec<Id>) {
         let mut s = Sketch::default();
@@ -1517,6 +1650,84 @@ mod tests {
             s.constraints.push(Constraint::Tangent { a: l1, b: ci, inner: false });
             assert_eq!(s.solve(&env, &[]).dof, 7);
         }
+    }
+
+    #[test]
+    fn curve_on_a_missing_point_does_not_panic() {
+        // e.g. a line chain continued from a point an undo took away
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let b = s.add_point(DVec2::new(5.0, 0.0));
+        let l = s.add_curve(Geom::Line { a: 999, b }, false);
+        let c = s.add_point(DVec2::ZERO);
+        s.add_curve(Geom::Arc { c, a: 998, b }, false);
+        s.constraints.push(Constraint::Horizontal { l });
+        let st = s.solve(&env, &[]);
+        assert_eq!(st.unsupported, vec![0]);
+    }
+
+    #[test]
+    fn merging_a_text_anchor_keeps_the_text() {
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        let p = s.add_point(DVec2::new(1.0, 0.0));
+        s.texts.push(TextItem { anchor: a, text: "I".into(), height: 10.0, curves: vec![] });
+        s.refresh_texts();
+        s.merge_point(a, p);
+        s.refresh_texts();
+        assert_eq!(s.texts.len(), 1);
+        assert_eq!(s.texts[0].anchor, p);
+        assert!(!s.curves.is_empty());
+    }
+
+    #[test]
+    fn deleting_a_text_outline_deletes_the_text() {
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        s.texts.push(TextItem { anchor: a, text: "IL".into(), height: 10.0, curves: vec![] });
+        s.refresh_texts();
+        let one: HashSet<Id> = [s.texts[0].curves[0]].into();
+        s.delete(&one, &HashSet::new());
+        s.refresh_texts();
+        assert!(s.texts.is_empty() && s.curves.is_empty() && s.points.is_empty(), "{:?}", s.curves.len());
+    }
+
+    #[test]
+    fn point_on_ellipse_holds() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let c = s.add_point(DVec2::new(1.0, 2.0));
+        let a = s.add_point(DVec2::new(1.0, 12.0));
+        let e = s.add_curve(Geom::Ellipse { c, a, rmin: 4.0 }, false);
+        s.constraints.push(Constraint::Fix { p: c, x: 1.0, y: 2.0 });
+        s.constraints.push(Constraint::Fix { p: a, x: 1.0, y: 12.0 });
+        let p = s.add_point(DVec2::new(8.0, 3.0));
+        let before = s.solve(&env, &[]).dof;
+        s.constraints.push(Constraint::PointOnCircle { p, c: e });
+        let st = s.solve(&env, &[]);
+        assert!(st.ok && st.unsupported.is_empty(), "{st:?}");
+        assert_eq!(st.dof + 1, before);
+        // on the ellipse: major axis 10 along y, the (free) minor radius along x
+        let Some(Geom::Ellipse { rmin, .. }) = s.curve(e).map(|c| c.geom.clone()) else { panic!() };
+        let d = s.pv(p) - s.pv(c);
+        assert!(((d.y / 10.0).hypot(d.x / rmin) - 1.0).abs() < 1e-6, "{d} {rmin}");
+    }
+
+    #[test]
+    fn constraints_the_solver_cannot_apply_are_reported() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let pts: Vec<Id> = [(0.0, 0.0), (5.0, 3.0), (10.0, 0.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        let sp = s.add_curve(Geom::Spline { pts: pts.clone(), closed: false }, false);
+        let a = s.add_point(DVec2::new(0.0, 5.0));
+        let b = s.add_point(DVec2::new(10.0, 5.0));
+        let l = s.add_curve(Geom::Line { a, b }, false);
+        s.constraints.push(Constraint::Horizontal { l });
+        s.constraints.push(Constraint::Tangent { a: l, b: sp, inner: false });
+        assert_eq!(s.solve(&env, &[]).unsupported, vec![1]);
     }
 
     #[test]

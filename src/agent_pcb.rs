@@ -151,6 +151,8 @@ impl Session {
                     edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
+                let nl = p.netlist();
+                p.retag_copper(&nl);
                 self.ws.pcbs[pi] = p;
                 json!({"pcb": pi, "added": added})
             }
@@ -162,6 +164,8 @@ impl Session {
                     let pins: Vec<(usize, String)> = pins.as_array().ok_or_else(|| format!("{net}: a list of pins like \"R1.2\""))?.iter().map(|x| x.as_str().ok_or_else(|| format!("{net}: pins are strings like \"R1.2\"")).and_then(|s| pin_ref(&p, s))).collect::<R<_>>()?;
                     connect(&mut p, net, &pins);
                 }
+                let nl = p.netlist();
+                p.retag_copper(&nl);
                 self.ws.pcbs[pi] = p;
                 let nl = self.ws.pcbs[pi].netlist();
                 json!({"pcb": pi, "nets": nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", self.ws.pcbs[pi].parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>()})
@@ -235,6 +239,8 @@ impl Session {
                     Some("all") => placed = Some(crate::pcb_route::auto_place(&mut p, true)),
                     Some(o) => return Err(format!("auto_place is unplaced or all, not {o}")),
                 }
+                let nl = p.netlist();
+                p.retag_copper(&nl);
                 self.ws.pcbs[pi] = p;
                 let mut v = self.pcb_summary(pi);
                 if let Some(n) = placed {
@@ -288,6 +294,8 @@ impl Session {
                     let o = crate::pcb_route::autoroute(&mut p, a.get("net").and_then(|v| v.as_str()));
                     v = json!({"routed": o.routed, "tracks_added": o.tracks, "vias_added": o.vias, "failed": o.failed});
                 }
+                let nl = p.netlist();
+                p.retag_copper(&nl);
                 self.ws.pcbs[pi] = p;
                 let s = self.pcb_summary(pi);
                 for (k, x) in s.as_object().unwrap() {

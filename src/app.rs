@@ -384,6 +384,7 @@ impl App {
             if let Some(d) = s.undo.pop() {
                 s.redo.push(self.doc.clone());
                 self.doc = d;
+                crate::sketcher::after_undo(self);
                 self.after_sketch_edit();
                 return;
             }
@@ -418,6 +419,7 @@ impl App {
             if let Some(d) = s.redo.pop() {
                 s.undo.push(self.doc.clone());
                 self.doc = d;
+                crate::sketcher::after_undo(self);
                 self.after_sketch_edit();
                 return;
             }
@@ -655,6 +657,7 @@ impl App {
         self.dwg = Default::default();
         self.cam = Default::default();
         self.fea = Default::default();
+        self.pcb = Default::default();
         self.first_fit = true;
         self.session.fitted_asm.clear();
         self.tab = crate::workspace::Tab::Studio(0);
@@ -698,6 +701,8 @@ impl App {
             self.cam = Default::default();
             self.fea = Default::default();
             self.pcb = Default::default();
+        } else {
+            self.pcb.external_change();
         }
         self.picks.clear();
         if self.result.bodies.is_empty() {
@@ -769,6 +774,9 @@ impl App {
             self.dwg.dirty = true;
             self.cam.scene_dirty = true;
             self.fea.scene_dirty = true;
+        }
+        if let Tab::Pcb(i) = t {
+            self.pcb.enter_tab(i);
         }
         self.picks.clear();
         self.hover = None;
@@ -2539,8 +2547,8 @@ impl App {
                     start |= r.drag_started() || r.gained_focus();
                 });
             };
-            num(ui, "Side allowance", &mut pref.side, "Extra on each side of the width and length (each end of a bar), to clean up the sawn edges");
-            num(ui, "Face allowance", &mut pref.face, "Extra on each face of the thickness, to face it flat; 0 uses the plate as it comes");
+            num(ui, "Side allowance", &mut pref.side, "Extra on each side of the width and length (each end of a flat or square bar) and around a round bar, to clean up the sawn edges");
+            num(ui, "Face allowance", &mut pref.face, "Extra on each face of the thickness and each end of a round bar, to face it flat; 0 uses the plate as it comes");
             ui.horizontal(|ui| {
                 ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new("Own size").color(theme::muted()).size(12.0)));
                 let r = ui.add(egui::TextEdit::singleline(&mut pref.custom).hint_text("use the suggestion").desired_width(160.0))
@@ -3064,6 +3072,10 @@ impl App {
                                 let old = std::mem::replace(&mut self.ws.cams[i].name, text.clone());
                                 for c in self.ws.cams.iter_mut().filter(|c| c.follows == old) {
                                     c.follows = text.clone();
+                                }
+                                // and the tab that machines its soft jaws
+                                for c in self.ws.cams.iter_mut().filter(|c| c.jaws_of == old) {
+                                    c.jaws_of = text.clone();
                                 }
                             }
                             Tab::Sim(i) => self.ws.sims[i].name = text,

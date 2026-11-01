@@ -95,9 +95,20 @@ impl SimSetup {
 
 // ---------------------------------------------------------------- numbers
 
-/// A number with an SI prefix and an optional unit: 10k, 4k7, 2.2uF, 100n, 1R5, 1meg, 5V, 1kHz.
-/// `m` is milli and `M` mega.
+/// A number with an SI prefix and an optional unit: 10k, 4k7, 2.2uF, 100n, 1R5, 3V3, 1meg, 5V,
+/// 1kHz, 10 k. `m` is milli and `M` mega. Text glued to the number that is not a unit
+/// (10kx, 5mm) is not a number; text after a space is ignored (100n 50V).
 pub fn parse_si(s: &str) -> Option<f64> {
+    parse_si_with(s, true)
+}
+
+/// `parse_si` that ignores whatever follows the number and its prefix (a potentiometer's
+/// "10KB" taper letter).
+pub fn parse_si_lenient(s: &str) -> Option<f64> {
+    parse_si_with(s, false)
+}
+
+fn parse_si_with(s: &str, strict: bool) -> Option<f64> {
     let s = s.trim();
     let b = s.as_bytes();
     let mut i = 0;
@@ -119,8 +130,18 @@ pub fn parse_si(s: &str) -> Option<f64> {
             i += 1;
         }
     }
-    let mut v: f64 = s[..i].parse().ok()?;
-    let rest = &s[i..];
+    let num = &s[..i];
+    let mut v: f64 = num.parse().ok()?;
+    // "10 k": a prefix may follow a space
+    let rest = {
+        let r = &s[i..];
+        let t = r.trim_start();
+        if t.len() < r.len() && !t.chars().next().is_some_and(|c| matches!(c, 'T' | 'G' | 'M' | 'k' | 'K' | 'm' | 'u' | 'µ' | 'μ' | 'n' | 'N' | 'p' | 'P' | 'f' | 'R' | 'r' | 'V')) {
+            // something else after the space: a separate word
+            return Some(v);
+        }
+        t
+    };
     let lower = rest.to_ascii_lowercase();
     let (mult, plen) = if lower.starts_with("meg") {
         (1e6, 3)
@@ -135,19 +156,34 @@ pub fn parse_si(s: &str) -> Option<f64> {
             Some('n') | Some('N') => (1e-9, 1),
             Some('p') | Some('P') => (1e-12, 1),
             Some('f') => (1e-15, 1),
-            Some('R') | Some('r') => (1.0, 1),
+            // 1R5 (ohms) and 3V3 (volts) mark the decimal point
+            Some('R') | Some('r') | Some('V') => (1.0, 1),
             _ => (1.0, 0),
         }
     };
     // 4k7 style: digits after the prefix are the decimals
-    let tail = &rest[plen..];
+    let mut tail = &rest[plen..];
     if plen > 0 {
         let d: String = tail.chars().take_while(|c| c.is_ascii_digit()).collect();
-        if !d.is_empty() && !s[..i].contains('.') {
-            v = format!("{}.{}", &s[..i], d).parse().ok()?;
+        if !d.is_empty() && !num.contains('.') && !num.contains(|c: char| c == 'e' || c == 'E') {
+            v = format!("{num}.{d}").parse().ok()?;
+            tail = &tail[d.len()..];
         }
     }
+    if strict && !unit_tail(tail) {
+        return None;
+    }
     Some(v * mult)
+}
+
+/// What may follow a number and its prefix: nothing, a unit (Ω, ohm, F, H, Hz, V, A, s, W),
+/// or something that is not a letter (a space, /, %).
+fn unit_tail(t: &str) -> bool {
+    if !t.chars().next().is_some_and(|c| c.is_alphabetic()) {
+        return true;
+    }
+    let l = t.to_lowercase();
+    ["ohms", "ohm", "ω", "hz", "f", "h", "v", "a", "s", "w"].iter().any(|u| l.starts_with(u) && !l[u.len()..].chars().next().is_some_and(|c| c.is_alphabetic()))
 }
 
 /// Leakage through the solver's tiny conductances (fA, fW) as 0, for display.
@@ -305,14 +341,25 @@ fn has(v: &str, keys: &[&str]) -> bool {
 pub(crate) fn diode_model(value: &str) -> (Diode, f64, f64, String) {
     let u = value.to_ascii_uppercase();
     let d = |is: f64, n: f64, bv: f64| Diode { is, n, bv, ibv: 1e-3 };
-    // zeners: BZX84C5V1, 1N4733A, "5V1 zener"
+    // zeners: BZX84C5V1, BZX84C12, 1N4733A, "5V1 zener"
     let zener_v = if let Some(k) = u.find("1N47") {
         u[k + 4..].chars().take(2).collect::<String>().parse::<usize>().ok().and_then(|n| {
-            const V: [f64; 25] = [3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1, 10.0, 11.0, 12.0, 13.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 27.0, 30.0, 33.0];
+            // 1N4728 (3.3 V) … 1N4764 (100 V)
+            const V: [f64; 37] = [
+                3.3, 3.6, 3.9, 4.3, 4.7, 5.1, 5.6, 6.2, 6.8, 7.5, 8.2, 9.1, 10.0, 11.0, 12.0, 13.0, 15.0, 16.0, 18.0, 20.0, 22.0, 24.0, 27.0, 30.0, 33.0, 36.0, 39.0, 43.0, 47.0, 51.0, 56.0, 62.0,
+                68.0, 75.0, 82.0, 91.0, 100.0,
+            ];
             n.checked_sub(28).and_then(|i| V.get(i).copied())
         })
     } else if has(&u, &["BZX", "BZT", "ZENER", "MMSZ", "ZMM"]) {
-        volts_in(u.split_once('C').map(|x| x.1).unwrap_or(&u)).or_else(|| volts_in(&u))
+        // the voltage follows the tolerance letter: C5V1, or C12 for whole volts
+        let after = u.split_once('C').map(|x| x.1);
+        let whole = |s: &str| {
+            let d: String = s.chars().take_while(|c| c.is_ascii_digit()).collect();
+            let next = s[d.len()..].chars().next();
+            d.parse::<f64>().ok().filter(|v| (1.0..=200.0).contains(v) && !next.is_some_and(|c| c.is_ascii_digit() || c == '.'))
+        };
+        after.and_then(volts_in).or_else(|| after.and_then(whole)).or_else(|| volts_in(&u))
     } else {
         None
     };
@@ -450,14 +497,7 @@ fn opamp_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
     if spec.is_none() && !generic {
         return None;
     }
-    let units = spec.map(|s| s.units).unwrap_or(match pins.len() {
-        5 => 1,
-        14 => 4,
-        _ => 2,
-    });
-    let (gbw, sr, hr, name) = spec.map(|s| (s.gbw, s.sr, s.hr, s.name.to_string())).unwrap_or((1e6, 1e6, [0.05, 0.05], "rail-to-rail op amp".into()));
-    let m = OpAmp { a0: 1e5, gbw, sr, hr_hi: hr[0], hr_lo: hr[1], ro: 50.0 };
-    let unit_roles = |k: usize| -> [Vec<String>; 3] {
+    let unit_roles = |k: usize, units: usize| -> [Vec<String>; 3] {
         let (n, l) = (k + 1, (b'A' + k as u8) as char);
         let mut out = vec![format!("OUT{n}"), format!("OUT{l}"), format!("{l}OUT"), format!("VOUT{l}"), format!("VOUT{n}")];
         let mut inn = vec![format!("-IN{n}"), format!("IN{n}-"), format!("-IN{l}"), format!("IN{l}-"), format!("{l}-"), format!("VIN{l}-"), format!("VIN{n}-")];
@@ -469,15 +509,33 @@ fn opamp_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
         }
         [out, inn, inp]
     };
+    let names: Vec<String> = part.pin_names.iter().map(|n| norm(n)).collect();
+    let find = |al: &[String]| names.iter().position(|n| al.iter().any(|a| a == n)).and_then(|k| pins.get(k).cloned());
+    let units = spec.map(|s| s.units).unwrap_or_else(|| {
+        // a generic op amp: as many units as its pin names give (OUTA, OUTB …), else by package
+        // (an 8-pin package is a single: OUT on 6, V+ on 7)
+        let named = (0..4)
+            .take_while(|&k| {
+                let [o, n, p] = unit_roles(k, 2);
+                find(&o).is_some() && find(&n).is_some() && find(&p).is_some()
+            })
+            .count();
+        match (named, pins.len()) {
+            (0, 14) => 4,
+            (0, 5 | 8) => 1,
+            (0, _) => 2,
+            (k, _) => k,
+        }
+    });
+    let (gbw, sr, hr, name) = spec.map(|s| (s.gbw, s.sr, s.hr, s.name.to_string())).unwrap_or((1e6, 1e6, [0.05, 0.05], "rail-to-rail op amp".into()));
+    let m = OpAmp { a0: 1e5, gbw, sr, hr_hi: hr[0], hr_lo: hr[1], ro: 50.0 };
     let supply: [&[&str]; 2] = [&["V+", "VCC", "VDD", "VS+", "+V", "VCC+"], &["V-", "VEE", "VSS", "GND", "VS-", "-V", "VCC-"]];
     // names first
     let mut by_name = None;
     if !part.pin_names.is_empty() {
-        let names: Vec<String> = part.pin_names.iter().map(|n| norm(n)).collect();
-        let find = |al: &[String]| names.iter().position(|n| al.iter().any(|a| a == n)).and_then(|k| pins.get(k).cloned());
         let mut us = vec![];
         for k in 0..units {
-            let [o, n, p] = unit_roles(k);
+            let [o, n, p] = unit_roles(k, units);
             match (find(&o), find(&n), find(&p)) {
                 (Some(o), Some(n), Some(p)) => us.push([p, n, o]),
                 _ => break,
@@ -509,6 +567,11 @@ fn opamp_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
 fn reg_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
     let u = part.value.to_ascii_uppercase();
     let after_dash = |s: &str| s.split_once('-').map(|x| x.1.to_string());
+    // the voltage at the start of an ordering code: 1.8 in AP2112K-1.8TRG1
+    let lead = |s: &str| -> Option<f64> {
+        let n: String = s.chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
+        n.trim_end_matches('.').parse().ok().filter(|v: &f64| *v > 0.0)
+    };
     // (vset, dropout, ground current, adjustable, default pins [in, ref, out], name)
     let spec: Option<(f64, f64, f64, bool, [&str; 3], String)> = if let Some(k) = u.find("78") {
         let rest: String = u[k + 2..].trim_start_matches(['L', 'M']).chars().take_while(|c| c.is_ascii_digit()).collect();
@@ -516,12 +579,12 @@ fn reg_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
     } else if u.contains("317") {
         Some((1.25, 2.0, -50e-6, true, ["3", "1", "2"], "LM317".into()))
     } else if u.contains("1117") {
-        match after_dash(&u).and_then(|s| volts_in(&s).or_else(|| s.parse().ok())) {
+        match after_dash(&u).and_then(|s| volts_in(&s).or_else(|| lead(&s))) {
             Some(v) => Some((v, 1.1, 5e-3, false, ["3", "1", "2"], format!("AMS1117-{v}"))),
             None => Some((1.25, 1.1, -60e-6, true, ["3", "1", "2"], "AMS1117-ADJ".into())),
         }
     } else if u.contains("AP2112") {
-        let v = after_dash(&u).and_then(|s| volts_in(&s).or_else(|| s.parse().ok())).unwrap_or(3.3);
+        let v = after_dash(&u).and_then(|s| volts_in(&s).or_else(|| lead(&s))).unwrap_or(3.3);
         Some((v, 0.25, 55e-6, false, ["1", "2", "5"], format!("AP2112-{v}")))
     } else if u.contains("MCP1700") {
         let v = after_dash(&u).and_then(|s| s.get(..2).and_then(|d| d.parse::<f64>().ok())).map(|d| d / 10.0).unwrap_or(3.3);
@@ -585,7 +648,7 @@ pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
             Model::Servo(crate::circuit_mech::servo_model(&part.value), [r[0].clone(), r[1].clone(), r[2].clone()])
         }
         "RV" => {
-            let r = parse_si(&part.value).unwrap_or(10e3);
+            let r = parse_si_lenient(&part.value).unwrap_or(10e3);
             if r <= 0.0 {
                 return Err(format!("{}: resistance must be positive", part.reference));
             }
@@ -724,6 +787,9 @@ pub struct Built {
     pub mech: Vec<crate::circuit_mech::MechSim>,
     /// Stepper driver modules.
     pub drivers: Vec<crate::circuit_mech::DriverSim>,
+    /// The schematic's resistors, capacitors and inductors (not the models' internal parts),
+    /// for the stop time.
+    pub timing: Vec<usize>,
 }
 
 /// A supply voltage guessed from a power net's name: +5V 5, 3V3 3.3, -12V -12, VCC/VDD 5.
@@ -750,18 +816,39 @@ fn ground_names(p: &Pcb) -> Vec<String> {
     g
 }
 
+/// Supply names that mean 0 V (CMOS VSS).
+const ZERO_VOLT: [&str; 2] = ["VSS", "0V"];
+
+/// The ground net (None: the schematic has none) and the other nets tied to it: every other
+/// ground port (GND and AGND), and VSS or 0V, unless a source of the setup drives them.
+fn grounds(p: &Pcb, nl: &crate::pcb::Netlist) -> (Option<String>, Vec<String>) {
+    let gnd = ground_names(p);
+    let is_gnd = |n: &str| gnd.iter().any(|g| g.eq_ignore_ascii_case(n));
+    let is_zero = |n: &str| ZERO_VOLT.iter().any(|z| z.eq_ignore_ascii_case(n));
+    let chosen = p.sim.ground.trim();
+    let main = if !chosen.is_empty() {
+        nl.by_name(chosen).map(|i| nl.nets[i].name.clone())
+    } else {
+        nl.nets.iter().find(|n| is_gnd(&n.name)).or_else(|| nl.nets.iter().find(|n| is_zero(&n.name))).map(|n| n.name.clone())
+    };
+    let Some(main) = main else { return (None, vec![]) };
+    // a ground chosen off the ground ports (measuring from another rail) ties nothing
+    if !is_gnd(&main) && !is_zero(&main) {
+        return (Some(main), vec![]);
+    }
+    let driven = |n: &str| p.sim.sources.iter().any(|s| s.plus.trim().eq_ignore_ascii_case(n) || s.minus.trim().eq_ignore_ascii_case(n));
+    let tied = nl.nets.iter().map(|n| n.name.clone()).filter(|n| *n != main && (is_gnd(n) || is_zero(n)) && !driven(n)).collect();
+    (Some(main), tied)
+}
+
 /// The DC supplies used when the setup names no sources: one per power net.
 pub fn default_sources(p: &Pcb) -> Vec<Source> {
     let nl = p.netlist();
-    let gnd = ground_names(p);
-    let ground = if p.sim.ground.is_empty() {
-        nl.nets.iter().find(|n| gnd.iter().any(|g| g.eq_ignore_ascii_case(&n.name))).map(|n| n.name.clone()).unwrap_or_default()
-    } else {
-        p.sim.ground.clone()
-    };
+    let (ground, tied) = grounds(p, &nl);
+    let ground = ground.unwrap_or_default();
     nl.nets
         .iter()
-        .filter(|n| n.power && !n.name.eq_ignore_ascii_case(&ground) && !gnd.iter().any(|g| g.eq_ignore_ascii_case(&n.name)))
+        .filter(|n| n.power && !n.name.eq_ignore_ascii_case(&ground) && !tied.contains(&n.name) && !ground_names(p).iter().any(|g| g.eq_ignore_ascii_case(&n.name)))
         .map(|n| Source { name: n.name.clone(), plus: n.name.clone(), minus: String::new(), wave: format!("{}", supply_guess(&n.name)), current: false, ac: 0.0 })
         .collect()
 }
@@ -769,30 +856,32 @@ pub fn default_sources(p: &Pcb) -> Vec<Source> {
 pub fn build(p: &Pcb) -> Result<Built, String> {
     let setup = &p.sim;
     let nl = p.netlist();
-    let gnd = ground_names(p);
-    let ground = if !setup.ground.trim().is_empty() {
-        let g = setup.ground.trim();
-        nl.by_name(g).map(|i| nl.nets[i].name.clone()).ok_or_else(|| format!("no net {g} for the ground"))?
-    } else {
-        nl.nets
-            .iter()
-            .find(|n| gnd.iter().any(|g| g.eq_ignore_ascii_case(&n.name)))
-            .map(|n| n.name.clone())
-            .ok_or("the schematic has no ground: add a ground port (G) or choose the ground net")?
+    let (ground, tied) = grounds(p, &nl);
+    let ground = match ground {
+        Some(g) => g,
+        None if !setup.ground.trim().is_empty() => return Err(format!("no net {} for the ground", setup.ground.trim())),
+        None => return Err("the schematic has no ground: add a ground port (G) or choose the ground net".into()),
     };
     let mut c = Circuit::new();
     let mut notes = vec![];
+    if !tied.is_empty() {
+        notes.push(format!("{} tied to the ground {ground} (give a net a source to drive it instead)", tied.join(", ")));
+    }
     let mut net_node = vec![0usize; nl.nets.len()];
     let mut nets = vec![];
     for (i, n) in nl.nets.iter().enumerate() {
         if n.name == ground {
             net_node[i] = 0;
+        } else if tied.contains(&n.name) {
+            net_node[i] = 0;
+            nets.push((n.name.clone(), 0));
         } else {
             net_node[i] = c.node(n.name.clone());
             nets.push((n.name.clone(), net_node[i]));
         }
     }
     let mut parts = vec![];
+    let mut timing = vec![];
     let mut mcus = vec![];
     let mut mech = vec![];
     let mut drivers = vec![];
@@ -849,18 +938,21 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
         match &m {
             Model::R(r) => {
                 if let Some((a, b)) = two(&pins) {
+                    timing.push(c.elems.len());
                     add(&mut c, &mut pins, Dev::R(1.0 / r), &[T::P(a), T::P(b)]);
                     main = Some(a);
                 }
             }
             Model::C(cap) => {
                 if let Some((a, b)) = two(&pins) {
+                    timing.push(c.elems.len());
                     add(&mut c, &mut pins, Dev::C(*cap), &[T::P(a), T::P(b)]);
                     main = Some(a);
                 }
             }
             Model::L(l) => {
                 if let Some((a, b)) = two(&pins) {
+                    timing.push(c.elems.len());
                     add(&mut c, &mut pins, Dev::L(*l, 1e-3), &[T::P(a), T::P(b)]);
                     main = Some(a);
                 }
@@ -1064,8 +1156,14 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
     let mut sources = vec![];
     for (k, s) in list.iter().enumerate() {
         let name = if s.name.is_empty() { format!("V{}", k + 1) } else { s.name.clone() };
+        if s.plus.trim().is_empty() {
+            return Err(format!("source {name}: choose the net on its + terminal"));
+        }
         let plus = node_of(&s.plus).map_err(|e| format!("source {name}: {e}"))?;
         let minus = node_of(&s.minus).map_err(|e| format!("source {name}: {e}"))?;
+        if plus == minus {
+            return Err(format!("source {name}: its + and − terminals are on the same net"));
+        }
         let w = Wave::parse(if s.wave.trim().is_empty() { "0" } else { &s.wave }).map_err(|e| format!("source {name}: {e}"))?;
         let dev = if s.current { Dev::I(w, s.ac) } else { Dev::V(w, s.ac) };
         let e = c.add(dev, &[plus, minus]);
@@ -1107,29 +1205,60 @@ pub fn build(p: &Pcb) -> Result<Built, String> {
             notes.push(format!("{} is linked to a mate but is not a motor, stepper, servo, potentiometer, switch or encoder", l.part));
         }
     }
-    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus, mech, drivers })
+    Ok(Built { c, parts, sources, sigs, ground, nets, notes, mcus, mech, drivers, timing })
 }
 
-/// A transient stop time from the circuit: five of its longest RC time constants, or periods.
+/// A transient stop time from the circuit: five of its longest time constants (RC, L/R, LC from
+/// the schematic's own resistors, capacitors and inductors, not the models' junction and
+/// compensation capacitances), or five source periods, or a step and then five time constants.
 pub fn auto_stop(b: &Built) -> f64 {
-    let mut rmax: f64 = 0.0;
-    let mut cmax: f64 = 0.0;
-    let mut per: f64 = 0.0;
-    for e in &b.c.elems {
-        match &e.dev {
-            Dev::R(g) if *g > 1e-9 => rmax = rmax.max(1.0 / g),
+    let (mut rmax, mut rmin, mut cmax, mut lmax) = (0.0f64, f64::INFINITY, 0.0f64, 0.0f64);
+    for &k in &b.timing {
+        match &b.c.elems[k].dev {
+            Dev::R(g) if *g > 1e-9 => {
+                rmax = rmax.max(1.0 / g);
+                rmin = rmin.min(1.0 / g);
+            }
             Dev::C(c) if *c < 1e-2 => cmax = cmax.max(*c),
-            Dev::V(w, _) | Dev::I(w, _) => match w {
-                Wave::Pulse { per: p, td, tr, pw, tf, .. } => per = per.max(if *p > 0.0 { *p } else { td + tr + pw.min(1e3) + tf }),
-                Wave::Sin { f, .. } if *f > 0.0 => per = per.max(1.0 / f),
-                Wave::Pwl(pts) => per = per.max(pts.last().map(|x| x.0).unwrap_or(0.0)),
-                _ => {}
-            },
+            Dev::L(l, _) if *l > 0.0 => lmax = lmax.max(*l),
             _ => {}
         }
     }
-    let tau = (rmax * cmax * 5.0).max(per * 5.0);
-    if tau > 0.0 { nice(tau.clamp(1e-9, 100.0)) } else { 1e-3 }
+    let mut tau = rmax * cmax;
+    if lmax > 0.0 {
+        if rmin.is_finite() {
+            tau = tau.max(lmax / rmin);
+        }
+        tau = tau.max(std::f64::consts::TAU * (lmax * cmax).sqrt());
+    }
+    // repeating waves and one-off pulses run five times over; a step (a pulse that stays on) is
+    // followed by five time constants
+    let mut per: f64 = 0.0;
+    let mut step: Option<f64> = None;
+    for e in &b.c.elems {
+        if let Dev::V(w, _) | Dev::I(w, _) = &e.dev {
+            match w {
+                Wave::Pulse { per: p, td, tr, pw, tf, .. } => {
+                    if *p > 0.0 {
+                        per = per.max(*p);
+                    } else if pw.is_finite() {
+                        per = per.max(td + tr + pw + tf);
+                    } else {
+                        step = Some(step.unwrap_or(0.0).max(td + tr));
+                    }
+                }
+                Wave::Sin { f, .. } if *f > 0.0 => per = per.max(1.0 / f),
+                Wave::Pwl(pts) => per = per.max(pts.last().map(|x| x.0).unwrap_or(0.0)),
+                _ => {}
+            }
+        }
+    }
+    let mut stop = (tau * 5.0).max(per * 5.0);
+    if let Some(step) = step {
+        // as long again after the step (at least 1 ms) when the circuit shows no time constant
+        stop = stop.max(step + if tau > 0.0 { tau * 5.0 } else { step.max(1e-3) });
+    }
+    if stop > 0.0 { nice(stop.clamp(1e-9, 100.0)) } else { 1e-3 }
 }
 
 /// Round up to 1, 2 or 5 × 10ⁿ.
@@ -1138,9 +1267,9 @@ pub fn nice(v: f64) -> f64 {
     let m = v / 10f64.powf(e);
     let n = if m <= 1.0 + 1e-9 {
         1.0
-    } else if m <= 2.0 {
+    } else if m <= 2.0 + 1e-9 {
         2.0
-    } else if m <= 5.0 {
+    } else if m <= 5.0 + 1e-9 {
         5.0
     } else {
         10.0
@@ -1689,4 +1818,140 @@ mod tests {
         assert!((st.f_high.unwrap() - fc).abs() / fc < 0.01, "{:?}", st.f_high);
         assert!(st.start_db.abs() < 0.01);
     }
+
+    #[test]
+    fn values_parse_units_and_spaces() {
+        let close = |a: Option<f64>, b: f64| a.is_some_and(|a| (a - b).abs() <= b.abs() * 1e-9);
+        assert!(close(parse_si("3V3"), 3.3));
+        assert!(close(parse_si("5V"), 5.0));
+        assert!(close(parse_si("5V0"), 5.0));
+        assert!(close(parse_si("10 k"), 1e4));
+        assert!(close(parse_si("100 nF"), 1e-7));
+        assert!(close(parse_si("4.7 kΩ"), 4700.0));
+        assert!(close(parse_si("4.7kΩ"), 4700.0));
+        assert!(close(parse_si("1kHz"), 1e3));
+        assert!(close(parse_si("1MHz"), 1e6));
+        assert!(close(parse_si("500µs"), 500e-6));
+        assert!(close(parse_si("100mA"), 0.1));
+        assert!(close(parse_si("1megohm"), 1e6));
+        assert!(close(parse_si("100n 50V"), 1e-7));
+        assert!(close(parse_si("10uF/25V"), 1e-5));
+        assert!(close(parse_si("4u7F"), 4.7e-6));
+        assert!(close(parse_si("1F"), 1.0));
+        assert!(close(parse_si("1e3"), 1e3));
+        assert!(close(parse_si(" 5"), 5.0));
+        assert!(parse_si("10kx").is_none());
+        assert!(parse_si("5mm").is_none());
+        assert!(parse_si("10KB").is_none());
+        assert!(close(parse_si_lenient("10KB"), 1e4));
+        assert_eq!(Wave::parse("3V3").unwrap(), Wave::Dc(3.3));
+    }
+
+    #[test]
+    fn zeners_by_part_number() {
+        assert_eq!(diode_model("BZX84C12").0.bv, 12.0);
+        assert_eq!(diode_model("BZT52C15-7-F").0.bv, 15.0);
+        assert_eq!(diode_model("BZX84C5V1").0.bv, 5.1);
+        assert_eq!(diode_model("1N4733A").0.bv, 5.1);
+        assert_eq!(diode_model("1N4760A").0.bv, 68.0);
+        assert_eq!(diode_model("1N4764").0.bv, 100.0);
+        assert_eq!(diode_model("1N4148").0.bv, 100.0);
+        assert_eq!(diode_model("1N4148").3, "1N4148");
+    }
+
+    #[test]
+    fn regulator_voltage_from_ordering_code_and_generic_opamp_pins() {
+        let mut p = Pcb::new("t");
+        p.add_part("U", Some("SOT-23-5"), Some("AP2112K-1.8TRG1"), [0.0, 0.0]).unwrap();
+        p.add_part("U", Some("SOT-223"), Some("AMS1117-5.0"), [30.0, 0.0]).unwrap();
+        p.add_part("U", Some("SOIC-8"), Some("OPAMP"), [60.0, 0.0]).unwrap();
+        let vset = |k: usize| match model(&p.parts[k], &p.sim) {
+            Ok(Model::Reg(r, _, _)) => r.vset,
+            m => panic!("{m:?}"),
+        };
+        assert_eq!(vset(0), 1.8);
+        assert_eq!(vset(1), 5.0);
+        // a generic op amp in an 8-pin package is a single: in+ 3, in− 2, out 6, V+ 7, V− 4
+        match model(&p.parts[2], &p.sim) {
+            Ok(Model::OpAmp(_, us, sup, _)) => {
+                assert_eq!(us, vec![["3".to_string(), "2".into(), "6".into()]]);
+                assert_eq!(sup, ["7".to_string(), "4".into()]);
+            }
+            m => panic!("{m:?}"),
+        }
+    }
+
+    fn rc_step(wave: &str) -> Pcb {
+        let mut p = Pcb::new("t");
+        p.add_part("R", None, Some("1k"), [0.0, 0.0]).unwrap();
+        p.add_part("C", None, Some("1u"), [30.0, 0.0]).unwrap();
+        crate::agent::pcb_connect(&mut p, "IN", &[(0, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "OUT", &[(0, "2".into()), (1, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "GND", &[(1, "2".into())]);
+        p.sim.sources = vec![Source { name: "VIN".into(), plus: "IN".into(), wave: wave.into(), ..Default::default() }];
+        p
+    }
+
+    #[test]
+    fn auto_stop_from_the_schematic() {
+        // a step at 1 ms into 1 ms of RC: the step and five time constants (was 100 s)
+        assert_eq!(auto_stop(&build(&rc_step("PULSE(0 5 1m)")).unwrap()), 1e-2);
+        // a square wave: five periods
+        assert_eq!(auto_stop(&build(&rc_step("PULSE(0 5 0 1u 1u 1m 2m)")).unwrap()), 1e-2);
+        // L/R with a flyback diode: the diode's junction capacitance does not count (was 2 ns)
+        let mut p = Pcb::new("t");
+        p.add_part("R", None, Some("100"), [0.0, 0.0]).unwrap();
+        p.add_part("L", None, Some("10m"), [30.0, 0.0]).unwrap();
+        p.add_part("D", None, Some("1N4148"), [60.0, 0.0]).unwrap();
+        crate::agent::pcb_connect(&mut p, "+5V", &[(0, "1".into()), (2, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "SW", &[(0, "2".into()), (1, "1".into()), (2, "2".into())]);
+        crate::agent::pcb_connect(&mut p, "GND", &[(1, "2".into())]);
+        let b = build(&p).unwrap();
+        assert_eq!(auto_stop(&b), 5e-4);
+        // and the coil current reaches 50 mA
+        let out = run(&p, &Analysis { kind: Kind::Tran, ..Default::default() }).unwrap();
+        let i = out.probe("I(L1)").unwrap();
+        assert!((i.re.last().unwrap() - 0.05).abs() < 2e-3, "{:?}", i.re.last());
+    }
+
+    #[test]
+    fn every_ground_and_vss_are_tied() {
+        let mut p = Pcb::new("t");
+        p.add_part("R", None, Some("1k"), [0.0, 0.0]).unwrap();
+        p.add_part("R", None, Some("1k"), [30.0, 0.0]).unwrap();
+        p.add_part("R", None, Some("1k"), [60.0, 0.0]).unwrap();
+        crate::agent::pcb_connect(&mut p, "+5V", &[(0, "1".into()), (2, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "A", &[(0, "2".into()), (1, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "VSS", &[(1, "2".into())]);
+        crate::agent::pcb_connect(&mut p, "GND", &[(2, "2".into())]);
+        // VSS as a supply port (a CMOS 0 V rail), not a ground port
+        for l in &mut p.labels {
+            if l.text == "VSS" {
+                l.kind = LabelKind::Power;
+            }
+        }
+        assert_eq!(default_sources(&p).len(), 1);
+        let out = run(&p, &Analysis { kind: Kind::Op, ..Default::default() }).unwrap();
+        let a = out.nets.iter().find(|n| n.0 == "A").unwrap().1;
+        assert!((a - 2.5).abs() < 1e-6, "{a}");
+        assert_eq!(out.probe("VSS").unwrap().re[0], 0.0);
+        // a source on VSS drives it instead
+        p.sim.sources = vec![
+            Source { name: "V1".into(), plus: "+5V".into(), wave: "5".into(), ..Default::default() },
+            Source { name: "V2".into(), plus: "VSS".into(), wave: "-5".into(), ..Default::default() },
+        ];
+        let out = run(&p, &Analysis { kind: Kind::Op, ..Default::default() }).unwrap();
+        let a = out.nets.iter().find(|n| n.0 == "A").unwrap().1;
+        assert!(a.abs() < 1e-6, "{a}");
+    }
+
+    #[test]
+    fn a_source_needs_a_plus_net() {
+        let mut p = rc_step("5");
+        p.sim.sources[0].plus = String::new();
+        assert!(build(&p).err().unwrap().contains("+ terminal"));
+        p.sim.sources[0].plus = "GND".into();
+        assert!(build(&p).err().unwrap().contains("same net"));
+    }
+
 }

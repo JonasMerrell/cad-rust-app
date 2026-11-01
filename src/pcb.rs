@@ -660,7 +660,8 @@ impl Pcb {
                 }
             }
             for (j, m) in self.labels.iter().enumerate().skip(k + 1) {
-                if m.text == l.text {
+                // labels name nets by their trimmed text; blank ones join nothing
+                if !l.text.trim().is_empty() && m.text.trim() == l.text.trim() {
                     d.join(nw + np + k, nw + np + j);
                 }
             }
@@ -735,6 +736,49 @@ impl Pcb {
             }
         }
         v
+    }
+
+    /// Give copper whose net name the schematic no longer has (an unnamed net whose generated
+    /// name changed, a relabelled net) the name of the one net whose pads it touches. Copper that
+    /// touches no pad, or pads of several nets, keeps its name. Returns whether anything changed.
+    pub fn retag_copper(&mut self, nl: &Netlist) -> bool {
+        let known = |n: &str| n.is_empty() || nl.by_name(n).is_some();
+        let b = &self.board;
+        let mut stale: Vec<String> = b.tracks.iter().map(|t| &t.net).chain(b.vias.iter().map(|v| &v.net)).filter(|n| !known(n)).cloned().collect();
+        stale.sort();
+        stale.dedup();
+        if stale.is_empty() {
+            return false;
+        }
+        let pads = self.pads(nl);
+        let its = items(self, nl, &pads, &[]);
+        let mut map: HashMap<String, String> = HashMap::new();
+        for s in stale {
+            let mut nets: Vec<usize> = vec![];
+            for it in its.iter().filter(|it| it.net == s && matches!(it.kind, ItemKind::Track(_) | ItemKind::Via(_))) {
+                for pad in its.iter().filter(|x| matches!(x.kind, ItemKind::Pad(_))) {
+                    let ItemKind::Pad(pi) = pad.kind else { continue };
+                    if let Some(n) = pads[pi].net {
+                        if !nets.contains(&n) && it.shares_layer(pad) && it.cu.gap(&pad.cu) <= EPS {
+                            nets.push(n);
+                        }
+                    }
+                }
+            }
+            if let [n] = nets[..] {
+                map.insert(s, nl.nets[n].name.clone());
+            }
+        }
+        if map.is_empty() {
+            return false;
+        }
+        let b = &mut self.board;
+        for n in b.tracks.iter_mut().map(|t| &mut t.net).chain(b.vias.iter_mut().map(|v| &mut v.net)).chain(b.zones.iter_mut().map(|z| &mut z.net)) {
+            if let Some(m) = map.get(n.as_str()) {
+                *n = m.clone();
+            }
+        }
+        true
     }
 
     /// The width a new track on `net` gets.
@@ -1238,6 +1282,70 @@ pub(crate) mod tests {
         p.board.tracks.push(Track { a, b, width: 0.25, layer: Layer::Top, net: "VCC".into() });
         let issues = drc(&p, &nl, &pads, &[]);
         assert!(issues.iter().any(|i| i.message.starts_with("Short")), "{issues:?}");
+    }
+
+    #[test]
+    fn renamed_nets_keep_their_tracks() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let r2 = pads.iter().find(|x| x.part == 0 && x.num == "2").unwrap().at;
+        let da = pads.iter().find(|x| x.part == 1 && x.num == "2").unwrap().at;
+        // round the LED's other pad
+        let path = [r2, [r2[0], r2[1] + 2.0], [da[0], da[1] + 2.0], da];
+        for s in path.windows(2) {
+            p.board.tracks.push(Track { a: s[0], b: s[1], width: 0.25, layer: Layer::Top, net: "Net-(D1-2)".into() });
+        }
+        // renaming the LED changes the unnamed net's generated name
+        p.parts[1].reference = "D7".into();
+        let nl = p.netlist();
+        assert!(nl.by_name("Net-(D1-2)").is_none());
+        assert!(p.retag_copper(&nl));
+        assert!(p.board.tracks.iter().all(|t| t.net == "Net-(D7-2)"));
+        // and a relabelled supply carries its tracks and pours along
+        let vcc_pad = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap().at;
+        p.board.tracks.push(Track { a: vcc_pad, b: [vcc_pad[0], vcc_pad[1] - 3.0], width: 0.5, layer: Layer::Top, net: "VCC".into() });
+        p.board.zones.push(Zone { net: "VCC".into(), layer: Layer::Bottom, outline: p.board.outline.clone() });
+        for l in &mut p.labels {
+            if l.text == "VCC" {
+                l.text = "+5V".into();
+            }
+        }
+        let nl = p.netlist();
+        assert!(p.retag_copper(&nl));
+        assert_eq!(p.board.tracks[3].net, "+5V");
+        assert_eq!(p.board.zones[0].net, "+5V");
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.message.starts_with("Short") && (i.message.contains("VCC") || i.message.contains("+5V"))), "{issues:?}");
+    }
+
+    #[test]
+    fn labels_join_by_trimmed_text() {
+        let mut p = led_board();
+        for l in &mut p.labels {
+            if l.text == "VCC" && l.kind == LabelKind::Net {
+                l.text = "VCC ".into();
+            }
+        }
+        let nl = p.netlist();
+        assert_eq!(nl.nets.iter().filter(|n| n.name == "VCC").count(), 1);
+        assert_eq!(nl.nets[nl.by_name("VCC").unwrap()].pins.len(), 2);
+    }
+
+    #[test]
+    fn to92_pads_keep_the_clearance() {
+        let mut p = Pcb::new("q");
+        let q = p.add_part("Q_NPN", Some("TO-92"), None, [0.0, 0.0]).unwrap();
+        for (k, sp) in p.sch_pins().iter().enumerate() {
+            p.labels.push(Label { at: sp.at, text: format!("N{k}"), kind: LabelKind::Net, rot: 0 });
+        }
+        p.parts[q].at = [25.0, 20.0];
+        let nl = p.netlist();
+        assert_eq!(nl.nets.len(), 3);
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.is_empty(), "{issues:?}");
     }
 
     #[test]

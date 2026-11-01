@@ -26,6 +26,17 @@ pub fn clean_name(name: &str) -> String {
     if s.is_empty() { "Project".into() } else { s }
 }
 
+/// The folder typed for a new project: `~` is the home folder, and it must be a full path.
+pub fn expand_dir(typed: &str) -> Result<PathBuf, String> {
+    let t = typed.trim();
+    let home = || std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(PathBuf::from);
+    let p = match t.strip_prefix('~') {
+        Some(rest) if rest.is_empty() || rest.starts_with(['/', '\\']) => home().ok_or("no home folder")?.join(rest.trim_start_matches(['/', '\\'])),
+        _ => PathBuf::from(t),
+    };
+    if p.is_absolute() { Ok(p) } else { Err(format!("enter the folder's full path, like {}", default_dir().display())) }
+}
+
 /// `parent/name`, or `parent/name 2` and so on when that exists.
 fn free_dir(parent: &Path, name: &str) -> PathBuf {
     let mut dir = parent.join(name);
@@ -46,14 +57,40 @@ pub fn create(parent: &Path, name: &str) -> Result<PathBuf, String> {
     Ok(dir.join(format!("{file}.json")))
 }
 
-/// The project folder of a document: its git repository, or its folder when that is named after
-/// it (a project folder); None for a loose document in a shared folder.
+/// Whether the document's folder is named after it (a project folder).
+pub fn is_project_folder(doc: &Path) -> bool {
+    doc.parent().and_then(|d| d.file_name()).is_some_and(|n| Some(n) == doc.file_stem())
+}
+
+/// The project folder of a document: its folder when that is named after it (a project folder),
+/// else its git repository (unless that is the home folder or above, kept in git for settings);
+/// None for a loose document in a shared folder.
 pub fn folder_of(doc: &Path) -> Option<PathBuf> {
-    if let Some((root, _)) = crate::vcs::locate(doc) {
-        return Some(root);
+    if is_project_folder(doc) {
+        return doc.parent().map(Path::to_path_buf);
     }
-    let dir = doc.parent()?;
-    (dir.file_name().is_some() && dir.file_name() == doc.file_stem()).then(|| dir.to_path_buf())
+    let (root, _) = crate::vcs::locate(doc)?;
+    let home = std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).and_then(|h| std::fs::canonicalize(h).ok());
+    (!home.is_some_and(|h| h.starts_with(&root))).then_some(root)
+}
+
+/// Whether an archive path (inside the project) is git's own data that could run commands or
+/// point git elsewhere: a repository's config, its hooks, a `.git` file pointing to another
+/// folder. (`git~1` is the short name Windows can give `.git`.)
+fn unsafe_git_path(p: &Path, is_dir: bool) -> bool {
+    // as Windows reads names: no case, trailing dots and spaces dropped, ":stream" ignored
+    let names: Vec<String> = p.components().map(|c| c.as_os_str().to_string_lossy().split(':').next().unwrap_or_default().trim_end_matches(['.', ' ']).to_ascii_lowercase()).collect();
+    let Some(i) = names.iter().position(|n| n == ".git" || n == "git~1") else { return false };
+    let rest = &names[i + 1..];
+    if rest.is_empty() {
+        // `.git` as a file points git at another folder
+        return !is_dir;
+    }
+    // (a submodule's or worktree's own repository, under modules/ or worktrees/, has them too;
+    // elsewhere, under refs/ say, those are branch names)
+    let nested = matches!(rest[0].as_str(), "modules" | "worktrees");
+    let special = matches!(rest.last().map(String::as_str), Some("config" | "config.worktree" | "commondir" | "gitdir"));
+    rest[0] == "hooks" || (nested && rest.iter().any(|n| n == "hooks")) || (special && (rest.len() == 1 || nested))
 }
 
 // ------------------------------------------------------------ export
@@ -228,8 +265,10 @@ pub fn import(zip_path: &Path, parent: &Path) -> Result<PathBuf, String> {
         .ok_or("the ZIP has no rCAD document at its top level")?;
     let dir = free_dir(parent, &clean_name(&name));
     std::fs::create_dir_all(&dir).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    // the repository's own config is rebuilt below from its safe settings
+    let git_config = files.iter().find(|(p, d, _)| !d && *p == Path::new(".git").join("config")).map(|f| f.2.clone());
     for (p, is_dir, data) in &files {
-        if p.as_os_str().is_empty() {
+        if p.as_os_str().is_empty() || unsafe_git_path(p, *is_dir) {
             continue;
         }
         let out = dir.join(p);
@@ -247,6 +286,7 @@ pub fn import(zip_path: &Path, parent: &Path) -> Result<PathBuf, String> {
         for d in ["refs/heads", "refs/tags", "objects"] {
             let _ = std::fs::create_dir_all(dir.join(".git").join(d));
         }
+        crate::vcs::write_imported_config(&dir.join(".git"), git_config.as_deref())?;
     }
     Ok(dir.join(doc))
 }
@@ -285,6 +325,54 @@ mod tests {
         // a second import doesn't overwrite the first
         assert_eq!(import(&z, &into).unwrap(), into.join("Robot- arm 2").join("Robot- arm.json"));
         let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn imported_repository_keeps_no_commands() {
+        let base = std::env::temp_dir().join(format!("rcad-project-evil-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&base);
+        std::fs::create_dir_all(&base).unwrap();
+        let evil = b"[core]\n\trepositoryformatversion = 0\n\tfsmonitor = touch PWNED\n".to_vec();
+        let entries = vec![
+            ("Arm/".to_string(), vec![]),
+            ("Arm/Arm.json".to_string(), Workspace::default().to_json().into_bytes()),
+            ("Arm/.git/HEAD".to_string(), b"ref: refs/heads/main\n".to_vec()),
+            ("Arm/.git/config".to_string(), evil.clone()),
+            ("Arm/.git/hooks/post-commit".to_string(), b"#!/bin/sh\ntouch PWNED\n".to_vec()),
+            ("Arm/.git/refs/heads/config".to_string(), b"0000000000000000000000000000000000000000\n".to_vec()),
+            ("Arm/sub/.git".to_string(), b"gitdir: ../evil\n".to_vec()),
+            ("Arm/evil/config".to_string(), evil),
+        ];
+        let z = base.join("in.zip");
+        std::fs::write(&z, zip(&entries).unwrap()).unwrap();
+        let got = import(&z, &base.join("out")).unwrap();
+        let dir = got.parent().unwrap();
+        assert!(!dir.join(".git/hooks/post-commit").exists());
+        assert!(!dir.join("sub/.git").exists());
+        // a branch named "config" is a branch, and a project file named config is a project file
+        assert!(dir.join(".git/refs/heads/config").exists() && dir.join("evil/config").exists());
+        if crate::vcs::version().is_some() {
+            let cfg = std::fs::read_to_string(dir.join(".git/config")).unwrap();
+            assert!(!cfg.contains("PWNED"), "{cfg}");
+        }
+        let _ = std::fs::remove_dir_all(&base);
+    }
+
+    #[test]
+    fn git_internals_that_run_commands() {
+        let u = |p: &str, d: bool| unsafe_git_path(Path::new(p), d);
+        assert!(u(".git/config", false) && u(".GIT./Config", false) && u("git~1/config", false));
+        assert!(u(".git/hooks/pre-commit", false) && u(".git/commondir", false) && u("a/.git", false));
+        assert!(u(".git/modules/lib/config", false) && u(".git/modules/lib/hooks/x", false));
+        assert!(!u(".git", true) && !u(".git/HEAD", false) && !u(".git/refs/heads/config", false) && !u("cam/config", false));
+    }
+
+    #[test]
+    fn new_project_folders() {
+        let home = PathBuf::from(std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).unwrap());
+        assert_eq!(expand_dir("~/CAD").unwrap(), home.join("CAD"));
+        assert_eq!(expand_dir(" ~ ").unwrap(), home);
+        assert!(expand_dir("CAD").is_err());
     }
 
     #[test]

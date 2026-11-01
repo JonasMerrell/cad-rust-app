@@ -37,6 +37,6 @@
   {"tool": "cam_soft_jaws", "args": {"cam": 1, "printed": false, "mount": "gen3_insert_bar", "height": 25, "gap": 36}},
   {"tool": "render_cam", "args": {"cam": 1, "view": "iso", "path": "soft-jaws-bars.png"}},
   {"tool": "simulate_cam", "args": {"cam": 1, "path": "soft-jaws-bars-sim.png"}},
-  {"tool": "cam_soft_jaws", "args": {"cam": 1, "printed": true, "one_piece": true, "height": 30, "export_step": "soft-jaws-block.step"}},
+  {"tool": "cam_soft_jaws", "args": {"cam": 1, "printed": true, "one_piece": true, "gap": 1, "width": 95.5, "thickness": 25, "height": 30, "export_step": "soft-jaws-block.step"}},
   {"tool": "save_document", "args": {"path": "soft-jaws.json"}}
 ]

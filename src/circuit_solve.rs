@@ -417,20 +417,52 @@ impl Neg for Cx {
 
 trait Num: Copy + Default + Add<Output = Self> + Sub<Output = Self> + Mul<Output = Self> + Div<Output = Self> {
     fn mag(self) -> f64;
+    fn times(self, k: f64) -> Self;
 }
 impl Num for f64 {
     fn mag(self) -> f64 {
         self.abs()
+    }
+    fn times(self, k: f64) -> Self {
+        self * k
     }
 }
 impl Num for Cx {
     fn mag(self) -> f64 {
         self.re.abs() + self.im.abs()
     }
+    fn times(self, k: f64) -> Self {
+        Cx::new(self.re * k, self.im * k)
+    }
 }
 
 /// Solve a·x = b in place (b becomes x) by LU with partial pivoting; false when singular.
+///
+/// The pivot test is relative to the largest entry, so a row held only by gmin (a pin on no net)
+/// looks singular next to a stiff element (an inductor's L/dt, a large ωL). When that happens the
+/// system is solved again with every row scaled to a largest entry of 1, which leaves the
+/// solution unchanged and judges each row on its own scale.
 fn lu_solve<T: Num>(n: usize, a: &mut [T], b: &mut [T]) -> bool {
+    let (a0, b0) = (a.to_vec(), b.to_vec());
+    if lu_raw(n, a, b) {
+        return true;
+    }
+    a.copy_from_slice(&a0);
+    b.copy_from_slice(&b0);
+    for r in 0..n {
+        let m = a[r * n..(r + 1) * n].iter().map(|v| v.mag()).fold(0.0, f64::max);
+        if m > 0.0 {
+            let k = 1.0 / m;
+            for v in &mut a[r * n..(r + 1) * n] {
+                *v = v.times(k);
+            }
+            b[r] = b[r].times(k);
+        }
+    }
+    lu_raw(n, a, b)
+}
+
+fn lu_raw<T: Num>(n: usize, a: &mut [T], b: &mut [T]) -> bool {
     let scale = a.iter().map(|v| v.mag()).fold(0.0, f64::max).max(1e-300);
     for k in 0..n {
         let mut p = k;
@@ -1578,5 +1610,40 @@ mod tests {
         let x = Sim::new(&c).op().unwrap();
         // saturation: 0.05 A → 5 V across the resistor
         assert!((x[d - 1] - 5.0).abs() < 0.05, "{}", x[d - 1]);
+    }
+
+    /// A pin on no net is a node held only by gmin: next to a stiff inductor it must not make
+    /// the system look singular.
+    #[test]
+    fn stiff_inductor_beside_an_unconnected_pin() {
+        let mut c = Circuit::new();
+        let a = c.node("a");
+        let b = c.node("b");
+        let _nc = c.node("U1.4");
+        c.add(Dev::V(Wave::Dc(5.0), 1.0), &[a, 0]);
+        c.add(Dev::R(1.0 / 100.0), &[a, b]);
+        c.add(Dev::L(0.1, 1e-3), &[b, 0]);
+        let tr = Sim::new(&c).tran(10e-3, 0.0, false).unwrap();
+        // L/R = 1 ms: after one time constant 63 % of 50 mA, at the end all of it
+        let k = tr.t.iter().position(|t| *t >= 1e-3).unwrap();
+        let i = tr.x[k][4];
+        assert!((i - 0.0316).abs() < 0.002, "{i} at {}", tr.t[k]);
+        assert!((tr.x.last().unwrap()[4] - 0.05).abs() < 1e-3);
+        // and an AC sweep with a 1 H inductor up to 1 MHz (ωL above 10⁶)
+        let mut c2 = c.clone();
+        c2.elems[2].dev = Dev::L(1.0, 1e-3);
+        let mut s = Sim::new(&c2);
+        let op = s.op().unwrap();
+        let (xs, _) = s.ac(&op, &[1e6]).unwrap();
+        assert!((xs[0][1].abs() - 1.0).abs() < 1e-3, "{}", xs[0][1].abs());
+    }
+
+    #[test]
+    fn row_scaling_keeps_the_solution() {
+        // the retry path on its own: a gmin row next to a 1e9 entry
+        let mut a = vec![1e9, 0.0, 0.0, 1e-12];
+        let mut b = vec![2e9, 3e-12];
+        assert!(lu_solve(2, &mut a, &mut b));
+        assert!((b[0] - 2.0).abs() < 1e-12 && (b[1] - 3.0).abs() < 1e-9, "{b:?}");
     }
 }

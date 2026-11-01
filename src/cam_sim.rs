@@ -22,6 +22,10 @@ pub enum EventKind {
     Gouge,
     /// The tool or its holder ran into a fixture (clamp, vise jaw).
     Fixture,
+    /// The machine (head, spindle, table, column) ran into itself, the work, a fixture, or the tool into it.
+    Machine,
+    /// An axis went past its travel.
+    Travel,
 }
 
 impl EventKind {
@@ -32,6 +36,8 @@ impl EventKind {
             EventKind::Holder => "holder hits the stock",
             EventKind::Gouge => "cuts into the part",
             EventKind::Fixture => "hits a fixture",
+            EventKind::Machine => "machine crash",
+            EventKind::Travel => "beyond the machine's travel",
         }
     }
 }
@@ -46,6 +52,9 @@ pub struct SimEvent {
     pub at: [f64; 3],
     /// How deep, mm.
     pub depth: f64,
+    /// What hit what (machine crashes, travel).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub what: String,
 }
 
 struct Cutter {
@@ -63,6 +72,9 @@ struct Cutter {
     allowance: f32,
     /// The tool and holder as bands from the tip up: (radius, height of the band's bottom above the tip).
     body: Vec<(f64, f64)>,
+    /// Length out of the holder, and the holder's length up to the spindle (for placing it in the machine).
+    stickout: f64,
+    holder_len: f64,
 }
 
 pub const LUT_STEP: f64 = 0.002;
@@ -142,7 +154,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t) }
     }
 }
 
@@ -193,6 +205,20 @@ pub struct Sim {
     fixtures: Vec<(DVec3, DVec3)>,
     /// The highest fixture top: the tool's tip above it can't touch them.
     fixture_top: f64,
+    /// The machine, when the setup has one.
+    pub machine: Option<SimMachine>,
+}
+
+/// The machine model placed for the simulation, and each toolpath's tool as points for checking it.
+pub struct SimMachine {
+    pub placed: std::sync::Arc<crate::cam_machine::Placed>,
+    fixtures: Vec<(String, DVec3, DVec3)>,
+    /// Per cutter: how far the tip is below the spindle point, and points on the tool and holder.
+    tools: Vec<Option<(f64, Vec<glam::Vec3>)>>,
+    /// Travel since the last check, mm.
+    since: f64,
+    /// The machine parts in each crash: (move, part indices).
+    pub hit_parts: Vec<(usize, Vec<usize>)>,
 }
 
 impl Sim {
@@ -227,6 +253,7 @@ impl Sim {
             removed: 0.0,
             max_h: hi.z as f32,
             fixture_top: f64::INFINITY,
+            machine: None,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -289,6 +316,73 @@ impl Sim {
         for m in &tp.moves {
             self.moves.push((ci, tp.op, *m));
         }
+    }
+
+    /// The machine placed for a setup (see `set_machine`; it takes a moment for a detailed machine, so it can be kept).
+    pub fn place_machine(cam: &Cam, part: &Part, stock: (DVec3, DVec3), machine: std::sync::Arc<crate::cam_machine::Loaded>) -> crate::cam_machine::Placed {
+        let fixtures = crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part));
+        let at = crate::cam_machine::Placed::reference(stock, &fixtures);
+        crate::cam_machine::Placed::new(machine, at, DVec3::from(cam.on_table))
+    }
+
+    /// Check the machine too: its parts against each other and the work, the tool against the machine, and
+    /// the axes against their travel. `offset` is where the setup sits on the table (see `Placed::new`).
+    pub fn set_machine(&mut self, cam: &Cam, part: &Part, placed: std::sync::Arc<crate::cam_machine::Placed>) {
+        let fixtures = crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part));
+        self.machine = Some(SimMachine { placed, fixtures, tools: vec![], since: f64::INFINITY, hit_parts: vec![] });
+    }
+
+    /// How far the tool tip of cutter `ci` is below the machine's spindle point.
+    pub fn gauge(&self, ci: usize) -> f64 {
+        let Some(c) = self.cutters.get(ci) else { return 0.0 };
+        let holders = self.machine.as_ref().map(|m| m.placed.machine.model.holders).unwrap_or(false);
+        c.stickout + if holders { c.holder_len } else { 0.0 }
+    }
+
+    fn check_machine(&mut self, ci: usize, op: u64, step: usize, p: DVec3) {
+        let Some(mut m) = self.machine.take() else { return };
+        if m.tools.len() <= ci {
+            m.tools.resize(ci + 1, None);
+        }
+        if m.tools[ci].is_none() {
+            let c = &self.cutters[ci];
+            let gauge = c.stickout + if m.placed.machine.model.holders { c.holder_len } else { 0.0 };
+            // the tool up to the spindle point (a model without holders has the collet nut on it already)
+            m.tools[ci] = Some((gauge, crate::cam_machine::tool_points(&self.cutters[ci].body, gauge, 2.0)));
+        }
+        let (gauge, pts) = m.tools[ci].as_ref().unwrap();
+        let q = m.placed.axes_at(p, *gauge);
+        let over = m.placed.machine.model.over_travel(q);
+        for (a, o) in over.iter().enumerate() {
+            if *o > 1e-6 {
+                let name = ["X", "Y", "Z"][a];
+                let [lo, hi] = m.placed.machine.model.travel[a];
+                let what = format!("{name} {} its travel ({lo:.0} to {hi:.0} mm from where it was modelled)", if q[a] < lo { "below" } else { "beyond" });
+                self.event_what(EventKind::Travel, op, step, p, *o, what);
+            }
+        }
+        let work = crate::cam_machine::Work {
+            x0: self.x0,
+            y0: self.y0,
+            cell: self.cell,
+            nx: self.nx,
+            ny: self.ny,
+            top: &self.stock,
+            lo: &self.lo,
+            part: &self.part,
+            max_h: self.max_h,
+            fixtures: &m.fixtures,
+        };
+        let hits = m.placed.check(p, *gauge, pts, &work);
+        if !hits.is_empty() && m.hit_parts.len() < 2000 {
+            let parts = hits.iter().flat_map(|h| h.mover.into_iter().chain(if let crate::cam_machine::Obstacle::Part(i) = h.what { Some(i) } else { None })).collect();
+            m.hit_parts.push((step, parts));
+        }
+        for h in hits {
+            let what = crate::cam_machine::describe(&m.placed.machine.model, &h);
+            self.event_what(EventKind::Machine, op, step, h.at, h.depth, what);
+        }
+        self.machine = Some(m);
     }
 
     /// Start from stock left by an earlier setup instead of the full block.
@@ -375,6 +469,13 @@ impl Sim {
             if !self.fixtures.is_empty() {
                 self.hit_fixtures(ci, op, step, p);
             }
+            if let Some(m) = &mut self.machine {
+                m.since += len / n as f64;
+                if m.since >= m.placed.step || k == n {
+                    m.since = 0.0;
+                    self.check_machine(ci, op, step, p);
+                }
+            }
             // nothing to touch above the stock
             if p.z as f32 > self.max_h + 1e-3 {
                 continue;
@@ -438,13 +539,24 @@ impl Sim {
     }
 
     fn event(&mut self, kind: EventKind, op: u64, step: usize, at: DVec3, depth: f64) {
-        if let Some(e) = self.events.iter_mut().rev().take(8).find(|e| e.kind == kind && e.op == op && (e.step == step || e.step + 1 == step)) {
+        self.event_what(kind, op, step, at, depth, String::new());
+    }
+
+    fn event_what(&mut self, kind: EventKind, op: u64, step: usize, at: DVec3, depth: f64, what: String) {
+        // the same machine crash over and over in one operation is one problem (at its first move)
+        if matches!(kind, EventKind::Machine | EventKind::Travel) {
+            if let Some(e) = self.events.iter_mut().find(|e| e.kind == kind && e.op == op && e.what == what) {
+                e.depth = e.depth.max(depth);
+                return;
+            }
+        }
+        if let Some(e) = self.events.iter_mut().rev().take(8).find(|e| e.kind == kind && e.op == op && e.what == what && (e.step == step || e.step + 1 == step)) {
             e.depth = e.depth.max(depth);
             e.step = step;
             return;
         }
         if self.events.len() < 500 {
-            self.events.push(SimEvent { kind, op, step, at: at.to_array(), depth });
+            self.events.push(SimEvent { kind, op, step, at: at.to_array(), depth, what });
         }
     }
 

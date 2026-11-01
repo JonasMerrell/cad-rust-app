@@ -93,7 +93,9 @@ pub fn role(symbol: &str) -> Option<Role> {
     }
 }
 
-/// A new link with defaults for the role and the mate (`slide`: the mate is a slider).
+/// A new link with defaults for the role and the mate (`slide`: the mate is a slider). `limits`
+/// are the mate's, in the unit its sensors read (degrees, or mm on a slider): pass None for a
+/// cylindrical mate, whose limits are travel in mm while its sensors read its angle.
 pub fn new_link(part: &str, role: Role, assembly: usize, mate: u64, slide: bool, limits: Option<[f64; 2]>) -> Link {
     let mut l = Link { part: part.into(), assembly, mate, ..Default::default() };
     match role {
@@ -770,7 +772,8 @@ impl MechExt {
                 }
                 MechPart::Servo { servo, sig, gnd, val } => {
                     let range = l.range.unwrap_or([-90.0, 90.0]);
-                    let angle = mate.map(|m| ext.mates[m].angle0.to_degrees()).unwrap_or((range[0] + range[1]) / 2.0);
+                    // on a slider the servo's "angle" is the travel in mm
+                    let angle = mate.map(|m| if slide { ext.mates[m].slide0 } else { ext.mates[m].angle0.to_degrees() }).unwrap_or((range[0] + range[1]) / 2.0);
                     if mate.is_some() && slide {
                         notes.push(format!("{}: a servo turns; on a slider its angle is taken as mm", p.reference));
                     }
@@ -1029,7 +1032,7 @@ impl MechExt {
             .map(|(r, a)| match a {
                 Act::Motor { mate, omega, n, theta, sign, .. } => {
                     let pos = mate.map(|m| self.mates[m].value()).unwrap_or((sign * theta / n).to_degrees());
-                    (r.clone(), pos, Some(omega / n * 60.0 / std::f64::consts::TAU))
+                    (r.clone(), pos, Some(sign * omega / n * 60.0 / std::f64::consts::TAU))
                 }
                 Act::Stepper(s) => {
                     let pos = s.mate.map(|m| self.mates[m].value()).unwrap_or((s.sign * s.theta / s.n).to_degrees());
