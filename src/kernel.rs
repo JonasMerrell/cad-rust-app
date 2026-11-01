@@ -452,6 +452,10 @@ impl<'a> Model<'a> {
             return Err("nothing was produced".into());
         }
         let tool = fuse_all(tools)?;
+        // e.g. an extrude up to a face behind its profile: an error, not a feature that adds nothing
+        if unique_faces(&tool).is_empty() {
+            return Err("the feature made nothing (is the face or point it goes up to on the other side?)".into());
+        }
         match op {
             BoolOp::New => {
                 let base = self.bodies.iter().filter(|b| b.id.0 == fid).count() as u32;
@@ -482,7 +486,8 @@ impl<'a> Model<'a> {
                 if self.bodies.is_empty() {
                     return Err("there is no body to cut".into());
                 }
-                let mut out = vec![];
+                let mut out: Vec<Body> = vec![];
+                let before: Vec<BodyId> = self.bodies.iter().map(|b| b.id).collect();
                 for b in std::mem::take(&mut self.bodies) {
                     // a cut that misses leaves the body as it was (checked by the cut itself:
                     // a separate overlap test costs as much as the cut on large parts)
@@ -491,8 +496,21 @@ impl<'a> Model<'a> {
                         continue;
                     }
                     let r = if op == BoolOp::Remove { occ::cut(&b.shape, &tool)? } else { occ::common(&b.shape, &tool)? };
+                    let mut k = 0;
                     for (i, s) in solids_of(&r).into_iter().enumerate() {
-                        let id = if i == 0 { b.id } else { (b.id.0, b.id.1 + 1000 * i as u32) };
+                        // pieces after the first: b + 1000, + 2000, ..., skipping ids a piece of an
+                        // earlier split already has (a body split twice would otherwise repeat one)
+                        let id = if i == 0 {
+                            b.id
+                        } else {
+                            loop {
+                                k += 1;
+                                let id = (b.id.0, b.id.1 + 1000 * k);
+                                if !before.contains(&id) && !out.iter().any(|o| o.id == id) {
+                                    break id;
+                                }
+                            }
+                        };
                         out.push(Body { id, shape: s });
                     }
                 }
@@ -524,7 +542,7 @@ impl<'a> Model<'a> {
             Op::Extrude { profiles, end, depth, opposite, second, depth2, up_to, op, draft } => {
                 let faces = self.profile_faces(profiles)?;
                 let sketches: Vec<Option<FeatId>> = profiles.iter().map(|r| if let Ref::Region { sketch, .. } = r { Some(*sketch) } else { None }).collect();
-                let sign = if *opposite { -1.0 } else { 1.0 };
+                let mut sign = if *opposite { -1.0 } else { 1.0 };
                 let d = match end {
                     EndType::ThroughAll | EndType::UpToFace => self.model_size() * 2.0,
                     EndType::UpToNext => self.up_to_next(&faces, sign, *op)?,
@@ -532,7 +550,12 @@ impl<'a> Model<'a> {
                         let r = up_to.as_ref().ok_or("select the vertex or point to extrude up to")?;
                         let p = self.point_of(r)?;
                         let (_, fr) = &faces[0];
-                        ((p - DVec3::from(fr.origin)).dot(fr.normal() * sign)).abs()
+                        // toward the point, on whichever side of the profile it lies
+                        let along = (p - DVec3::from(fr.origin)).dot(fr.normal() * sign);
+                        if along < 0.0 {
+                            sign = -sign;
+                        }
+                        along.abs()
                     }
                     _ => self.len(depth)?,
                 };
@@ -595,6 +618,12 @@ impl<'a> Model<'a> {
                 }
                 // cut, and if that removed nothing, cut the other way instead (one boolean in the usual case)
                 let flipped = build(-sign, false)?;
+                // a tool that came out empty (up to a face behind the profile) cuts the other way
+                let empty = |ts: &[Shape]| ts.iter().all(|t| unique_faces(t).is_empty());
+                if empty(&tools) && !empty(&flipped) {
+                    self.name_extruded(fid, &flipped, &faces, &sketches, -sign);
+                    return self.apply(fid, flipped, *op);
+                }
                 let before: Vec<Body> = self.bodies.iter().map(|b| Body { id: b.id, shape: dup(&b.shape) }).collect();
                 let vol = |bs: &[Body]| bs.iter().map(|b| volume(&b.shape)).sum::<f64>();
                 let v0 = vol(&before);
@@ -669,6 +698,9 @@ impl<'a> Model<'a> {
                     return Err("radius must be positive".into());
                 }
                 let r2 = if *variable { self.len(end_radius)? } else { r };
+                if r2 <= 0.0 {
+                    return Err("end radius must be positive".into());
+                }
                 self.edge_op(fid, "fillet", edges, |shape, es| occ::fillet(shape, es, r, r2).and_then(|s| occ::checked(s, "the fillet", " (radius too large?)")))
             }
             Op::Chamfer { edges, distance, mode, distance2, angle } => {
@@ -1233,6 +1265,13 @@ impl<'a> Model<'a> {
                         BooleanKind::Intersect => occ::common(&shape, tool)?,
                     };
                 }
+                // a subtraction or intersection that leaves nothing of the part is an error, not an empty part
+                if *kind != BooleanKind::Union && solids_of(&shape).is_empty() && !solids_of(&self.bodies[t].shape).is_empty() {
+                    return Err(match kind {
+                        BooleanKind::Subtract => "the tools cover the whole part: subtracting them leaves nothing".into(),
+                        _ => "the parts don't overlap: their intersection is empty".into(),
+                    });
+                }
                 // a union of parts that don't touch would make one part of separate solids: keep them apart
                 let pieces = if *kind == BooleanKind::Union { solids_of(&shape) } else { vec![] };
                 if pieces.len() > solids_of(&self.bodies[t].shape).len() {
@@ -1342,8 +1381,15 @@ impl<'a> Model<'a> {
                 let (sk, fr) = self.sketch(*sketch)?;
                 Ok(fr.to_world(sk.point(*point).ok_or("a point no longer exists")?.v()))
             }
-            Ref::Vertex { point } | Ref::Edge { point, .. } => Ok(v3(*point)),
-            Ref::Face { point, .. } => Ok(v3(*point)),
+            Ref::Vertex { point } => Ok(v3(*point)),
+            // edges and faces are looked up again (by name), not taken at the point stored when
+            // they were picked: that goes stale when what is upstream changes
+            Ref::Edge { .. } => Ok(naming::edge_mid(&self.find_edge_ref(r)?.0)),
+            Ref::Face { point, .. } => {
+                let (f, _) = self.find_face_ref(r)?;
+                let (p, g) = (v3(*point), face_geom(&f));
+                Ok(if g.planar { p - g.normal * (p - g.center).dot(g.normal) } else { occ::face_at(&Shape::from(&f), p).map(|q| q.point).unwrap_or(p) })
+            }
             _ => Err("select points".into()),
         }
     }
@@ -1644,13 +1690,17 @@ impl<'a> Model<'a> {
             return Err("select edges".into());
         }
         let mut by_body: HashMap<usize, Vec<(usize, Edge)>> = HashMap::new();
+        let mut keys: HashMap<usize, u64> = HashMap::new();
         let mut missing = vec![];
         for (i, r) in refs.iter().enumerate() {
             if !matches!(r, Ref::Edge { .. }) {
                 return Err("select edges".into());
             }
             match self.find_edge_ref(r) {
-                Ok((e, bi)) => by_body.entry(bi).or_default().push((i, e)),
+                Ok((e, bi)) => {
+                    keys.insert(i, self.edge_key(r, bi, &e, i));
+                    by_body.entry(bi).or_default().push((i, e))
+                }
                 Err(e) => missing.push(format!("edge {}: {e}", i + 1)),
             }
         }
@@ -1662,7 +1712,8 @@ impl<'a> Model<'a> {
                 Ok(s) => {
                     let before = std::mem::replace(&mut self.bodies[bi].shape, s);
                     let after = dup(&self.bodies[bi].shape);
-                    self.name_edge_faces(fid, role, &before, &after, &list);
+                    let keyed: Vec<(usize, u64, Edge)> = list.iter().map(|(i, e)| (*i, keys[i], Edge::from_edge(&e.inner))).collect();
+                    self.name_edge_faces(fid, role, &before, &after, &keyed);
                 }
                 Err(e) => {
                     // find the edges that fail on their own, to say which ones
@@ -2780,6 +2831,82 @@ mod more_feature_tests {
             assert!(f.error.is_none(), "feature {} failed: {:?}", f.id, f.error);
         }
         r
+    }
+
+    #[test]
+    fn bodies_split_twice_keep_distinct_ids() {
+        let mut doc = Document::default();
+        let s = sketch_rect(&mut doc, 0.0, 0.0, 60.0, 40.0);
+        extrude(&mut doc, s, [5.0, 5.0], "10", BoolOp::New);
+        // a slot across splits the plate in two, then one along splits both halves
+        let c1 = sketch_rect(&mut doc, 28.0, -5.0, 4.0, 50.0);
+        extrude(&mut doc, c1, [30.0, 0.0], "10", BoolOp::Remove);
+        let c2 = sketch_rect(&mut doc, -5.0, 18.0, 70.0, 4.0);
+        extrude(&mut doc, c2, [0.0, 20.0], "10", BoolOp::Remove);
+        let r = run(&doc);
+        assert_eq!(r.bodies.len(), 4);
+        let ids: std::collections::HashSet<BodyId> = r.bodies.iter().map(|b| b.id).collect();
+        assert_eq!(ids.len(), 4, "{:?}", r.bodies.iter().map(|b| b.id).collect::<Vec<_>>());
+    }
+
+    fn error_of(r: &RebuildResult, id: FeatId) -> String {
+        r.features.iter().find(|f| f.id == id).and_then(|f| f.error.clone()).unwrap_or_default()
+    }
+
+    #[test]
+    fn booleans_and_extrudes_that_make_nothing_say_so() {
+        let mut doc = Document::default();
+        let s = sketch_rect(&mut doc, 0.0, 0.0, 10.0, 10.0);
+        let small = extrude(&mut doc, s, [5.0, 5.0], "10", BoolOp::New);
+        let s = sketch_rect(&mut doc, -5.0, -5.0, 20.0, 20.0);
+        let big = extrude(&mut doc, s, [-4.0, -4.0], "20", BoolOp::New);
+        let mut b = Op::new_default("boolean").unwrap();
+        if let Op::Boolean { kind, target, tools, .. } = &mut b {
+            *kind = BooleanKind::Subtract;
+            *target = Some(Ref::Body { body: (small, 0) });
+            tools.push(Ref::Body { body: (big, 0) });
+        }
+        let bid = doc.insert("B".into(), b);
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(error_of(&r, bid).contains("leaves nothing"), "{:?}", error_of(&r, bid));
+
+        // up to a face behind the profile: a block at z -20..-15, extruded to from the top plane
+        let mut doc = Document::default();
+        let mut pl = Op::new_default("plane").unwrap();
+        if let Op::Plane { base, offset, .. } = &mut pl {
+            *base = Some(Ref::OriginPlane { plane: OriginPlane::Top });
+            *offset = "-20".into();
+        }
+        let p = doc.insert("P".into(), pl);
+        let mut sk = Sketch::default();
+        let q: Vec<_> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].iter().map(|&(x, y)| sk.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            sk.add_curve(Geom::Line { a: q[i], b: q[(i + 1) % 4] }, false);
+        }
+        let low = doc.insert("S".into(), Op::Sketch { plane: Ref::FeaturePlane { feature: p }, sketch: sk, frame: Frame::TOP });
+        extrude(&mut doc, low, [5.0, 5.0], "5", BoolOp::New);
+        let s = sketch_rect(&mut doc, 0.0, 0.0, 10.0, 10.0);
+        let e = extrude(&mut doc, s, [5.0, 5.0], "10", BoolOp::New);
+        if let Some(Op::Extrude { end, up_to, .. }) = doc.feature_mut(e).map(|f| &mut f.op) {
+            *end = EndType::UpToFace;
+            *up_to = Some(Ref::Face { point: [5.0, 5.0, -15.0], normal: [0.0, 0.0, 1.0], name: Default::default() });
+        }
+        let r = rebuild(&doc, &[], |_| {});
+        assert!(error_of(&r, e).contains("made nothing"), "{:?}", error_of(&r, e));
+    }
+
+    #[test]
+    fn up_to_a_vertex_below_the_profile_extrudes_down() {
+        let mut doc = Document::default();
+        let s = sketch_rect(&mut doc, 0.0, 0.0, 10.0, 10.0);
+        let e = extrude(&mut doc, s, [5.0, 5.0], "1", BoolOp::New);
+        if let Some(Op::Extrude { end, up_to, .. }) = doc.feature_mut(e).map(|f| &mut f.op) {
+            *end = EndType::UpToVertex;
+            *up_to = Some(Ref::Vertex { point: [20.0, 20.0, -7.0] });
+        }
+        let r = run(&doc);
+        assert!((r.bodies[0].volume - 700.0).abs() < 1e-6, "{}", r.bodies[0].volume);
+        assert!((r.bodies[0].centroid[2] + 3.5).abs() < 1e-6, "{:?}", r.bodies[0].centroid);
     }
 
     #[test]

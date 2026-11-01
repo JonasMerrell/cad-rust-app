@@ -3874,12 +3874,18 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         let Some(a) = dim_anchor(&sk, c) else { return };
         let pos = to_screen(app, &fr, rect, a + DVec2::from(c.dim().map(|d| d.offset).unwrap_or_default()));
         let angle = c.is_angle();
+        let positive = matches!(c, Constraint::Length { .. } | Constraint::Radius { .. } | Constraint::Diameter { .. } | Constraint::RadialDistance { .. });
         let (vars, _) = app.doc.var_values();
         let units = app.doc.units;
         let mut done = None;
         egui::Area::new(egui::Id::new("dim-edit")).order(egui::Order::Foreground).pivot(egui::Align2::CENTER_CENTER).fixed_pos(pos).show(painter.ctx(), |ui| {
             egui::Frame::new().fill(theme::bg()).stroke(Stroke::new(1.0, theme::accent())).corner_radius(4).inner_margin(2).show(ui, |ui| {
-              let err = expr::eval(&text, if angle { Kind::Angle } else { Kind::Length }, &Env { vars: &vars, units }).err();
+              let err = match expr::eval(&text, if angle { Kind::Angle } else { Kind::Length }, &Env { vars: &vars, units }) {
+                  Err(e) => Some(e),
+                  // sizes can't be zero or negative (a negative radius would be stored as its size)
+                  Ok(v) if positive && v <= 0.0 => Some("must be more than 0".to_string()),
+                  Ok(_) => None,
+              };
               ui.horizontal(|ui| {
                 let ok = err.is_none();
                 let out = egui::TextEdit::singleline(&mut text).desired_width(90.0).text_color(if ok { theme::text() } else { theme::error_soft() }).show(ui);

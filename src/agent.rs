@@ -1082,7 +1082,7 @@ fn check_constraint(sk: &Sketch, c: &Value, k: &Constraint, env: &crate::expr::E
     if let Some(d) = k.dim() {
         let kind = if k.is_angle() { crate::expr::Kind::Angle } else { crate::expr::Kind::Length };
         let v = crate::expr::eval(&d.expr, kind, env).map_err(|e| format!("value {:?}: {e}", d.expr))?;
-        if matches!(k, Constraint::Length { .. } | Constraint::Radius { .. } | Constraint::Diameter { .. }) && v <= 0.0 {
+        if matches!(k, Constraint::Length { .. } | Constraint::Radius { .. } | Constraint::Diameter { .. } | Constraint::RadialDistance { .. }) && v <= 0.0 {
             return Err(format!("value {:?} must be more than 0", d.expr));
         }
     }

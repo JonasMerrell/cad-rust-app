@@ -987,6 +987,9 @@ impl System {
                 continue;
             }
             let val = |d: &Dim, kind: Kind| -> Option<f64> { expr::eval(&d.expr, kind, env).ok() };
+            // radii and gaps between circles: a value of 0 or less is a bad dimension, not a size
+            // the solver would meet with a negative radius (stored as its size, unlike the label)
+            let size = |d: &Dim| val(d, Kind::Length).filter(|v| *v > 0.0);
             let pi = |id: Id| pidx.get(&id).copied();
             use Constraint::*;
             let r: Option<Vec<Res>> = (|| {
@@ -1112,9 +1115,9 @@ impl System {
                         let (a, b) = line(*l)?;
                         vec![Res::Dist(a, b, val(dim, Kind::Length)?)]
                     }
-                    Radius { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)?)],
-                    Diameter { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)? / 2.0)],
-                    RadialDistance { a, b, dim } => vec![Res::RadiusGap(circ(*a)?.1, circ(*b)?.1, val(dim, Kind::Length)?)],
+                    Radius { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, size(dim)?)],
+                    Diameter { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, size(dim)? / 2.0)],
+                    RadialDistance { a, b, dim } => vec![Res::RadiusGap(circ(*a)?.1, circ(*b)?.1, size(dim)?)],
                     Angle { a, b, dim } => {
                         let (p, q) = line(*a)?;
                         let (r, t) = line(*b)?;
@@ -1537,6 +1540,21 @@ mod tests {
         // it saves under its own name
         let json = serde_json::to_string(&s.constraints[1]).unwrap();
         assert!(json.contains("radial_distance"), "{json}");
+    }
+
+    #[test]
+    fn a_negative_radial_distance_is_a_bad_dimension() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let c = s.add_point(DVec2::new(0.0, 0.0));
+        let inner = s.add_curve(Geom::Circle { c, r: 10.0 }, false);
+        let outer = s.add_curve(Geom::Circle { c, r: 16.0 }, false);
+        s.constraints.push(Constraint::RadialDistance { a: inner, b: outer, dim: Dim::new("-25", [0.0; 2]) });
+        let st = s.solve(&env, &[inner, c]);
+        assert_eq!(st.bad_dims, vec![0], "{st:?}");
+        let k = Constraint::RadialDistance { a: inner, b: outer, dim: Dim::new("", [0.0; 2]) };
+        assert!((s.measure(&k).unwrap() - 6.0).abs() < 1e-9);
     }
 
     /// A rectangle fixed at the origin with width and height dimensions: (sketch, lines).

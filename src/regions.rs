@@ -464,12 +464,35 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
     // half-edges: 2*i is a->b, 2*i+1 is b->a
     let he_from = |h: usize| if h % 2 == 0 { edges[h / 2].a } else { edges[h / 2].b };
     let he_seg = |h: usize| if h % 2 == 0 { edges[h / 2].seg.clone() } else { edges[h / 2].seg.reversed() };
+    // (tangent direction leaving the vertex, signed curvature there, chord direction a little along)
     let he_angle = |h: usize| {
         let s = he_seg(h);
-        let d = s.at(1e-4) - s.start();
-        let d2 = s.at(2e-2) - s.start();
-        // primary: tangent; tie-break with chord direction a little further along
-        (d.to_angle(), d2.to_angle())
+        let d2 = (s.at(2e-2) - s.start()).to_angle();
+        let (tangent, curvature) = match s {
+            Seg::Line { a, b } => ((b - a).to_angle(), 0.0),
+            // counter-clockwise arcs turn left (positive curvature), clockwise ones right
+            Seg::Arc { r, t0, t1, .. } => {
+                if t1 > t0 {
+                    ((t0 + TAU / 4.0).sin().atan2((t0 + TAU / 4.0).cos()), 1.0 / r)
+                } else {
+                    ((t0 - TAU / 4.0).sin().atan2((t0 - TAU / 4.0).cos()), -1.0 / r)
+                }
+            }
+            Seg::Poly { ref pts, .. } => {
+                let p: Vec<DVec2> = pts.iter().copied().take(3).collect();
+                let d = p[1] - p[0];
+                let k = if p.len() == 3 {
+                    let e = p[2] - p[1];
+                    d.angle_to(e) / ((d.length() + e.length()) * 0.5).max(1e-12)
+                } else {
+                    0.0
+                };
+                (d.to_angle(), k)
+            }
+        };
+        // one value for a direction straight along -x (atan2 gives π or -π)
+        let tangent = if tangent > std::f64::consts::PI - 1e-9 { tangent - TAU } else { tangent };
+        (tangent, curvature, d2)
     };
     let mut out: Vec<Vec<usize>> = vec![vec![]; verts.len()];
     for (i, _) in edges.iter().enumerate().filter(|(i, _)| alive[*i]) {
@@ -478,9 +501,18 @@ pub fn find_regions(s: &Sketch) -> Vec<Region> {
     }
     for o in &mut out {
         o.sort_by(|&x, &y| {
-            let (a1, a2) = he_angle(x);
-            let (b1, b2) = he_angle(y);
-            if (a1 - b1).abs() > 1e-6 { a1.total_cmp(&b1) } else { a2.total_cmp(&b2) }
+            // pieces leaving along the same tangent (curves touching there) are told apart by how
+            // they bend: the one turning further left lies further counter-clockwise. Sampling a
+            // fixed fraction of each piece can't do this: on arcs it measures the span, not the radius.
+            let (a1, ka, a2) = he_angle(x);
+            let (b1, kb, b2) = he_angle(y);
+            if (a1 - b1).abs() > 1e-6 {
+                a1.total_cmp(&b1)
+            } else if (ka - kb).abs() > 1e-9 {
+                ka.total_cmp(&kb)
+            } else {
+                a2.total_cmp(&b2)
+            }
         });
     }
     let mut used = vec![false; edges.len() * 2];
@@ -768,6 +800,36 @@ mod tests {
         s.add_curve(Geom::Line { a, b }, false);
         let r = find_regions(&s);
         assert_eq!(r.len(), 2);
+    }
+
+    /// A circle inside another, touching it: the crescent and the small disc, wherever they touch.
+    #[test]
+    fn internally_tangent_circles_make_a_crescent_and_a_disc() {
+        let pi = std::f64::consts::PI;
+        for k in 0..24 {
+            let r1 = 1.0 + 7.5 * ((k * 7) % 24) as f64 / 24.0;
+            let th = k as f64 / 24.0 * TAU + 0.1;
+            let mut s = Sketch::default();
+            let c0 = s.add_point(DVec2::ZERO);
+            s.add_curve(Geom::Circle { c: c0, r: 10.0 }, false);
+            let c1 = s.add_point(DVec2::from_angle(th) * (10.0 - r1));
+            s.add_curve(Geom::Circle { c: c1, r: r1 }, false);
+            let mut areas: Vec<f64> = find_regions(&s).iter().map(|r| r.area).collect();
+            areas.sort_by(f64::total_cmp);
+            let mut want = vec![pi * r1 * r1, pi * (100.0 - r1 * r1)];
+            want.sort_by(f64::total_cmp);
+            assert_eq!(areas.len(), 2, "r1 {r1} at {th}: {areas:?}");
+            for (a, w) in areas.iter().zip(&want) {
+                assert!((a - w).abs() < 1e-3, "r1 {r1} at {th}: {areas:?} vs {want:?}");
+            }
+        }
+        // the case where both circles split at the touching point (angle 0 on each)
+        let mut s = Sketch::default();
+        let c0 = s.add_point(DVec2::ZERO);
+        s.add_curve(Geom::Circle { c: c0, r: 10.0 }, false);
+        let c1 = s.add_point(DVec2::new(5.0, 0.0));
+        s.add_curve(Geom::Circle { c: c1, r: 5.0 }, false);
+        assert_eq!(find_regions(&s).len(), 2);
     }
 }
 

@@ -979,27 +979,31 @@ fn world_tri(inst: &Instance, m: &crate::kernel::BodyMesh, t: &[u32]) -> [DVec3;
 fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let a = asm(app)?;
     let cam = &app.camera;
-    // edges first
-    let mut best: Option<(f32, Hit)> = None;
+    // edges first: the nearest one on screen that no part hides
+    let mut near: Vec<(f32, DVec3, Hit)> = vec![];
     for x in a.instances.iter().filter(|x| !x.hidden) {
       for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
         let Some(part) = part else { continue };
         let m = part.mesh;
         let pose = display_pose(app, a, x).compose(&part.local);
         for (ei, e) in m.edges.iter().enumerate() {
-            let pts: Vec<Vec2> = e.pts.iter().map(|p| cam.project(pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3())).collect();
-            for w in pts.windows(2) {
+            let world: Vec<DVec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64)))).collect();
+            let pts: Vec<Vec2> = world.iter().map(|p| cam.project(p.as_vec3())).collect();
+            for (k, w) in pts.windows(2).enumerate() {
                 let d = w[1] - w[0];
                 let t = if d.length_squared() < 1e-9 { 0.0 } else { ((s - w[0]).dot(d) / d.length_squared()).clamp(0.0, 1.0) };
                 let dist = (w[0] + d * t - s).length();
-                if dist < 6.0 && best.as_ref().map(|b| dist < b.0).unwrap_or(true) {
-                    best = Some((dist, Hit { inst: x.id, leaf, face: None, edge: Some(ei), local: e.mid }));
+                if dist < 6.0 {
+                    // the view is orthographic, so the screen parameter carries over to the 3D point
+                    let at = world[k] + (world[k + 1] - world[k]) * t as f64;
+                    near.push((dist, at, Hit { inst: x.id, leaf, face: None, edge: Some(ei), local: e.mid }));
                 }
             }
         }
       }
     }
-    if let Some((_, h)) = best {
+    near.sort_by(|a, b| a.0.total_cmp(&b.0));
+    if let Some((_, _, h)) = near.into_iter().find(|(_, p, _)| !occluded(app, a, *p)) {
         return Some(h);
     }
     let (o, d) = cam.ray(s);
@@ -1024,6 +1028,32 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
       }
     }
     best.map(|b| b.1)
+}
+
+/// Whether a shown part lies in front of world point `p` (an edge behind another part).
+fn occluded(app: &App, a: &Assembly, p: DVec3) -> bool {
+    let cam = &app.camera;
+    let (o, d) = cam.ray(cam.project(p.as_vec3()));
+    let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
+    let depth = (p - o).dot(d);
+    // the faces that end at the edge meet the ray at its own depth: a few pixels of slack
+    let slack = cam.wpp() as f64 * 3.0;
+    for x in a.instances.iter().filter(|x| !x.hidden) {
+        for part in parts_of(app, x).into_iter().flatten() {
+            let m = part.mesh;
+            let pose = display_pose(app, a, x).compose(&part.local);
+            let (lo, ld) = (pose.inverse_apply(o), pose.inverse_dir(d));
+            for t in m.indices.chunks(3) {
+                let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
+                if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
+                    if tt < depth - slack {
+                        return true;
+                    }
+                }
+            }
+        }
+    }
+    false
 }
 
 fn ray_tri(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {

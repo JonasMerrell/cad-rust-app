@@ -26,6 +26,17 @@ const PLANE: i32 = 0;
 const CYLINDER: i32 = 1;
 const SPHERE: i32 = 3;
 
+/// Fillet and chamfer faces are named after the edge they were made from: by a key of that
+/// edge's own name (the two faces it joins) with this bit set, so taking an edge out of the
+/// feature's list doesn't hand its number to another edge's face. Below it, `n` is the edge's
+/// place in the list (older documents, and edges between faces nothing named).
+const KEYED: u64 = 1 << 63;
+
+/// Whether a name holds a fillet or chamfer face named by its edge's place in the list.
+fn by_place(n: &TopoName) -> bool {
+    n.0.iter().any(|f| matches!(f.role.as_str(), "fillet" | "chamfer") && f.n < KEYED)
+}
+
 /// Positions are compared to this (surfaces survive booleans exactly; unification refits planes to about 1e-7).
 const TOL: f64 = 1e-5;
 
@@ -223,14 +234,19 @@ impl Model<'_> {
     /// Name the faces an edge operation (fillet, chamfer) added to a body: those on none of
     /// the surfaces the body had before, each after the nearest of the edges it was made from
     /// (`edges` holds each edge's index in the feature's list).
-    pub(super) fn name_edge_faces(&mut self, fid: FeatId, role: &str, before: &Shape, after: &Shape, edges: &[(usize, Edge)]) {
+    pub(super) fn name_edge_faces(&mut self, fid: FeatId, role: &str, before: &Shape, after: &Shape, edges: &[(usize, u64, Edge)]) {
         let old: Vec<(Surf, Face)> = unique_faces(before).into_iter().filter_map(|f| surf_of(&f).map(|s| (s, f))).collect();
         for f in unique_faces(after) {
             let Some(s) = surf_of(&f) else { continue };
             if old.iter().any(|(o, of)| same_surface(&s, &f, o, of)) {
                 continue;
             }
-            if let Some((i, _)) = edges.iter().map(|(i, e)| (*i, edge_distance(e, s.at))).min_by(|a, b| a.1.total_cmp(&b.1)) {
+            if let Some((i, key, _)) = edges.iter().map(|(i, k, e)| (*i, *k, edge_distance(e, s.at))).min_by(|a, b| a.2.total_cmp(&b.2)) {
+                // the stable name first (what new references get), then the place in the list
+                // that older references hold
+                if key != i as u64 {
+                    self.add_named(fid, &f, role, key);
+                }
                 self.add_named(fid, &f, role, i as u64);
             }
         }
@@ -241,6 +257,7 @@ impl Model<'_> {
         let f = self.doc.feature(n.feature).map(|f| f.name.clone()).unwrap_or_else(|| format!("feature {}", n.feature));
         match n.role.as_str() {
             "side" => format!("{f} side face (sketch curve {})", n.n),
+            "fillet" | "chamfer" if n.n >= KEYED => format!("{f} face from one of its edges"),
             "fillet" | "chamfer" => format!("{f} face from its edge {}", n.n + 1),
             "wall" => format!("{f} wall (sketch point {})", n.n),
             r => format!("{f} {r} face"),
@@ -292,6 +309,22 @@ impl Model<'_> {
         let a = self.face_name_of(&faces[fs[0]])?;
         let b = self.face_name_of(&faces[fs[1]])?;
         (a != b).then(|| TopoName(vec![a, b]))
+    }
+
+    /// The key fillet and chamfer faces made from edge reference `r` (resolved to edge `e` of
+    /// body `bi`, `i`-th in the feature's list) are named by: from the edge's name, which stays
+    /// the same when the list changes, else its place `i`.
+    pub(super) fn edge_key(&self, r: &Ref, bi: usize, e: &Edge, i: usize) -> u64 {
+        let Ref::Edge { name, .. } = r else { return i as u64 };
+        let name = if name.is_empty() || by_place(name) { self.edge_name_of(bi, e) } else { Some(name.clone()) };
+        let Some(name) = name else { return i as u64 };
+        let mut h: u64 = 0xcbf29ce484222325;
+        for f in &name.0 {
+            for b in f.feature.to_le_bytes().iter().chain(f.role.as_bytes()).chain(&f.n.to_le_bytes()) {
+                h = (h ^ *b as u64).wrapping_mul(0x100000001b3);
+            }
+        }
+        h | KEYED
     }
 
     /// The live face a face reference points at: by its name when it has one, else by its point.
@@ -358,7 +391,8 @@ impl Model<'_> {
         if self.current.get() == 0 {
             return;
         }
-        let name = if name.is_empty() { self.face_name_of(face).map(|n| TopoName(vec![n])).unwrap_or_default() } else { name.clone() };
+        // names by a fillet edge's place in the list are swapped for the stable ones
+        let name = if name.is_empty() || by_place(name) { self.face_name_of(face).map(|n| TopoName(vec![n])).unwrap_or_else(|| name.clone()) } else { name.clone() };
         if name.is_empty() {
             return;
         }
@@ -375,7 +409,7 @@ impl Model<'_> {
         if self.current.get() == 0 {
             return;
         }
-        let name = if name.is_empty() { self.edge_name_of(bi, e).unwrap_or_default() } else { name.clone() };
+        let name = if name.is_empty() || by_place(name) { self.edge_name_of(bi, e).unwrap_or_else(|| name.clone()) } else { name.clone() };
         if name.is_empty() {
             return;
         }
@@ -386,7 +420,7 @@ impl Model<'_> {
 
     fn note(&self, old: &Ref, new: Ref, moved: bool) {
         let named_now =
-            matches!((old, &new), (Ref::Face { name: a, .. }, Ref::Face { name: b, .. }) | (Ref::Edge { name: a, .. }, Ref::Edge { name: b, .. }) if a.is_empty() && !b.is_empty());
+            matches!((old, &new), (Ref::Face { name: a, .. }, Ref::Face { name: b, .. }) | (Ref::Edge { name: a, .. }, Ref::Edge { name: b, .. }) if a.0 != b.0);
         if moved || named_now {
             self.updates.borrow_mut().push(RefUpdate { feature: self.current.get(), old: old.clone(), new });
         }
@@ -595,6 +629,49 @@ mod tests {
         // grew (the chamfer runs on round the tangent outline)
         let want = v0 + 20.0 * 50.0 * 10.0 - 0.5 * 40.0;
         assert!((r.bodies[0].volume - want).abs() < 1e-3, "{} vs {want}", r.bodies[0].volume);
+    }
+
+    /// The block with its four fillets and a chamfer on the top edge of the fillet at (80, 50).
+    fn chamfered_fillet() -> (Document, FeatId, FeatId) {
+        let (mut doc, s1, fid) = filleted_block(None);
+        let mut c = Op::new_default("chamfer").unwrap();
+        if let Op::Chamfer { edges, distance, .. } = &mut c {
+            let a = std::f64::consts::FRAC_PI_4;
+            edges.push(Ref::Edge { point: [75.0 + 5.0 * a.cos(), 45.0 + 5.0 * a.sin(), 10.0], name: Default::default() });
+            *distance = "1".into();
+        }
+        doc.insert("Chamfer".into(), c);
+        (doc, s1, fid)
+    }
+
+    #[test]
+    fn taking_an_edge_out_of_a_fillet_keeps_later_references_on_their_faces() {
+        let (mut doc, _, fid) = chamfered_fillet();
+        let r = build(&mut doc);
+        assert!(errors(&r).is_empty(), "{:?}", errors(&r));
+        // the first fillet edge goes: the fillet at (80, 50) is now the second in the list, not the third
+        if let Some(Op::Fillet { edges, .. }) = doc.feature_mut(fid).map(|f| &mut f.op) {
+            edges.remove(0);
+        }
+        let r = build(&mut doc);
+        assert!(errors(&r).is_empty(), "{:?}", errors(&r));
+        // the same model made afresh (the chamfer found by its point)
+        let (mut fresh, _, ffid) = chamfered_fillet();
+        if let Some(Op::Fillet { edges, .. }) = fresh.feature_mut(ffid).map(|f| &mut f.op) {
+            edges.remove(0);
+        }
+        let want = build(&mut fresh);
+        assert!(errors(&want).is_empty(), "{:?}", errors(&want));
+        assert!((r.bodies[0].volume - want.bodies[0].volume).abs() < 1e-6, "{} vs {}", r.bodies[0].volume, want.bodies[0].volume);
+        // and the chamfer is still on that corner (the others would give the same volume)
+        let cid = doc.features.last().unwrap().id;
+        match &doc.feature(cid).unwrap().op {
+            Op::Chamfer { edges, .. } => match &edges[0] {
+                Ref::Edge { point, .. } => assert!(point[0] > 70.0 && point[1] > 40.0, "{point:?}"),
+                _ => unreachable!(),
+            },
+            _ => unreachable!(),
+        }
     }
 
     #[test]
