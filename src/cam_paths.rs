@@ -682,7 +682,15 @@ impl<'a> Pb<'a> {
         let n = pts.len() as f64;
         let c = pts.iter().fold(DVec2::ZERO, |a, p| a + DVec2::from(*p)) / n;
         // the helix stays inside the loop: no further from its middle than the nearest point of it
-        let room = pts.iter().map(|p| DVec2::from(*p).distance(c)).fold(f64::INFINITY, f64::min);
+        let m = pts.len();
+        let room = (0..m)
+            .map(|i| {
+                let (a, b) = (DVec2::from(pts[i]), DVec2::from(pts[(i + 1) % m]));
+                let ab = b - a;
+                let t = if ab.length_squared() > 1e-18 { ((c - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                (a + ab * t).distance(c)
+            })
+            .fold(f64::INFINITY, f64::min);
         let rh = (room * 0.9).min(self.tool.diameter * 0.25);
         if rh < self.tool.diameter * 0.05 || !inside(&vec![vec![pts.to_vec()]], c.to_array()) {
             return false;
@@ -1149,6 +1157,21 @@ fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
                 (cam.max_rpm / tool.rpm * 100.0).round()
             ));
         }
+        // a slow-spindle minimum (or a hand-set speed) can push the cutting speed far past what the tool takes
+        if tool.kind != ToolKind::Tap && tool.rpm > 0.0 {
+            let vc = std::f64::consts::PI * tool.diameter * cam.spindle_rpm(tool) / 1000.0;
+            let limit = crate::cam::cutting_speed(tool, &cam.stock.material);
+            if vc > limit * 1.5 {
+                tp.warnings.push(format!(
+                    "T{} cuts at {} m/min, well above the about {} m/min a {} tool takes in {}: expect a burnt tool; slow the spindle (and feed) down if it can",
+                    tool.number,
+                    vc.round(),
+                    limit.round(),
+                    tool.material,
+                    cam.stock.material.to_lowercase()
+                ));
+            }
+        }
         if let Some(other) = cam.tools.iter().find(|t| t.number == tool.number && t.id != tool.id) {
             tp.warnings.push(format!("T{} is also the number of {}: the machine can't tell them apart (tool change and length offset H{})", tool.number, other.describe(), tool.number));
         }
@@ -1449,7 +1472,8 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let mut z_prev = top;
     let mut any = false;
     for z in levels(top, bottom, stepdown(op, t), &floors) {
-        let keep = offset(&ctx.geo.shadow(z), r + op.leave);
+        // the floors less than leave_floor below this level stay covered
+        let keep = offset(&ctx.geo.shadow(z - op.leave_floor), r + op.leave);
         let area = rest_area(ctx, difference(&bound, &keep), z, r, op.leave);
         if area.is_empty() {
             z_prev = z;
@@ -1480,8 +1504,10 @@ fn rest_area(ctx: &Ctx, area: Shapes, z: f64, r: f64, leave: f64) -> Shapes {
 
 /// Closed pockets at height z that have a floor at or below z (through holes are left to hole operations).
 fn pocket_area(ctx: &Ctx, op: &Operation, z: f64, grow: f64) -> Shapes {
-    let mut reg = enclosed(&ctx.geo.shadow(z));
-    reg.retain(|sh| ctx.geo.floor_pts.iter().any(|f| f.z <= z + 1e-3 && shape_inside(sh, [f.x, f.y])));
+    // the floors less than leave_floor below this level stay covered
+    let zf = z - op.leave_floor;
+    let mut reg = enclosed(&ctx.geo.shadow(zf));
+    reg.retain(|sh| ctx.geo.floor_pts.iter().any(|f| f.z <= zf + 1e-3 && shape_inside(sh, [f.x, f.y])));
     if let Some(at) = op.at {
         let p = [at[0] + ctx.origin.x, at[1] + ctx.origin.y];
         reg.retain(|sh| shape_inside(sh, p));
@@ -1520,7 +1546,7 @@ fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     for z in levels(top, bottom, stepdown(op, t), &lf) {
         let raw = pocket_area(ctx, op, z, 0.0);
         if raw.is_empty() {
-            z_prev = z;
+            // nothing cut at this level (e.g. above the part's top): the next one still starts from z_prev
             continue;
         }
         let area = offset(&raw, -(t.radius() + op.leave));
@@ -1580,7 +1606,7 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             }
         }
         if loops.is_empty() {
-            z_prev = z;
+            // nothing cut at this level (above the part's top): the next one ramps from z_prev, not from here
             continue;
         }
         any = true;
@@ -1653,6 +1679,27 @@ fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, lead
             let mut lp: Vec<P2> = vec![[s0.x, s0.y]];
             lp.extend((1..=n).map(|k| l[(i + k) % n]));
             pb.approach(lead_in[0].x, lead_in[0].y, z_from);
+            let dz = z_from - z;
+            if dz > 1e-6 {
+                // ramp down back and forth along the lead-in arc (clear of the part) instead of plunging into the stock
+                pb.cut(lead_in[0].extend(z_from), pb.plunge);
+                let len: f64 = lead_in.windows(2).map(|w| w[0].distance(w[1])).sum();
+                let per_pass = 2.0 * len * pb.ramp.tan().max(1e-3);
+                let pairs = ((dz / per_pass).ceil() as usize).clamp(1, 1000);
+                let step = dz / (2 * pairs) as f64;
+                let mut zz = z_from;
+                for _ in 0..pairs {
+                    for path in [lead_in.iter().collect::<Vec<_>>(), lead_in.iter().rev().collect::<Vec<_>>()] {
+                        let z0 = zz;
+                        let mut d = 0.0;
+                        for w in path.windows(2) {
+                            d += w[0].distance(*w[1]);
+                            pb.cut(w[1].extend(z0 - step * d / len.max(1e-9)), pb.feed);
+                        }
+                        zz = z0 - step;
+                    }
+                }
+            }
             pb.cut(lead_in[0].extend(z), pb.plunge);
             for p in &lead_in[1..] {
                 pb.cut(p.extend(z), pb.feed);
@@ -1693,7 +1740,17 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             };
             if want {
                 let l: Contour = if op.climb { c.iter().rev().copied().collect() } else { c.clone() };
-                pb.cut_loop(&l, z, z, 0.0, None, None);
+                if l.len() < 2 {
+                    continue;
+                }
+                // come down above the edge, not to the chamfer's bottom: a cone lowered to z + retract would
+                // already reach into the edge when the chamfer is deeper than the retract
+                let here = pb.pos.map(|p| p.truncate());
+                let k = here.map(|h| (0..l.len()).min_by(|a, b| DVec2::from(l[*a]).distance_squared(h).total_cmp(&DVec2::from(l[*b]).distance_squared(h))).unwrap()).unwrap_or(0);
+                let s0 = l[k];
+                pb.approach(s0[0], s0[1], edge.max(z));
+                pb.cut(DVec3::new(s0[0], s0[1], z), pb.plunge);
+                pb.cut_loop(&l, z, z, 0.01, None, None);
                 any = true;
             }
         }
@@ -1764,6 +1821,9 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     for h in order {
         let top = ctx.wz(op.top).filter(|_| op.points.is_empty()).unwrap_or(h.top);
         let through_extra = if h.through { op.breakthrough } else { 0.0 };
+        // come down over the stock, not just over the hole's top: material above it (a pocket not cut yet,
+        // the stock's top margin) would be in the way of the rapid
+        let entry = top.max(ctx.stock.1.z);
         match op.kind {
             OpKind::Drill => {
                 let bottom = match ctx.wz(op.bottom).filter(|_| op.points.is_empty()) {
@@ -1778,7 +1838,7 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                     },
                 };
                 let rz = top + pb.retract;
-                pb.approach(h.x, h.y, top);
+                pb.approach(h.x, h.y, entry);
                 if op.peck > 0.0 {
                     let mut cur = top;
                     while cur > bottom + 1e-6 {
@@ -1786,14 +1846,14 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                         if cur < top - 1e-6 {
                             pb.rapid(DVec3::new(h.x, h.y, cur + 0.3));
                         }
-                        pb.cut(DVec3::new(h.x, h.y, next), pb.feed);
+                        pb.cut(DVec3::new(h.x, h.y, next), pb.plunge);
                         cur = next;
                         if cur > bottom + 1e-6 {
                             pb.rapid(DVec3::new(h.x, h.y, rz));
                         }
                     }
                 } else {
-                    pb.cut(DVec3::new(h.x, h.y, bottom), pb.feed);
+                    pb.cut(DVec3::new(h.x, h.y, bottom), pb.plunge);
                 }
                 if op.dwell > 0.0 {
                     pb.moves.push(Move::Dwell(op.dwell));
@@ -1809,7 +1869,7 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                 let bottom = ctx.wz(op.bottom).filter(|_| op.points.is_empty()).unwrap_or(h.bottom - through_extra);
                 let pitch = stepdown(op, t).min(2.0 * std::f64::consts::PI * rh * pb.ramp.tan()).max(0.05);
                 let dir = if op.climb { 1.0 } else { -1.0 };
-                pb.approach(h.x + rh, h.y, top);
+                pb.approach(h.x + rh, h.y, entry);
                 pb.cut(DVec3::new(h.x + rh, h.y, top), pb.plunge);
                 helix(pb, h.x, h.y, rh, top, bottom, -pitch, dir);
                 helix(pb, h.x, h.y, rh, bottom, bottom, 0.0, dir);
@@ -1842,7 +1902,7 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                 let revs = if t.cutting_width >= length + pitch { 1.0 } else { (length / pitch).ceil() + 1.0 };
                 // right-hand internal, climbing: counter-clockwise going up
                 let dir = if op.left_hand { -1.0 } else { 1.0 };
-                pb.approach(h.x, h.y, top);
+                pb.approach(h.x, h.y, entry);
                 pb.cut(DVec3::new(h.x, h.y, bottom), pb.plunge);
                 pb.cut(DVec3::new(h.x + rh, h.y, bottom), pb.feed * 0.5);
                 helix(pb, h.x, h.y, rh, bottom, bottom + pitch * revs, pitch, dir);
@@ -1853,7 +1913,7 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             OpKind::Tap => {
                 let bottom = ctx.wz(op.bottom).filter(|_| op.points.is_empty()).unwrap_or(if h.through { h.bottom - through_extra } else { h.bottom + t.pitch * 2.0 });
                 let rz = top + pb.retract;
-                pb.approach(h.x, h.y, top);
+                pb.approach(h.x, h.y, entry);
                 pb.moves.push(Move::Tap { z: bottom, r: rz, pitch: t.pitch });
                 pb.pos = Some(DVec3::new(h.x, h.y, rz));
             }
@@ -2037,8 +2097,14 @@ mod tests {
             let wall = (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
             assert!(wall > 3.0 - 0.02, "{p}");
         }
-        // the first cut: plunge, then a quarter circle of radius 3 arriving at the wall offset (3 mm in)
-        let lead: Vec<DVec3> = pts.iter().take(13).copied().collect();
+        // the first cut: ramp down back and forth along the lead-in (no straight plunge into the stock), then a
+        // quarter circle of radius 3 at depth arriving at the wall offset (3 mm in)
+        let i = (1..pts.len() - 13)
+            .find(|&i| pts[i].truncate().distance(pts[0].truncate()) < 1e-9 && pts[i + 1..i + 13].iter().all(|p| (p.z - pts[i].z).abs() < 1e-9))
+            .unwrap();
+        assert!(pts[i].z < pts[0].z - 1.0);
+        assert!(pts[..=i].windows(2).all(|w| w[0].z - w[1].z <= 0.5 * w[0].truncate().distance(w[1].truncate()) + 1e-9), "plunges");
+        let lead: Vec<DVec3> = pts[i..i + 13].to_vec();
         let end = lead[12];
         let wall = (end.x - 10.0).min(30.0 - end.x).min(end.y - 10.0).min(30.0 - end.y);
         assert!((wall - 3.0).abs() < 0.02, "{end}");
@@ -2388,5 +2454,87 @@ mod tests {
         c.fixtures.push(Default::default());
         let h = hints(&c, &part, &generate(&c, &part));
         assert!(h.is_empty(), "{h:?}");
+    }
+
+    /// The rapid that brings the tool down before its first cut.
+    fn entry(tp: &Toolpath) -> DVec3 {
+        let k = tp.moves.iter().position(|m| matches!(m, Move::Feed(..))).unwrap();
+        match tp.moves[k - 1] {
+            Move::Rapid(p) => DVec3::from(p),
+            ref m => panic!("{m:?}"),
+        }
+    }
+
+    #[test]
+    fn levels_above_the_part_dont_count_as_cut() {
+        // 5 mm of stock over the part, 3 mm steps: the level at -3 has nothing to follow
+        let part = plate();
+        let (mut c, t) = setup();
+        c.stock.top = 5.0;
+        let id = c.add_op(OpKind::Contour, t);
+        c.op_mut(id).unwrap().stepdown = Some(3.0);
+        let tp = generate(&c, &part).remove(0);
+        let top = stock_box(&c, &part).1.z;
+        assert!(entry(&tp).z >= top - 1e-6, "{:?}", entry(&tp));
+        let p = c.add_op(OpKind::Pocket, t);
+        c.op_mut(p).unwrap().stepdown = Some(3.0);
+        c.op_mut(id).unwrap().suppressed = true;
+        let tp = generate(&c, &part).remove(0);
+        assert!(entry(&tp).z >= top - 1e-6, "{:?}", entry(&tp));
+    }
+
+    #[test]
+    fn helix_stays_inside_thin_loops() {
+        let t = Tool { diameter: 6.0, ..Default::default() };
+        let mut pb = Pb { tool: &t, moves: vec![], pos: None, safe: 20.0, retract: 2.0, ramp: 3f64.to_radians(), feed: 1000.0, plunge: 300.0 };
+        // a 1.2 × 0.1 tool-centre region: its corners are 0.6 from the middle, its sides 0.05
+        let l = vec![[0.0, 0.0], [1.2, 0.0], [1.2, 0.1], [0.0, 0.1]];
+        if pb.helix_in(&l, 0.0, -3.0) {
+            for m in &pb.moves {
+                if let Move::Feed(p, _) = m {
+                    assert!(p[1] >= -1e-6 && p[1] <= 0.1 + 1e-6, "{p:?}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn deep_chamfers_come_down_above_the_edge() {
+        let part = plate();
+        let mut c = Cam::default();
+        let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap());
+        let id = c.add_op(OpKind::Chamfer, t);
+        c.retract = 1.0;
+        c.op_mut(id).unwrap().chamfer = 2.0;
+        let tp = generate(&c, &part).remove(0);
+        assert!(entry(&tp).z >= part.hi.z + 1.0 - 1e-6, "{:?} {:?}", entry(&tp), tp.warnings);
+    }
+
+    #[test]
+    fn drilling_feeds_at_the_plunge_rate() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let (feed, plunge) = (c.tool(t).unwrap().feed, c.tool(t).unwrap().plunge_feed);
+        assert!(feed > plunge);
+        let id = c.add_op(OpKind::Drill, t);
+        let o = work_origin(&c, &part);
+        c.op_mut(id).unwrap().points = vec![[30.0 - o.x, 20.0 - o.y]];
+        c.op_mut(id).unwrap().bottom = Some(-3.0);
+        c.op_mut(id).unwrap().peck = 1.0;
+        let tp = generate(&c, &part).remove(0);
+        let fs: Vec<f64> = tp.moves.iter().filter_map(|m| if let Move::Feed(_, f) = m { Some(*f) } else { None }).collect();
+        assert!(!fs.is_empty() && fs.iter().all(|f| (*f - plunge).abs() < 1e-6), "{fs:?} {:?}", tp.warnings);
+    }
+
+    #[test]
+    fn hot_cutting_speeds_are_flagged() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.add_op(OpKind::Face, t);
+        let ok = generate(&c, &part);
+        assert!(ok[0].warnings.iter().all(|w| !w.contains("m/min")), "{:?}", ok[0].warnings);
+        c.stock.material = "Stainless steel".into();
+        let hot = generate(&c, &part);
+        assert!(hot[0].warnings.iter().any(|w| w.contains("m/min")), "{:?}", hot[0].warnings);
     }
 }

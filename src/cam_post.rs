@@ -101,9 +101,9 @@ impl Out {
 
     fn mv(&mut self, g: u8, p: DVec3, f: Option<f64>) {
         let mut l = String::new();
-        if self.motion != Some(g) {
+        let new_mode = self.motion != Some(g);
+        if new_mode {
             let _ = write!(l, "G{g}");
-            self.motion = Some(g);
         }
         for (i, (axis, v)) in [('X', p.x), ('Y', p.y), ('Z', p.z)].into_iter().enumerate() {
             let r = (v * 1000.0).round() / 1000.0;
@@ -121,7 +121,11 @@ impl Out {
         }
         let trimmed = l.trim();
         if trimmed.is_empty() || trimmed == format!("G{g}") {
+            // nothing written: the controller is still in its old motion mode
             return;
+        }
+        if new_mode {
+            self.motion = Some(g);
         }
         let t = trimmed.to_string();
         self.line(&t);
@@ -134,7 +138,8 @@ impl Out {
         if self.last[2] != Some(r3(p.z)) {
             let _ = write!(l, " Z{}", num(r3(p.z)));
         }
-        let _ = write!(l, " I{} J{}", num(r3(c.x - from.x)), num(r3(c.y - from.y)));
+        // the controller adds I, J to the start as it was written (rounded)
+        let _ = write!(l, " I{} J{}", num(r3(c.x - r3(from.x))), num(r3(c.y - r3(from.y))));
         let f = f.round();
         if self.feed != Some(f) {
             let _ = write!(l, " F{}", num(f));
@@ -658,6 +663,17 @@ fn fit_arcs(pts: &[DVec3]) -> Vec<Piece> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_move_that_writes_nothing_keeps_the_motion_mode() {
+        let mut o = Out { s: String::new(), last: [None; 3], motion: None, feed: None };
+        o.mv(1, DVec3::new(0.0, 0.0, 1.0), Some(500.0));
+        o.mv(0, DVec3::new(0.0, 0.0, 5.0), None);
+        // rounds to where the tool already is: no line, and the controller stays in G0
+        o.mv(1, DVec3::new(0.0, 0.0, 5.0002), Some(500.0));
+        o.mv(1, DVec3::new(0.0, 0.0, 1.0), Some(500.0));
+        assert_eq!(o.s.lines().last(), Some("G1 Z1"), "{}", o.s);
+    }
 
     #[test]
     fn comments_are_ascii() {

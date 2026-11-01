@@ -690,6 +690,17 @@ impl Fin {
         }
     }
 
+    /// Height to come down to (plus the retract) before feeding in to `p`. Roughing can leave far more than
+    /// ENTRY_FEED above the surface (steps up to its stepdown on slopes), so without the stock that is left this
+    /// is the stock's top; with it, the highest material under the tool there.
+    fn entry_top(&self, p: DVec3) -> f64 {
+        let over = match &self.stock {
+            Some((m, _)) => m.top_near(p.x, p.y, self.d.radius()).min(self.top),
+            None => self.top,
+        };
+        (p.z + ENTRY_FEED).max(over).min(self.top).max(p.z)
+    }
+
     fn wanted(&self, slope: f64) -> bool {
         slope >= self.lo_slope && slope <= self.hi_slope
     }
@@ -774,7 +785,7 @@ impl Fin {
                     pb.cut(p0, pb.feed);
                 }
                 _ => {
-                    pb.approach(p0.x, p0.y, (p0.z + ENTRY_FEED).min(self.top).max(p0.z));
+                    pb.approach(p0.x, p0.y, self.entry_top(p0));
                     pb.cut(p0, pb.plunge);
                 }
             }
@@ -1520,7 +1531,8 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
     }
     for run in ordered {
         let run = simplify3(&run, 0.002);
-        pb.approach(run[0].x, run[0].y, (run[0].z + ENTRY_FEED).min(ctx.stock.1.z).max(run[0].z));
+        // the cone first touches the edge `dz` above the run: come down to above that
+        pb.approach(run[0].x, run[0].y, (run[0].z + dz + ENTRY_FEED).min(ctx.stock.1.z).max(run[0].z + dz));
         pb.cut(run[0], pb.plunge);
         for p in run.into_iter().skip(1) {
             pb.cut(p, pb.feed);
@@ -2157,6 +2169,25 @@ mod tests {
         let mut s = Sim::new(c, part, stock, &paths, 400);
         s.run_to(usize::MAX, usize::MAX);
         (s, paths)
+    }
+
+    #[test]
+    fn finishing_after_deep_roughing_never_rapids_into_its_steps() {
+        let part = dome();
+        let mut c = Cam::default();
+        let flat = tool(&mut c, ToolKind::Flat, 6.0);
+        let ball = tool(&mut c, ToolKind::Ball, 6.0);
+        let a = c.add_op(OpKind::Adaptive, flat);
+        c.op_mut(a).unwrap().stepdown = Some(9.0);
+        c.add_op(OpKind::Parallel, ball);
+        let (s, paths) = sim(&c, &part);
+        let bad: Vec<_> = s.events.iter().filter(|e| e.kind == EventKind::Rapid).take(3).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        // without the stock that is left, finishing comes down over the stock's top
+        let top = stock_box(&c, &part).1.z;
+        let mv = &paths[1].moves;
+        let first = mv.iter().position(|m| matches!(m, Move::Feed(..))).unwrap();
+        assert!(matches!(mv[first - 1], Move::Rapid(p) if p[2] >= top - 1e-6), "{:?}", mv[first - 1]);
     }
 
     #[test]
