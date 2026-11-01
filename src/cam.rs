@@ -847,8 +847,12 @@ pub struct Operation {
     /// 3D finishing: only where the surface slopes between these angles (degrees from horizontal).
     pub slope_min: f64,
     pub slope_max: f64,
-    /// Deburr: points (work coordinates) on the edges to chamfer; empty = every sharp edge.
+    /// Deburr: points (work coordinates) on the edges to chamfer; empty (with `edge_picks`) = every sharp edge.
     pub edges: Vec<[f64; 3]>,
+    /// Deburr: points picked on the edges in the view, in the part's own coordinates, so they stay on
+    /// the part when the stock, the work zero or the setup's orientation changes.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub edge_picks: Vec<[f64; 3]>,
     /// Deburr: edges sharper than this angle between faces, degrees.
     pub edge_angle: f64,
     /// Rest machining: only cut where the earlier operations (and setups) left material.
@@ -905,6 +909,7 @@ impl Default for Operation {
             slope_min: 0.0,
             slope_max: 90.0,
             edges: vec![],
+            edge_picks: vec![],
             edge_angle: 30.0,
             rest: false,
             ref_diameter: 0.0,
@@ -1458,6 +1463,14 @@ impl Cam {
         }
     }
 
+    /// The cutting and plunge feeds a tool really runs at: scaled with its speed when the spindle caps it
+    /// (same chip load), then capped at the machine's top feed.
+    pub fn feeds(&self, t: &Tool) -> (f64, f64) {
+        let slow = if t.rpm > 0.0 { self.spindle_rpm(t) / t.rpm } else { 1.0 };
+        let cap = |f: f64| if self.machine.max_feed > 0.0 { f.min(self.machine.max_feed) } else { f };
+        (cap((t.feed * slow).max(1.0)), cap((t.plunge_feed * slow).max(1.0)))
+    }
+
     /// The coolant an operation runs with: the operation's (when it asks for it), else the tool's, else the setup's.
     pub fn coolant_for(&self, t: &Tool, op: Option<&Operation>) -> Coolant {
         let setup = match self.coolant {
@@ -1615,6 +1628,18 @@ pub fn new_setup(name: String, studio: usize, cams: &[Cam], saved: Option<Machin
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn feeds_follow_the_capped_spindle_and_the_top_feed() {
+        let mut c = Cam { max_rpm: 24000.0, ..Default::default() };
+        c.machine.max_feed = 0.0;
+        let t = Tool { rpm: 30000.0, feed: 2000.0, plunge_feed: 500.0, ..Default::default() };
+        assert_eq!(c.feeds(&t), (1600.0, 400.0));
+        c.machine.max_feed = 1500.0;
+        assert_eq!(c.feeds(&t), (1500.0, 400.0));
+        let slow = Tool { rpm: 10000.0, feed: 800.0, plunge_feed: 200.0, ..Default::default() };
+        assert_eq!(c.feeds(&slow), (800.0, 200.0));
+    }
 
     #[test]
     fn coolant_reads_old_files_and_follows_the_setup() {

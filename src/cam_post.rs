@@ -232,7 +232,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
     if d != Dialect::LinuxCnc && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
         o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
     }
-    let total: f64 = paths.iter().map(|p| p.time).sum();
+    let total = crate::cam_paths::cycle_time(cam, paths);
     o.line(&comment(&format!("estimated time {}:{:02}", (total / 60.0).floor(), (total % 60.0).round() as i64)));
     match d {
         Dialect::Grbl => o.line("G21 G17 G90 G94"),

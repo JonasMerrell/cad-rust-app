@@ -175,7 +175,7 @@ impl Session {
                 v
             })
             .collect();
-        let total: f64 = paths.iter().map(|p| p.time).sum();
+        let total = cam_paths::cycle_time(c, &paths);
         // what will likely break something, and what is likely not meant
         let errors: Vec<String> = c.tools.iter().filter(|t| paths.iter().any(|p| p.tool == t.id && !p.moves.is_empty())).filter_map(|t| cam_paths::tap_danger(c, t)).collect();
         let hints = cam_paths::hints(c, &part, &paths);
@@ -824,7 +824,7 @@ impl Session {
                 let sim = crate::cam_sheet::new_sim(c, &part, &paths, left.as_ref());
                 let text = crate::cam_sheet::sheet(c, &part, &paths, Some(sim));
                 super::write_out(&path, &text)?;
-                json!({"exported": path, "bytes": text.len(), "tools": c.tools.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "cycle_time_s": round(paths.iter().map(|p| p.time).sum::<f64>().round())})
+                json!({"exported": path, "bytes": text.len(), "tools": c.tools.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round())})
             }
             "export_gcode" => {
                 let ci = self.cam_idx(a)?;
@@ -841,7 +841,7 @@ impl Session {
                 super::write_out(&path, &text)?;
                 let warnings: Vec<String> =
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
-                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(paths.iter().map(|p| p.time).sum::<f64>().round()), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
+                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
             }
             _ => return self.fea_call(name, a),
         };

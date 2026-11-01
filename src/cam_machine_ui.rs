@@ -211,13 +211,16 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                     let first = m.parts[ids[0]].carrier;
                     let mixed = ids.iter().any(|&i| m.parts[i].carrier != first);
                     ui.horizontal(|ui| {
-                        let mut pick = first;
+                        let mut pick = None;
                         egui::ComboBox::from_id_salt(("cam-machine-group", g)).width(110.0).selected_text(if mixed { "mixed" } else { first.short() }).show_ui(ui, |ui| {
                             for k in CARRIERS {
-                                ui.selectable_value(&mut pick, k, k.label());
+                                if ui.selectable_label(!mixed && k == first, k.label()).clicked() {
+                                    pick = Some(k);
+                                }
                             }
                         });
-                        if pick != first || (mixed && pick != first) {
+                        // a pick sets every part of the group, also one already on it in a mixed group
+                        if let Some(pick) = pick {
                             for &i in &ids {
                                 m.parts[i].carrier = pick;
                             }

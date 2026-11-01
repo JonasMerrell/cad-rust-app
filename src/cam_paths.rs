@@ -1149,6 +1149,9 @@ fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
                 (cam.max_rpm / tool.rpm * 100.0).round()
             ));
         }
+        if let Some(other) = cam.tools.iter().find(|t| t.number == tool.number && t.id != tool.id) {
+            tp.warnings.push(format!("T{} is also the number of {}: the machine can't tell them apart (tool change and length offset H{})", tool.number, other.describe(), tool.number));
+        }
         if let Some(e) = tap_danger(cam, tool) {
             tp.warnings.push(e);
         } else if cam.min_rpm > 0.0 && tool.rpm > 0.0 && cam.spindle_rpm(tool) < cam.min_rpm - 0.5 {
@@ -1876,6 +1879,35 @@ fn helix(pb: &mut Pb, cx: f64, cy: f64, r: f64, z0: f64, z1: f64, pitch: f64, di
     }
 }
 
+/// The program's run time: each operation's moves, the spin-up wait at each spindle start (where the post
+/// writes one) and the rapids from one operation to the next (each toolpath's own time starts at its first move).
+pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
+    let rapid_rate = cam.rapid_rate.max(1.0);
+    let rapid_z = if cam.machine.rapid_z > 0.0 { cam.machine.rapid_z } else { rapid_rate };
+    let mut total = 0.0;
+    let (mut tool, mut rpm, mut end): (Option<u64>, Option<f64>, Option<DVec3>) = (None, None, None);
+    for tp in paths.iter().filter(|p| !p.moves.is_empty()) {
+        // the post leaves out operations without a tool
+        let Some(t) = cam.tool(tp.tool) else { continue };
+        total += tp.time;
+        if tool != Some(t.id) {
+            tool = Some(t.id);
+            rpm = None;
+        }
+        let r = cam.spindle_rpm(t).round();
+        if rpm != Some(r) {
+            rpm = Some(r);
+            total += cam.machine.spin_up.max(0.0);
+        }
+        let start = tp.moves[0].end(DVec3::ZERO);
+        if let Some(e) = end {
+            total += ((start - e).truncate().length() / rapid_rate).max((start.z - e.z).abs() / rapid_z) * 60.0;
+        }
+        end = Some(tp.moves.iter().fold(DVec3::ZERO, |p, m| m.end(p)));
+    }
+    total
+}
+
 fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
     let rapid_rate = cam.rapid_rate.max(1.0);
     let rapid_z = if cam.machine.rapid_z > 0.0 { cam.machine.rapid_z } else { rapid_rate };
@@ -1918,6 +1950,25 @@ mod tests {
     use super::*;
     use crate::cam::{Cam, OpKind, Side, ToolKind};
 
+    #[test]
+    fn cycle_time_counts_spin_ups_and_moves_between_operations() {
+        let mut c = Cam { rapid_rate: 6000.0, ..Default::default() };
+        c.machine.spin_up = 5.0;
+        c.machine.rapid_z = 0.0;
+        let a = c.add_tool(crate::cam::Tool { rpm: 10000.0, ..Default::default() });
+        let b = c.add_tool(crate::cam::Tool { rpm: 12000.0, ..Default::default() });
+        let tp = |tool: u64, from: [f64; 3], to: [f64; 3]| Toolpath { tool, moves: vec![Move::Rapid(from), Move::Feed(to, 600.0)], time: 10.0, ..Default::default() };
+        // two operations with the same tool, then another tool 100 mm away
+        let paths = vec![tp(a, [0.0, 0.0, 5.0], [10.0, 0.0, 5.0]), tp(a, [10.0, 0.0, 5.0], [0.0, 0.0, 5.0]), tp(b, [100.0, 0.0, 5.0], [0.0, 0.0, 5.0])];
+        // 3 × 10 s of moves, 2 spindle starts, 100 mm at 6000 mm/min = 1 s
+        assert!((cycle_time(&c, &paths) - 41.0).abs() < 1e-9, "{}", cycle_time(&c, &paths));
+        // empty toolpaths and ones without a tool aren't in the program
+        let mut more = paths.clone();
+        more.insert(1, Toolpath { tool: a, ..Default::default() });
+        more.push(tp(999, [0.0; 3], [1.0, 0.0, 0.0]));
+        assert!((cycle_time(&c, &more) - 41.0).abs() < 1e-9);
+    }
+
     /// A 60 × 40 × 10 plate with a 20 × 20 pocket 5 deep, as upward triangles on a 1 mm grid plus a bottom.
     fn plate() -> Part {
         let mut tris = vec![];
@@ -1939,6 +1990,21 @@ mod tests {
         let t = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap();
         let id = c.add_tool(t);
         (c, id)
+    }
+
+    #[test]
+    fn tools_sharing_a_number_are_flagged() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let u = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 3.0).unwrap());
+        c.add_op(OpKind::Face, t);
+        c.add_op(OpKind::Contour, u);
+        let ok = generate(&c, &part);
+        assert!(ok.iter().all(|p| p.warnings.iter().all(|w| !w.contains("also the number"))), "{:?}", ok[0].warnings);
+        let n = c.tool(t).unwrap().number;
+        c.tools.iter_mut().find(|x| x.id == u).unwrap().number = n;
+        let both = generate(&c, &part);
+        assert!(both.iter().all(|p| p.warnings.iter().any(|w| w.contains(&format!("T{n} is also the number")))), "{:?}", both[1].warnings);
     }
 
     fn feeds(tp: &Toolpath) -> Vec<DVec3> {
