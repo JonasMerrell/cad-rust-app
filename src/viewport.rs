@@ -192,7 +192,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
             for p in &sketch.points {
                 let w = frame.to_world(p.v());
                 let d = (to_screen(w) - s).length();
-                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) && (app.xray || !occluded(app, w)) {
+                if d < px && best.as_ref().map(|b| d < b.0).unwrap_or(true) && section_keeps(app, w) && (app.xray || !occluded(app, w)) {
                     best = Some((d, Ref::SketchPoint { sketch: f.id, point: p.id }));
                 }
             }
@@ -219,7 +219,8 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
+    // nothing the section view cut away
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| section_keeps(app, *p) && (app.xray || !occluded(app, *p))) {
         return Some(r);
     }
     // curve features
@@ -258,7 +259,8 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| app.xray || !occluded(app, *p)) {
+    // nothing the section view cut away
+    if let Some((_, _, r)) = near.into_iter().find(|(_, p, _)| section_keeps(app, *p) && (app.xray || !occluded(app, *p))) {
         return Some(r);
     }
     // faces, regions and planes by depth along the view ray

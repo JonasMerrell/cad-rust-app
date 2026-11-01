@@ -281,6 +281,10 @@ pub struct Assembly {
     pub relations: Vec<Relation>,
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub explode_steps: Vec<ExplodeStep>,
+    /// Each turning mate's angle (radians) counted on past ±180°, as the solver last left it:
+    /// relations (a screw's travel, a gear of ratio ½) and limits past ±180° need whole turns.
+    #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
+    pub turns: std::collections::HashMap<u64, f64>,
 }
 
 impl Assembly {
@@ -328,8 +332,28 @@ fn wrap(a: f64) -> f64 {
     a.sin().atan2(a.cos())
 }
 
+/// The angle equal to `a` (up to whole turns) nearest `prev`: an angle counted on past ±180°.
+fn unwrap_near(prev: f64, a: f64) -> f64 {
+    prev + wrap(a - prev)
+}
+
+/// Whether a mate turns about its axis (its angle is counted in whole turns).
+fn turning(m: &Mate) -> bool {
+    matches!(m.kind, MateKind::Revolute | MateKind::Cylindrical)
+}
+
+impl Assembly {
+    /// Mate `m`'s angle counted past ±180° from where the solver last left it (`turns`).
+    pub fn mate_turn(&self, m: &Mate, a: Frame3, b: Frame3) -> f64 {
+        let t = mate_angle(m, a, b);
+        self.turns.get(&m.id).map(|p| unwrap_near(*p, t)).unwrap_or(t)
+    }
+}
+
 /// Residual of a relation for the mates' current frames.
-fn relation_value(r: &Relation, mates: &[Mate], frames: &dyn Fn(&Mate) -> Option<(Frame3, Frame3)>) -> Option<f64> {
+/// `angle` gives a mate's angle counted past ±180° (so a screw or a gear of ratio ½ doesn't
+/// jump back a turn when the angle wraps round).
+fn relation_value(r: &Relation, mates: &[Mate], frames: &dyn Fn(&Mate) -> Option<(Frame3, Frame3)>, angle: &dyn Fn(&Mate, Frame3, Frame3) -> f64) -> Option<f64> {
     let ma = mates.iter().find(|m| m.id == r.a)?;
     let (a1, b1) = frames(ma)?;
     let sign = if r.reverse { -1.0 } else { 1.0 };
@@ -337,14 +361,14 @@ fn relation_value(r: &Relation, mates: &[Mate], frames: &dyn Fn(&Mate) -> Option
         RelationKind::Gear => {
             let mb = mates.iter().find(|m| Some(m.id) == r.b)?;
             let (a2, b2) = frames(mb)?;
-            wrap(mate_angle(mb, a2, b2) + sign * r.ratio * mate_angle(ma, a1, b1) - r.phase) * 10.0
+            wrap(mate_angle(mb, a2, b2) + sign * r.ratio * angle(ma, a1, b1) - r.phase) * 10.0
         }
         RelationKind::Rack => {
             let mb = mates.iter().find(|m| Some(m.id) == r.b)?;
             let (a2, b2) = frames(mb)?;
-            mate_slide(mb, a2, b2) - sign * r.ratio * mate_angle(ma, a1, b1) - r.phase
+            mate_slide(mb, a2, b2) - sign * r.ratio * angle(ma, a1, b1) - r.phase
         }
-        RelationKind::Screw => mate_slide(ma, a1, b1) - sign * r.ratio * mate_angle(ma, a1, b1) / std::f64::consts::TAU - r.phase,
+        RelationKind::Screw => mate_slide(ma, a1, b1) - sign * r.ratio * angle(ma, a1, b1) / std::f64::consts::TAU - r.phase,
     })
 }
 
@@ -353,7 +377,7 @@ pub fn relation_phase(asm: &Assembly, r: &Relation) -> f64 {
     let mut r0 = r.clone();
     r0.phase = 0.0;
     let frames = |m: &Mate| -> Option<(Frame3, Frame3)> { Some((asm.world(m.a.as_ref()?)?, asm.world(m.b.as_ref()?)?)) };
-    let v = relation_value(&r0, &asm.mates, &frames).unwrap_or(0.0);
+    let v = relation_value(&r0, &asm.mates, &frames, &|m, a, b| asm.mate_turn(m, a, b)).unwrap_or(0.0);
     match r.kind {
         RelationKind::Gear => v / 10.0,
         _ => v,
@@ -443,6 +467,17 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
     let driven = |id: u64| drives.iter().any(|d| d.mate == id);
     let relations: Vec<Relation> = asm.relations.iter().filter(|r| !(driven(r.a) && r.b.map(driven).unwrap_or(true))).cloned().collect();
     let active: std::cell::RefCell<Vec<(u64, f64)>> = std::cell::RefCell::new(vec![]);
+    // turning mates' angles at the start, counted past ±180°: each evaluation is taken as the
+    // nearest angle to it (the solver's steps are far smaller than half a turn)
+    let start: std::collections::HashMap<u64, f64> = mates
+        .iter()
+        .filter(|m| turning(m))
+        .filter_map(|m| Some((m.id, asm.mate_turn(m, asm.world(m.a.as_ref()?)?, asm.world(m.b.as_ref()?)?))))
+        .collect();
+    let turn = |m: &Mate, a: Frame3, b: Frame3| {
+        let t = mate_angle(m, a, b);
+        start.get(&m.id).map(|p| unwrap_near(*p, t)).unwrap_or(t)
+    };
     let residuals = |x: &[f64]| -> Vec<f64> {
         let poses = poses_for(x);
         let mut out = vec![];
@@ -460,7 +495,7 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
                 // a limit that was hit holds the part at it
                 if let Some((_, bound)) = active.borrow().iter().find(|x| x.0 == m.id) {
                     match m.kind {
-                        MateKind::Revolute => out.push(wrap(mate_angle(m, a, b) - bound.to_radians()) * 10.0),
+                        MateKind::Revolute => out.push((turn(m, a, b) - bound.to_radians()) * 10.0),
                         _ => out.push(mate_slide(m, a, b) - bound),
                     }
                 }
@@ -468,7 +503,7 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
         }
         let frames = |m: &Mate| -> Option<(Frame3, Frame3)> { Some((world(&poses, m.a.as_ref()?)?, world(&poses, m.b.as_ref()?)?)) };
         for r in &relations {
-            if let Some(v) = relation_value(r, &mates, &frames) {
+            if let Some(v) = relation_value(r, &mates, &frames, &turn) {
                 out.push(v);
             }
         }
@@ -536,7 +571,7 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
             continue;
         }
         let v = match m.kind {
-            MateKind::Revolute => mate_angle(m, a, b).to_degrees(),
+            MateKind::Revolute => turn(m, a, b).to_degrees(),
             MateKind::Slider | MateKind::Cylindrical => mate_slide(m, a, b),
             _ => continue,
         };
@@ -551,9 +586,16 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
     }
     }
     let poses = poses_for(&x);
+    let mut turns = std::collections::HashMap::new();
+    for m in mates.iter().filter(|m| turning(m)) {
+        if let (Some(a), Some(b)) = (world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) {
+            turns.insert(m.id, turn(m, a, b));
+        }
+    }
     for (i, p) in poses.into_iter().enumerate() {
         asm.instances[i].pose = p;
     }
+    asm.turns = turns;
     let failed = failed_mates(asm);
     SolveResult { ok: failed.is_empty(), failed }
 }
@@ -637,6 +679,24 @@ fn face_contains(mesh: &BodyMesh, fi: usize, p: DVec3, n: DVec3) -> bool {
     })
 }
 
+/// The point of planar face `fi` nearest `p` (on the face's plane).
+fn nearest_on_face(mesh: &BodyMesh, fi: usize, p: DVec3) -> Option<DVec3> {
+    let v = |i: u32| DVec3::new(mesh.positions[3 * i as usize] as f64, mesh.positions[3 * i as usize + 1] as f64, mesh.positions[3 * i as usize + 2] as f64);
+    let seg = |a: DVec3, b: DVec3| {
+        let d = b - a;
+        a + d * ((p - a).dot(d) / d.length_squared().max(1e-18)).clamp(0.0, 1.0)
+    };
+    mesh.indices
+        .chunks(3)
+        .zip(&mesh.tri_face)
+        .filter(|(_, f)| **f as usize == fi)
+        .flat_map(|(t, _)| {
+            let (a, b, c) = (v(t[0]), v(t[1]), v(t[2]));
+            [seg(a, b), seg(b, c), seg(c, a)]
+        })
+        .min_by(|x, y| (*x - p).length().total_cmp(&(*y - p).length()))
+}
+
 /// Find a connector's geometry on its part (`mesh`, in the part's own coordinates; `o`, `z` too).
 /// With no record of what it was on (older files), it is attached to what it sits on, or to the
 /// nearest parallel face whose outline holds it. Returns the new origin and the reference.
@@ -645,6 +705,15 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
     let planes = |want: Option<ConnRef>| -> Option<(DVec3, ConnRef)> {
         // a face with the picked face's persistent name, when it had one and it is still there
         let named = want.filter(|w| w.name != 0).and_then(|w| mesh.faces.iter().position(|f| face_key(&f.name) == w.name));
+        // the named face, still facing the same way, holds the connector even when it moved
+        // across its plane (a boss moved in its sketch): onto it, at the nearest point if need be,
+        // rather than onto whatever other face lies under the old position
+        if let Some(k) = named.filter(|&k| mesh.faces[k].planar && DVec3::from(mesh.faces[k].normal).normalize().dot(z) >= 0.999) {
+            let n = DVec3::from(mesh.faces[k].normal).normalize();
+            let q = o + n * (DVec3::from(mesh.faces[k].center) - o).dot(n);
+            let q = if face_contains(mesh, k, q, n) { q } else { nearest_on_face(mesh, k, q)? };
+            return Some((q, ConnRef { leaf, kind: 0, index: k as u32, name: want.map(|w| w.name).unwrap_or(0), ..Default::default() }));
+        }
         let mut best: Option<(f64, usize, DVec3)> = None;
         for (fi, f) in mesh.faces.iter().enumerate().filter(|(_, f)| f.planar) {
             let n = DVec3::from(f.normal).normalize();
@@ -678,9 +747,10 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
             }
             let v = o - c;
             let off = (v - n * v.dot(n)).length();
+            // by where it is and its size: mesh edge indices are renumbered whenever the part's
+            // topology changes, so the old index only settles a tie
             let score = match want {
-                Some(w) if w.index == ei as u32 => -1.0,
-                Some(w) => off + (r - w.size).abs() + if w.centre { v.length() * 1e-3 } else { 0.0 },
+                Some(w) => off + (r - w.size).abs() + if w.centre { v.length() * 1e-3 } else { 0.0 } - if w.index == ei as u32 { 1e-6 } else { 0.0 },
                 None => off + v.length() * 1e-3,
             };
             if best.map(|b| score < b.0).unwrap_or(true) {
@@ -689,7 +759,7 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
         }
         let (_, ei, c, r, off) = best?;
         let size = want.map(|w| w.size).unwrap_or(r);
-        if off > 2.0 * size.max(r) + 1.0 && want.map(|w| w.index != ei as u32).unwrap_or(true) {
+        if off > 2.0 * size.max(r) + 1.0 {
             return None;
         }
         let centre = want.map(|w| w.centre).unwrap_or((o - c).length() < tol);
@@ -705,7 +775,7 @@ fn locate(mesh: &BodyMesh, on: Option<ConnRef>, leaf: u32, o: DVec3, z: DVec3) -
                 continue;
             }
             let m = DVec3::from(e.mid);
-            let score = if want == Some(ei as u32) { -1.0 } else { (m - o).length() };
+            let score = (m - o).length() - if want == Some(ei as u32) { 1e-6 } else { 0.0 };
             if best.map(|b| score < b.0).unwrap_or(true) {
                 best = Some((score, ei, m));
             }
@@ -920,6 +990,27 @@ mod tests {
         let (q, r) = locate(&after, c.on, 0, c.origin.into(), c.z.into()).unwrap();
         assert_eq!(r.index, 1, "found by name, not by index or nearness");
         assert!((q.z - 45.0).abs() < 1e-9);
+        // the named face moved sideways off the old spot, and another face now lies under it:
+        // the connector goes with its face (to the nearest point of it), not onto the other one
+        let mut moved = mesh([(8.0, 1), (8.0, 0)]);
+        for i in 4..8 {
+            moved.positions[3 * i] += 100.0;
+        }
+        moved.faces[1].center[0] += 100.0;
+        let (q, r) = locate(&moved, c.on, 0, c.origin.into(), c.z.into()).unwrap();
+        assert_eq!(r.index, 1, "{q}");
+        assert!((q - DVec3::new(100.0, 10.0, 8.0)).length() < 1e-6, "{q}");
+    }
+
+    #[test]
+    fn axis_connectors_go_by_position_not_by_edge_number() {
+        let circle = |x: f64| crate::kernel::EdgeInfo { circle: Some(([x, 0.0, 0.0], [0.0, 0.0, 1.0], 3.0)), mid: [x + 3.0, 0.0, 0.0], ..Default::default() };
+        let on = ConnRef { leaf: 0, kind: 1, index: 0, centre: true, size: 3.0, name: 0 };
+        // edge 0 was the hole at x = 0; after a rebuild edge 0 is the hole at x = 50
+        let after = BodyMesh { edges: vec![circle(50.0), circle(0.0)], ..Default::default() };
+        let (q, r) = locate(&after, Some(on), 0, DVec3::ZERO, DVec3::Z).unwrap();
+        assert_eq!(r.index, 1);
+        assert!(q.length() < 1e-9, "{q}");
     }
 
     fn revolute(id: u64, inst: u64, at: [f64; 3]) -> Mate {
@@ -964,5 +1055,47 @@ mod tests {
         solve(&mut a, &[2], &|_| DVec3::ZERO);
         let t = ang(&a, 10);
         assert!((t.abs() - 10.0).abs() < 1e-3, "clamped to the limit: {t}");
+    }
+
+    #[test]
+    fn a_screw_keeps_going_past_half_a_turn_and_limits_reach_past_180() {
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 5.0]));
+        let mut m = revolute(10, 2, [0.0, 0.0, 5.0]);
+        m.kind = MateKind::Cylindrical;
+        a.mates.push(m);
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        let mut rel = Relation { id: 20, name: "s".into(), kind: RelationKind::Screw, a: 10, b: None, ratio: 2.0, reverse: false, phase: 0.0 };
+        rel.phase = relation_phase(&a, &rel);
+        a.relations.push(rel);
+        let slide = |a: &Assembly| {
+            let m = &a.mates[0];
+            mate_slide(m, a.world(m.a.as_ref().unwrap()).unwrap(), a.world(m.b.as_ref().unwrap()).unwrap())
+        };
+        let s0 = slide(&a);
+        // a turn and a half, a twelfth at a time, as a drag does
+        for _ in 0..18 {
+            turn(&mut a, 2, 30.0);
+            assert!(solve(&mut a, &[2], &|_| DVec3::ZERO).ok);
+        }
+        let travel = (slide(&a) - s0).abs();
+        // (the held part gives back a hair of its turn to the relation; a jump would be a whole pitch)
+        assert!((travel - 3.0).abs() < 0.05, "1.5 turns of a 2 mm pitch: {travel}");
+
+        // a revolute limited to -10..270 turns on to 200° (it read as -160° before)
+        let mut b = Assembly::default();
+        b.instances.push(inst(1, true, [0.0; 3]));
+        b.instances.push(inst(2, false, [0.0, 0.0, 5.0]));
+        let mut m = revolute(10, 2, [0.0, 0.0, 5.0]);
+        m.limits = Some([-10.0, 270.0]);
+        b.mates.push(m);
+        assert!(solve(&mut b, &[], &|_| DVec3::ZERO).ok);
+        for _ in 0..10 {
+            turn(&mut b, 2, 20.0);
+            assert!(solve(&mut b, &[2], &|_| DVec3::ZERO).ok);
+        }
+        let t = b.turns[&10].to_degrees().abs();
+        assert!((t - 200.0).abs() < 1e-3, "{t}");
     }
 }
