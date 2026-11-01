@@ -15,10 +15,12 @@ use crate::theme;
 
 #[derive(Default)]
 pub struct MachineUi {
-    /// A STEP file being read: (setup index, receiver).
-    importing: Option<(usize, Receiver<Result<MachineModel, String>>)>,
+    /// A STEP file being read: (the setup's name, receiver).
+    importing: Option<(String, Receiver<Result<MachineModel, String>>)>,
     /// The machine being checked or edited in the window.
     pub editing: Option<MachineModel>,
+    /// The name (or path) it was loaded by, where Save writes it back.
+    editing_from: Option<String>,
     /// Parts being read to add onto the table: (group name, receiver).
     adding: Option<(String, Receiver<Result<Vec<cam_machine::StepPart>, String>>)>,
     /// How far to move each group (by name) in the window.
@@ -75,13 +77,16 @@ pub fn setup_rows(ui: &mut Ui, c: &mut Cam, importing: bool) -> Option<Action> {
 pub fn start_import(app: &mut App, ctx: &egui::Context, ci: usize) {
     let Some(path) = rfd::FileDialog::new().add_filter("STEP or Parasolid", &["step", "stp", "x_t", "STEP", "STP", "X_T"]).pick_file() else { return };
     let name = path.file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Machine".into());
+    // a machine of that name already in the library keeps its settings: the new one gets a name of its own
+    let name = cam_machine::free_name(&name);
     let (tx, rx) = channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
         let _ = tx.send(cam_machine::import_step(&path, &name));
         ctx.request_repaint();
     });
-    app.cam.machine.importing = Some((ci, rx));
+    let setup = app.ws.cams.get(ci).map(|c| c.name.clone()).unwrap_or_default();
+    app.cam.machine.importing = Some((setup, rx));
 }
 
 pub fn is_importing(app: &App) -> bool {
@@ -90,26 +95,36 @@ pub fn is_importing(app: &App) -> bool {
 
 pub fn edit(app: &mut App, name: &str) {
     match cam_machine::load(name) {
-        Ok(l) => app.cam.machine.editing = Some(l.model.clone()),
+        Ok(l) => {
+            app.cam.machine.editing = Some(l.model.clone());
+            app.cam.machine.editing_from = Some(name.to_string());
+        }
         Err(e) => app.flash(e, ToastKind::Error),
     }
 }
 
 /// Finish an import, and the window for checking the machine.
 pub fn window(app: &mut App, ctx: &egui::Context) {
-    if let Some((ci, rx)) = &app.cam.machine.importing {
-        let ci = *ci;
+    if let Some((setup, rx)) = &app.cam.machine.importing {
+        let setup = setup.clone();
         if let Ok(r) = rx.try_recv() {
             app.cam.machine.importing = None;
             match r.and_then(|m| cam_machine::save(&m).map(|_| m)) {
                 Ok(m) => {
-                    if let Some(c) = app.ws.cams.get_mut(ci) {
+                    // (by name: setups may have been added, removed or moved meanwhile)
+                    if let Some(c) = app.ws.cams.iter_mut().find(|c| c.name == setup) {
                         c.machine.model = m.name.clone();
                     }
                     app.cam.sim = None;
                     app.cam.scene_dirty = true;
-                    app.flash_info(format!("Read {} parts of {}: check which axis moves each", m.parts.len(), m.name), Some(std::time::Duration::from_secs(4)));
-                    app.cam.machine.editing = Some(m);
+                    if app.cam.machine.editing.is_some() {
+                        // don't throw away edits to the machine open in the window
+                        app.flash_info(format!("Read {} parts of {}: open Axes… to check which axis moves each", m.parts.len(), m.name), Some(std::time::Duration::from_secs(4)));
+                    } else {
+                        app.flash_info(format!("Read {} parts of {}: check which axis moves each", m.parts.len(), m.name), Some(std::time::Duration::from_secs(4)));
+                        app.cam.machine.editing_from = Some(m.name.clone());
+                        app.cam.machine.editing = Some(m);
+                    }
                 }
                 Err(e) => app.flash(format!("Could not read the machine: {e}"), ToastKind::Error),
             }
@@ -118,7 +133,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let Some(mut m) = app.cam.machine.editing.take() else { return };
     if let Some((g, rx)) = &app.cam.machine.adding {
         if let Ok(r) = rx.try_recv() {
-            let g = g.clone();
+            let g = m.free_group(g);
             app.cam.machine.adding = None;
             match r {
                 Ok(parts) => {
@@ -260,8 +275,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 }
             });
             if let Some(g) = gone {
-                let full = m.parts.iter().find(|p| p.name.split('/').next() == Some(g.as_str())).map(|p| p.name.split('/').next().unwrap_or("").to_string()).unwrap_or(g);
-                m.remove(&full);
+                // exactly that group (not another whose cleaned name matches it)
+                m.remove_group(&g);
             }
             if let Some((g, d)) = shift {
                 m.shift_group(&g, glam::DVec3::from(d));
@@ -295,9 +310,11 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         }
     }
     if save {
-        match cam_machine::save(&m) {
+        // back where it was loaded from (a library name or a path), which every setup using it reads
+        let to = app.cam.machine.editing_from.clone().unwrap_or_else(|| m.name.clone());
+        match cam_machine::save_to(&m, &to) {
             Ok(_) => {
-                cam_machine::update_cached(&m.name, Arc::new(cam_machine::Loaded::new(m.clone())));
+                cam_machine::update_cached(&to, Arc::new(cam_machine::Loaded::new(m.clone())));
                 app.cam.sim = None;
                 app.cam.scene_dirty = true;
                 app.flash_info(format!("Saved machine {}", m.name), Some(std::time::Duration::from_secs(2)));
@@ -307,6 +324,8 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     }
     if open && !close {
         app.cam.machine.editing = Some(m);
+    } else {
+        app.cam.machine.editing_from = None;
     }
 }
 
@@ -339,7 +358,8 @@ pub fn draw(app: &App, s: &mut SceneData) {
     let Some(sim) = &app.cam.sim else { return };
     let Some(sm) = &sim.machine else { return };
     let placed = &sm.placed;
-    let ci = sim.current_cutter().unwrap_or(0);
+    // the cutter of the move that put the tool where it is (the next one's may be another length)
+    let ci = sim.last_cutter().unwrap_or(0);
     let rel = placed.pose(sim.tool_pos(), sim.gauge(ci));
     // parts in a crash at this move turn red
     let bad: Vec<usize> = sm.hit_parts.iter().filter(|(step, _)| step + 1 >= sim.done && *step < sim.done + 1).flat_map(|(_, p)| p.iter().copied()).collect();

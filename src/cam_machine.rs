@@ -201,15 +201,19 @@ pub fn guess(name: &str, parts: Vec<(String, [u8; 3], Vec<[Vec3; 3]>)>) -> Machi
         }
         spindle = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, zmin);
     }
-    // the table: the axis (other than the spindle's) under the spindle, else the base
+    // the table: the axis (other than the spindle's) under the spindle, else the base; with one axis on
+    // the other (an X table on a Y saddle) the upper one, which the work stands on (Y on a tie)
     let under = |b: &(DVec3, DVec3)| b.0.x <= spindle.x && spindle.x <= b.1.x && b.0.y <= spindle.y && spindle.y <= b.1.y && b.1.z < spindle.z;
-    let table_on = [Carrier::Y, Carrier::X]
+    let table_on = [Carrier::X, Carrier::Y]
         .into_iter()
         .filter(|c| *c != spindle_on)
-        .find(|c| {
-            let ids = of(&carriers, *c);
-            !ids.is_empty() && under(&union(&ids))
+        .filter_map(|c| {
+            let ids = of(&carriers, c);
+            let u = union(&ids);
+            (!ids.is_empty() && under(&u)).then_some((c, u.1.z))
         })
+        .max_by(|a, b| a.1.total_cmp(&b.1))
+        .map(|t| t.0)
         .unwrap_or(Carrier::Base);
     // the table's top: the biggest part of that carrier under the spindle
     let table_part = (0..parts.len())
@@ -238,16 +242,32 @@ pub fn guess(name: &str, parts: Vec<(String, [u8; 3], Vec<[Vec3; 3]>)>) -> Machi
         let (ga, gb) = (group(a), group(b));
         ga.iter().any(|&i| gb.iter().any(|&j| touching(&boxes[i], &boxes[j], 0.5)))
     };
-    // what rides on what: Z on X (or Y), X on Y (a gantry or a saddle), else on the base
+    // what rides on what: the table on the saddle under it (X on Y, or Y on X), X on Y on a gantry, Z on
+    // the axis carrying the head (one that doesn't move the work), else on the base
     let mut rides = [Carrier::Base; 3];
-    if touches(Carrier::X, Carrier::Y) && table_on != Carrier::X {
-        rides[0] = Carrier::Y;
-    } else if touches(Carrier::X, Carrier::Y) {
-        rides[1] = Carrier::X;
+    if touches(Carrier::X, Carrier::Y) {
+        if table_on == Carrier::Y {
+            rides[1] = Carrier::X;
+        } else {
+            rides[0] = Carrier::Y;
+        }
     }
-    rides[2] = if touches(Carrier::Z, Carrier::X) && rides[0] != Carrier::Z {
+    let moves_work = |c: Carrier, rides: &[Carrier; 3]| {
+        let mut k = table_on;
+        for _ in 0..4 {
+            if k == c {
+                return true;
+            }
+            match k.axis() {
+                Some(a) => k = rides[a],
+                None => return false,
+            }
+        }
+        false
+    };
+    rides[2] = if touches(Carrier::Z, Carrier::X) && !moves_work(Carrier::X, &rides) {
         Carrier::X
-    } else if touches(Carrier::Z, Carrier::Y) {
+    } else if touches(Carrier::Z, Carrier::Y) && !moves_work(Carrier::Y, &rides) {
         Carrier::Y
     } else {
         Carrier::Base
@@ -303,6 +323,23 @@ impl MachineModel {
         let n = self.parts.len();
         self.parts.retain(|p| !(p.name == name || p.name.starts_with(&format!("{name}/")) || clean(p.name.split('/').next().unwrap_or("")) == name));
         n - self.parts.len()
+    }
+
+    /// Remove the parts of exactly this top-level assembly (as the machine window lists them). Returns how
+    /// many went.
+    pub fn remove_group(&mut self, group: &str) -> usize {
+        let n = self.parts.len();
+        self.parts.retain(|p| p.name.split('/').next() != Some(group));
+        n - self.parts.len()
+    }
+
+    /// A group name for parts added on the table that no top-level assembly has yet ("Vise", "Vise 2", …).
+    pub fn free_group(&self, name: &str) -> String {
+        let taken = |g: &str| self.parts.iter().any(|p| p.name.split('/').next() == Some(g) || clean(p.name.split('/').next().unwrap_or("")) == g);
+        if !taken(name) {
+            return name.to_string();
+        }
+        (2..).map(|k| format!("{name} {k}")).find(|g| !taken(g)).unwrap_or_default()
     }
 
     /// Add more parts riding on the table (a vise, a fixture plate, a rotary table), from their own model:
@@ -425,15 +462,42 @@ fn path_of(name: &str) -> Option<std::path::PathBuf> {
     machines_dir().map(|d| d.join(file_name(name)))
 }
 
+/// Keep a machine in the library under its own name.
 pub fn save(m: &MachineModel) -> Result<std::path::PathBuf, String> {
-    let d = machines_dir().ok_or("no config folder (HOME isn't set)")?;
-    std::fs::create_dir_all(&d).map_err(|e| e.to_string())?;
-    let p = d.join(file_name(&m.name));
+    save_to(m, &m.name)
+}
+
+/// Keep a machine where `name` (a library name or a path, as given to `load`) points, and drop the copy
+/// cached for that place.
+pub fn save_to(m: &MachineModel, name: &str) -> Result<std::path::PathBuf, String> {
+    let p = path_of(name).ok_or("no config folder (HOME isn't set)")?;
+    if let Some(d) = p.parent().filter(|d| !d.as_os_str().is_empty()) {
+        std::fs::create_dir_all(d).map_err(|e| e.to_string())?;
+    }
     std::fs::write(&p, serde_json::to_string(m).unwrap_or_default()).map_err(|e| e.to_string())?;
     if let Ok(mut c) = cache().lock() {
-        c.remove(&m.name);
+        c.remove(&cache_key(name));
     }
     Ok(p)
+}
+
+/// Whether the library already has a machine of that name.
+pub fn exists(name: &str) -> bool {
+    path_of(name).map(|p| p.exists()).unwrap_or(false)
+}
+
+/// A library name for a new machine that doesn't replace one already there ("Mill", "Mill 2", …).
+pub fn free_name(name: &str) -> String {
+    if !exists(name) {
+        return name.to_string();
+    }
+    (2..).map(|k| format!("{name} {k}")).find(|n| !exists(n)).unwrap_or_default()
+}
+
+/// The cache's key for a machine name: the file it is in, so "Mill v1.2" and "Mill v1_2" (its file's
+/// name, as `list` shows it) are the same machine.
+fn cache_key(name: &str) -> String {
+    path_of(name).map(|p| p.to_string_lossy().into_owned()).unwrap_or_else(|| name.to_string())
 }
 
 /// A machine with its meshes unpacked.
@@ -460,7 +524,8 @@ pub fn load(name: &str) -> Result<Arc<Loaded>, String> {
     if name.is_empty() {
         return Err("no machine".into());
     }
-    if let Some(m) = cache().lock().ok().and_then(|c| c.get(name).cloned()) {
+    let key = cache_key(name);
+    if let Some(m) = cache().lock().ok().and_then(|c| c.get(&key).cloned()) {
         return Ok(m);
     }
     let p = path_of(name).ok_or("no config folder (HOME isn't set)")?;
@@ -468,7 +533,7 @@ pub fn load(name: &str) -> Result<Arc<Loaded>, String> {
     let model: MachineModel = serde_json::from_str(&text).map_err(|e| format!("machine {name} is damaged: {e}"))?;
     let l = Arc::new(Loaded::new(model));
     if let Ok(mut c) = cache().lock() {
-        c.insert(name.to_string(), l.clone());
+        c.insert(key, l.clone());
     }
     Ok(l)
 }
@@ -476,7 +541,7 @@ pub fn load(name: &str) -> Result<Arc<Loaded>, String> {
 /// Replace a cached machine (after editing it).
 pub fn update_cached(name: &str, l: Arc<Loaded>) {
     if let Ok(mut c) = cache().lock() {
-        c.insert(name.to_string(), l);
+        c.insert(cache_key(name), l);
     }
 }
 
@@ -494,14 +559,14 @@ pub fn read_step(path: &std::path::Path) -> Result<Vec<StepPart>, String> {
     if crate::import::format_of(path) == Some("parasolid") {
         let bytes = std::fs::read(path).map_err(|e| format!("can't read {}: {e}", path.display()))?;
         let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_default();
-        let step = std::env::temp_dir().join(format!("rcad-machine-{}.step", std::process::id()));
+        let step = temp_path("step");
         std::fs::write(&step, crate::parasolid::to_step(&bytes, &name)?.step).map_err(|e| e.to_string())?;
         let parts = read_step(&step);
         let _ = std::fs::remove_file(&step);
         return parts;
     }
     let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-    let out = std::env::temp_dir().join(format!("rcad-machine-{}.bin", std::process::id()));
+    let out = temp_path("bin");
     let st = std::process::Command::new(exe)
         .arg("--step-parts")
         .arg(path)
@@ -517,6 +582,13 @@ pub fn read_step(path: &std::path::Path) -> Result<Vec<StepPart>, String> {
         return Err(if err.is_empty() { "the STEP reader stopped".into() } else { err });
     }
     decode_parts(&bytes.map_err(|e| e.to_string())?)
+}
+
+/// A temporary file of its own for one read (an import and an add can run at once).
+fn temp_path(ext: &str) -> std::path::PathBuf {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    std::env::temp_dir().join(format!("rcad-machine-{}-{}.{ext}", std::process::id(), N.fetch_add(1, Ordering::Relaxed)))
 }
 
 /// Entry point of `--step-parts in.step out.bin`: the leaves of a STEP assembly, meshed, written as JSON
@@ -1033,6 +1105,10 @@ pub fn tool_points(body: &[(f64, f64)], top: f64, step: f64) -> Vec<Vec3> {
         }
     }
     for (k, (r, z0)) in body.iter().enumerate() {
+        // bands that start above `top` aren't there (a model with the collet nut has it already)
+        if *z0 > top + 1e-9 {
+            break;
+        }
         let z1 = body.get(k + 1).map(|b| b.1).unwrap_or(top).min(top);
         let mut z = *z0;
         while z <= z1 + 1e-9 {
@@ -1041,7 +1117,7 @@ pub fn tool_points(body: &[(f64, f64)], top: f64, step: f64) -> Vec<Vec3> {
         }
         ring(&mut v, *r, z1);
         // the step to the next band
-        if let Some(&(r2, _)) = body.get(k + 1) {
+        if let Some(&(r2, _)) = body.get(k + 1).filter(|b| b.1 <= top + 1e-9) {
             let (a, b) = (r.min(r2), r.max(r2));
             let mut rr = a + step;
             while rr < b {
@@ -1218,6 +1294,49 @@ mod tests {
         assert_eq!((lo, hi), (DVec3::new(-10.0, -150.0, 10.0), DVec3::new(30.0, 50.0, 55.0)));
         m.shift_group("Vise", DVec3::new(0.0, 0.0, 1.0));
         assert_eq!(bounds(&unpack_tris(&m.parts.last().unwrap().mesh)).0.z, 11.0);
+    }
+
+    #[test]
+    fn x_table_on_a_y_saddle_carries_the_work() {
+        // a bench mill: Y saddle on the base's rails, the X table on the saddle, the head on the column
+        let parts = vec![
+            ("Base v1:1".to_string(), [90, 90, 90], cuboid([-250.0, -300.0, -100.0], [250.0, 300.0, -40.0])),
+            ("Base v1:1/Column".to_string(), [90, 90, 90], cuboid([-250.0, 200.0, -40.0], [250.0, 300.0, 400.0])),
+            ("Y axis v1:1/Saddle".to_string(), [200, 200, 200], cuboid([-100.0, -150.0, -40.0], [100.0, 50.0, 0.0])),
+            ("X axis v1:1/Table".to_string(), [60, 90, 140], cuboid([-300.0, -100.0, 0.0], [300.0, 0.0, 30.0])),
+            ("Z axis v1:1".to_string(), [60, 140, 60], cuboid([-60.0, 20.0, 170.0], [60.0, 200.0, 500.0])),
+            ("Z axis v1:1/Nose".to_string(), [40, 40, 40], cuboid([-11.0, -61.0, 150.0], [11.0, -39.0, 170.0])),
+        ];
+        let m = guess("Bench mill", parts);
+        assert_eq!(m.table_on, Carrier::X);
+        assert_eq!(m.rides, [Carrier::Y, Carrier::Base, Carrier::Base]);
+        assert_eq!(m.table[2], 30.0, "the table point is on the X table, not the saddle");
+        assert!(m.problem().is_none(), "{:?}", m.problem());
+    }
+
+    #[test]
+    fn tool_points_stop_at_the_spindle_point() {
+        // a 6 mm end mill 30 mm out of an ER20 nut, then the holder body and an 80 mm spindle above it
+        let body = vec![(3.0, 0.0), (3.0, 20.0), (15.0, 30.0), (17.0, 33.0), (17.0, 49.5), (40.0, 89.5)];
+        let pts = tool_points(&body, 30.0, 2.0);
+        let r = pts.iter().map(|p| p.truncate().length()).fold(0.0f32, f32::max);
+        assert!(r <= 15.01, "nothing wider than the nut face: {r}");
+        assert!(pts.iter().all(|p| p.z <= 30.0 + 1e-4));
+        // with the holder hanging below the spindle face, the spindle face is there
+        let pts = tool_points(&body, 89.5, 2.0);
+        assert!(pts.iter().any(|p| (p.truncate().length() - 40.0).abs() < 0.01));
+    }
+
+    #[test]
+    fn groups_and_temp_files_of_their_own() {
+        let mut m = test_machine();
+        m.add_on_table("Base", vec![("Body".into(), [1, 2, 3], cuboid([0.0; 3], [10.0, 10.0, 10.0]))], DVec3::ZERO);
+        assert_eq!(m.free_group("Base"), "Base 2");
+        assert_eq!(m.free_group("Vise"), "Vise");
+        // taking off the added "Base" leaves the machine's own "Base v1:1"
+        assert_eq!(m.remove_group("Base"), 1);
+        assert_eq!(m.parts.iter().filter(|p| p.name.starts_with("Base v1:1")).count(), 3);
+        assert_ne!(temp_path("bin"), temp_path("bin"));
     }
 
     #[test]

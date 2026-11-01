@@ -539,6 +539,15 @@ pub fn held_setup(cams: &[Cam], ci: usize) -> Result<Option<usize>, String> {
     }
 }
 
+/// The parts a setup's input is made from: for a jaw-machining tab those of the setup it makes jaws for
+/// (its jaws are shaped to what that one holds), else its own.
+pub fn input_bodies(cams: &[Cam], ci: usize) -> Vec<crate::doc::BodyId> {
+    match held_setup(cams, ci) {
+        Ok(Some(h)) => cams[h].bodies.clone(),
+        _ => cams[ci].bodies.clone(),
+    }
+}
+
 /// What a setup machines: the Part Studio's parts, or for a jaw-machining tab the jaws of the setup it
 /// names (in that setup's coordinates, which are this one's).
 pub fn input_for(cams: &[Cam], ci: usize, input: PartInput) -> Result<PartInput, String> {

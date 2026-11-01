@@ -429,6 +429,14 @@ impl Sim {
         self.moves.get(self.done.min(self.moves.len().saturating_sub(1))).map(|m| m.0)
     }
 
+    /// Index of the toolpath cutter that made the last move (where the tool is now).
+    pub fn last_cutter(&self) -> Option<usize> {
+        match self.done.min(self.moves.len()).checked_sub(1) {
+            Some(k) => self.moves.get(k).map(|m| m.0),
+            None => self.current_cutter(),
+        }
+    }
+
     /// Run moves until `target` (exclusive) or until about `budget` tool positions have been stamped.
     /// Returns true when it reached the target.
     pub fn run_to(&mut self, target: usize, budget: usize) -> bool {
@@ -469,7 +477,9 @@ impl Sim {
             if !self.fixtures.is_empty() {
                 self.hit_fixtures(ci, op, step, p);
             }
-            if let Some(m) = &mut self.machine {
+            // (the first move comes from a made-up start above the setup's origin, not from where the machine
+            // is: only its end is checked)
+            if let Some(m) = self.machine.as_mut().filter(|_| step > 0 || k == n) {
                 m.since += len / n as f64;
                 if m.since >= m.placed.step || k == n {
                     m.since = 0.0;

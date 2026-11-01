@@ -105,7 +105,7 @@ impl Session {
         self.sync();
         let c = self.ws.cams[ci].clone();
         self.ensure_built(c.studio)?;
-        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
+        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, ci));
         let input = crate::cam_jaws::input_for(&self.ws.cams, ci, input)?;
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
@@ -138,7 +138,7 @@ impl Session {
         self.sync();
         let c = self.ws.cams[ci].clone();
         self.ensure_built(c.studio)?;
-        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &c.bodies);
+        let input = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, ci));
         let input = crate::cam_jaws::input_for(&self.ws.cams, ci, input)?;
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
@@ -307,13 +307,15 @@ impl Session {
                 model.add_on_table(name, parts, DVec3::from(at));
             }
         }
+        // an edited machine goes back where it was read from (a library name or a path)
+        let to = a.get("name").and_then(|v| v.as_str()).filter(|_| a.get("import").is_none()).unwrap_or(&model.name).to_string();
         if a.get("import").is_some() || model != before {
-            mm::save(&model)?;
-            mm::update_cached(&model.name, std::sync::Arc::new(mm::Loaded::new(model.clone())));
+            mm::save_to(&model, &to)?;
+            mm::update_cached(&to, std::sync::Arc::new(mm::Loaded::new(model.clone())));
         }
         if a.get("cam").is_some() {
             let ci = self.cam_idx(a)?;
-            self.ws.cams[ci].machine.model = model.name.clone();
+            self.ws.cams[ci].machine.model = to.clone();
             if let Some(v) = a.get("on_table") {
                 self.ws.cams[ci].on_table = serde_json::from_value(v.clone()).map_err(|_| "on_table: [x, y, z]")?;
             }
