@@ -1544,7 +1544,7 @@ mod tests {
 
     #[test]
     fn a_negative_radial_distance_is_a_bad_dimension() {
-        let vars = HashMap::new();
+        let vars = crate::expr::Vars::default();
         let env = Env { vars: &vars, units: Units::Mm };
         let mut s = Sketch::default();
         let c = s.add_point(DVec2::new(0.0, 0.0));
