@@ -16,9 +16,10 @@ pub struct StockPref {
     /// Standard sizes: "auto" (from the document units), "metric" or "imperial"; or "box": just the
     /// part's bounding box plus the allowances, not rounded to a stock size.
     pub standard: String,
-    /// Machining allowance on each side of the width and length, mm.
+    /// Machining allowance on each side of the width and length (each end of a flat or square
+    /// bar), and on a round bar's radius, mm.
     pub side: f64,
-    /// Allowance on each face of the thickness (each end of a round bar's diameter), mm.
+    /// Allowance on each face of the thickness, and on each end of a round bar (faced on the lathe), mm.
     pub face: f64,
     /// A size typed in by hand (shown instead of the suggestion), like "Flat bar 10 × 50 × 120".
     #[serde(skip_serializing_if = "String::is_empty")]
@@ -272,7 +273,7 @@ pub fn wants_stock(props: &crate::doc::PartProps) -> bool {
 }
 
 thread_local! {
-    /// Last answers by (mesh positions address, vertex count, volume, settings), so panels can ask every frame.
+    /// Last answers by (mesh positions address, vertex count, the mesh's shape, settings), so panels can ask every frame.
     static CACHE: std::cell::RefCell<Vec<((usize, usize, u64, String), Option<StockSize>)>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
@@ -283,7 +284,18 @@ pub fn for_part(mesh: &crate::kernel::BodyMesh, props: &crate::doc::PartProps, u
     }
     let pref = props.stock.clone().unwrap_or_default();
     let imperial = imperial_for(&pref, units);
-    let key = (mesh.positions.as_ptr() as usize, mesh.positions.len(), mesh.volume.to_bits(), format!("{pref:?}{imperial}"));
+    // the address alone can come back for a later mesh: key on what the kernel measured of the
+    // shape too (a moved boss shifts the centroid, a turned part its box and inertia)
+    let shape = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        let b = mesh.bbox;
+        for v in [mesh.volume, mesh.area].iter().chain(b[0].iter()).chain(b[1].iter()).chain(mesh.centroid.iter()).chain(mesh.inertia.iter()) {
+            v.to_bits().hash(&mut h);
+        }
+        h.finish()
+    };
+    let key = (mesh.positions.as_ptr() as usize, mesh.positions.len(), shape, format!("{pref:?}{imperial}"));
     if let Some(hit) = CACHE.with(|c| c.borrow().iter().find(|e| e.0 == key).map(|e| e.1.clone())) {
         return hit;
     }
@@ -534,6 +546,15 @@ mod tests {
         // Ø22 + 2 → Ø25, 50 + 1 → 55
         assert_eq!(s.dims, [25.0, 25.0, 55.0]);
         assert!(s.axes[2].dot(DVec3::X).abs() > 0.999);
+    }
+
+    #[test]
+    fn round_bar_allowances() {
+        // the side allowance goes on the radius, the face allowance on each end
+        let pref = StockPref { side: 0.0, face: 5.0, standard: "box".into(), ..Default::default() };
+        let r = suggest(&cylinder(11.0, 50.0, DVec3::X), &pref, false).unwrap();
+        assert_eq!(r.kind, Kind::Round);
+        assert_eq!(r.dims, [22.0, 22.0, 60.0]);
     }
 
     #[test]

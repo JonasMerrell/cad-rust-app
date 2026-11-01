@@ -2539,8 +2539,8 @@ impl App {
                     start |= r.drag_started() || r.gained_focus();
                 });
             };
-            num(ui, "Side allowance", &mut pref.side, "Extra on each side of the width and length (each end of a bar), to clean up the sawn edges");
-            num(ui, "Face allowance", &mut pref.face, "Extra on each face of the thickness, to face it flat; 0 uses the plate as it comes");
+            num(ui, "Side allowance", &mut pref.side, "Extra on each side of the width and length (each end of a flat or square bar) and around a round bar, to clean up the sawn edges");
+            num(ui, "Face allowance", &mut pref.face, "Extra on each face of the thickness and each end of a round bar, to face it flat; 0 uses the plate as it comes");
             ui.horizontal(|ui| {
                 ui.add_sized([96.0, 16.0], egui::Label::new(RichText::new("Own size").color(theme::muted()).size(12.0)));
                 let r = ui.add(egui::TextEdit::singleline(&mut pref.custom).hint_text("use the suggestion").desired_width(160.0))

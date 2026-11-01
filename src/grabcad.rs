@@ -149,7 +149,8 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
         let bytes = match method {
             0 => data.to_vec(),
             8 => {
-                let mut v = Vec::with_capacity(usize_);
+                // (the size is the archive's word for it: don't reserve gigabytes on it)
+                let mut v = Vec::with_capacity(usize_.min(64 << 20));
                 flate2::read::DeflateDecoder::new(data).read_to_end(&mut v).map_err(|e| format!("could not unpack {name}: {e}"))?;
                 v
             }
