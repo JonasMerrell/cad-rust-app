@@ -188,6 +188,12 @@ pub enum Constraint {
         c: Id,
         dim: Dim,
     },
+    /// Gap between two concentric circles or arcs: the radius of `b` less the radius of `a`.
+    RadialDistance {
+        a: Id,
+        b: Id,
+        dim: Dim,
+    },
     /// Angle from line `a` to line `b` in degrees.
     Angle {
         a: Id,
@@ -213,6 +219,7 @@ impl Constraint {
             | Length { dim, .. }
             | Radius { dim, .. }
             | Diameter { dim, .. }
+            | RadialDistance { dim, .. }
             | Angle { dim, .. } => Some(dim),
             _ => None,
         }
@@ -227,6 +234,7 @@ impl Constraint {
             | Length { dim, .. }
             | Radius { dim, .. }
             | Diameter { dim, .. }
+            | RadialDistance { dim, .. }
             | Angle { dim, .. } => Some(dim),
             _ => None,
         }
@@ -255,6 +263,7 @@ impl Constraint {
             | Equal { a, b }
             | Distance { a, b, .. }
             | AxisDistance { a, b, .. }
+            | RadialDistance { a, b, .. }
             | Angle { a, b, .. } => vec![a, b],
         }
     }
@@ -542,6 +551,10 @@ impl Sketch {
                 w[i] = 1e4;
                 w[i + 1] = 1e4;
             }
+            // a held circle keeps its radius too
+            if let Some(&i) = sys.ridx.get(h) {
+                w[i] = 1e4;
+            }
         }
         let mut ok = false;
         for _ in 0..60 {
@@ -637,6 +650,7 @@ impl Sketch {
             }
             Radius { c, .. } => radius(c)?,
             Diameter { c, .. } => 2.0 * radius(c)?,
+            RadialDistance { a, b, .. } => radius(b)? - radius(a)?,
             Angle { a, b, .. } => {
                 let ((p, q), (r, t)) = (line(a)?, line(b)?);
                 // the residual allows theta and theta + 180°: report the one in [0, 180)
@@ -739,6 +753,8 @@ enum Res {
         a: usize,
         r: usize,
     },
+    /// radius `b` - radius `a` = d (signed, so the inner circle stays inside)
+    RadiusGap(RIdx, RIdx, f64),
     /// The line from `p` (an end it shares with an arc about `c`) to its other end `q` leaves
     /// along the arc's tangent there: `side` times the radius turned a quarter counter-clockwise.
     /// Fixing the side (rather than asking only that line and radius be perpendicular) keeps a
@@ -864,6 +880,7 @@ impl Res {
                 let (ex, ey) = (d.dot(u) / big, d.perp_dot(u) / big);
                 out.push(((ex / big).hypot(ey / small) - 1.0) * big.min(small))
             }
+            Res::RadiusGap(a, b, d) => out.push(rad(x, b) - rad(x, a) - d),
             // the angle off the wanted direction: zero on one branch only, unlike a dot product,
             // and as steep as before (sin ≈ angle) near the solution
             Res::PerpAt { p, c, q, side } => {
@@ -907,7 +924,7 @@ impl Res {
             Res::Parallel(a, b, c, d) | Res::Perp(a, b, c, d) | Res::Angle(a, b, c, d, _) | Res::EqualLen(a, b, c, d) => [pt(a), pt(b), pt(c), pt(d)].concat(),
             Res::LineCircleTangent { a, b, c, r: rr } => [pt(a).to_vec(), pt(b).to_vec(), pt(c).to_vec(), r(rr)].concat(),
             Res::CircleCircle { c1, r1, c2, r2, .. } => [pt(c1).to_vec(), r(r1), pt(c2).to_vec(), r(r2)].concat(),
-            Res::EqualR(a, b) => [r(a), r(b)].concat(),
+            Res::EqualR(a, b) | Res::RadiusGap(a, b, _) => [r(a), r(b)].concat(),
             Res::RadiusIs(rr, _) => r(rr),
             Res::PointEllipse { p, c, a, r } => [pt(p).to_vec(), pt(c).to_vec(), pt(a).to_vec(), vec![r]].concat(),
             Res::Symmetric { p, q, a, b } => [pt(p), pt(q), pt(a), pt(b)].concat(),
@@ -1097,6 +1114,7 @@ impl System {
                     }
                     Radius { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)?)],
                     Diameter { c, dim } => vec![Res::RadiusIs(circ(*c)?.1, val(dim, Kind::Length)? / 2.0)],
+                    RadialDistance { a, b, dim } => vec![Res::RadiusGap(circ(*a)?.1, circ(*b)?.1, val(dim, Kind::Length)?)],
                     Angle { a, b, dim } => {
                         let (p, q) = line(*a)?;
                         let (r, t) = line(*b)?;
@@ -1486,6 +1504,39 @@ mod tests {
         };
         let d = (s.pv(c).y - s.pv(a).y).abs();
         assert!((d - r).abs() < 1e-6, "{d} {r}");
+    }
+
+    #[test]
+    fn concentric_circles_take_a_radial_distance() {
+        let vars = HashMap::new();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        // a circle and an arc sharing one centre (what Concentric leaves)
+        let c = s.add_point(DVec2::new(5.0, 5.0));
+        let inner = s.add_curve(Geom::Circle { c, r: 10.0 }, false);
+        let a = s.add_point(DVec2::new(19.0, 5.0));
+        let b = s.add_point(DVec2::new(5.0, 19.0));
+        let outer = s.add_curve(Geom::Arc { c, a, b }, false);
+        s.constraints.push(Constraint::Fix { p: c, x: 5.0, y: 5.0 });
+        s.constraints.push(Constraint::Diameter { c: inner, dim: Dim::new("20", [0.0; 2]) });
+        let k = Constraint::RadialDistance { a: inner, b: outer, dim: Dim::new("6", [0.0; 2]) };
+        assert!((s.measure(&k).unwrap() - 4.0).abs() < 1e-9);
+        s.constraints.push(k);
+        let st = s.solve(&env, &[]);
+        assert!(st.ok, "{st:?}");
+        assert!((s.measure(&s.constraints[2]).unwrap() - 6.0).abs() < 1e-6);
+        assert!(((s.pv(a) - s.pv(c)).length() - 16.0).abs() < 1e-6);
+        // only the arc's two end angles are left free
+        assert_eq!(st.dof, 2);
+        // held, the inner circle keeps its size while the gap changes
+        s.constraints.remove(1);
+        s.constraints[1].dim_mut().unwrap().expr = "8".into();
+        assert!(s.solve(&env, &[inner, c]).ok);
+        assert!((s.measure(&Constraint::Radius { c: inner, dim: Dim::new("", [0.0; 2]) }).unwrap() - 10.0).abs() < 1e-3);
+        assert!(((s.pv(a) - s.pv(c)).length() - 18.0).abs() < 1e-3);
+        // it saves under its own name
+        let json = serde_json::to_string(&s.constraints[1]).unwrap();
+        assert!(json.contains("radial_distance"), "{json}");
     }
 
     /// A rectangle fixed at the origin with width and height dimensions: (sketch, lines).

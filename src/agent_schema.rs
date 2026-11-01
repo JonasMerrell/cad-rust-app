@@ -261,7 +261,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("sketch_constrain", "constraints") => arr(
             json!({"type": "object", "required": ["type"], "additionalProperties": false, "description": "one constraint by point and curve ids (see the tool description)", "properties": {
-                "type": en(&["coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "horizontal_pts", "vertical_pts", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fix", "distance", "axis_distance", "point_line_distance", "length", "radius", "diameter", "angle", "equal_distance"], "constraint type"),
+                "type": en(&["coincident", "point_on_line", "point_on_circle", "horizontal", "vertical", "horizontal_pts", "vertical_pts", "parallel", "perpendicular", "tangent", "equal", "midpoint", "symmetric", "fix", "distance", "axis_distance", "point_line_distance", "length", "radius", "diameter", "radial_distance", "angle", "equal_distance"], "constraint type"),
                 "a": t("integer", "first point or curve id"), "b": t("integer", "second point or curve id"), "p": t("integer", "point id"), "l": t("integer", "line id"), "c": t("integer", "circle or arc id"),
                 "q": t("integer", "equal_distance: second point id"), "m": t("integer", "equal_distance: second line id"),
                 "driven": t("boolean", "dimensions: a reference that measures and drives nothing"),

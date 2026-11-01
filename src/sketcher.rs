@@ -3090,7 +3090,18 @@ fn build_dimension(app: &App, pending: &[Sel], at: DVec2) -> Option<Constraint> 
         }
         [Sel::Curve(c1), Sel::Curve(c2)] if circular(c1) && circular(c2) => {
             let (a, b) = (center(c1), center(c2));
-            linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
+            // concentric: the gap between them, measured from the smaller one out
+            if a == b || (sk.pv(b) - sk.pv(a)).length() < 1e-9 {
+                let radius = |id: Id| sk.measure(&Constraint::Radius { c: id, dim: mk(String::new()) }).unwrap_or(0.0);
+                let (ra, rb) = (radius(c1), radius(c2));
+                if (rb - ra).abs() < 1e-9 {
+                    return None;
+                }
+                let (a, b, gap) = if ra < rb { (c1, c2, rb - ra) } else { (c2, c1, ra - rb) };
+                Constraint::RadialDistance { a, b, dim: mk(fmt_len(gap)) }
+            } else {
+                    linear(a, b, Constraint::Distance { a, b, dim: mk(fmt_len((sk.pv(b) - sk.pv(a)).length())) })
+            }
         }
         _ => return None,
     };
@@ -3230,7 +3241,7 @@ fn dim_anchor(sk: &Sketch, c: &Constraint) -> Option<DVec2> {
                 _ => Some(pp),
             }
         }
-        Radius { c, .. } | Diameter { c, .. } => center(*c),
+        Radius { c, .. } | Diameter { c, .. } | RadialDistance { a: c, .. } => center(*c),
         Angle { a, b, .. } => {
             let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) else {
                 return None;
@@ -3644,6 +3655,20 @@ fn draw_dim(app: &App, sk: &Sketch, fr: &Frame, painter: &egui::Painter, rect: e
             arrow_line(painter, ts(start), ts(rim), stroke);
             painter.line_segment([ts(rim), lp], stroke);
         }
+        RadialDistance { a, b, .. } => {
+            let r = |id: Id| sk.measure(&Radius { c: id, dim: d.clone() }).unwrap_or(0.0);
+            let (ctr, ra, rb) = (anchor, r(*a), r(*b));
+            // along the label's direction, from the inner circle out to the outer one
+            let w = DVec2::from(d.offset);
+            let dir = w.normalize_or(DVec2::X);
+            let (p, q) = (ctr + dir * ra, ctr + dir * rb);
+            arrow_line(painter, ts(p), ts(q), stroke);
+            // a label off the arrow gets a leader from the nearer rim
+            let t = w.length();
+            if t > rb || t < ra {
+                painter.line_segment([ts(if t > rb { q } else { p }), lp], stroke);
+            }
+        }
         Angle { a, b, .. } => {
             if let (Some(Geom::Line { a: p, b: q }), Some(Geom::Line { a: r, b: s })) = (sk.curve(*a).map(|c| &c.geom), sk.curve(*b).map(|c| &c.geom)) {
                 let u1 = (sk.pv(*q) - sk.pv(*p)).normalize();
@@ -3902,6 +3927,12 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
                             Some(Constraint::Length { l, .. }) => sk.curve(*l).map(|c| Sketch::curve_points(&c.geom)).and_then(|p| p.first().copied()).into_iter().collect(),
                             Some(Constraint::Distance { a, .. }) | Some(Constraint::AxisDistance { a, .. }) => vec![*a],
                             Some(Constraint::PointLineDistance { p, .. }) => vec![*p],
+                            // the inner circle stays, the outer one grows
+                            Some(Constraint::RadialDistance { a, .. }) => {
+                                let mut h = vec![*a];
+                                h.extend(sk.curve(*a).map(|c| Sketch::curve_points(&c.geom)).unwrap_or_default());
+                                h
+                            }
                             _ => vec![],
                         }
                     };
