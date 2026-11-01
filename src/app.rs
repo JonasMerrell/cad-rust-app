@@ -384,6 +384,7 @@ impl App {
             if let Some(d) = s.undo.pop() {
                 s.redo.push(self.doc.clone());
                 self.doc = d;
+                crate::sketcher::after_undo(self);
                 self.after_sketch_edit();
                 return;
             }
@@ -418,6 +419,7 @@ impl App {
             if let Some(d) = s.redo.pop() {
                 s.undo.push(self.doc.clone());
                 self.doc = d;
+                crate::sketcher::after_undo(self);
                 self.after_sketch_edit();
                 return;
             }

@@ -218,7 +218,9 @@ impl Prim {
                 let d = b - a;
                 let u = (p - a).dot(d) / d.length_squared().max(1e-18);
                 let tol = TOL / d.length().max(1e-9);
-                (u >= -tol && u <= 1.0 + tol).then_some(u.clamp(0.0, 1.0))
+                // off the line it isn't on it, however well it projects
+                let off = d.perp_dot(p - a).abs() / d.length().max(1e-18);
+                (u >= -tol && u <= 1.0 + tol && off < TOL * 10.0).then_some(u.clamp(0.0, 1.0))
             }
             Prim::Arc { c, r, t0, t1 } => {
                 let mut t = (p - c).to_angle();
@@ -313,8 +315,9 @@ fn intersections(p: &Prim, q: &Prim) -> Vec<DVec2> {
             let s = *d - *c;
             let den = r.perp_dot(s);
             if den.abs() < 1e-12 {
-                // collinear overlaps: endpoints on the other segment
-                vec![*a, *b, *c, *d]
+                // collinear overlaps: endpoints on the other segment (parallel lines apart never meet)
+                let off = r.perp_dot(*c - *a).abs() / r.length().max(1e-18);
+                if off < TOL * 10.0 { vec![*a, *b, *c, *d] } else { vec![] }
             } else {
                 let t = (*c - *a).perp_dot(s) / den;
                 vec![*a + r * t]
@@ -726,6 +729,33 @@ mod tests {
             }
         }
         assert!(bad.is_empty(), "{}", bad.join("\n"));
+    }
+
+    /// Parallel lines apart never meet: they used to "cross" wherever one's ends projected onto the
+    /// other, so trim cut a line short under any parallel line and extend stopped below one.
+    #[test]
+    fn parallel_lines_do_not_cross() {
+        let mut s = Sketch::default();
+        let a = s.add_point(DVec2::new(0.0, 0.0));
+        let b = s.add_point(DVec2::new(40.0, 0.0));
+        let l = s.add_curve(Geom::Line { a, b }, false);
+        let c = s.add_point(DVec2::new(10.0, 50.0));
+        let d = s.add_point(DVec2::new(30.0, 50.0));
+        s.add_curve(Geom::Line { a: c, b: d }, false);
+        assert_eq!(split_params(&s, l), vec![0.0, 1.0]);
+        assert!(ray_hits(&s, DVec2::ZERO, DVec2::X, l).is_empty());
+        // a line crossing it still splits it, and a collinear one overlapping it splits at its ends
+        let e = s.add_point(DVec2::new(20.0, -5.0));
+        let f = s.add_point(DVec2::new(20.0, 5.0));
+        s.add_curve(Geom::Line { a: e, b: f }, false);
+        let g = s.add_point(DVec2::new(30.0, 0.0));
+        let h = s.add_point(DVec2::new(60.0, 0.0));
+        s.add_curve(Geom::Line { a: g, b: h }, false);
+        let sp = split_params(&s, l);
+        assert_eq!(sp.len(), 4, "{sp:?}");
+        assert!((sp[1] - 0.5).abs() < 1e-9 && (sp[2] - 0.75).abs() < 1e-9, "{sp:?}");
+        let hits = ray_hits(&s, DVec2::ZERO, DVec2::X, l);
+        assert!(hits.iter().any(|t| (t - 20.0).abs() < 1e-9), "{hits:?}");
     }
 
     #[test]
