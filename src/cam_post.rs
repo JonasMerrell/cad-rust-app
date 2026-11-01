@@ -229,7 +229,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             o.line(&comment(&if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) }));
         }
     }
-    if d != Dialect::LinuxCnc && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
+    if d != Dialect::LinuxCnc && cam.post != "rcnc" && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
         o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
     }
     let total = crate::cam_paths::cycle_time(cam, paths);
@@ -268,7 +268,8 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                     coolant = Coolant::Off;
                 }
             }
-            let probing = cam.probe.mode != "off";
+            // rcnc's M6 measures the tool itself: a probe cycle here would measure it twice
+            let probing = cam.probe.mode != "off" && cam.post != "rcnc";
             if !cam.post_text.tool_change.trim().is_empty() {
                 for l in fill(&cam.post_text.tool_change, cam, Some(tool)) {
                     o.line(&l);
@@ -315,7 +316,8 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             o.line(&format!("S{} M3", num(rpm)));
             spindle_rpm = Some(rpm);
             // let the spindle come up to speed
-            if cam.machine.spin_up > 0.0 {
+            // (rcnc waits for its own spin-up time after M3, so no dwell on top)
+            if cam.machine.spin_up > 0.0 && cam.post != "rcnc" {
                 o.line(&dwell(d, cam.machine.spin_up));
             }
         }
@@ -398,6 +400,13 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                             o.line(&format!("G33.1 Z{} K{}", num(zw), num(pitch)));
                             o.forget();
                             o.last = [Some((w.x * 1000.0).round() / 1000.0), Some((w.y * 1000.0).round() / 1000.0), Some((rw * 1000.0).round() / 1000.0)];
+                        }
+                        // rcnc refuses G84 on a spindle that can't reverse (the DMC2's can't):
+                        // stop over the hole and leave the tapping to the operator
+                        Dialect::Mach3 if cam.post == "rcnc" => {
+                            o.mv(0, DVec3::new(w.x, w.y, rw), None);
+                            o.line(&message(d, &format!("tap by hand at X{} Y{} to Z{}, then press cycle start", num(w.x), num(w.y), num(zw))));
+                            o.line("M0");
                         }
                         Dialect::Fanuc | Dialect::Mach3 => {
                             o.line(&format!("G98 G84 X{} Y{} Z{} R{} F{}", num(w.x), num(w.y), num(zw), num(rw), num(f)));

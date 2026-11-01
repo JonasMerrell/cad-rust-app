@@ -2168,6 +2168,12 @@ mod tests {
             if post == "rcnc" {
                 // rcnc's own M6 handles the pause and the measuring
                 assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");
+                // rcnc's M6 measures and its M3 waits for the spindle: no probe cycle or dwell on top
+                let mut p = c.clone();
+                p.probe.mode = "setter".into();
+                p.machine.spin_up = 5.0;
+                let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
+                assert!(!g.contains("G38") && !g.contains("G31") && !g.contains("G4 "), "{g}");
             }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {
@@ -2298,6 +2304,11 @@ mod tests {
         };
         let g = crate::cam_post::gcode(&c, &paths, origin, safe);
         assert!(g.contains("G84") && g.contains("no rigid tapping"));
+        // rcnc can't reverse the DMC2's spindle: stop over the hole for a hand tap instead of a G84
+        c.post = "rcnc".into();
+        let g = crate::cam_post::gcode(&c, &paths, origin, safe);
+        assert!(!g.contains("G84") && !g.contains("M4") && g.contains("tap by hand") && g.contains("M0"), "{g}");
+        c.post = "mach3".into();
         // in a self-reversing tapping head: straight in and out with the spindle running forward (blind: stops two pitches short)
         c.tools.iter_mut().find(|x| x.id == t).unwrap().tapping_head = true;
         let paths = generate(&c, &part);

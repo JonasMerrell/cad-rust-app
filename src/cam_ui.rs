@@ -2182,8 +2182,9 @@ pub(crate) fn send_to_rcnc(app: &mut App) {
         app.flash("Toolpaths are still being made", ToastKind::Info);
         return;
     }
-    if !matches!(c.post.as_str(), "rcnc" | "mach3" | "mach4") {
-        app.flash("rcnc runs Mach3-style G-code: set the controller to rcnc in the machine settings", ToastKind::Error);
+    // the Mach3 post probes and dwells on top of what rcnc's M6 and M3 already do, and posts G84
+    if c.post != "rcnc" {
+        app.flash("Set the controller to rcnc in the machine settings first", ToastKind::Error);
         return;
     }
     let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
@@ -2191,10 +2192,12 @@ pub(crate) fn send_to_rcnc(app: &mut App) {
     let mut body = crate::rcnc::payload(&c, &app.cam.paths, &format!("{name}.nc"), text);
     // rcnc shows the setup sheet beside the program
     let sim = crate::cam_sheet::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref());
-    body["setup_sheet"] = crate::cam_sheet::sheet(&c, &part, &app.cam.paths, Some(sim)).into();
+    let vis = crate::cam_sheet::visuals(&c, &part, &app.cam.paths, Some(sim));
+    body["setup_sheet"] = crate::cam_sheet::html(&c, &part, &app.cam.paths, &vis).into();
     match crate::rcnc::send(&body) {
         Ok(msg) => {
-            let crashes = app.cam.sim.as_ref().map(|s| s.events.len()).unwrap_or(0);
+            // what the sheet's own simulation found, not whatever the Simulate tab last ran
+            let crashes = vis.events.len();
             if crashes > 0 {
                 app.flash(format!("{msg} · the simulation found {crashes} problem(s)"), ToastKind::Error);
             } else {
