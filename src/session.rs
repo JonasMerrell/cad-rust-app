@@ -77,7 +77,10 @@ pub struct Session {
     pub poke: bool,
     /// The "save changes?" prompt, and what runs after a save it started.
     pub confirm: Option<Pending>,
-    after_save: Option<Pending>,
+    pub(crate) after_save: Option<Pending>,
+    /// The "save changes?" prompt has been on screen for a frame (so the Enter that opened it,
+    /// e.g. in command search, doesn't also answer it).
+    confirm_seen: bool,
     allow_close: bool,
     /// The system has no file dialog: use the built-in prompt.
     pub no_native_dialog: bool,
@@ -111,6 +114,7 @@ impl Default for Session {
             poke: false,
             confirm: None,
             after_save: None,
+            confirm_seen: false,
             allow_close: false,
             no_native_dialog: std::env::var_os("CAD_NO_FILE_DIALOG").is_some(),
             prompt: None,
@@ -149,6 +153,27 @@ fn save_prefs(p: &Prefs) {
     }
 }
 
+/// Write a file so that it is either the old or the new content, never half of one: write a
+/// temporary file next to it, flush it to disk, then rename it over the original.
+pub fn write_atomic(path: &Path, bytes: &[u8]) -> std::io::Result<()> {
+    use std::io::Write;
+    // through a symlink to the file it points at
+    let path = std::fs::canonicalize(path).unwrap_or_else(|_| path.to_path_buf());
+    let name = path.file_name().map(|n| n.to_string_lossy().to_string()).unwrap_or_else(|| "file".into());
+    let tmp = path.with_file_name(format!(".{name}.{}.tmp", std::process::id()));
+    let res = (|| {
+        let mut f = std::fs::File::create(&tmp)?;
+        f.write_all(bytes)?;
+        f.sync_all()?;
+        drop(f);
+        std::fs::rename(&tmp, &path)
+    })();
+    if res.is_err() {
+        let _ = std::fs::remove_file(&tmp);
+    }
+    res
+}
+
 fn autosave_dir() -> Option<PathBuf> {
     config_dir().map(|d| d.join("autosave"))
 }
@@ -178,7 +203,20 @@ fn writer_gone(file: &Path) -> bool {
         return true;
     }
     if cfg!(target_os = "linux") {
-        return !Path::new("/proc").join(pid.to_string()).exists();
+        let proc = Path::new("/proc").join(pid.to_string());
+        if !proc.exists() {
+            return true;
+        }
+        // the process id may since have gone to another program (after a reboot, say)
+        return match (std::fs::read_link(proc.join("exe")), std::env::current_exe()) {
+            (Ok(exe), Ok(me)) => {
+                // an instance started before an update runs a binary that is now "(deleted)"
+                let exe = exe.to_string_lossy().trim_end_matches(" (deleted)").to_string();
+                let me = std::fs::canonicalize(&me).unwrap_or(me);
+                Path::new(&exe) != me.as_path()
+            }
+            _ => false,
+        };
     }
     // elsewhere: a live run rewrites its file every minute while it has changes
     std::fs::metadata(file).and_then(|m| m.modified()).ok().and_then(|t| t.elapsed().ok()).map(|e| e > Duration::from_secs(300)).unwrap_or(true)
@@ -305,7 +343,16 @@ impl App {
         let Some(file) = autosave_file() else { return };
         let dirty = self.is_dirty();
         match self.session.autosaved {
-            Some((t, h)) if t.elapsed() < Duration::from_secs(60) || (h == self.session.cur_hash && dirty) => return,
+            Some((t, _)) if t.elapsed() < Duration::from_secs(60) => return,
+            Some((_, h)) if h == self.session.cur_hash && dirty && file.exists() => {
+                // nothing new, but show other running instances that this one is still alive
+                // (elsewhere than Linux they go by the file's age, see `writer_gone`)
+                if let Ok(f) = std::fs::File::options().append(true).open(&file) {
+                    let _ = f.set_modified(std::time::SystemTime::now());
+                }
+                self.session.autosaved = Some((Instant::now(), h));
+                return;
+            }
             None if !dirty => return,
             _ => {}
         }
@@ -319,7 +366,7 @@ impl App {
             s.doc = self.doc.clone();
         }
         let _ = std::fs::create_dir_all(file.parent().unwrap());
-        let ok = std::fs::write(&file, ws.to_json()).is_ok();
+        let ok = serde_json::to_string_pretty(&ws).ok().map(|j| write_atomic(&file, j.as_bytes()).is_ok()).unwrap_or(false);
         let _ = std::fs::write(file.with_extension("path"), self.path.as_ref().map(|p| p.display().to_string()).unwrap_or_default());
         if !ok {
             log::warn!("could not write the autosave {}", file.display());
@@ -456,6 +503,8 @@ impl App {
                 return then(self, p);
             }
             if t.elapsed() > Duration::from_millis(300) {
+                // cancelled: what the save was for (closing, opening another document) is off too
+                self.session.after_save = None;
                 return;
             }
             log::warn!("no file dialog available; using the built-in prompt");
@@ -549,6 +598,12 @@ impl App {
         // park the live studio's history with the others
         let cur = self.cur_studio;
         self.studio_undo.insert(cur, (std::mem::take(&mut self.undo), std::mem::take(&mut self.redo)));
+        // a snapshot that doesn't say how the studio list changes (restoring a version) but has
+        // other studios: histories kept by number would go to the wrong ones
+        let names = |w: &Workspace| w.studios.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
+        if s.restores_studio.is_none() && s.drops_studio.is_none() && names(&self.ws) != names(&s.ws) {
+            self.studio_undo.clear();
+        }
         if let Some((i, hist)) = s.restores_studio {
             // the snapshot has studio i, the current workspace doesn't: move later ones up
             let up = |k: usize| if k >= i { k + 1 } else { k };
@@ -573,7 +628,11 @@ impl App {
         // geometry of every studio is rebuilt (indices and content may have moved); the old
         // meshes stay on screen until then
         self.studio_results.clear();
+        self.kernel.invalidate();
         self.picks.clear();
+        // assembly/drawing undo steps hold whole tabs with the numbering from before
+        self.asm.undo.clear();
+        self.asm.redo.clear();
         self.asm.sel.clear();
         self.asm.sel_mate = None;
         self.asm.dialog = None;
@@ -607,6 +666,8 @@ pub fn windows(app: &mut App, ctx: &egui::Context) {
     }
     if let Some(p) = app.session.confirm.clone() {
         save_prompt(app, ctx, p);
+    } else {
+        app.session.confirm_seen = false;
     }
     if app.session.prompt.is_some() {
         path_prompt(app, ctx);
@@ -642,12 +703,14 @@ fn save_prompt(app: &mut App, ctx: &egui::Context, p: Pending) {
         Pending::Open | Pending::OpenPath(_) => "opening another document",
     };
     let mut choice = None;
+    // Enter answers only once the prompt has been seen
+    let enter_ok = std::mem::replace(&mut app.session.confirm_seen, true);
     egui::Modal::new(egui::Id::new("save-changes")).show(ctx, |ui| {
         modal_frame(ui, &format!("Save changes to “{}”?", doc_name(app)));
         ui.label(RichText::new(format!("Your changes will be lost if you don't save them before {what}.")).color(theme::muted()));
         ui.add_space(10.0);
         ui.horizontal(|ui| {
-            if ui.add(egui::Button::new(RichText::new("Save").color(egui::Color32::WHITE)).fill(theme::accent())).clicked() || ui.input(|i| i.key_pressed(Key::Enter)) {
+            if ui.add(egui::Button::new(RichText::new("Save").color(egui::Color32::WHITE)).fill(theme::accent())).clicked() || (enter_ok && ui.input(|i| i.key_pressed(Key::Enter))) {
                 choice = Some(0);
             }
             if ui.button("Don't save").clicked() {
@@ -877,7 +940,7 @@ pub fn delete_effects(app: &App, t: Tab) -> Vec<String> {
                 }
             }
             for d in &ws.drawings {
-                let n = d.views.iter().filter(|v| v.studio == i).count();
+                let n = d.views.iter().filter(|v| v.assembly.is_none() && v.studio == i).count();
                 if n > 0 {
                     out.push(format!("{}: {} removed", d.name, plural(n, "view", "views")));
                 }
@@ -905,6 +968,12 @@ pub fn delete_effects(app: &App, t: Tab) -> Vec<String> {
                         l += &format!(", {} with them", plural(mates, "mate", "mates"));
                     }
                     out.push(l);
+                }
+            }
+            for d in &ws.drawings {
+                let n = d.views.iter().filter(|v| v.assembly == Some(i)).count();
+                if n > 0 {
+                    out.push(format!("{}: {} removed", d.name, plural(n, "view", "views")));
                 }
             }
         }
@@ -1125,6 +1194,33 @@ fn shortcuts_window(app: &mut App, ctx: &egui::Context) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn atomic_write_replaces_whole_file() {
+        let dir = std::env::temp_dir().join(format!("rcad-atomic-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let p = dir.join("part.json");
+        std::fs::write(&p, "old content that is longer").unwrap();
+        write_atomic(&p, b"new").unwrap();
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        // no temporary file is left behind
+        let names: Vec<_> = std::fs::read_dir(&dir).unwrap().flatten().map(|e| e.file_name()).collect();
+        assert_eq!(names, vec![std::ffi::OsString::from("part.json")]);
+        // a failed write leaves the original alone
+        assert!(write_atomic(&dir.join("missing").join("x.json"), b"x").is_err());
+        assert_eq!(std::fs::read_to_string(&p).unwrap(), "new");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn a_damaged_active_tab_is_not_kept() {
+        // what load_workspace checks before showing the saved tab
+        let mut w = Workspace::default();
+        w.active = Tab::Pcb(2);
+        let w = Workspace::from_json(&w.to_json()).unwrap();
+        assert!(!w.has_tab(w.active));
+        assert!(w.has_tab(Tab::Studio(0)));
+    }
 
     #[test]
     fn orphan_mates_are_pruned() {

@@ -119,6 +119,9 @@ pub struct KernelClient {
     inflight: Option<(u64, usize, Document, Vec<FeatId>, Option<FeatId>)>,
     /// Waiting rebuilds, newest per tag.
     queued: Vec<(usize, Document)>,
+    /// Rebuild requests with smaller ids belong to a document or Part Studio numbering that is
+    /// gone (another file opened, a studio deleted, …): their results are dropped.
+    stale_before: u64,
     export: Option<(u64, String)>,
     /// The geometry query in flight.
     querying: Option<u64>,
@@ -144,7 +147,7 @@ impl KernelClient {
     }
 
     fn with_ctx(ctx: Option<egui::Context>) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], export: None, querying: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
+        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], stale_before: 0, export: None, querying: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
         k.spawn();
         k
     }
@@ -209,6 +212,26 @@ impl KernelClient {
             self.studios_json = json;
             self.studios = studios.clone();
             self.send(&Request::SetStudios { studios });
+        }
+    }
+
+    /// Forget every rebuild asked for so far: results still on their way are dropped and queued
+    /// requests are discarded. Call it when Part Studio indices stop meaning what they meant.
+    pub fn invalidate(&mut self) {
+        self.stale_before = self.next_id;
+        self.queued.clear();
+        self.crashed.clear();
+    }
+
+    /// A rebuild reply arrived: finish the request in flight and keep the result unless stale.
+    fn on_rebuilt(&mut self, id: u64, tag: usize, result: RebuildResult, out: &mut Vec<Outcome>) {
+        if self.inflight.as_ref().map(|f| f.0) == Some(id) {
+            self.inflight = None;
+            self.state = KernelState::Ready;
+            if id >= self.stale_before {
+                out.push(Outcome::Rebuilt(tag, result));
+            }
+            self.start_next();
         }
     }
 
@@ -293,14 +316,7 @@ impl KernelClient {
                         }
                     }
                 }
-                Ev::Reply(Reply::Rebuilt { id, tag, result }) => {
-                    if self.inflight.as_ref().map(|f| f.0) == Some(id) {
-                        self.inflight = None;
-                        self.state = KernelState::Ready;
-                        out.push(Outcome::Rebuilt(tag, result));
-                        self.start_next();
-                    }
-                }
+                Ev::Reply(Reply::Rebuilt { id, tag, result }) => self.on_rebuilt(id, tag, result, &mut out),
                 Ev::Reply(Reply::Projected { tag, key, views, .. }) => out.push(Outcome::Projected(tag, key, views)),
                 Ev::Reply(Reply::Interference { pairs, .. }) => out.push(Outcome::Interference(pairs)),
                 Ev::Reply(Reply::Queried { result, .. }) => out.push(Outcome::Queried(result)),
@@ -323,7 +339,9 @@ impl KernelClient {
                     if self.querying.take().is_some() {
                         out.push(Outcome::Queried(Err("the kernel crashed during the query".into())));
                     }
-                    let retry = self.inflight.take();
+                    // (a stale request is not retried)
+                    let stale_before = self.stale_before;
+                    let retry = self.inflight.take().filter(|f| f.0 >= stale_before);
                     if self.crashes > 50 {
                         self.state = KernelState::Error;
                         return out;
@@ -436,5 +454,35 @@ impl Drop for KernelClient {
         if let Some(p) = &mut self.proc {
             let _ = p.child.kill();
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn client() -> KernelClient {
+        KernelClient { proc: None, state: KernelState::Ready, next_id: 1, inflight: None, queued: vec![], stale_before: 0, export: None, querying: None, crashes: 0, crashed: vec![], ctx: None, studios: vec![], studios_json: String::new() }
+    }
+
+    #[test]
+    fn stale_rebuilds_are_dropped() {
+        let mut k = client();
+        let doc = Document::default();
+        k.rebuild(2, &doc); // in flight (id 1)
+        k.rebuild(1, &doc); // queued
+        let id = k.inflight.as_ref().unwrap().0;
+        // another document is opened: what was asked for before no longer applies
+        k.invalidate();
+        assert!(k.queued.is_empty());
+        let mut out = vec![];
+        k.on_rebuilt(id, 2, RebuildResult::default(), &mut out);
+        assert!(out.is_empty(), "a stale result must not be applied");
+        assert!(k.inflight.is_none());
+        // a request made afterwards comes through
+        k.rebuild(0, &doc);
+        let id = k.inflight.as_ref().unwrap().0;
+        k.on_rebuilt(id, 0, RebuildResult::default(), &mut out);
+        assert!(matches!(out.as_slice(), [Outcome::Rebuilt(0, _)]));
     }
 }

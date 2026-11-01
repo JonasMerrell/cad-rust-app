@@ -134,6 +134,14 @@ pub(crate) fn sync_setup(app: &mut App) {
     app.cam.last_ck = None;
 }
 
+/// Forget the undo steps of every setup (tab operations renumber setups and Part Studios).
+pub fn clear_history(app: &mut App) {
+    app.cam.undo.clear();
+    app.cam.redo.clear();
+    app.cam.histories.clear();
+    app.cam.last_ck = None;
+}
+
 /// (undo steps, redo steps) of the open setup.
 fn history_len(app: &App) -> (usize, usize) {
     match cam_index(app) {

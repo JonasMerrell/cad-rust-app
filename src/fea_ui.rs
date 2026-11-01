@@ -89,6 +89,8 @@ pub struct FeaUi {
     stress_hi: f32,
     undo: Vec<Study>,
     redo: Vec<Study>,
+    /// The study the undo steps belong to.
+    undo_of: Option<usize>,
     last_ck: Option<Instant>,
     hover: Option<u32>,
     fitted: bool,
@@ -134,6 +136,7 @@ impl Default for FeaUi {
             stress_hi: Default::default(),
             undo: Default::default(),
             redo: Default::default(),
+            undo_of: None,
             last_ck: Default::default(),
             hover: Default::default(),
             fitted: Default::default(),
@@ -164,7 +167,26 @@ pub fn study_mut(app: &mut App) -> Option<&mut Study> {
     app.ws.sims.get_mut(i)
 }
 
+/// The undo steps are the open study's: another study's are dropped.
+fn own_history(app: &mut App) {
+    let i = index(app);
+    if app.fea.undo_of != i {
+        app.fea.undo.clear();
+        app.fea.redo.clear();
+        app.fea.last_ck = None;
+        app.fea.undo_of = i;
+    }
+}
+
+/// Forget every undo step (tab operations renumber the studies).
+pub fn clear_history(app: &mut App) {
+    app.fea.undo.clear();
+    app.fea.redo.clear();
+    app.fea.last_ck = None;
+}
+
 pub fn undo(app: &mut App) {
+    own_history(app);
     let Some(i) = index(app) else { return };
     if let Some(c) = app.fea.undo.pop() {
         let cur = std::mem::replace(&mut app.ws.sims[i], c);
@@ -174,6 +196,7 @@ pub fn undo(app: &mut App) {
 }
 
 pub fn redo(app: &mut App) {
+    own_history(app);
     let Some(i) = index(app) else { return };
     if let Some(c) = app.fea.redo.pop() {
         let cur = std::mem::replace(&mut app.ws.sims[i], c);
@@ -183,15 +206,16 @@ pub fn redo(app: &mut App) {
 }
 
 pub fn can_undo(app: &App) -> bool {
-    !app.fea.undo.is_empty()
+    app.fea.undo_of == index(app) && !app.fea.undo.is_empty()
 }
 
 pub fn can_redo(app: &App) -> bool {
-    !app.fea.redo.is_empty()
+    app.fea.undo_of == index(app) && !app.fea.redo.is_empty()
 }
 
 /// Record an undo step with the state before an edit (edits closer together than a second share one step).
 fn record(app: &mut App, before: Study) {
+    own_history(app);
     let now = Instant::now();
     if app.fea.last_ck.map(|t| now.duration_since(t).as_secs_f32() > 1.0).unwrap_or(true) {
         app.fea.undo.push(before);
