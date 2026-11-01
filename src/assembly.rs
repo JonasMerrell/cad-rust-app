@@ -90,13 +90,19 @@ pub struct Leaf {
 
 /// The parts an instance stands for: itself, or every part of its sub-assembly (recursively).
 pub fn leaves(all: &[Assembly], inst: &Instance) -> Vec<Leaf> {
-    fn rec(all: &[Assembly], inst: &Instance, acc: Pose, depth: usize, out: &mut Vec<Leaf>) {
+    leaves_with(all, inst, false)
+}
+
+/// The parts of an instance like `leaves`, with the parts hidden inside sub-assemblies too when
+/// `hidden` is set: hiding is only for looking, so a bill of materials still counts them.
+pub fn leaves_with(all: &[Assembly], inst: &Instance, hidden: bool) -> Vec<Leaf> {
+    fn rec(all: &[Assembly], inst: &Instance, acc: Pose, depth: usize, hidden: bool, out: &mut Vec<Leaf>) {
         match inst.sub {
             None => out.push(Leaf { studio: inst.studio, body: inst.body, pose: acc }),
             Some(k) if depth < 8 => {
                 if let Some(a) = all.get(k) {
-                    for c in a.instances.iter().filter(|c| !c.hidden) {
-                        rec(all, c, acc.compose(&c.pose), depth + 1, out);
+                    for c in a.instances.iter().filter(|c| hidden || !c.hidden) {
+                        rec(all, c, acc.compose(&c.pose), depth + 1, hidden, out);
                     }
                 }
             }
@@ -104,7 +110,7 @@ pub fn leaves(all: &[Assembly], inst: &Instance) -> Vec<Leaf> {
         }
     }
     let mut out = vec![];
-    rec(all, inst, Pose::default(), 0, &mut out);
+    rec(all, inst, Pose::default(), 0, hidden, &mut out);
     out
 }
 
@@ -805,6 +811,19 @@ mod tests {
         assert!((world - DVec3::new(100.0, 10.0, 0.0)).length() < 1e-9, "{world:?}");
         assert!(contains(&all, 1, 0));
         assert!(!contains(&all, 0, 1));
+    }
+
+    #[test]
+    fn hidden_parts_inside_a_sub_assembly_still_count() {
+        // the sub-assembly hides one of its two parts; the BOM walk still counts it, the drawing walk doesn't
+        let mut hidden = inst(2, false, [10.0, 0.0, 0.0]);
+        hidden.hidden = true;
+        let sub = Assembly { name: "sub".into(), instances: vec![inst(1, true, [0.0; 3]), hidden], ..Default::default() };
+        let mut top_i = inst(1, true, [0.0; 3]);
+        top_i.sub = Some(0);
+        let all = vec![sub];
+        assert_eq!(leaves(&all, &top_i).len(), 1);
+        assert_eq!(leaves_with(&all, &top_i, true).len(), 2);
     }
 
     #[test]

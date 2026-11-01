@@ -244,11 +244,23 @@ fn study_input(app: &App, s: &Study) -> Input {
 fn hash_input(input: &Input, h: &mut impl std::hash::Hasher) {
     use std::hash::Hash;
     input.tris.len().hash(h);
-    let mut s = 0.0f64;
-    for (k, t) in input.tris.iter().enumerate().step_by((input.tris.len() / 1024).max(1)) {
-        s += (t[0].x + t[1].y * 3.0 + t[2].z * 7.0) * (k as f64 + 1.0);
+    // every coordinate and face number counts: a small edit on a big part (a fillet's radius, a hole
+    // moved) keeps the triangle count, and must still give new results. A cheap multiply-rotate mix
+    // keeps this fast enough to run every frame.
+    let mut s = 0u64;
+    let mut mix = |v: u64| s = (s.rotate_left(5) ^ v).wrapping_mul(0x51_7c_c1_b7_27_22_0a_95);
+    for (t, f) in input.tris.iter().zip(&input.face) {
+        for p in t {
+            mix(p.x.to_bits());
+            mix(p.y.to_bits());
+            mix(p.z.to_bits());
+        }
+        mix(*f as u64);
     }
-    s.to_bits().hash(h);
+    for b in &input.body {
+        mix(*b as u64);
+    }
+    s.hash(h);
     input.part_material.hash(h);
     input.materials.hash(h);
 }
@@ -1262,7 +1274,7 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
                     }
                     let f = ui.label(RichText::new(format!("{} Hz", sig(m.freq))).size(12.5).color(if m.rigid { theme::muted() } else { theme::text() }));
                     if m.rigid {
-                        f.on_hover_text("A rigid-body mode: the part moving as a whole, as nothing holds it");
+                        f.on_hover_text("A rigid-body mode: the part moving as a whole, as the supports don't stop it");
                     }
                     let p = m.participation.map(|x| format!("{:.0}", x * 100.0));
                     ui.label(RichText::new(format!("{} / {} / {} %", p[0], p[1], p[2])).color(theme::muted()).size(12.0));

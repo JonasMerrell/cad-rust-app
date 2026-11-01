@@ -959,8 +959,10 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             let want = study.modes.clamp(1, 50);
             let modes = crate::fea_solve::modal(&problem, if free { want + 6 } else { want }, cancel)?;
             let rigid = modes.iter().filter(|m| m.rigid).count();
-            if rigid > 0 {
+            if rigid > 0 && free {
                 warnings.push(format!("No supports: the first {rigid} modes are the part moving as a whole (0 Hz); its vibration modes follow"));
+            } else if rigid > 0 {
+                warnings.push(format!("The supports don't hold the part fully: {rigid} mode{} the part (or a part) sliding or turning as a whole (0 Hz), not vibration; add supports to hold it", if rigid == 1 { " is" } else { "s are" }));
             }
             Solution::Modal { modes }
         }
@@ -1001,7 +1003,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         }
         _ => None,
     };
-    let mass = mesh.tets.iter().enumerate().map(|(ei, t)| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * tet10_volume(&mesh, t)).sum();
+    let mass = (0..mesh.tets.len()).map(|ei| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * crate::fea_solve::element_volume(&mesh, ei)).sum();
     Ok(Outcome { mesh, material, mat, body_mats, solution, warnings, mass, peak_stress })
 }
 
@@ -1088,11 +1090,6 @@ fn hole_warning(input: &Input, mesh: &Mesh) -> Option<String> {
             crate::expr::trim(nice(mesh.size.max(h) * across / 6.0), 3)
         )
     })
-}
-
-pub(crate) fn tet10_volume(m: &Mesh, t: &[u32; 10]) -> f64 {
-    let p = |i: usize| m.nodes[t[i] as usize];
-    (p(1) - p(0)).cross(p(2) - p(0)).dot(p(3) - p(0)) / 6.0
 }
 
 /// A time in s, ms or µs.

@@ -650,7 +650,12 @@ impl Session {
                     }
                 }
                 if let Some(p) = it.get("projection").and_then(|v| v.as_str()) {
-                    t.first_angle = p.starts_with("first");
+                    let first = p.starts_with("first");
+                    if first != t.first_angle {
+                        t.first_angle = first;
+                        // the views move to the other projection's places
+                        drawing_ui::mirror_projection(d);
+                    }
                 }
                 if let Some(n) = it.get("decimals") {
                     d.decimals = n.as_u64().map(|n| n.min(6) as u8);
