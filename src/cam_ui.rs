@@ -304,7 +304,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     }
     let Some(ci) = cam_index(app) else { return };
     let Some(c) = cam(app).cloned() else { return };
-    let input = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &c.bodies);
+    let input = part_input(app.studio_bodies(c.studio), app.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&app.ws.cams, ci));
     // a tab that machines soft jaws works on those jaws (a broken link shows as a warning)
     let (input, jaws_err) = match crate::cam_jaws::input_for(&app.ws.cams, ci, input) {
         Ok(i) => (i, None),
@@ -2248,10 +2248,12 @@ fn start_sim(app: &mut App, run: bool) {
                     use std::hash::{Hash, Hasher};
                     let mut h = std::collections::hash_map::DefaultHasher::new();
                     (Arc::as_ptr(&l) as usize).hash(&mut h);
-                    for v in [stock.0, stock.1, DVec3::from(c.on_table)] {
+                    // where it goes: the setup's reference point (from the stock and the fixtures and jaws as they
+                    // are now, which move with the work zero and the part) and the offset on the table
+                    let fixtures = cam_paths::fixture_boxes(&c, &part, cam_paths::work_origin(&c, &part));
+                    for v in [crate::cam_machine::Placed::reference(stock, &fixtures), DVec3::from(c.on_table)] {
                         v.to_array().map(f64::to_bits).hash(&mut h);
                     }
-                    serde_json::to_string(&(&c.fixtures, &c.soft_jaws)).unwrap_or_default().hash(&mut h);
                     h.finish()
                 };
                 let placed = match &app.cam.placed {

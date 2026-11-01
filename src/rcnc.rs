@@ -39,7 +39,11 @@ pub fn send(body: &Value) -> Result<String, String> {
     match agent.post(&url).set("Content-Type", "application/json").send_string(&body.to_string()) {
         Ok(r) => Ok(message(r).unwrap_or_else(|| "Sent to rcnc".into())),
         Err(ureq::Error::Status(_, r)) => Err(message(r).unwrap_or_else(|| "rcnc refused the program".into())),
-        Err(ureq::Error::Transport(_)) => Err("rcnc isn't running on this computer: start it, then send again".into()),
+        Err(ureq::Error::Transport(t)) if matches!(t.kind(), ureq::ErrorKind::ConnectionFailed | ureq::ErrorKind::Dns) => {
+            Err("rcnc isn't running on this computer: start it, then send again".into())
+        }
+        // connected, but no answer in time (or the connection broke): it may well have the program already
+        Err(ureq::Error::Transport(t)) => Err(format!("rcnc didn't answer ({t}): check whether it loaded the program before sending it again")),
     }
 }
 
