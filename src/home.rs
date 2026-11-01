@@ -90,12 +90,19 @@ pub fn touch(app: &mut App, p: &Path) {
 }
 
 pub(crate) fn forget(app: &mut App, p: &Path) {
-    app.home.recents.retain(|r| r.path != p);
+    // the list keeps canonical paths (see `touch`); `p` may not be one, or may be gone already
+    let canon = std::fs::canonicalize(p)
+        .ok()
+        .or_else(|| Some(std::fs::canonicalize(p.parent()?).ok()?.join(p.file_name()?)))
+        .unwrap_or_else(|| p.to_path_buf());
+    app.home.recents.retain(|r| r.path != p && r.path != canon);
     save(&app.home.recents);
-    if let Some(t) = thumb_path(p) {
-        let _ = std::fs::remove_file(t);
+    for q in [p, canon.as_path()] {
+        if let Some(t) = thumb_path(q) {
+            let _ = std::fs::remove_file(t);
+        }
+        app.home.textures.remove(q);
     }
-    app.home.textures.remove(p);
 }
 
 /// The viewport shows no hover highlight while a thumbnail is about to be taken.

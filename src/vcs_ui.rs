@@ -17,7 +17,8 @@ use crate::workspace::Workspace;
 /// What a background job (network calls) came back with.
 enum Done {
     Note(String),
-    Pulled(String),
+    /// What happened, and the document the pull was for.
+    Pulled(String, PathBuf),
     Published(String),
     Account(Option<(GhUser, TokenSource)>),
 }
@@ -110,7 +111,11 @@ fn new_project_window(app: &mut App, ctx: &egui::Context) {
         });
         ui.checkbox(git, "Track changes with git (every save is committed)");
         let shown = crate::project::clean_name(name);
-        ui.label(RichText::new(format!("Makes {}", std::path::Path::new(dir.as_str()).join(&shown).join(format!("{shown}.json")).display())).color(theme::muted()).size(11.5));
+        let made = match crate::project::expand_dir(dir) {
+            Ok(d) => format!("Makes {}", d.join(&shown).join(format!("{shown}.json")).display()),
+            Err(e) => e,
+        };
+        ui.label(RichText::new(made).color(theme::muted()).size(11.5));
         ui.add_space(4.0);
         if ui.add_enabled(!name.trim().is_empty(), egui::Button::new("Create project")).clicked() {
             create = true;
@@ -125,7 +130,7 @@ fn new_project_window(app: &mut App, ctx: &egui::Context) {
             app.vcs.new_project = Some((name, dir, git));
             return;
         }
-        match crate::project::create(std::path::Path::new(dir.trim()), &name) {
+        match crate::project::expand_dir(&dir).and_then(|d| crate::project::create(&d, &name)) {
             Ok(doc) => app.guard(crate::session::Pending::NewProject(doc, git)),
             Err(e) => app.flash(e, ToastKind::Error),
         }
@@ -221,14 +226,13 @@ fn poll(app: &mut App) {
     match r {
         Ok(Done::Note(m)) => app.vcs.note = Some((m, false)),
         Ok(Done::Published(url)) => app.vcs.note = Some((format!("Published to {}", vcs::short_remote(&url)), false)),
-        Ok(Done::Pulled(m)) => {
+        Ok(Done::Pulled(m, doc)) => {
             app.vcs.note = Some((m.clone(), false));
-            if m != "Already up to date" {
-                // the document on disk is newer now
-                if let Some(p) = app.path.clone() {
-                    app.open_path(p);
-                    app.flash_info(m, Some(Duration::from_secs(3)));
-                }
+            // the document on disk is newer now: open it again if it is still the one open, asking
+            // first about changes made while the pull ran
+            if m != "Already up to date" && app.path.as_ref() == Some(&doc) {
+                app.guard(crate::session::Pending::OpenPath(doc));
+                app.flash_info(m, Some(Duration::from_secs(3)));
             }
         }
         Ok(Done::Account(_)) => {}
@@ -698,7 +702,7 @@ fn act_on(app: &mut App, a: Act) {
         }
         Act::Pull => {
             let Some(root) = app.vcs.status.as_ref().map(|s| s.root.clone()) else { return };
-            run(app, "Pulling…", move || vcs::pull(&root, token().as_deref()).map(Done::Pulled));
+            run(app, "Pulling…", move || vcs::pull(&root, token().as_deref()).map(|m| Done::Pulled(m, path)));
         }
         Act::Publish => {
             let Some(root) = app.vcs.status.as_ref().map(|s| s.root.clone()) else { return };
