@@ -235,6 +235,10 @@ pub fn erc(p: &Pcb, nl: &Netlist) -> Vec<Issue> {
             seen.push((t.to_ascii_uppercase(), t));
         }
     }
+    // one net, two names: the labels join both names into one net
+    for (net, text, at) in &nl.label_conflicts {
+        out.push(Issue::new("erc_names", *at, false, format!("Net {net} is also labelled {text}: the two names are one net")));
+    }
     // references and footprints
     for (i, a) in p.parts.iter().enumerate() {
         if p.parts[..i].iter().any(|b| b.reference.eq_ignore_ascii_case(&a.reference)) {

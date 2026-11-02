@@ -383,6 +383,7 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("erc_undriven", "Inputs nothing drives"),
     ("erc_nc", "No-connect marks on connected pins"),
     ("erc_labels", "Labels and wire ends that join nothing"),
+    ("erc_names", "Nets that carry two different label names"),
     ("erc_refs", "Duplicate references"),
     ("erc_footprint", "Unknown footprints"),
 ];
@@ -804,6 +805,10 @@ pub struct Net {
 pub struct Netlist {
     pub nets: Vec<Net>,
     pub pin_net: HashMap<(usize, String), usize>,
+    /// Each schematic wire's net (None for wires that reach no pin).
+    pub wire_net: Vec<Option<usize>>,
+    /// Labels whose text differs from the name their net got: (net name, label text, label position).
+    pub label_conflicts: Vec<(String, String, P)>,
 }
 
 impl Netlist {
@@ -896,7 +901,7 @@ impl Pcb {
     /// Next free reference for a prefix (R1, R2, …).
     pub fn next_reference(&self, prefix: &str) -> String {
         let mut n = 1;
-        while self.parts.iter().any(|p| p.reference == format!("{prefix}{n}")) {
+        while self.part_index(&format!("{prefix}{n}")).is_some() {
             n += 1;
         }
         format!("{prefix}{n}")
@@ -1059,7 +1064,162 @@ impl Pcb {
                 out.pin_net.insert(p.clone(), ni);
             }
         }
+        // a group's net, found through any of its pins
+        let mut root_net: HashMap<usize, usize> = HashMap::new();
+        for (k, p) in pins.iter().enumerate() {
+            if let Some(&ni) = out.pin_net.get(&(p.part, p.num.clone())) {
+                root_net.insert(d.find(nw + k), ni);
+            }
+        }
+        out.wire_net = (0..nw).map(|i| root_net.get(&d.find(i)).copied()).collect();
+        for (k, l) in self.labels.iter().enumerate() {
+            let t = l.text.trim();
+            if let Some(&ni) = root_net.get(&d.find(nw + np + k)) {
+                if !t.is_empty() && out.nets[ni].name != t && !out.label_conflicts.iter().any(|c| c.0 == out.nets[ni].name && c.1 == t) {
+                    out.label_conflicts.push((out.nets[ni].name.clone(), t.to_string(), l.at));
+                }
+            }
+        }
         out
+    }
+
+    /// Keep part `i`'s connections after its pins moved (turned, mirrored, new pin names, footprint
+    /// or type); `old` is `sch_pins()` from before. Pins are matched by number. A stub (a wire from
+    /// the pin to an end that touches nothing but labels) turns with its pin, labels and all; other
+    /// wires keep their far end and are redrawn to the pin's new spot clear of other pins. Labels
+    /// right on a pin follow it. Ends on pins that are gone stay where they are.
+    pub fn carry_to_pins(&mut self, i: usize, old: &[SchPin]) {
+        let new: Vec<SchPin> = self.sch_pins().into_iter().filter(|x| x.part == i).collect();
+        let moves: Vec<(&SchPin, &SchPin)> = old.iter().filter(|o| o.part == i).filter_map(|o| new.iter().find(|n| n.num == o.num).map(|n| (o, n))).filter(|(o, n)| dist(o.at, n.at) > 1e-9 || dist(o.inner, n.inner) > 1e-9).collect();
+        if moves.is_empty() {
+            return;
+        }
+        let near = |a: P, b: P| dist(a, b) < 1e-6;
+        let unit = |v: P| {
+            let l = v[0].hypot(v[1]).max(1e-12);
+            [v[0] / l, v[1] / l]
+        };
+        // quarter turns of a net label that reads away from a pin pointing `d`
+        let rot_of = |d: P| -> u8 {
+            if d[0] > 0.5 { 0 } else if d[1] > 0.5 { 1 } else if d[0] < -0.5 { 2 } else { 3 }
+        };
+        let others_at = |p: &Pcb, q: P, skip: usize| p.wires.iter().enumerate().any(|(k, w)| k != skip && seg_point(w.a, w.b, q) < EPS) || p.sch_pins().iter().any(|x| near(x.at, q));
+        // work from the state before: every decision looks at where things were
+        let snapshot = self.clone();
+        let mut redraw: Vec<(usize, P, P)> = vec![];
+        let mut moved_labels: Vec<bool> = vec![false; self.labels.len()];
+        for (k, w) in snapshot.wires.iter().enumerate() {
+            let ends = [(w.a, w.b, false), (w.b, w.a, true)];
+            let Some(&(pin_end, far, b_is_pin)) = ends.iter().find(|e| moves.iter().any(|m| near(m.0.at, e.0))) else { continue };
+            let (o, n) = *moves.iter().find(|m| near(m.0.at, pin_end)).unwrap();
+            let far_on_pin = moves.iter().find(|m| near(m.0.at, far));
+            if let Some((_, n2)) = far_on_pin {
+                // a wire between two of this part's pins: both ends follow
+                self.wires[k] = if b_is_pin { Wire { a: n2.at, b: n.at } } else { Wire { a: n.at, b: n2.at } };
+                continue;
+            }
+            if !others_at(&snapshot, far, k) {
+                // a stub: turn it the way the pin turned
+                let (d0, d1) = (unit(sub(o.at, o.inner)), unit(sub(n.at, n.inner)));
+                let v = sub(far, o.at);
+                let (c, s) = (d0[0] * d1[0] + d0[1] * d1[1], d0[0] * d1[1] - d0[1] * d1[0]);
+                let nf = snap(add(n.at, [v[0] * c - v[1] * s, v[0] * s + v[1] * c]), 1e-6);
+                self.wires[k] = if b_is_pin { Wire { a: nf, b: n.at } } else { Wire { a: n.at, b: nf } };
+                for (li, l) in snapshot.labels.iter().enumerate() {
+                    if near(l.at, far) && !moved_labels[li] {
+                        moved_labels[li] = true;
+                        self.labels[li].at = nf;
+                        if l.kind == LabelKind::Net && l.rot % 4 == rot_of(d0) {
+                            self.labels[li].rot = rot_of(d1);
+                        }
+                    }
+                }
+                continue;
+            }
+            redraw.push((k, far, n.at));
+        }
+        // no-connect marks stay on their pins
+        for q in &mut self.no_connects {
+            if let Some((_, n)) = moves.iter().find(|m| near(m.0.at, *q)) {
+                *q = n.at;
+            }
+        }
+        for (li, l) in snapshot.labels.iter().enumerate() {
+            if let Some((_, n)) = moves.iter().find(|m| near(m.0.at, l.at)) {
+                if !moved_labels[li] {
+                    self.labels[li].at = n.at;
+                }
+            }
+        }
+        // wires that go on elsewhere keep their far end and are redrawn to the pin
+        let mut add_wires = vec![];
+        let mut drop = vec![];
+        for (k, far, to) in redraw {
+            let path = self.wire_path(far, to, false, Some(k));
+            drop.push(k);
+            for s in path.windows(2) {
+                add_wires.push(Wire { a: s[0], b: s[1] });
+            }
+        }
+        let mut k = 0;
+        self.wires.retain(|_| {
+            k += 1;
+            !drop.contains(&(k - 1))
+        });
+        self.wires.extend(add_wires);
+        self.wires.retain(|w| dist(w.a, w.b) > 1e-9);
+    }
+
+    /// A schematic wire from a to b: the orthogonal path (preferred corner first) that touches no
+    /// pin, label or wire end except at its own ends and puts no corner on another wire, since all of
+    /// those would join it. When both corners would, a three-segment detour a grid step or more
+    /// aside; failing that, the preferred corner. `skip` is a wire being replaced.
+    pub fn wire_path(&self, a: P, b: P, vfirst: bool, skip: Option<usize>) -> Vec<P> {
+        let away = |q: &P| dist(*q, a) > 1e-6 && dist(*q, b) > 1e-6;
+        let mut dots: Vec<P> = self.sch_pins().into_iter().map(|x| x.at).collect();
+        dots.extend(self.labels.iter().map(|l| l.at));
+        // a wire over a no-connect mark would contradict it
+        dots.extend(self.no_connects.iter().copied());
+        let wires: Vec<&Wire> = self.wires.iter().enumerate().filter(|(k, _)| Some(*k) != skip).map(|(_, w)| w).collect();
+        dots.extend(wires.iter().flat_map(|w| [w.a, w.b]));
+        dots.retain(away);
+        let clear = |path: &[P]| {
+            path.windows(2).all(|s| dots.iter().all(|q| seg_point(s[0], s[1], *q) > EPS))
+                && path[1..path.len() - 1].iter().all(|c| wires.iter().all(|w| seg_point(w.a, w.b, *c) > EPS))
+        };
+        let corner = |vf: bool| if vf { vec![a, [a[0], b[1]], b] } else { vec![a, [b[0], a[1]], b] };
+        let g = pcb_lib::GRID;
+        let mut tries = vec![corner(vfirst), corner(!vfirst)];
+        for k in 1..=8 {
+            for side in [1.0, -1.0] {
+                let d = side * k as f64 * g;
+                // out sideways from a or b, across, and back in
+                tries.push(vec![a, [a[0] + d, a[1]], [a[0] + d, b[1]], b]);
+                tries.push(vec![a, [a[0], a[1] + d], [b[0], a[1] + d], b]);
+                tries.push(vec![a, [b[0] + d, a[1]], [b[0] + d, b[1]], b]);
+                tries.push(vec![a, [a[0], b[1] + d], [b[0], b[1] + d], b]);
+            }
+        }
+        let tidy = |v: Vec<P>| -> Vec<P> {
+            let mut out: Vec<P> = vec![];
+            for q in v {
+                if out.last().is_none_or(|l| dist(*l, q) > 1e-9) {
+                    out.push(q);
+                }
+            }
+            // drop corners that sit on a straight run
+            let mut k = 1;
+            while k + 1 < out.len() {
+                if seg_point(out[k - 1], out[k + 1], out[k]) < 1e-9 && dist(out[k - 1], out[k + 1]) > 1e-9 {
+                    out.remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+            out
+        };
+        let first = tidy(tries[0].clone());
+        tries.into_iter().map(tidy).find(|t| t.len() >= 2 && clear(t)).unwrap_or(first)
     }
 
     /// Every pad on the board with its net.
@@ -2051,6 +2211,60 @@ pub(crate) mod tests {
         let pads = p.pads(&nl);
         let issues = drc(&p, &nl, &pads, &[]);
         assert!(!issues.iter().any(|i| i.message.starts_with("Short") && (i.message.contains("VCC") || i.message.contains("+5V"))), "{issues:?}");
+    }
+
+    #[test]
+    fn turned_and_mirrored_symbols_keep_their_connections() {
+        let mut p = led_board();
+        let u = p.add_part("U", Some("SOIC-8"), Some("NE555"), [40.64, 0.0]).unwrap();
+        let pins = p.sch_pins();
+        for (k, sp) in pins.iter().filter(|x| x.part == u).enumerate() {
+            // a stub out of each pin with a label at its end, as pcb_connect draws them
+            let d = sub(sp.at, sp.inner);
+            let end = add(sp.at, [d[0].signum() * 2.54, d[1].signum() * 2.54]);
+            p.wires.push(Wire { a: sp.at, b: end });
+            p.labels.push(Label { at: end, text: format!("U{k}"), kind: LabelKind::Net, rot: 0 });
+        }
+        let names = |p: &Pcb| -> Vec<(String, Vec<(usize, String)>)> { p.netlist().nets.into_iter().map(|n| (n.name, n.pins)).collect() };
+        let want = names(&p);
+        // the 555's box is symmetric: mirrored, its pins land on the other side's wires
+        let old = p.sch_pins();
+        p.parts[u].sch_mirror = true;
+        p.carry_to_pins(u, &old);
+        assert_eq!(names(&p), want);
+        // half a turn of the LED would reverse it on its own wires
+        for r in 1..4 {
+            let mut q = p.clone();
+            let old = q.sch_pins();
+            q.parts[1].sch_rot = r;
+            q.carry_to_pins(1, &old);
+            assert_eq!(names(&q), want, "turned {r}");
+        }
+        // a longer pin name widens the box and moves the pins out; the wires follow
+        let old = p.sch_pins();
+        p.parts[u].pin_names = vec!["GND".into(), "TRIGGER_INPUT".into()];
+        p.carry_to_pins(u, &old);
+        assert_eq!(names(&p), want);
+    }
+
+    #[test]
+    fn wires_know_their_net_and_odd_labels_are_flagged() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let mid = nl.by_name("Net-(D1-2)").unwrap();
+        assert_eq!(nl.wire_net, vec![Some(mid), Some(mid)]);
+        assert!(nl.label_conflicts.is_empty(), "{:?}", nl.label_conflicts);
+        // a second name on the supply
+        let at = p.labels[0].at;
+        p.labels.push(Label { at, text: "VDD".into(), kind: LabelKind::Net, rot: 0 });
+        let nl = p.netlist();
+        assert_eq!(nl.label_conflicts.len(), 1);
+        assert_eq!((nl.label_conflicts[0].0.as_str(), nl.label_conflicts[0].1.as_str()), ("VCC", "VDD"));
+        assert!(crate::pcb_erc::erc(&p, &nl).iter().any(|i| i.rule == "erc_names" && i.message.contains("also labelled VDD")));
+        assert!(CHECKS.iter().any(|c| c.0 == "erc_names"));
+        // references are unique without regard to case (the ERC flags duplicates)
+        p.parts[0].reference = "d1".into();
+        assert_eq!(p.next_reference("D"), "D2");
     }
 
     #[test]

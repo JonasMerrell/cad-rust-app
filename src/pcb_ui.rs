@@ -124,7 +124,8 @@ pub struct PcbUi {
     lib_search: String,
     /// The IPC-7351 footprint wizard's inputs while it is open.
     wizard: Option<crate::pcb_ipc::IpcSpec>,
-    label_text: String,
+    /// The text for the next label, per kind (net, power, ground).
+    label_text: [String; 3],
     zone_net: String,
     highlight: Option<String>,
     pub(crate) hover: P,
@@ -172,7 +173,7 @@ impl Default for PcbUi {
             issue_shown: None,
             lib_search: String::new(),
             wizard: None,
-            label_text: String::new(),
+            label_text: Default::default(),
             zone_net: String::new(),
             highlight: None,
             hover: [0.0; 2],
@@ -611,9 +612,12 @@ fn rotate_sel(app: &mut App) {
     let view = app.pcb.view;
     match app.pcb.sel {
         Some(Sel::Part(i)) => edit(app, |p| {
+            let old = p.sch_pins();
             let Some(part) = p.parts.get_mut(i) else { return };
             if view == View::Schematic {
                 part.sch_rot = (part.sch_rot + 1) % 4;
+                // the wires stay on their pins (else a half turn would swap them unseen)
+                p.carry_to_pins(i, &old);
             } else {
                 part.rot = (part.rot + 90.0).rem_euclid(360.0);
             }
@@ -635,9 +639,11 @@ fn mirror_sel(app: &mut App) {
     let view = app.pcb.view;
     if let Some(Sel::Part(i)) = app.pcb.sel {
         edit(app, |p| {
+            let old = p.sch_pins();
             let Some(part) = p.parts.get_mut(i) else { return };
             if view == View::Schematic {
                 part.sch_mirror = !part.sch_mirror;
+                p.carry_to_pins(i, &old);
             } else {
                 part.bottom = !part.bottom;
             }
@@ -817,9 +823,6 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
                 set_tool(app, Tool::Label(LabelKind::Net));
             }
             if app.tool_button(ui, "pcbPower", "Power", "A supply port such as VCC or +3V3", false, t == Tool::Label(LabelKind::Power), true).clicked() {
-                if app.pcb.label_text.is_empty() || app.pcb.label_text == "GND" {
-                    app.pcb.label_text = "VCC".into();
-                }
                 set_tool(app, Tool::Label(LabelKind::Power));
             }
             if app.tool_button(ui, "pcbGround", "Ground", "A ground port (G)", false, t == Tool::Label(LabelKind::Ground), true).clicked() {
@@ -835,7 +838,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             }
         });
         App::group(ui, |ui| {
-            if app.tool_button(ui, "pcbRotate", "Rotate", "Rotate the selection (R)", false, false, app.pcb.sel.is_some()).clicked() {
+            if app.tool_button(ui, "pcbRotate", "Rotate", "Rotate the selection (R)", false, false, matches!(app.pcb.sel, Some(Sel::Part(_) | Sel::Label(_)))).clicked() {
                 rotate_sel(app);
             }
             if app.tool_button(ui, "mirror", "Mirror", "Mirror the selected part (X)", false, false, matches!(app.pcb.sel, Some(Sel::Part(_)))).clicked() {
@@ -925,21 +928,34 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             crate::circuit_ui::sidebar(app, ui);
             return;
         }
-        if app.pcb.view == View::Schematic {
-            if let Some(issues) = app.pcb.erc.clone() {
-                section(ui, "Check", |ui| issues_ui(app, ui, &issues));
-            }
-            section(ui, "Library", |ui| library_ui(app, ui));
-            if matches!(app.pcb.tool, Tool::Label(_)) {
+        // what is being edited comes first, above the long library list
+        if let Tool::Label(kind) = app.pcb.tool {
+            if app.pcb.view == View::Schematic {
                 section(ui, "Label", |ui| {
                     row(ui, "Net name", |ui| {
-                        ui.add(egui::TextEdit::singleline(&mut app.pcb.label_text).desired_width(120.0).hint_text(default_label(&app.pcb.tool)));
+                        ui.add(egui::TextEdit::singleline(&mut app.pcb.label_text[label_slot(kind)]).desired_width(120.0).hint_text(default_label(&app.pcb.tool)));
                     });
                 });
             }
         }
         if let Some(s) = app.pcb.sel {
+            // a symbol whose pins move (new pin names, footprint or type) takes its wires along
+            let old_pins = match (s, app.pcb.view) {
+                (Sel::Part(k), View::Schematic) => Some((k, app.ws.pcbs[i].sch_pins())),
+                _ => None,
+            };
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
+            if let Some((k, old)) = old_pins {
+                if k < app.ws.pcbs[i].parts.len() && app.ws.pcbs[i].parts[k] != before.parts.get(k).cloned().unwrap_or_default() {
+                    app.ws.pcbs[i].carry_to_pins(k, &old);
+                }
+            }
+        }
+        if app.pcb.view == View::Schematic {
+            if let Some(issues) = app.pcb.erc.clone() {
+                section(ui, "Check", |ui| issues_ui(app, ui, &issues));
+            }
+            section(ui, "Library", |ui| library_ui(app, ui));
         }
         if app.pcb.view != View::Board || matches!(app.pcb.sel, Some(Sel::Part(_))) {
             section(ui, "Digi-Key", |ui| crate::digikey_ui::section_ui(app, ui));
@@ -963,6 +979,21 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             app.pcb.dirty = true;
         }
     }
+}
+
+fn label_slot(k: LabelKind) -> usize {
+    match k {
+        LabelKind::Net => 0,
+        LabelKind::Power => 1,
+        LabelKind::Ground => 2,
+    }
+}
+
+/// The text the next label of the current tool gets.
+fn next_label_text(app: &App) -> String {
+    let Tool::Label(k) = app.pcb.tool else { return String::new() };
+    let t = app.pcb.label_text[label_slot(k)].trim();
+    if t.is_empty() { default_label(&app.pcb.tool).to_string() } else { t.to_string() }
 }
 
 fn default_label(t: &Tool) -> &'static str {
@@ -1167,6 +1198,12 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             row(ui, "Reference", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.reference).desired_width(120.0));
             });
+            let dup = |p: &Pcb| p.parts.iter().enumerate().any(|(k, q)| k != i && q.reference.trim().eq_ignore_ascii_case(p.parts[i].reference.trim()));
+            if dup(p) || p.parts[i].reference.trim().is_empty() {
+                let msg = if dup(p) { "Another part has this reference: nets and the BOM mix them up" } else { "Give the part a reference" };
+                ui.label(RichText::new(msg).color(theme::error_soft()).size(11.5));
+            }
+            let part = &mut p.parts[i];
             row(ui, "Value", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.value).desired_width(120.0));
             });
@@ -1925,9 +1962,13 @@ fn label_box_hit(l: &Label, at: P) -> bool {
             let x0 = if l.rot % 4 == 2 { l.at[0] - w - 0.5 } else { l.at[0] };
             at[0] >= x0 && at[0] <= x0 + w + 0.5 && at[1] >= l.at[1] && at[1] <= l.at[1] + 1.8
         }
+        LabelKind::Net => {
+            // turned text runs up (1) or down (3) from the point, left of it
+            let y0 = if l.rot % 4 == 3 { l.at[1] - w - 0.5 } else { l.at[1] };
+            at[1] >= y0 && at[1] <= y0 + w + 0.5 && at[0] <= l.at[0] && at[0] >= l.at[0] - 1.8
+        }
         LabelKind::Ground => (at[0] - l.at[0]).abs() < 1.8 && at[1] <= l.at[1] && at[1] >= l.at[1] - 3.8,
         LabelKind::Power => (at[0] - l.at[0]).abs() < 1.8 && at[1] >= l.at[1] && at[1] <= l.at[1] + 3.2,
-        _ => false,
     }
 }
 
@@ -1999,17 +2040,6 @@ fn sch_snap(p: &Pcb, at: P, tol: f64) -> P {
         }
     }
     best.map(|b| b.1).unwrap_or_else(|| pcb::snap(at, GRID))
-}
-
-/// The two-segment orthogonal path from a to b.
-fn ortho(a: P, b: P, vfirst: bool) -> Vec<P> {
-    let corner = if vfirst { [a[0], b[1]] } else { [b[0], a[1]] };
-    let mut v = vec![a];
-    if pcb::dist(corner, a) > 1e-9 && pcb::dist(corner, b) > 1e-9 {
-        v.push(corner);
-    }
-    v.push(b);
-    v
 }
 
 /// The two-segment 45° path from a to b: diagonal first, then straight.
@@ -2164,7 +2194,15 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     } else if sim {
         crate::circuit_ui::sim_input(app, pi, hover, tol, clicked);
     } else {
-        sch_input(app, pi, &resp, &xf, hover, tol, clicked, double, right);
+        // a click acts where the button went up, not where the pointer is by the time a slow frame runs
+        let up = ui.input(|i| {
+            i.raw.events.iter().rev().find_map(|e| match e {
+                egui::Event::PointerButton { pos, pressed: false, button, .. } if (*button == egui::PointerButton::Primary && clicked) || (*button == egui::PointerButton::Secondary && right) => Some(*pos),
+                _ => None,
+            })
+        });
+        let at = if clicked || right { up.filter(|q| rect.contains(*q)).map(|q| xf.w(q)).or(hover) } else { hover };
+        sch_input(app, pi, &resp, &xf, at, tol, clicked, double, right);
     }
     refresh(app);
     let p = &app.ws.pcbs[pi];
@@ -2276,7 +2314,7 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                     app.pcb.wire.push(at);
                 } else {
                     let start = *app.pcb.wire.last().unwrap();
-                    let path = ortho(start, at, app.pcb.wire_vfirst);
+                    let path = p.wire_path(start, at, app.pcb.wire_vfirst, None);
                     // ending on a pin or another wire finishes it
                     let ends_on = p.sch_pins().iter().any(|x| pcb::dist(x.at, at) < 1e-6) || p.wires.iter().any(|w| pcb::seg_point(w.a, w.b, at) < 1e-6);
                     edit(app, |p| add_wire_path(p, &path));
@@ -2315,7 +2353,7 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
             if let (true, Some(h)) = (clicked, hover) {
                 let p = &app.ws.pcbs[pi];
                 let at = sch_snap(p, h, tol * 1.5);
-                let text = if app.pcb.label_text.trim().is_empty() { default_label(&app.pcb.tool).to_string() } else { app.pcb.label_text.trim().to_string() };
+                let text = next_label_text(app);
                 let mut idx = 0;
                 edit(app, |p| {
                     p.labels.push(Label { at, text, kind, rot: 0 });
@@ -2323,7 +2361,7 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                 });
                 if kind == LabelKind::Net {
                     // the next label gets the next number
-                    app.pcb.label_text = bump(&app.pcb.label_text);
+                    app.pcb.label_text[0] = bump(&app.pcb.label_text[0]);
                 }
                 app.pcb.sel = Some(Sel::Label(idx));
             }
@@ -2386,34 +2424,37 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
             }
             if clicked {
                 app.pcb.sel = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol));
-                if let Some(Sel::Wire(_)) = app.pcb.sel {
-                    // show the wire's net
-                    let p = &app.ws.pcbs[pi];
-                    let h = hover.unwrap();
-                    let nl = &app.pcb.cache.nl;
-                    let net = p.sch_pins().into_iter().find_map(|x| {
-                        let w = p.wires.iter().any(|w| pcb::seg_point(w.a, w.b, x.at) < 1e-3 && pcb::seg_point(w.a, w.b, h) < tol);
-                        if w { nl.net_of(x.part, &x.num).map(|n| nl.nets[n].name.clone()) } else { None }
-                    });
-                    app.pcb.highlight = net;
-                }
+                // a wire shows its whole net; clicking anything else clears that
+                let nl = &app.pcb.cache.nl;
+                app.pcb.highlight = match app.pcb.sel {
+                    Some(Sel::Wire(w)) => nl.wire_net.get(w).copied().flatten().map(|n| nl.nets[n].name.clone()),
+                    _ => None,
+                };
             }
         }
     }
 }
 
-/// "NET1" → "NET2"; text without a number is left alone.
+/// "NET1" → "NET2", "D09" → "D10"; text without a number, and supply-like names (3V3, 1V8, +12),
+/// are left alone.
 fn bump(s: &str) -> String {
     let t = s.trim();
-    let digits: String = t.chars().rev().take_while(|c| c.is_ascii_digit()).collect::<Vec<_>>().into_iter().rev().collect();
     if t.is_empty() {
         return "NET2".into();
     }
-    if digits.is_empty() {
+    let digits = t.chars().rev().take_while(|c| c.is_ascii_digit()).count();
+    let (head, num) = t.split_at(t.len() - digits);
+    let volts = {
+        let mut c = head.chars().rev();
+        matches!(c.next(), Some('V' | 'v')) && c.next().is_some_and(|x| x.is_ascii_digit())
+    };
+    if digits == 0 || volts || head.is_empty() || head == "+" || head == "-" {
         return t.to_string();
     }
-    let n: u64 = digits.parse().unwrap_or(0);
-    format!("{}{}", &t[..t.len() - digits.len()], n + 1)
+    match num.parse::<u64>().ok().and_then(|n| n.checked_add(1)) {
+        Some(n) => format!("{head}{n:0width$}", width = digits),
+        None => t.to_string(),
+    }
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -2630,7 +2671,7 @@ fn sch_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
             let at = sch_snap(p, h, (9.0 / xf.zoom) as f64);
             painter.circle_stroke(xf.s(at), 4.0, Stroke::new(1.2, Color32::from_rgb(0, 128, 0)));
             if let Some(start) = app.pcb.wire.last() {
-                let path = ortho(*start, at, app.pcb.wire_vfirst);
+                let path = p.wire_path(*start, at, app.pcb.wire_vfirst, None);
                 for s in path.windows(2) {
                     painter.line_segment([xf.s(s[0]), xf.s(s[1])], Stroke::new(1.5, Color32::from_rgb(0, 160, 0)));
                 }
@@ -2638,7 +2679,7 @@ fn sch_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         }
         Tool::Label(kind) => {
             let at = sch_snap(p, h, (9.0 / xf.zoom) as f64);
-            let text = if app.pcb.label_text.trim().is_empty() { default_label(&app.pcb.tool).to_string() } else { app.pcb.label_text.trim().to_string() };
+            let text = next_label_text(app);
             let mut list = vec![];
             pcb_export::label(&mut list, &Label { at, text, kind: *kind, rot: 0 });
             for d in &mut list {
@@ -2775,5 +2816,51 @@ mod tests {
         // with the top layer hidden the track can't be picked
         let hidden = BoardView { top: false, ..BoardView::default() };
         assert_eq!(board_hit(&p, &pads, mid, 0.1, Layer::Top, &hidden), None);
+    }
+
+    #[test]
+    fn bump_numbers_net_labels_only() {
+        assert_eq!(bump("NET1"), "NET2");
+        assert_eq!(bump(""), "NET2");
+        assert_eq!(bump("D09"), "D10");
+        assert_eq!(bump("SDA"), "SDA");
+        // supply names keep their number
+        assert_eq!(bump("3V3"), "3V3");
+        assert_eq!(bump("+12"), "+12");
+        assert_eq!(bump("1V8"), "1V8");
+        // no overflow, no lost digits
+        assert_eq!(bump("N18446744073709551615"), "N18446744073709551615");
+        assert_eq!(bump("N99999999999999999999999"), "N99999999999999999999999");
+    }
+
+    #[test]
+    fn wire_path_goes_round_pins() {
+        let mut p = Pcb::new("w");
+        p.add_part("R", None, None, [0.0, 0.0]).unwrap();
+        p.add_part("R", None, None, [20.32, 0.0]).unwrap();
+        let pins = p.sch_pins();
+        let at = |part: usize, num: &str| pins.iter().find(|x| x.part == part && x.num == num).unwrap().at;
+        // R1 top to R2 bottom: horizontal first would reach R2's top pin and run down through R2,
+        // vertical first would land on R1's bottom pin
+        let (a, b) = (at(0, "1"), at(1, "2"));
+        let path = p.wire_path(a, b, false, None);
+        assert_eq!(path[0], a);
+        assert_eq!(*path.last().unwrap(), b);
+        add_wire_path(&mut p, &path);
+        let nl = p.netlist();
+        assert_eq!(nl.nets.len(), 1, "{:?}", nl.nets);
+        assert_eq!(nl.nets[0].pins, vec![(0, "1".to_string()), (1, "2".to_string())]);
+        // a clear straight run stays straight
+        assert_eq!(p.wire_path([0.0, 20.0], [10.16, 20.0], false, None), vec![[0.0, 20.0], [10.16, 20.0]]);
+    }
+
+    #[test]
+    fn turned_net_labels_can_be_hit() {
+        let up = Label { at: [0.0, 0.0], text: "TIMING".into(), kind: LabelKind::Net, rot: 1 };
+        assert!(label_box_hit(&up, [-1.0, 3.0]));
+        assert!(!label_box_hit(&up, [1.0, 3.0]));
+        let down = Label { rot: 3, ..up.clone() };
+        assert!(label_box_hit(&down, [-1.0, -3.0]));
+        assert!(!label_box_hit(&down, [-1.0, 3.0]));
     }
 }
