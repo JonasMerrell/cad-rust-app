@@ -34,6 +34,9 @@ pub struct Pcb {
     /// Circuit simulation: sources, ground, analysis.
     #[serde(default, skip_serializing_if = "crate::circuit::SimSetup::is_empty")]
     pub sim: crate::circuit::SimSetup,
+    /// Output job: which fabrication and documentation outputs a run writes.
+    #[serde(default, skip_serializing_if = "crate::pcb_fab::OutJob::is_default")]
+    pub outputs: crate::pcb_fab::OutJob,
     #[serde(default)]
     pub next_id: u64,
 }
