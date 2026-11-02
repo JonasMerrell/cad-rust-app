@@ -149,6 +149,12 @@ damping and ring-down time, and results show as colour maps on the deformed shap
 animation. **Advanced** mode runs the crackh3d finite element solver with periodic boundary pairs for
 unit cells.
 
+**3D-printed plastics** (PLA, PETG, ABS, ASA, PC, nylon and carbon-fibre grades) can be modelled as
+printed: solid walls and top/bottom layers around a sparse infill (grid, triangles, honeycomb or gyroid
+at any density), either layered (weaker across the layers, about a build direction you choose) or
+effective isotropic. The defaults come from makers' X-Y and Z data and Gibson–Ashby infill scaling; see
+[docs/fea-printed-plastics.md](docs/fea-printed-plastics.md).
+
 ### PCB design
 
 <table>

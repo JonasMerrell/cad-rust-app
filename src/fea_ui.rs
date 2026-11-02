@@ -85,6 +85,8 @@ pub struct FeaUi {
     phase: f64,
     last_tick: Option<Instant>,
     stress_cache: Option<((usize, usize), Arc<Vec<[f32; 6]>>)>,
+    /// Factor of safety at each node of printed parts, by (outcome, frame).
+    safety_cache: Option<((usize, usize), Arc<Vec<f32>>)>,
     /// Largest stress seen in the frames shown so far, so colours stay put while a time history plays.
     stress_hi: f32,
     undo: Vec<Study>,
@@ -133,6 +135,7 @@ impl Default for FeaUi {
             phase: Default::default(),
             last_tick: Default::default(),
             stress_cache: Default::default(),
+            safety_cache: Default::default(),
             stress_hi: Default::default(),
             undo: Default::default(),
             redo: Default::default(),
@@ -298,7 +301,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                         if let Solution::Transient(t) = &o.solution {
                             app.fea.frame = t.frames.iter().enumerate().max_by(|a, b| fea::max_mag(&a.1.1).total_cmp(&fea::max_mag(&b.1.1))).map(|x| x.0).unwrap_or(0);
                         }
-                        if app.fea.outcome.as_ref().is_none_or(|p| !Arc::ptr_eq(&p.mesh, &o.mesh)) {
+                        if app.fea.outcome.as_ref().is_none_or(|p| !Arc::ptr_eq(&p.mesh, &o.mesh) && p.mesh.nodes != o.mesh.nodes) {
                             app.fea.pins.clear();
                         }
                         app.fea.outcome = Some(Arc::new(o));
@@ -732,6 +735,11 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
             }
         }
     }
+    // 3D-printed plastics: walls, infill and layers
+    let printable: Vec<&'static crate::fea_print::Printed> = used.iter().filter_map(|m| crate::fea_print::printed(m)).collect();
+    if !advanced && !printable.is_empty() {
+        print_rows(ui, s, &printable);
+    }
     if advanced {
         adv::study_rows(app, ui);
     }
@@ -741,6 +749,71 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
     if bodies.is_empty() {
         ui.label(RichText::new("This Part Studio has no parts yet").color(theme::error_soft()));
     }
+}
+
+/// The 3D-printing settings of a study whose parts are printable plastics.
+fn print_rows(ui: &mut Ui, s: &mut Study, printable: &[&'static crate::fea_print::Printed]) {
+    use crate::fea_print::{Infill, Print, PrintModel};
+    let mut on = s.print.is_some();
+    row(ui, "3D printed", |ui| {
+        ui.checkbox(&mut on, "FDM").on_hover_text(
+            "Model the plastic parts as 3D printed: solid walls and top/bottom layers around a sparse infill, weaker between layers than along them. Off: solid, isotropic material",
+        );
+    });
+    if on != s.print.is_some() {
+        s.print = on.then(Print::default);
+    }
+    let Some(p) = &mut s.print else { return };
+    row(ui, "Print model", |ui| {
+        egui::ComboBox::from_id_salt("fea-print-model").width(160.0).selected_text(p.model.label()).show_ui(ui, |ui| {
+            ui.selectable_value(&mut p.model, PrintModel::Layered, PrintModel::Layered.label()).on_hover_text(
+                "Transversely isotropic about the build direction: stiffer and stronger along the layers than across them. Judged by von Mises against the in-plane strength and by tension across / shear along the layers against the layer bond",
+            );
+            ui.selectable_value(&mut p.model, PrintModel::Isotropic, PrintModel::Isotropic.label())
+                .on_hover_text("The same in every direction: the modulus averaged over directions and the weakest (between-layer) strength, so it is safe whichever way the part is printed");
+        });
+    });
+    row(ui, "Infill", |ui| {
+        ui.add(egui::DragValue::new(&mut p.infill).range(0.0..=100.0).speed(1.0).suffix(" %")).on_hover_text("Sparse infill density");
+        egui::ComboBox::from_id_salt("fea-print-infill").width(120.0).selected_text(p.pattern.label()).show_ui(ui, |ui| {
+            for k in Infill::ALL {
+                let tip = match k {
+                    Infill::Grid => "Straight walls in two directions (grid, rectilinear, lines, crosshatch): about ρ/4 of the solid's stiffness in the layer plane, ρ along Z",
+                    Infill::Triangles => "Triangles: the walls stretch rather than bend, about ρ/3 in the layer plane, ρ along Z",
+                    Infill::Honeycomb => "Hexagons: the walls bend in the layer plane (about 1.5 ρ³, very soft), ρ along Z",
+                    Infill::Gyroid => "Gyroid, cubic and other curved 3D patterns: alike in every direction, about 0.8 ρ² stiffness and 0.3 ρ^1.5 strength",
+                };
+                ui.selectable_value(&mut p.pattern, k, k.label()).on_hover_text(tip);
+            }
+        });
+    });
+    row(ui, "Walls", |ui| {
+        ui.add(egui::DragValue::new(&mut p.walls).range(0..=50)).on_hover_text("Wall (perimeter) loops");
+        ui.label("×");
+        ui.add(egui::DragValue::new(&mut p.line_width).range(0.1..=3.0).speed(0.01).suffix(" mm")).on_hover_text("Line width");
+    });
+    row(ui, "Top / bottom", |ui| {
+        ui.add(egui::DragValue::new(&mut p.top_bottom).range(0..=100)).on_hover_text("Solid top and bottom layers");
+        ui.label("×");
+        ui.add(egui::DragValue::new(&mut p.layer_height).range(0.02..=2.0).speed(0.01).suffix(" mm")).on_hover_text("Layer height");
+    });
+    row(ui, "Build direction", |ui| {
+        let dirs: [([f64; 3], &str); 6] = [([0.0, 0.0, 1.0], "+Z"), ([0.0, 0.0, -1.0], "-Z"), ([1.0, 0.0, 0.0], "+X"), ([-1.0, 0.0, 0.0], "-X"), ([0.0, 1.0, 0.0], "+Y"), ([0.0, -1.0, 0.0], "-Y")];
+        let text = crate::fea_print::fmt_dir(p.axis());
+        egui::ComboBox::from_id_salt("fea-print-dir").width(80.0).selected_text(text).show_ui(ui, |ui| {
+            for (d, n) in dirs {
+                ui.selectable_value(&mut p.build_dir, d, n);
+            }
+        })
+        .response
+        .on_hover_text("The printer's Z (up from the bed) in the Part Studio's axes: the layers lie across it");
+    });
+    let mut info = vec![];
+    for m in printable {
+        info.push(format!("{} printed solid: E {} / {} GPa, strength {} / {} MPa (X-Y / Z) · {}", m.name, sig(m.e_xy / 1000.0), sig(m.e_z / 1000.0), sig(m.s_xy), sig(m.s_z), m.source));
+    }
+    info.push(format!("Shell {} mm walls, {} mm top/bottom: mesh at about that size where the stress matters", sig(p.wall()), sig(p.skin())));
+    ui.label(RichText::new(info.join("\n")).color(theme::muted()).size(11.5));
 }
 
 fn items_ui(app: &mut App, ui: &mut Ui, supports: bool) {
@@ -1222,8 +1295,10 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
                     .on_hover_text("The largest tension (max principal stress) and the largest compression (min principal stress) anywhere in the part");
             });
             stat(ui, "Max deflection", format!("{} mm", sig(fea::max_mag(u))));
-            let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
-            let sf = stress.iter().zip(&y).map(|(s, y)| y / (crate::fea_solve::von_mises(s) as f64).max(1e-12)).fold(f64::INFINITY, f64::min);
+            let sf = match o.safety {
+                Some((walls, _)) => walls,
+                None => fea::node_safety(&o, u, stress).into_iter().fold(f64::INFINITY, f64::min),
+            };
             row(ui, "Factor of safety", |ui| {
                 let col = if stale {
                     theme::muted()
@@ -1235,8 +1310,20 @@ fn results_ui(app: &mut App, ui: &mut Ui) {
                     theme::ok_green()
                 };
                 ui.label(RichText::new(if sf > 1000.0 { "> 1000".into() } else { sig(sf) }).strong().size(12.5).color(col))
-                    .on_hover_text(format!("Yield strength {} MPa over the largest von Mises stress", o.mat.yield_mpa));
+                    .on_hover_text(if o.printed {
+                        "The walls' smallest margin to the printed material's strength: von Mises against its in-plane strength, and tension across the layers and shear along them against the layer bond".to_string()
+                    } else {
+                        format!("Yield strength {} MPa over the largest von Mises stress", o.mat.yield_mpa)
+                    });
             });
+            if let Some((_, infill)) = o.safety {
+                row(ui, "Infill safety", |ui| {
+                    let col = if stale { theme::muted() } else if infill < 1.0 { Color32::from_rgb(0xe0, 0x9a, 0x20) } else { vcol };
+                    ui.label(RichText::new(if infill > 1000.0 { "> 1000".into() } else { sig(infill) }).strong().size(12.5).color(col)).on_hover_text(
+                        "The infill's smallest margin to its strength (Gibson–Ashby scaled with its density). Below 1 it would crush or tear locally and leave more of the load to the walls",
+                    );
+                });
+            }
             if let Some(s) = study(app) {
                 for (id, r) in reactions {
                     if let Some(name) = s.supports.iter().find(|x| x.id == *id).map(|x| x.name.as_str()).or_else(|| s.advanced.name_of(*id)) {
@@ -1424,8 +1511,23 @@ fn field_values(app: &mut App, o: &Outcome, disp: &[DVec3]) -> (Vec<f32>, f32, f
                 Field::Principal1 => s.iter().map(|x| crate::fea_solve::principal(x)[0]).collect(),
                 Field::Principal3 => s.iter().map(|x| crate::fea_solve::principal(x)[2]).collect(),
                 Field::Safety => {
-                    let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
-                    s.iter().zip(&y).map(|(x, y)| (*y as f32 / crate::fea_solve::von_mises(x).max(1e-9)).min(10.0)).collect()
+                    let u: &[f64] = match &o.solution {
+                        Solution::Static { u, .. } => u,
+                        Solution::Transient(t) => t.frames.get(app.fea.frame).map(|f| &f.1[..]).unwrap_or(&[]),
+                        Solution::Modal { .. } => &[],
+                    };
+                    let key = (o as *const Outcome as usize, app.fea.frame);
+                    if !o.printed {
+                        fea::node_safety(o, u, &s).into_iter().map(|v| (v as f32).min(10.0)).collect()
+                    } else if let Some(v) = app.fea.safety_cache.as_ref().filter(|c| c.0 == key) {
+                        v.1.to_vec()
+                    } else if u.len() != 3 * o.mesh.nodes.len() {
+                        vec![10.0; s.len()]
+                    } else {
+                        let v: Vec<f32> = fea::node_safety(o, u, &s).into_iter().map(|v| (v as f32).min(10.0)).collect();
+                        app.fea.safety_cache = Some((key, Arc::new(v.clone())));
+                        v
+                    }
                 }
                 _ => s.iter().map(crate::fea_solve::von_mises).collect(),
             }
@@ -1983,8 +2085,7 @@ fn overlay(app: &mut App, ui: &mut Ui, painter: &egui::Painter, rect: egui::Rect
         line = match &o.solution {
             Solution::Static { u, stress, .. } => {
                 let vm = stress.iter().map(crate::fea_solve::von_mises).fold(0.0f32, f32::max) as f64;
-                let y = fea::node_yield(&o.mesh, &o.mat, &o.body_mats);
-                let sf = stress.iter().zip(&y).map(|(s, y)| y / (crate::fea_solve::von_mises(s) as f64).max(1e-12)).fold(f64::INFINITY, f64::min);
+                let sf = o.safety.map(|s| s.0).unwrap_or_else(|| fea::node_safety(o, u, stress).into_iter().fold(f64::INFINITY, f64::min));
                 format!("Max stress {} MPa · max displacement {} mm · factor of safety {}", sig(vm), sig(fea::max_mag(u)), sig(sf.min(1e4)))
             }
             Solution::Modal { modes } => modes.get(app.fea.mode).map(|m| format!("Mode {} · {} Hz", app.fea.mode + 1, sig(m.freq))).unwrap_or_default(),

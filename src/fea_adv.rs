@@ -333,5 +333,5 @@ pub fn run(study: &Study, input: &Input, mesh: Arc<Mesh>, progress: &dyn Fn(&str
     let reactions = holding.into_iter().zip(&sol.reactions).map(|(id, r)| (id, DVec3::from(r.force))).collect();
     // curved elements' own volume, not their corners' straight tetrahedron
     let mass = (0..mesh.tets.len()).map(|ei| mat.rho * crate::fea_solve::element_volume(&mesh, ei)).sum();
-    Ok(Outcome { mesh, material, mat, body_mats: vec![], solution: Solution::Static { u, stress, reactions }, warnings: std::mem::take(warnings), mass, peak_stress: None })
+    Ok(Outcome { mesh, material, mat, body_mats: vec![], printed: false, safety: None, solution: Solution::Static { u, stress, reactions }, warnings: std::mem::take(warnings), mass, peak_stress: None })
 }
