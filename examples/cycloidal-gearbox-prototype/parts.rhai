@@ -286,6 +286,7 @@ for p in parts {
         export_step(sh, out + "printed-" + file + ".step");
         export_stl(sh, out + "print-" + file + ".stl", 0.03);
     }
+    if FILES && p.kind == "bought" { export_step(p.shape, out + "bought-" + file + ".step"); }
     let g = if p.kind == "printed" { p.shape.volume() * PA_CF } else { () };
     if p.kind == "printed" { total_print_g += g; }
     bom.push(#{part: p.name, kind: p.kind, qty: p.qty, material: p.material, note: p.note, mass_g: g, bbox: p.shape.bbox().size, valid: p.shape.is_valid()});

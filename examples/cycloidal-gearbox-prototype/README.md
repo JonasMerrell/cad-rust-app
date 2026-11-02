@@ -9,7 +9,12 @@ first.
     mkdir out && rcad script examples/cycloidal-gearbox-prototype/parts.rhai out          # ~3 min
     mkdir out && rcad script examples/cycloidal-gearbox-prototype/parts.rhai out quick    # renders and summary only
 
-It writes `print-*.stl` and `printed-*.step` for every printed part, the assembly as
+To get an rCAD project file (one Part Studio per part plus a "Test unit" assembly), run the tool
+script in that output folder afterwards:
+
+    cd out && rcad run ../examples/cycloidal-gearbox-prototype/project.json    # writes cycloidal-gearbox-prototype.rcad.json
+
+The parts script writes `print-*.stl` and `printed-*.step` for every printed part, `bought-*.step` for the bought ones, the assembly as
 `cycloidal-gearbox-prototype.step`, five renders and `summary.json` (BOM, masses, z stack, and the
 meshing and interference checks).
 
