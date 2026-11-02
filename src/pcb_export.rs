@@ -274,7 +274,22 @@ pub fn silk(out: &mut Vec<Draw>, part: &pcb::Part, rgba: [u8; 4]) {
         graphic(out, g, 0.15, rgba, &xf);
     }
     let (lo, hi) = fp.court;
-    text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35], 1.0, 1, 0.0, rgba, &xf);
+    // the reference sits above the courtyard and turns with the part, but never reads upside down
+    // (on the bottom, as seen from below): past a quarter turn it is turned half way round, about
+    // the middle of the line it fills
+    let h = 1.0;
+    if ref_flipped(part) {
+        text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35 + h], h, 1, 180.0, rgba, &xf);
+    } else {
+        text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35], h, 1, 0.0, rgba, &xf);
+    }
+}
+
+/// Whether a part's reference is drawn turned half way round so that it reads upright: its
+/// direction as read (from above on the top, from below on the bottom) points left.
+fn ref_flipped(part: &pcb::Part) -> bool {
+    let a = (if part.bottom { -part.rot } else { part.rot }).rem_euclid(360.0);
+    a > 90.0 + 1e-6 && a <= 270.0 + 1e-6
 }
 
 /// The schematic as a display list.
@@ -441,8 +456,11 @@ pub fn png(list: &[Draw], area: (P, P), width: u32, bg: [u8; 3]) -> Result<Vec<u
     use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let (lo, hi) = area;
     let size = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
-    let k = width as f64 / size[0];
-    let height = ((size[1] * k).round() as u32).clamp(1, 8000);
+    // a tall area is scaled down to fit the height limit (and the image gets narrower), never cut off
+    const MAX_H: f64 = 8000.0;
+    let k = (width as f64 / size[0]).min(MAX_H / size[1]);
+    let width = ((size[0] * k).round() as u32).clamp(1, width.max(1));
+    let height = ((size[1] * k).round() as u32).clamp(1, MAX_H as u32);
     let mut pm = Pixmap::new(width, height).ok_or("bad image size")?;
     pm.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 255));
     let at = |q: P| (((q[0] - lo[0]) * k) as f32, ((hi[1] - q[1]) * k) as f32);
@@ -664,8 +682,11 @@ fn edge_layer(p: &Pcb) -> String {
 }
 
 fn excellon(holes: &[(P, f64)], plated: bool) -> String {
+    // tools by diameter as written (to the micron), so two sizes that print alike are one tool
+    let um = |d: f64| (d * 1000.0).round() / 1000.0;
+    let holes: Vec<(P, f64)> = holes.iter().map(|(at, d)| (*at, um(*d))).collect();
     let mut sizes: Vec<f64> = vec![];
-    for (_, dia) in holes {
+    for (_, dia) in &holes {
         if !sizes.iter().any(|s| (s - dia).abs() < 1e-6) {
             sizes.push(*dia);
         }
@@ -1098,6 +1119,68 @@ mod tests {
         to_studio(&mut ws, 0).unwrap();
         assert_eq!(ws.studios[si].doc.features.len(), n);
         assert_eq!(fid(&ws, "R1 470"), Some(r1));
+    }
+
+    #[test]
+    fn tall_png_is_scaled_not_cut_off() {
+        // a dot at the bottom of a 10 x 120 mm area, asked for 4000 px wide
+        let list = vec![d([255, 0, 0, 255], Prim::Circle { c: [5.0, 2.0], r: 1.0, w: 0.0, fill: true })];
+        let bytes = png(&list, ([0.0, 0.0], [10.0, 120.0]), 4000, [0, 0, 0]).unwrap();
+        let pm = tiny_skia::Pixmap::decode_png(&bytes).unwrap();
+        assert_eq!(pm.height(), 8000);
+        assert!((pm.width() as i64 - 667).abs() <= 1, "{}", pm.width());
+        let k = 8000.0 / 120.0;
+        let px = pm.pixel((5.0 * k) as u32, (8000.0 - 2.0 * k) as u32).unwrap();
+        assert!(px.red() > 200, "the dot is in the image");
+        // a wide area keeps the asked width
+        let pm = tiny_skia::Pixmap::decode_png(&png(&list, ([0.0, 0.0], [100.0, 20.0]), 1000, [0, 0, 0]).unwrap()).unwrap();
+        assert_eq!((pm.width(), pm.height()), (1000, 200));
+    }
+
+    #[test]
+    fn references_read_upright() {
+        let part = |rot: f64, bottom: bool| pcb::Part { reference: "R1".into(), footprint: "R_0805".into(), at: [20.0, 20.0], rot, bottom, ..Default::default() };
+        // top: read from above, so 0 and 90 stand, 180 and 270 turn; bottom: read from below
+        for (rot, bottom, flipped) in [(0.0, false, false), (90.0, false, false), (180.0, false, true), (270.0, false, true), (-90.0, false, true), (45.0, false, false), (135.0, false, true)] {
+            assert_eq!(ref_flipped(&part(rot, bottom)), flipped, "rot {rot} bottom {bottom}");
+        }
+        for (rot, flipped) in [(0.0, false), (90.0, true), (180.0, true), (270.0, false)] {
+            assert_eq!(ref_flipped(&part(rot, true)), flipped, "rot {rot} bottom");
+        }
+        // at 180 on top the text still sits outside the courtyard (now below the part, as the
+        // courtyard's top edge turned), and its strokes run left to right
+        let p = part(180.0, false);
+        let fp = p.footprint();
+        let mut graphics = vec![];
+        for g in &fp.silk {
+            graphic(&mut graphics, g, 0.15, [0; 4], &|q| p.xf(q));
+        }
+        let mut list = vec![];
+        silk(&mut list, &p, [0; 4]);
+        let text = &list[graphics.len()..];
+        assert!(!text.is_empty());
+        let (lo, hi) = extent(text);
+        let court_lo_y = p.at[1] - fp.court.1[1];
+        assert!(hi[1] <= court_lo_y + 1e-6 && lo[1] < court_lo_y - 0.5, "{lo:?} {hi:?} {court_lo_y}");
+        // the "R" comes before the "1": its strokes are left of the last ones
+        let x = |d: &Draw| match &d.prim {
+            Prim::Seg { a, .. } => a[0],
+            _ => unreachable!(),
+        };
+        assert!(x(&text[0]) < x(&text[text.len() - 1]), "{} {}", x(&text[0]), x(&text[text.len() - 1]));
+    }
+
+    #[test]
+    fn drill_tools_merge_sizes_that_print_alike() {
+        let s = excellon(&[([1.0, 1.0], 0.8), ([2.0, 2.0], 0.8004), ([3.0, 3.0], 1.0)], true);
+        assert!(s.contains("T1C0.800\nT2C1.000\n%"), "{s}");
+        assert!(!s.contains("T3"), "{s}");
+        // no plated holes: the PTH file is still written (upload checkers want one), with no tools
+        let mut p = Pcb::new("smd");
+        p.parts.push(pcb::Part { reference: "R1".into(), footprint: "R_0805".into(), at: [10.0, 10.0], ..Default::default() });
+        let files = gerbers(&p);
+        let pth = &files.iter().find(|f| f.0 == "smd-PTH.drl").expect("a PTH drill file").1;
+        assert!(!pth.contains("T1"), "{pth}");
     }
 
     #[test]
