@@ -11,7 +11,8 @@
 // drilled), 8 mm aluminium base plate (drilled), bearings, dowel pins, magnets, pogo pins, steppers.
 
 let out = if ARGS.len() > 0 { ARGS[0] + "/" } else { "" };
-let FILES = !(ARGS.len() > 1 && ARGS[1] == "quick");   // "quick": skip the per-part STEP/STL files
+let SIM = ARGS.len() > 1 && ARGS[1] == "sim";               // "sim": per-part meshes for sim/ (see sim/README.md)
+let FILES = !(ARGS.len() > 1 && (ARGS[1] == "quick" || SIM));   // "quick": skip the per-part STEP/STL files
 let TAU = 6.283185307179586;
 
 fn zcyl(x, y, z0, r, h) { cylinder(vec3(x, y, z0), vec3(0, 0, 1), r, h) }
@@ -578,4 +579,17 @@ let summary = #{
                                od_mm: jn.spec.od, length_mm: act_z(jn.spec).out + jn.spec.motor_len}),
 };
 write_json(out + "summary.json", summary);
+
+// "sim": every part as an STL in the zero pose, with its group, mass and colour, for sim/model.py
+if SIM {
+    let simparts = [];
+    for i in 0..parts.len() {
+        let p = parts[i];
+        let file = "sim-" + i + ".stl";
+        export_stl(p.shape, out + file, 0.3);
+        simparts.push(#{i: i, part: p.name, group: p.group, kind: p.kind, material: p.material, color: p.color,
+                        mass_g: if p.contains("mass") { p.mass } else { () }, file: file});
+    }
+    write_json(out + "sim-parts.json", #{parts: simparts, H2: H2, L1: L1, L2: L2, W: W, yF: yF, xT: xT, zB: zB});
+}
 #{reach: reach, arm_mass_g: total, torque: torque, interference: checks.filter(|c| c.overlap_mm3 > 1.0)}
