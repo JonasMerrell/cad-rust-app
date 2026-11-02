@@ -3407,6 +3407,8 @@ impl eframe::App for App {
                 self.import_path(&p);
             } else if matches!(self.tab, crate::workspace::Tab::Assembly(_)) {
                 crate::stdparts_ui::import_into_assembly(self, &p);
+            } else if matches!(self.tab, crate::workspace::Tab::Pcb(_)) && p.extension().is_some_and(|e| e.eq_ignore_ascii_case("csv")) {
+                crate::digikey_ui::load_csv(self, &p);
             }
         }
         if self.awaiting_sketch_plane && self.sketch.is_none() && self.picks.iter().any(|r| r.is_planar() || matches!(r, Ref::FeaturePlane { .. })) {

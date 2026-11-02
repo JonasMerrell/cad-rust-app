@@ -50,6 +50,8 @@ mod pcb_export;
 mod pcb_lib;
 mod pcb_route;
 mod pcb_ui;
+mod digikey;
+mod digikey_ui;
 mod grabcad;
 mod home;
 mod icon_paths;

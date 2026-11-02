@@ -164,6 +164,13 @@ route them with 45° tracks and vias or with the autorouter. Copper pours, a rat
 rule check are there, and the output is a Gerber and Excellon ZIP for board makers such as JLCPCB,
 BOM and pick-and-place CSVs, and a **3D board** Part Studio to put in your assemblies or export as STEP.
 
+Every part property can be edited in the sidebar: reference, value, type, footprint, package,
+schematic pose, MPN, manufacturer, description, datasheet, Digi-Key number, your own BOM fields
+(tolerance, LCSC number …) and the simulation model's parameters. **Digi-Key** parts come in by
+part number, product link or keywords through Digi-Key's API (with your own free API app's client ID
+and secret), or without keys from a table, cart or list CSV downloaded from digikey.com: use one for
+the selected part or place it as a new one, with its value, footprint and BOM data filled in.
+
 ### Circuit and firmware simulation
 
 <img alt="A Raspberry Pi Pico running its firmware drives a motor and a servo; the plots show the arm angle, motor current and limit switch" src="docs/screenshots/circuit-firmware.png" width="100%">
@@ -296,6 +303,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb_route.rs` | the grid autorouter and automatic placement |
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
+| `src/digikey.rs`, `src/digikey_ui.rs` | Digi-Key API client and CSV import, products to parts, the PCB tab's Digi-Key section |
 | `src/circuit.rs` | circuit simulation setup, part models by value, the circuit built from the schematic, results and measurements |
 | `src/circuit_solve.rs` | the circuit solver: MNA with Newton-Raphson, variable-step BDF2 transient with events and an external pin driver, AC sweep |
 | `src/circuit_mcu.rs` | the Raspberry Pi Pico board in a circuit and its firmware running alongside the transient |

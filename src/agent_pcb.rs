@@ -324,6 +324,8 @@ impl Session {
                             "reference": x.reference, "value": x.value, "symbol": x.symbol, "footprint": x.footprint,
                             "at": r2(x.at), "rot": round(x.rot), "side": if x.bottom { "bottom" } else { "top" },
                             "courtyard": [r2(lo), r2(hi)], "sch": r2(x.sch),
+                            "bom": {"mpn": x.mpn, "manufacturer": x.manufacturer, "description": x.description, "datasheet": x.datasheet, "digikey": x.digikey, "package": x.package, "fields": x.fields.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<String, Value>>()},
+                            "sim": sim_json(x, &p.sim),
                             "pads": pads.iter().filter(|q| q.part == i).map(|q| json!({"pin": q.num, "at": r2(q.at), "net": q.net.map(|n| nl.nets[n].name.clone())})).collect::<Vec<_>>(),
                         })
                     })
@@ -392,9 +394,75 @@ impl Session {
                 let errors: Vec<Value> = r.into_iter().flat_map(|r| r.features.iter()).filter_map(|f| f.error.clone().map(|e| json!({"feature": f.id, "error": e}))).collect();
                 json!({"studio": si, "name": self.ws.studios[si].name, "parts": r.map(|r| r.bodies.len()).unwrap_or(0), "errors": errors, "hint": "it is now the active Part Studio: render it, export it as STEP, or insert its parts into an assembly"})
             }
+            "digikey_search" => {
+                let q = a.get("query").and_then(|v| v.as_str()).ok_or("give query: a part number or keywords")?;
+                let set = crate::digikey::load_settings();
+                let limit = a.get("limit").and_then(|v| v.as_u64()).unwrap_or(10) as usize;
+                let hits: Vec<crate::digikey::Product> = if let Some(path) = a.get("csv").and_then(|v| v.as_str()) {
+                    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+                    let ql = q.to_ascii_lowercase();
+                    crate::digikey::parse_csv(&text)?.into_iter().filter(|p| ql.is_empty() || ql == "*" || format!("{} {} {} {}", p.digikey, p.mpn, p.manufacturer, p.description).to_ascii_lowercase().contains(&ql)).take(limit).collect()
+                } else {
+                    if !set.has_creds() {
+                        return Err(format!("no Digi-Key API keys are set up (PCB tab → Digi-Key → Settings, or DIGIKEY_CLIENT_ID/DIGIKEY_CLIENT_SECRET). Without keys, give csv: a table downloaded from {}", crate::digikey::web_search_url(q)));
+                    }
+                    crate::digikey::search(&set, q, limit)?
+                };
+                json!({"products": hits.iter().take(limit).map(crate::digikey::product_json).collect::<Vec<_>>()})
+            }
+            "pcb_digikey" => {
+                let pi = self.pcb_idx(a)?;
+                let pn = a.get("part_number").and_then(|v| v.as_str()).ok_or("give part_number: a Digi-Key or manufacturer part number, or a digikey.com product link")?;
+                let product = if let Some(path) = a.get("csv").and_then(|v| v.as_str()) {
+                    let text = std::fs::read_to_string(path).map_err(|e| format!("{path}: {e}"))?;
+                    let want = crate::digikey::part_number_of(pn);
+                    crate::digikey::parse_csv(&text)?.into_iter().find(|p| p.digikey.eq_ignore_ascii_case(&want) || p.mpn.eq_ignore_ascii_case(&want)).ok_or_else(|| format!("{want} is not in {path}"))?
+                } else {
+                    let set = crate::digikey::load_settings();
+                    if !set.has_creds() {
+                        return Err("no Digi-Key API keys are set up: give csv (a table downloaded from digikey.com), or add keys under PCB tab → Digi-Key → Settings".into());
+                    }
+                    crate::digikey::details(&set, pn)?
+                };
+                let mut p = self.ws.pcbs[pi].clone();
+                let (i, changed) = match a.get("reference").and_then(|v| v.as_str()) {
+                    Some(r) => {
+                        let i = p.part_index(r).ok_or_else(|| format!("no part {r}"))?;
+                        let retype = a.get("set_value").and_then(|v| v.as_bool()).unwrap_or(true);
+                        (i, crate::digikey::apply(&mut p.parts[i], &product, retype))
+                    }
+                    None => {
+                        let sym = a.get("symbol").and_then(|v| v.as_str()).unwrap_or(crate::digikey::symbol_for(&product));
+                        let sch = a.get("sch").and_then(pt).unwrap_or_else(|| free_sch_spot(&p));
+                        let i = p.add_part(sym, None, None, sch)?;
+                        let changed = crate::digikey::apply(&mut p.parts[i], &product, true);
+                        let part = &mut p.parts[i];
+                        part.pin_names = pcb_lib::default_pin_names(&part.symbol, &part.value);
+                        let at = p.free_spot(&p.parts[i]);
+                        p.parts[i].at = at;
+                        (i, changed)
+                    }
+                };
+                let nl = p.netlist();
+                p.retag_copper(&nl);
+                self.ws.pcbs[pi] = p;
+                let x = &self.ws.pcbs[pi].parts[i];
+                json!({"pcb": pi, "reference": x.reference, "symbol": x.symbol, "value": x.value, "footprint": x.footprint, "mpn": x.mpn, "manufacturer": x.manufacturer, "digikey": x.digikey, "datasheet": x.datasheet, "changed": changed, "pins": pins_json(&self.ws.pcbs[pi], i)})
+            }
             _ => return self.circuit_call(name, a),
         };
         Ok((v, None))
+    }
+}
+
+/// A part's simulation model and its parameters (with any overrides).
+fn sim_json(x: &pcb::Part, setup: &crate::circuit::SimSetup) -> Value {
+    match crate::circuit::model_params(x, setup) {
+        Ok((model, params)) => json!({
+            "model": model, "excluded": x.no_sim,
+            "params": params.iter().map(|(k, label, unit, v)| json!({"key": k, "label": label, "unit": unit, "default": v, "override": x.sim.get(*k)})).collect::<Vec<_>>(),
+        }),
+        Err(e) => json!({"error": e, "excluded": x.no_sim}),
     }
 }
 
@@ -419,8 +487,60 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
         }
         part.footprint = f.to_string();
     }
-    if let Some(m) = x.get("mpn").and_then(|v| v.as_str()) {
-        part.mpn = m.to_string();
+    if let Some(sym) = x.get("symbol").and_then(|v| v.as_str()) {
+        if sym != part.symbol {
+            let k = pcb_lib::symbol_kind(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
+            part.symbol = k.key.to_string();
+        }
+    }
+    for (key, field) in [
+        ("mpn", &mut part.mpn),
+        ("manufacturer", &mut part.manufacturer),
+        ("description", &mut part.description),
+        ("datasheet", &mut part.datasheet),
+        ("digikey", &mut part.digikey),
+        ("package", &mut part.package),
+    ] {
+        if let Some(m) = x.get(key).and_then(|v| v.as_str()) {
+            *field = m.trim().to_string();
+        }
+    }
+    if let Some(f) = x.get("fields").and_then(|v| v.as_object()) {
+        for (k, v) in f {
+            let v = match v {
+                Value::String(s) => s.clone(),
+                Value::Null => String::new(),
+                o => o.to_string(),
+            };
+            match part.fields.iter().position(|(n, _)| n.eq_ignore_ascii_case(k)) {
+                Some(i) if v.is_empty() => {
+                    part.fields.remove(i);
+                }
+                Some(i) => part.fields[i].1 = v,
+                None if v.is_empty() => {}
+                None => part.fields.push((k.clone(), v)),
+            }
+        }
+    }
+    if let Some(f) = x.get("sim").and_then(|v| v.as_object()) {
+        for (k, v) in f {
+            let v = match v {
+                Value::String(s) => s.trim().to_string(),
+                Value::Null => String::new(),
+                o => o.to_string(),
+            };
+            if v.is_empty() {
+                part.sim.remove(k);
+            } else {
+                part.sim.insert(k.to_ascii_lowercase(), v);
+            }
+        }
+    }
+    if let Some(b) = x.get("no_sim").and_then(|v| v.as_bool()) {
+        part.no_sim = b;
+    }
+    if let Some(b) = x.get("sch_mirror").and_then(|v| v.as_bool()) {
+        part.sch_mirror = b;
     }
     if let Some(n) = x.get("pin_names").and_then(|v| v.as_array()) {
         part.pin_names = n.iter().map(|s| s.as_str().unwrap_or("").to_string()).collect();
@@ -514,7 +634,16 @@ pub fn tools() -> Vec<Value> {
         let mut m = json!({
             "value": {"type": "string", "description": "value, e.g. 10k, 100n, NE555"},
             "footprint": {"type": "string", "description": "footprint: R_0402/0603/0805/1206 (also C_, L_, LED_), R_Axial, CP_D5, CP_D8, LED_D5, D_SOD-123, D_DO-41, SOT-23, SOT-23-5, SOT-223, TO-92, TO-220, SOIC-8/14/16, TSSOP-8/14/16/20, DIP-4…64, PinHeader_1xNN / 2xNN (2.54 mm), Terminal_2P/3P (5.08 mm), SW_6mm, Crystal_HC49; the pins follow the footprint's pads"},
-            "mpn": {"type": "string", "description": "manufacturer or LCSC part number for the BOM"},
+            "mpn": {"type": "string", "description": "manufacturer part number (or an LCSC number like C25804) for the BOM"},
+            "manufacturer": {"type": "string", "description": "manufacturer, for the BOM"},
+            "description": {"type": "string", "description": "description, for the BOM"},
+            "datasheet": {"type": "string", "description": "datasheet link"},
+            "digikey": {"type": "string", "description": "Digi-Key part number, for the BOM"},
+            "package": {"type": "string", "description": "supplier package name (informational; the footprint sets the pads)"},
+            "fields": {"type": "object", "additionalProperties": {"type": "string", "description": "value; empty removes the field"}, "description": "extra BOM fields by name: {\"Tolerance\": \"1%\", \"LCSC\": \"C17414\"}"},
+            "sim": {"type": "object", "additionalProperties": {"type": "string", "description": "value with SI prefix (300, 2.5m, 10p); empty resets it"}, "description": "simulation model parameter overrides by key; pcb_info lists each part's model parameters and keys (e.g. a BJT's bf, a diode's is/n/bv/rs/cj, an op amp's gbw/sr, a regulator's vset)"},
+            "no_sim": {"type": "boolean", "description": "leave the part out of the circuit simulation"},
+            "sch_mirror": {"type": "boolean", "description": "mirror the schematic symbol"},
             "pin_names": {"type": "array", "items": {"type": "string"}, "description": "ICs and connectors: pin names in pin order (pins can then be given as U1.VCC)"},
             "at": xy("board position of the footprint origin (its centre), mm"),
             "rot": {"type": "number", "description": "board rotation, degrees anticlockwise"},
@@ -529,7 +658,7 @@ pub fn tools() -> Vec<Value> {
     };
     let mut edit = board.clone();
     edit["pcb"] = pcb.clone();
-    edit["parts"] = json!({"type": "array", "items": {"type": "object", "properties": part_fields(json!({"reference": {"type": "string", "description": "which part (R1, U2, …)"}, "new_reference": {"type": "string", "description": "rename it"}, "delete": {"type": "boolean", "description": "remove the part"}})), "required": ["reference"], "additionalProperties": false}, "description": "change parts: [{reference, at, rot, side, value, footprint, …}]"});
+    edit["parts"] = json!({"type": "array", "items": {"type": "object", "properties": part_fields(json!({"reference": {"type": "string", "description": "which part (R1, U2, …)"}, "new_reference": {"type": "string", "description": "rename it"}, "symbol": {"type": "string", "description": "change the library symbol (part type)"}, "delete": {"type": "boolean", "description": "remove the part"}})), "required": ["reference"], "additionalProperties": false}, "description": "change parts: [{reference, at, rot, side, value, footprint, …}]"});
     edit["wires"] = json!({"type": "array", "items": pts("polyline"), "description": "schematic wires to add, each a polyline [[x, y], …] (pins connect where a wire passes through their end point)"});
     edit["labels"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("label position, mm"), "text": {"type": "string", "description": "net name"}, "kind": {"type": "string", "enum": ["net", "power", "ground"], "description": "default net"}}, "required": ["at", "text"], "additionalProperties": false}, "description": "schematic labels to add [{at: [x, y], text, kind: net | power | ground}]; labels with the same text are one net"});
     edit["holes"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("hole centre, mm"), "d": num("diameter mm (default 3.2)")}, "required": ["at"], "additionalProperties": false}, "description": "replace the mounting holes: [{at: [x, y], d (default 3.2)}]"});
@@ -547,6 +676,8 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "check_pcb", "description": "Design rule check: clearance violations and shorts between nets, track widths, via drills and rings, copper near or off the board edge, overlapping parts, parts off the board, unrouted connections. ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
         json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}}), &["pcb", "path"])}),
+        json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
+        json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
         json!({"name": "pcb_3d", "description": "Make or update the Part Studio \"<pcb name> 3D\": the board (with its holes) and a simple body for every part, as separate parts named by reference and value, ready to insert into assemblies or export as STEP. Running it again updates the same parts. The Part Studio becomes the active one.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
     ]
 }

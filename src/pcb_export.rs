@@ -667,23 +667,57 @@ pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
     out
 }
 
-/// Bill of materials, grouped by value and footprint (JLCPCB columns).
+/// Bill of materials, grouped by value, footprint and part numbers. The first five columns are
+/// JLCPCB's (LCSC is a part's "LCSC" field, or its MPN when that is an LCSC number like C25804);
+/// then the manufacturer, MPN, Digi-Key number, description, datasheet and each extra field.
 pub fn bom_csv(p: &Pcb) -> String {
-    let mut groups: Vec<(String, String, String, Vec<String>)> = vec![];
+    let lcsc = |part: &pcb::Part| {
+        part.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case("LCSC")).map(|f| f.1.clone()).unwrap_or_else(|| {
+            let m = part.mpn.trim();
+            let is_lcsc = m.len() > 1 && m.starts_with(['C', 'c']) && m[1..].chars().all(|c| c.is_ascii_digit());
+            if is_lcsc || part.manufacturer.is_empty() && part.digikey.is_empty() { m.to_string() } else { String::new() }
+        })
+    };
+    // extra field names, in first-seen order
+    let mut extra: Vec<String> = vec![];
     for part in &p.parts {
-        match groups.iter_mut().find(|g| g.0 == part.value && g.1 == part.footprint && g.2 == part.mpn) {
-            Some(g) => g.3.push(part.reference.clone()),
-            None => groups.push((part.value.clone(), part.footprint.clone(), part.mpn.clone(), vec![part.reference.clone()])),
+        for (k, _) in &part.fields {
+            if !k.trim().is_empty() && !k.eq_ignore_ascii_case("LCSC") && !extra.iter().any(|e| e.eq_ignore_ascii_case(k)) {
+                extra.push(k.clone());
+            }
+        }
+    }
+    let row_of = |part: &pcb::Part| -> Vec<String> {
+        let mut r = vec![part.value.clone(), part.footprint.clone(), lcsc(part), part.manufacturer.clone(), part.mpn.clone(), part.digikey.clone(), part.description.clone(), part.datasheet.clone()];
+        for e in &extra {
+            r.push(part.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case(e)).map(|f| f.1.clone()).unwrap_or_default());
+        }
+        r
+    };
+    let mut groups: Vec<(Vec<String>, Vec<String>)> = vec![];
+    for part in &p.parts {
+        let r = row_of(part);
+        match groups.iter_mut().find(|g| g.0 == r) {
+            Some(g) => g.1.push(part.reference.clone()),
+            None => groups.push((r, vec![part.reference.clone()])),
         }
     }
     for g in &mut groups {
-        g.3.sort_by(|a, b| pcb::natural(a, b));
+        g.1.sort_by(|a, b| pcb::natural(a, b));
     }
-    groups.sort_by(|a, b| pcb::natural(&a.3[0], &b.3[0]));
+    groups.sort_by(|a, b| pcb::natural(&a.1[0], &b.1[0]));
     let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
-    let mut s = String::from("Comment,Designator,Footprint,LCSC,Quantity\n");
-    for g in groups {
-        let _ = writeln!(s, "{},{},{},{},{}", q(&g.0), q(&g.3.join(",")), q(&g.1), q(&g.2), g.3.len());
+    let mut s = String::from("Comment,Designator,Footprint,LCSC,Quantity,Manufacturer,MPN,Digi-Key,Description,Datasheet");
+    for e in &extra {
+        s += &format!(",{}", q(e));
+    }
+    s.push('\n');
+    for (r, refs) in groups {
+        let _ = write!(s, "{},{},{},{},{}", q(&r[0]), q(&refs.join(",")), q(&r[1]), q(&r[2]), refs.len());
+        for x in &r[3..] {
+            let _ = write!(s, ",{}", q(x));
+        }
+        s.push('\n');
     }
     s
 }
@@ -951,6 +985,19 @@ mod tests {
         let z = zip(&files.iter().map(|(n, s)| (n.clone(), s.clone().into_bytes())).collect::<Vec<_>>());
         assert_eq!(&z[..4], b"PK\x03\x04");
         assert!(bom_csv(&p).contains("\"330\",\"R1\",\"R_0805\""));
+        // BOM columns from the part's fields; parts that differ only in MPN are separate lines
+        let mut q = p.clone();
+        let r = q.parts.iter().position(|x| x.reference == "R1").unwrap();
+        q.parts[r].mpn = "RC0805FR-07330RL".into();
+        q.parts[r].manufacturer = "YAGEO".into();
+        q.parts[r].digikey = "311-330CRCT-ND".into();
+        q.parts[r].fields = vec![("Tolerance".into(), "1%".into()), ("LCSC".into(), "C17630".into())];
+        let bom = bom_csv(&q);
+        let head = bom.lines().next().unwrap();
+        assert_eq!(head, "Comment,Designator,Footprint,LCSC,Quantity,Manufacturer,MPN,Digi-Key,Description,Datasheet,\"Tolerance\"");
+        let line = bom.lines().find(|l| l.contains("\"R1\"")).unwrap();
+        assert!(line.contains("\"C17630\",1,\"YAGEO\",\"RC0805FR-07330RL\",\"311-330CRCT-ND\""), "{line}");
+        assert!(line.ends_with("\"1%\""), "{line}");
         assert!(cpl_csv(&p).contains("R1,15.0000mm,20.0000mm,Top,0"));
     }
 
