@@ -32,6 +32,10 @@ pub enum Tool {
     Route,
     Zone,
     Hole,
+    /// Drawing a keepout area (like a pour).
+    Keepout,
+    /// Marking pins as left open on purpose.
+    NoConnect,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -43,6 +47,7 @@ pub enum Sel {
     Via(usize),
     Zone(usize),
     Hole(usize),
+    Keepout(usize),
 }
 
 struct Drag {
@@ -96,6 +101,8 @@ pub struct PcbUi {
     dirty: bool,
     pub(crate) cache: Cache,
     pub issues: Option<Vec<Issue>>,
+    /// The last electrical rule check, shown on the schematic.
+    pub erc: Option<Vec<Issue>>,
     lib_search: String,
     label_text: String,
     zone_net: String,
@@ -135,6 +142,7 @@ impl Default for PcbUi {
             dirty: true,
             cache: Cache::default(),
             issues: None,
+            erc: None,
             lib_search: String::new(),
             label_text: String::new(),
             zone_net: String::new(),
@@ -188,6 +196,7 @@ impl PcbUi {
         self.wire.clear();
         self.zone_pts.clear();
         self.issues = None;
+        self.erc = None;
         self.highlight = None;
     }
 }
@@ -217,6 +226,7 @@ fn after_history(app: &mut App) {
     app.pcb.route = None;
     app.pcb.wire.clear();
     app.pcb.issues = None;
+    app.pcb.erc = None;
 }
 
 pub fn can_undo(app: &App) -> bool {
@@ -240,6 +250,7 @@ fn record(app: &mut App, before: Pcb) {
     app.pcb.last_ck = Some(now);
     app.pcb.dirty = true;
     app.pcb.issues = None;
+    app.pcb.erc = None;
 }
 
 /// Make an edit as its own undo step.
@@ -362,6 +373,22 @@ pub(crate) fn run_drc(app: &mut App) {
     }
 }
 
+pub(crate) fn run_erc(app: &mut App) {
+    refresh(app);
+    let Some(p) = pcb_ref(app) else { return };
+    let issues = crate::pcb_erc::erc(p, &app.pcb.cache.nl);
+    let errors = issues.iter().filter(|i| i.error).count();
+    if issues.is_empty() {
+        app.flash_info("Electrical rule check passed: no problems found", Some(Duration::from_secs(3)));
+    } else {
+        app.flash_info(format!("Electrical rule check: {errors} errors, {} warnings (listed in the sidebar)", issues.len() - errors), Some(Duration::from_secs(4)));
+    }
+    app.pcb.erc = Some(issues);
+    if app.pcb.view != View::Schematic {
+        set_view(app, View::Schematic);
+    }
+}
+
 pub(crate) fn export_fab(app: &mut App) {
     let Some(p) = pcb_ref(app).cloned() else { return };
     let name = format!("{}.zip", p.name.replace(['/', '\\'], "_"));
@@ -400,7 +427,7 @@ fn pour(app: &mut App, net: String) {
     edit(app, |p| {
         let outline = p.board.outline.clone();
         p.board.zones.retain(|z| !(z.layer == layer && z.net == net));
-        p.board.zones.push(Zone { net, layer, outline });
+        p.board.zones.push(Zone { net, layer, outline, ..Default::default() });
     });
 }
 
@@ -427,6 +454,9 @@ fn delete_sel(app: &mut App) {
         }
         Sel::Hole(i) if i < p.board.holes.len() => {
             p.board.holes.remove(i);
+        }
+        Sel::Keepout(i) if i < p.board.keepouts.len() => {
+            p.board.keepouts.remove(i);
         }
         _ => {}
     });
@@ -485,6 +515,8 @@ pub fn hint(app: &App) -> String {
         (_, Tool::Route) => "Click to add a corner, click the target pad to finish · V adds a via and changes layer · Esc ends".into(),
         (_, Tool::Zone) => "Click the corners of the pour, double-click or Enter to close it · or use Pour in the sidebar".into(),
         (_, Tool::Hole) => "Click to add a mounting hole".into(),
+        (_, Tool::Keepout) => "Click the corners of the keepout, double-click or Enter to close it · tracks, vias and pours stay out".into(),
+        (_, Tool::NoConnect) => "Click a pin to mark it as left open on purpose (click again to clear) · Esc when done".into(),
         (View::Schematic, _) => "Add parts from the library, wire their pins (W), name nets (L) · B switches to the board".into(),
         (View::Simulate, _) => crate::circuit_ui::hint(app),
         (View::Board, _) => "Drag parts onto the board (R rotates, F flips), then route (X) or autoroute · L changes layer · B back to the schematic".into(),
@@ -519,7 +551,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             app.pcb.highlight = None;
         }
     }
-    if pressed(egui::Key::Enter) && app.pcb.tool == Tool::Zone {
+    if pressed(egui::Key::Enter) && matches!(app.pcb.tool, Tool::Zone | Tool::Keepout) {
         close_zone(app);
     }
     if pressed(egui::Key::Delete) || pressed(egui::Key::Backspace) {
@@ -554,6 +586,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         if pressed(egui::Key::Slash) {
             app.pcb.wire_vfirst = !app.pcb.wire_vfirst;
         }
+        if pressed(egui::Key::Q) {
+            set_tool(app, Tool::NoConnect);
+        }
     } else {
         if pressed(egui::Key::X) {
             set_tool(app, Tool::Route);
@@ -577,7 +612,8 @@ fn via_here(app: &mut App) {
     let net = r.net.clone();
     let layer = r.layer.other();
     edit(app, |p| {
-        let (d, drill) = (p.board.rules.via_d, p.board.rules.via_drill);
+        let nr = p.net_rules(&p.netlist(), &net);
+        let (d, drill) = (nr.via_d, nr.via_drill);
         if !p.board.vias.iter().any(|v| pcb::dist(v.at, at) < 1e-6) {
             p.board.vias.push(Via { at, d, drill, net });
         }
@@ -627,6 +663,14 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             if app.tool_button(ui, "pcbGround", "Ground", "A ground port (G)", false, t == Tool::Label(LabelKind::Ground), true).clicked() {
                 set_tool(app, Tool::Label(LabelKind::Ground));
             }
+            if app.tool_button(ui, "pcbNoConnect", "No connect", "Mark pins left open on purpose, so the electrical check doesn't flag them (Q)", false, t == Tool::NoConnect, true).clicked() {
+                set_tool(app, Tool::NoConnect);
+            }
+        });
+        App::group(ui, |ui| {
+            if app.tool_button(ui, "pcbErc", "Check", "Electrical rule check: open pins, outputs driving each other, unpowered pins, dangling wires", true, app.pcb.erc.is_some(), true).clicked() {
+                run_erc(app);
+            }
         });
         App::group(ui, |ui| {
             if app.tool_button(ui, "pcbRotate", "Rotate", "Rotate the selection (R)", false, false, app.pcb.sel.is_some()).clicked() {
@@ -652,6 +696,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             }
             if app.tool_button(ui, "pcbHole", "Hole", "Add a mounting hole", false, t == Tool::Hole, true).clicked() {
                 set_tool(app, Tool::Hole);
+            }
+            if app.tool_button(ui, "pcbKeepout", "Keepout", "Draw an area that tracks, vias and pours stay out of", false, t == Tool::Keepout, true).clicked() {
+                set_tool(app, Tool::Keepout);
             }
         });
         App::group(ui, |ui| {
@@ -686,7 +733,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             if app.tool_button(ui, "pcbAutoroute", "Autoroute", "Route every unrouted connection", true, false, true).clicked() {
                 autoroute(app);
             }
-            if app.tool_button(ui, "pcbDrc", "Check", "Design rule check: clearances, shorts, unrouted nets", true, app.pcb.issues.is_some(), true).clicked() {
+            if app.tool_button(ui, "pcbDrc", "Check", "Design rule check: clearances by net class, shorts, holes, keepouts, 3D bodies, unrouted nets", true, app.pcb.issues.is_some(), true).clicked() {
                 run_drc(app);
             }
         });
@@ -716,6 +763,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             return;
         }
         if app.pcb.view == View::Schematic {
+            if let Some(issues) = app.pcb.erc.clone() {
+                section(ui, "Check", |ui| issues_ui(app, ui, &issues));
+            }
             section(ui, "Library", |ui| library_ui(app, ui));
             if matches!(app.pcb.tool, Tool::Label(_)) {
                 section(ui, "Label", |ui| {
@@ -1013,6 +1063,43 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 ui.selectable_value(&mut z.layer, Layer::Top, "Top");
                 ui.selectable_value(&mut z.layer, Layer::Bottom, "Bottom");
             });
+            row(ui, "Pads", |ui| {
+                let name = |c: pcb::PadConnect| match c {
+                    pcb::PadConnect::ThtRelief => "Relief on through-hole",
+                    pcb::PadConnect::Relief => "Relief on all",
+                    pcb::PadConnect::Solid => "Solid",
+                };
+                egui::ComboBox::from_id_salt("pcb-zone-pads").selected_text(name(z.pads)).show_ui(ui, |ui| {
+                    for c in [pcb::PadConnect::ThtRelief, pcb::PadConnect::Relief, pcb::PadConnect::Solid] {
+                        ui.selectable_value(&mut z.pads, c, name(c));
+                    }
+                })
+                .response
+                .on_hover_text("Thermal reliefs (a gap and four spokes) keep the pour from soaking up the soldering iron's heat");
+            });
+            let v = |ui: &mut Ui, label: &str, x: &mut f64, tip: &str| {
+                row(ui, label, |ui| {
+                    ui.add(egui::DragValue::new(x).speed(0.01).range(0.0..=5.0).max_decimals(2).custom_formatter(|x, _| if x == 0.0 { "auto".into() } else { format!("{x:.2} mm") })).on_hover_text(tip);
+                });
+            };
+            v(ui, "Clearance", &mut z.clearance, "Gap to other nets; auto takes the net's clearance");
+            if z.pads != pcb::PadConnect::Solid {
+                v(ui, "Relief gap", &mut z.relief_gap, "The gap round a relieved pad; auto is 0.3 mm");
+                v(ui, "Spoke", &mut z.spoke, "Thermal spoke width; auto is the net's track width");
+            }
+        }
+        Sel::Keepout(i) if i < p.board.keepouts.len() => {
+            let k = &mut p.board.keepouts[i];
+            ui.label(RichText::new("Keepout").strong());
+            row(ui, "Layer", |ui| {
+                ui.selectable_value(&mut k.layer, None, "Both");
+                ui.selectable_value(&mut k.layer, Some(Layer::Top), "Top");
+                ui.selectable_value(&mut k.layer, Some(Layer::Bottom), "Bottom");
+            });
+            ui.checkbox(&mut k.tracks, "No tracks");
+            ui.checkbox(&mut k.vias, "No vias");
+            ui.checkbox(&mut k.pours, "No pours");
+            ui.checkbox(&mut k.parts, "No parts");
         }
         Sel::Hole(i) if i < p.board.holes.len() => {
             let h = &mut p.board.holes[i];
@@ -1095,6 +1182,64 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
         num(ui, "Edge", &mut r.edge, "Copper to the board edge");
         num(ui, "Min. track", &mut r.min_track, "The fab's thinnest track");
         num(ui, "Min. drill", &mut r.min_drill, "The fab's smallest hole");
+        num(ui, "Hole gap", &mut r.hole_gap, "Hole edge to hole edge");
+        let opt = |ui: &mut Ui, label: &str, v: &mut f64, tip: &str| {
+            row(ui, label, |ui| {
+                ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=50.0).suffix(" mm").max_decimals(2).custom_formatter(|x, _| if x == 0.0 { "off".into() } else { format!("{x:.2} mm") })).on_hover_text(tip);
+            });
+        };
+        opt(ui, "Silk gap", &mut r.silk_gap, "Silkscreen to exposed pad copper (silk on pads is always flagged)");
+        opt(ui, "Max. height", &mut r.max_height, "Tallest part allowed above or below the board (an enclosure's limit)");
+        opt(ui, "Body gap", &mut r.body_gap, "Gap kept between parts' 3D bodies (colliding bodies are always flagged)");
+    });
+    ui.collapsing(format!("Net classes ({})", b.rules.classes.len()), |ui| {
+        ui.label(RichText::new("Nets in a class get its clearance, track width and via when routed and checked; 0 keeps the board rule. A trailing * matches a prefix (M1_*).").color(theme::muted()).size(11.5));
+        let mut remove = None;
+        for (ci, c) in b.rules.classes.iter_mut().enumerate() {
+            ui.push_id(("pcb-class", ci), |ui| {
+                ui.separator();
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(110.0).hint_text("Class name"));
+                    if ui.small_button("✕").on_hover_text("Remove the class").clicked() {
+                        remove = Some(ci);
+                    }
+                });
+                let mut text = c.nets.join(", ");
+                row(ui, "Nets", |ui| {
+                    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(150.0).hint_text("VCC, M1_*")).on_hover_text("Net names, comma separated").changed() {
+                        c.nets = text.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                    }
+                });
+                let v = |ui: &mut Ui, label: &str, x: &mut f64, unit: &'static str| {
+                    row(ui, label, |ui| {
+                        ui.add(egui::DragValue::new(x).speed(0.005).range(0.0..=20.0).max_decimals(3).custom_formatter(move |x, _| if x == 0.0 { "board".into() } else { format!("{x:.3} {unit}") }));
+                    });
+                };
+                v(ui, "Clearance", &mut c.clearance, "mm");
+                v(ui, "Track", &mut c.track, "mm");
+                v(ui, "Via", &mut c.via_d, "mm");
+                v(ui, "Via drill", &mut c.via_drill, "mm");
+            });
+        }
+        if let Some(ci) = remove {
+            b.rules.classes.remove(ci);
+        }
+        if ui.button("Add net class").clicked() {
+            let n = b.rules.classes.len() + 1;
+            b.rules.classes.push(pcb::NetClass { name: format!("Class{n}"), ..Default::default() });
+        }
+    });
+    ui.collapsing("Checks", |ui| {
+        ui.label(RichText::new("Untick a check to leave it out of the design and electrical rule checks.").color(theme::muted()).size(11.5));
+        for (id, what) in pcb::CHECKS {
+            let mut on = b.rules.checks(id);
+            if ui.checkbox(&mut on, *what).changed() {
+                b.rules.off.retain(|o| o != *id);
+                if !on {
+                    b.rules.off.push(id.to_string());
+                }
+            }
+        }
     });
     ui.add_space(4.0);
     // a pour over the whole board on the active layer
@@ -1149,8 +1294,9 @@ fn issues_ui(app: &mut App, ui: &mut Ui, issues: &[Issue]) {
         let col = if is.error { theme::error_soft() } else { theme::muted() };
         let r = ui.add(egui::Label::new(RichText::new(format!("{} {}", if is.error { "●" } else { "○" }, is.message)).color(col).size(12.0)).sense(Sense::click()));
         if r.on_hover_text("Show it").clicked() {
-            app.pcb.center[1] = is.at;
-            app.pcb.zoom[1] = app.pcb.zoom[1].max(12.0);
+            let k = vi(app.pcb.view);
+            app.pcb.center[k] = is.at;
+            app.pcb.zoom[k] = app.pcb.zoom[k].max(12.0);
         }
         let _ = k;
     }
@@ -1367,6 +1513,12 @@ fn board_hit(p: &Pcb, at: P, tol: f64, layer: Layer) -> Option<Sel> {
             return Some(Sel::Zone(i));
         }
     }
+    for (i, k) in p.board.keepouts.iter().enumerate() {
+        let n = k.outline.len();
+        if (0..n).any(|j| pcb::seg_point(k.outline[j], k.outline[(j + 1) % n], at) < tol * 2.0) || (n >= 3 && pcb::inside(&k.outline, at)) {
+            return Some(Sel::Keepout(i));
+        }
+    }
     None
 }
 
@@ -1427,9 +1579,19 @@ fn close_zone(app: &mut App) {
     if pts.len() < 3 {
         return;
     }
+    if app.pcb.tool == Tool::Keepout {
+        let mut idx = 0;
+        edit(app, |p| {
+            p.board.keepouts.push(pcb::Keepout { outline: pcb::ccw(pts), ..Default::default() });
+            idx = p.board.keepouts.len() - 1;
+        });
+        set_tool(app, Tool::Select);
+        app.pcb.sel = Some(Sel::Keepout(idx));
+        return;
+    }
     let layer = app.pcb.layer;
     let net = app.pcb.zone_net.clone();
-    edit(app, |p| p.board.zones.push(Zone { net, layer, outline: pcb::ccw(pts) }));
+    edit(app, |p| p.board.zones.push(Zone { net, layer, outline: pcb::ccw(pts), ..Default::default() }));
     set_tool(app, Tool::Select);
 }
 
@@ -1629,6 +1791,26 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                 app.pcb.wire.clear();
             }
         }
+        Tool::NoConnect => {
+            if let (true, Some(h)) = (clicked, hover) {
+                let p = &app.ws.pcbs[pi];
+                let at = sch_snap(p, h, tol * 1.5);
+                if p.sch_pins().iter().any(|x| pcb::dist(x.at, at) < 1e-6) {
+                    edit(app, |p| {
+                        let n = p.no_connects.len();
+                        p.no_connects.retain(|q| pcb::dist(*q, at) > 1e-6);
+                        if p.no_connects.len() == n {
+                            p.no_connects.push(at);
+                        }
+                    });
+                } else {
+                    app.flash_info("Click a pin's end to mark it", Some(Duration::from_secs(2)));
+                }
+            }
+            if right {
+                set_tool(app, Tool::Select);
+            }
+        }
         Tool::Label(kind) => {
             if let (true, Some(h)) = (clicked, hover) {
                 let p = &app.ws.pcbs[pi];
@@ -1793,7 +1975,7 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                 }
             }
         }
-        Tool::Zone => {
+        Tool::Zone | Tool::Keepout => {
             if let (true, Some(h)) = (clicked, hover) {
                 app.pcb.zone_pts.push(pcb::snap(h, 0.1));
                 if double {
@@ -1864,6 +2046,18 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
 fn sch_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
     let p = &app.ws.pcbs[pi];
     let hl = Color32::from_rgb(60, 130, 230);
+    if let (Some(issues), View::Schematic) = (&app.pcb.erc, app.pcb.view) {
+        for is in issues {
+            let col = if is.error { Color32::from_rgb(230, 50, 50) } else { Color32::from_rgb(235, 170, 30) };
+            painter.circle_stroke(xf.s(is.at), 7.0, Stroke::new(2.0, col));
+        }
+    }
+    if app.pcb.tool == Tool::NoConnect {
+        let h = app.pcb.hover;
+        let c = xf.s(h);
+        painter.line_segment([c + egui::vec2(-5.0, -5.0), c + egui::vec2(5.0, 5.0)], Stroke::new(1.5, hl));
+        painter.line_segment([c + egui::vec2(-5.0, 5.0), c + egui::vec2(5.0, -5.0)], Stroke::new(1.5, hl));
+    }
     match app.pcb.sel {
         Some(Sel::Part(i)) if i < p.parts.len() => {
             let (lo, hi) = pcb_export::sch_bbox(&p.parts[i]);
@@ -1946,6 +2140,10 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
             let pts: Vec<Pos2> = p.board.zones[i].outline.iter().map(|q| xf.s(*q)).collect();
             painter.add(egui::Shape::closed_line(pts, Stroke::new(2.0, hl)));
         }
+        Some(Sel::Keepout(i)) if i < p.board.keepouts.len() => {
+            let pts: Vec<Pos2> = p.board.keepouts[i].outline.iter().map(|q| xf.s(*q)).collect();
+            painter.add(egui::Shape::closed_line(pts, Stroke::new(2.0, hl)));
+        }
         _ => {}
     }
     if let Some(issues) = &app.pcb.issues {
@@ -1966,7 +2164,7 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         }
         painter.text(xf.s(h) + egui::vec2(12.0, -12.0), egui::Align2::LEFT_BOTTOM, format!("{} · {} · {} mm", r.net, r.layer.label(), r.width), egui::FontId::proportional(11.5), Color32::WHITE);
     }
-    if app.pcb.tool == Tool::Zone && !app.pcb.zone_pts.is_empty() {
+    if matches!(app.pcb.tool, Tool::Zone | Tool::Keepout) && !app.pcb.zone_pts.is_empty() {
         let mut pts: Vec<Pos2> = app.pcb.zone_pts.iter().map(|q| xf.s(*q)).collect();
         pts.push(xf.s(pcb::snap(h, 0.1)));
         painter.add(egui::Shape::closed_line(pts, Stroke::new(1.5, hl)));

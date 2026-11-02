@@ -203,4 +203,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("simTran", "M3 17h4V7h5v10h5V7h4"),
     ("simAc", "M3 12c2-7 4.5-7 6.5 0s4.5 7 6.5 0 3-5 5-5"),
     ("pcbHole", "M12 5a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM12 2v3M12 19v3M2 12h3M19 12h3"),
+    ("pcbKeepout", "M4 4h16v16H4zM12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12zM7.8 7.8l8.4 8.4"),
+    ("pcbNoConnect", "M2 12h8M10 8l8 8M10 16l8-8"),
+    ("pcbErc", "M4 12h4l2-5 4 10 2-5h4M12 3l8 3M12 3L4 6"),
 ];
