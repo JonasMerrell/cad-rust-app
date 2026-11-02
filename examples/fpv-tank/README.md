@@ -27,6 +27,8 @@ should be none). The `stl/` folder here has a build of the STLs.
 - **Clashes:** the turret at −90°…+90° (7 steps) against the gun at −6°, 0°, 10° and 20°, with the
   elevation horn and the pushrod moving with the gun. Each pose checks the moving parts against the
   hull, deck, battery and boards, and the gun and pushrod against the turret. 28 poses, no clashes.
+- **Printer tolerance:** the gun and the turret are shifted 0.2 mm in each of the 6 directions
+  against the parts around them; nothing touches.
 - **Elevation linkage:** a parallelogram (10 mm horn, 10 mm drum arm, 34 mm rod), so the gun turns
   as far as the servo does; the rod is 70°–90° to the horn over the whole range.
 - **Track:** the band's pitch line (its mid-plane) is 335.9 mm round the wheels, against 42 lugs ×
@@ -83,15 +85,58 @@ The wheels can't turn on the screws themselves, because tightening the screw cla
 4 mm brass tube (3.1 mm bore) into 20.5 mm sleeves, one per wheel: the screw clamps the sleeve
 against the hull and the wheel turns on it.
 
-### Assembly order for the turret
+### Fits and printer tolerance
 
-1. Screw the turret servo under the deck, put the horn on, fit the deck.
-2. Put the ring on the horn. Drive the horn's centre screw through the ring's middle hole, then the 4
-   horn screws.
-3. Build the gun into the shell: elevation servo on its brackets, horn and pushrod, the drum with
-   the camera and barrel on its two M2 pivot screws (from outside).
-4. Feed the camera ribbon through the ring's slot, lower the shell onto the ring, and drop the 4 M2
-   × 10 countersunk screws down the tubes from the roof.
+The parts are drawn with clearances for a typical FDM printer with a 0.4 mm nozzle, which prints
+holes about 0.1–0.2 mm small and outsides about 0.1 mm big:
+
+| fit | clearance |
+|---|---|
+| parts that slide or turn against each other (gun drum in its brackets and embrasure, turret ring over the deck, servos between their brackets, horn in the ring's recess) | 0.3–0.65 mm per side; the motion check also shifts the moving parts 0.2 mm each way and finds no contact |
+| wheels on their brass sleeves | Ø4.4 bore on a 4 mm tube |
+| glued fits (barrel in the drum, cupola spigot, LED in the barrel, TSOPs in their windows) | 0.25 mm per side |
+| motors in their wall pockets | 12.5 × 10.5 mm for a 12 × 10 mm gearbox |
+| sprocket on the N20 shaft | Ø3.2 with the flat 1.1 from the centre, glued |
+| clearance holes | Ø2.4 (M2), Ø2.9 (M2.5), Ø3.4 (M3), Ø1.9 (M1.6) |
+| self-tapping holes | Ø1.6 (M2), Ø2.1 (M2.5), Ø2.6 (M3) |
+
+Print the turret ring and one road wheel first: if the horn won't go into the ring or the wheel
+won't turn on its sleeve, adjust your printer's horizontal expansion (or hole compensation) before
+printing the rest. PLA shrinks very little; with ABS, scale the hull and deck by about 0.5 %.
+
+## Assembly
+
+Do it in this order: each step needs access that the next one closes off.
+
+1. **Hull electronics.** With the deck off: fit the rocker switch in the rear wall and the Radxa on
+   its standoffs (4 × M2.5, from inside the hull; it has to go in before the battery). Fit the
+   DRV8833, the bucks and the RP2040 on the floor (double-sided tape).
+2. **Motors.** Lower each motor in, push its shaft out through the wall hole and its gearbox into
+   the pocket, and fix it with 2 × M1.6 from outside. There is only about 0.6 mm between the
+   first motor's back end and the second motor while it goes in, so angle the second one's shaft
+   into its hole. Then wire the motors, switch and boards.
+3. **Battery.** Slide it in over the strap and strap it down.
+4. **Running gear.** Glue the sprockets onto the shafts. Each road wheel: an M3 × 30 through a brass
+   sleeve, through the wheel, into the hull boss; tighten it onto the sleeve, and the wheel turns
+   on the sleeve. Each idler: an M3 × 35 through a sleeve and the idler, through the slot, into the
+   nut, which sits in the channel on the inside of the pad (so you can tighten it from outside).
+   Stretch the tracks over the wheels, then slide the idler forward to tension them.
+5. **Deck.** Screw the turret servo under the deck (its top face against the deck) with the screws
+   that come with it, centre it, and fit the cross horn. Run the servo and camera leads through the
+   deck slot. Screw the deck down (4 × M3 countersunk).
+6. **Turret ring.** Put the ring on the horn, drive the horn's centre screw through the ring's middle
+   hole, then the 4 small horn screws from above.
+7. **Gun.** Screw the camera to the standoffs in both drum halves (4 × M2 × 6); this lines the halves
+   up, then glue them. Put the LED in the barrel and glue the barrel into the drum's socket, leads
+   through the hole behind it.
+8. **Turret shell.** Screw the elevation servo to its brackets (horn pointing down, a short or right-
+   angle screwdriver: the screws are horizontal, inside the shell), Z-bend the pushrod into the
+   horn's outer hole. Put the drum in from below between the trunnion brackets, the pushrod's L-bend
+   in the drum's blind hole, and fix the drum with 2 × M2 × 6 from outside the shell. Glue the TSOPs
+   in their windows and the WS2812 under the cupola, and push the cupola in.
+9. **Turret on.** Feed the camera ribbon and the leads down through the ring's slot, lower the shell
+   onto the ring, and drop 4 × M2 × 6 countersunk screws down the tubes from the roof (longer ones would come out
+   under the ring and scrape the deck).
 
 ## Bought parts (per tank)
 
@@ -110,7 +155,7 @@ against the hull and the wheel turns on it.
 | 940 nm 5 mm IR LED (TSAL6100), 4 × TSOP38238, WS2812 LED | $4 |
 | 3 A rocker switch, 3 A fuse, AO3400 FET, 1N4148, capacitors (2 × 470 µF, 220 µF, 6 × 100 nF, 4 × 4.7 µF), resistors | $3 |
 | 4 mm brass tube, 300 mm (wheel sleeves) | $2 |
-| screws: M3 × 30 (8), M3 × 35 (2), M3 countersunk (4), M3 nuts (2), M1.6 × 4 (4), M2 × 6 (9), M2 × 10 countersunk (4), M2.5 × 5 (4); 1 mm steel wire for the pushrod | $3 |
+| screws: M3 × 30 (8), M3 × 35 (2), M3 countersunk (4), M3 nuts (2), M1.6 × 4 (4), M2 × 6 (6), M2 × 6 countersunk (4), M2.5 × 5 (4); 1 mm steel wire for the pushrod | $3 |
 | silicone wire, heat-shrink, servo leads | $1 |
 | filament | $4 |
 | **total** | **about $79** |

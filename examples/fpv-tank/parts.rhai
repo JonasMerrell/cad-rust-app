@@ -30,6 +30,9 @@ let RW_R = 9.0;              // road wheel radius
 let RW_X = [-38.0, -12.0, 14.0, 40.0];
 let RW_Z = BAND + RW_R;      // 11: road wheel axle height
 let WALL = 2.4;
+// FDM fits (for a 0.4 mm nozzle; holes print about 0.1–0.2 mm small):
+//   slip / sliding fits 0.2–0.3 per side, running fits on the brass sleeves 0.2 per side, M2/M2.5/M3
+//   clearance holes Ø2.4/Ø2.9/Ø3.4, self-tapping pilots Ø1.6/Ø2.1/Ø2.6, glued fits 0.25 per side
 let HULL_Y = 33.0;           // hull half width (outside)
 let HULL_Z0 = 5.0;           // belly
 let HULL_Z1 = 40.0;          // top of the tub = underside of the deck
@@ -115,7 +118,7 @@ fn sprocket(r, n, pitch_w) {
     let pockets = [];
     for i in 0..n { pockets.push(pocket.rotate(vec3(0, 0, 0), vec3(0, 1, 0), 360.0 * i / n)); }
     // N20 D shaft: Ø3 with the flat 1.0 from the centre
-    let bore = ycyl(0, 33.5, 0, 1.55, 9.5).cut([block(vec3(1.05, 33, -2), vec3(2, 44, 2))]);
+    let bore = ycyl(0, 33.5, 0, 1.6, 9.5).cut([block(vec3(1.1, 33, -2), vec3(2, 44, 2))]);   // snug on the shaft; glue it
     rim_chamfer(drum.cut(pockets + [bore] + face_pockets(5, 7.6, 2.1)), r)
 }
 
@@ -123,11 +126,11 @@ fn sprocket(r, n, pitch_w) {
 fn wheel(r) {
     let w = fuse([ycyl(0, 35.5, 0, r, 18.0), ycyl(0, 33.2, 0, 4.0, 2.4)]);
     let n = if r > 10.0 { 6 } else { 5 };
-    // groove for the lugs: 3 deep, 7 wide at the floor, 45° sides (prints without support); Ø4.2 bore
+    // groove for the lugs: 3 deep, 7 wide at the floor, 45° sides (prints without support); Ø4.4 bore
     // for a 4 mm brass tube sleeve that the screw clamps, so the wheel turns on the tube
     let core = fuse([ycyl(0, 41.0, 0, r - 3.0, 7.0), cone(vec3(0, 41.0, 0), vec3(0, -1, 0), r - 3.0, r, 3.0),
                      cone(vec3(0, 48.0, 0), vec3(0, 1, 0), r - 3.0, r, 3.0)]);
-    let cuts = [ycyl(0, 38.0, 0, r + 1.0, 13.0).cut([core]), ycyl(0, 30, 0, 2.1, 30)];
+    let cuts = [ycyl(0, 38.0, 0, r + 1.0, 13.0).cut([core]), ycyl(0, 30, 0, 2.2, 30)];
     cuts += face_pockets(n, r * 0.62, r * 0.19);
     rim_chamfer(w.cut(cuts), r)
 }
@@ -233,18 +236,20 @@ for sy in [1.0, -1.0] {
     // road wheel axle bosses (M3 screws threaded into Ø2.5)
     for x in RW_X {
         adds.push(ycyl(x, sy * y_in - (if sy > 0.0 { 6.0 } else { 0.0 }), RW_Z, 4.5, 6.0));
-        cuts.push(ycyl(x, -HULL_Y - 1, RW_Z, 1.25, 2.0 * HULL_Y + 2));
+        cuts.push(ycyl(x, -HULL_Y - 1, RW_Z, 1.3, 2.0 * HULL_Y + 2));
     }
     // idler tension slot (M3 screw and nut), pad behind it
     // (its underside slopes 45° into the wall so it prints without support)
     let pad = extrude(polygon([[IDL[0] - 4.4, y_in, 11.5], [IDL[0] - 4.4, y_in, 26.0], [IDL[0] - 4.4, y_in - 5.0, 26.0], [IDL[0] - 4.4, y_in - 5.0, 16.5]]), vec3(9.6, 0, 0));
+    // a channel on its inside face holds the M3 nut so it can't turn: no tool needed inside the hull
+    pad = pad.cut([block(vec3(IDL[0] - 6.2, y_in - 6.0, IDL[1] - 2.95), vec3(IDL[0] + 6.2, y_in - 2.4, IDL[1] + 2.95))]);
     adds.push(if sy > 0.0 { pad } else { pad.mirror(vec3(0, 0, 0), vec3(0, 1, 0)) });
     // motor: gearbox recessed 1.4 into the wall, shaft boss hole, two M1.6 screws, cradle below
     let yw = sy * (HULL_Y - 1.0);
-    cuts.push(block(vec3(SPR[0] - 6.1, if sy > 0.0 { y_in - 1 } else { -HULL_Y + 1 }, SPR[1] - 5.1), vec3(SPR[0] + 6.1, if sy > 0.0 { HULL_Y - 1 } else { -y_in + 1 }, SPR[1] + 5.1)));
+    cuts.push(block(vec3(SPR[0] - 6.25, if sy > 0.0 { y_in - 1 } else { -HULL_Y + 1 }, SPR[1] - 5.25), vec3(SPR[0] + 6.25, if sy > 0.0 { HULL_Y - 1 } else { -y_in + 1 }, SPR[1] + 5.25)));
     cuts.push(ycyl(SPR[0], -HULL_Y - 1, SPR[1], 2.3, 2.0 * HULL_Y + 2));
-    for dx in [-4.5, 4.5] { cuts.push(ycyl(SPR[0] + dx, -HULL_Y - 1, SPR[1], 0.8, 2.0 * HULL_Y + 2)); }
-    adds.push(block(vec3(SPR[0] - 6, if sy > 0.0 { 9 } else { -y_in }, HULL_Z0 + WALL - 0.5), vec3(SPR[0] + 6, if sy > 0.0 { y_in } else { -9 }, SPR[1] - 5)));
+    for dx in [-4.5, 4.5] { cuts.push(ycyl(SPR[0] + dx, -HULL_Y - 1, SPR[1], 0.95, 2.0 * HULL_Y + 2)); }
+    adds.push(block(vec3(SPR[0] - 6, if sy > 0.0 { 9 } else { -y_in }, HULL_Z0 + WALL - 0.5), vec3(SPR[0] + 6, if sy > 0.0 { y_in } else { -9 }, SPR[1] - 5.2)));
     // battery strap slots in the floor
     cuts.push(block(vec3(34, sy * 17.0 - 1.5, HULL_Z0 - 1), vec3(46, sy * 17.0 + 1.5, HULL_Z0 + WALL + 1)));
 }
@@ -286,7 +291,9 @@ for sy in [1.0, -1.0] {
 // y = -8.45 and y = 19.15. Its horn then sits 1.1 over the deck and bottoms in the ring's recess with
 // the ring's bearing rib 0.4 clear of the deck, so screwing the ring down doesn't clamp it to the deck.
 for y in [-8.45, 19.15] {
-    d_adds.push(block(vec3(-5, y - 2.4, HULL_Z1 - 4), vec3(5, y + 2.4, HULL_Z1)).cut([zcyl(0, y, HULL_Z1 - 6, 0.8, 7)]));
+    // 1.9 on the inner side leaves 0.65 between the boss and the servo body
+    let yi = if y > 0.0 { y - 1.9 } else { y + 1.9 }; let yo = if y > 0.0 { y + 2.4 } else { y - 2.4 };
+    d_adds.push(block(vec3(-5, yi.min(yo), HULL_Z1 - 4), vec3(5, yi.max(yo), HULL_Z1)).cut([zcyl(0, y, HULL_Z1 - 6, 0.8, 7)]));
 }
 let d_cuts = [zcyl(0, 0, HULL_Z1 - 6, 6.0, 12), block(vec3(19, -8, HULL_Z1 - 6), vec3(25, 8, HULL_Z1 + 6))];   // spline; slot for the camera ribbon and wires
 for p in deck_screws {
@@ -304,7 +311,7 @@ deck = fuse([deck] + d_adds).cut(d_cuts).unify();
 // ---------------------------------------------------------------- turret
 let ring_z1 = TUR_Z0 + 4.0;
 let shell_z1 = ring_z1 + 34.0;
-// the shell screws to the ring from above: 4 countersunk M2 × 10 down tubes from the roof, clear of the
+// the shell screws to the ring from above: 4 countersunk M2 × 6 down tubes from the roof, clear of the
 // gun drum, pushrod, elevation servo, the horn's arms and the ring's wire slot
 let tur_screws = [];
 for p in [[12.0, 30.0], [12.0, -30.0], [26.0, 135.0], [26.0, -135.0]] { tur_screws.push([p[0] * cos(p[1].to_radians()), p[0] * sin(p[1].to_radians())]); }
@@ -313,7 +320,7 @@ for p in [[12.0, 30.0], [12.0, -30.0], [26.0, 135.0], [26.0, -135.0]] { tur_scre
 let tring = fuse([zcyl(0, 0, TUR_Z0, TUR_R, ring_z1 - TUR_Z0),
     // bearing rib on the underside that rides on the deck
     zcyl(0, 0, TUR_Z0 - 0.6, TUR_R - 1.0, 0.6).cut([zcyl(0, 0, TUR_Z0 - 1, TUR_R - 3.0, 4)])]);
-let horn = fuse([block(vec3(-17, -3.2, TUR_Z0 - 1), vec3(17, 3.2, TUR_Z0 + 1.6)), block(vec3(-3.2, -17, TUR_Z0 - 1), vec3(3.2, 17, TUR_Z0 + 1.6)), zcyl(0, 0, TUR_Z0 - 1, 4.0, 2.6)]);
+let horn = fuse([block(vec3(-17.3, -3.4, TUR_Z0 - 1), vec3(17.3, 3.4, TUR_Z0 + 1.6)), block(vec3(-3.4, -17.3, TUR_Z0 - 1), vec3(3.4, 17.3, TUR_Z0 + 1.6)), zcyl(0, 0, TUR_Z0 - 1, 4.2, 2.6)]);   // SG90 cross horn + 0.3
 // centre hole Ø5.2: the horn's centre screw goes in through it before the shell is fitted
 // wire slot ±110° so the camera ribbon (up to 16 wide) has room at ±90°
 let r_cuts = [horn, zcyl(0, 0, TUR_Z0 - 1, 2.6, 10), arc_slot(0, 0, TUR_Z0 - 1, 22.0, 8.0, -110.0, 110.0, 10)];
@@ -341,23 +348,23 @@ tshell = tshell.chamfer(roof_e, 1.2);
 let cupola = zcyl(-14, 12, shell_z1, 8, 3);
 let ce = [];
 for e in cupola.edges() { if e.mid().z > shell_z1 + 2.9 { ce.push(e); } }
-cupola = fuse([cupola.chamfer(ce, 1.0), zcyl(-14, 12, shell_z1 - 2, 3.2, 2.1)])
+cupola = fuse([cupola.chamfer(ce, 1.0), zcyl(-14, 12, shell_z1 - 2, 3.1, 2.1)])
     .cut([zcyl(-14, 12, shell_z1 - 3, 2.0, 8), zcyl(-14, 12, shell_z1 + 2.4, 6.0, 2).cut([zcyl(-14, 12, shell_z1, 5.0, 6)])]);   // light pipe hole for the hit LED, engraved hatch ring
 let s_cuts = [
     ycyl(GUN[0], -14.7, GUN[1], DRUM_R + 0.3, 29.4),   // embrasure the gun drum turns in,
     block(vec3(GUN[0] - 6.0, -14.7, ring_z1 - 1.0), vec3(GUN[0] + 20.0, 14.7, GUN[1])),   // open below it (no bridge over the drum)
-    zcyl(-14, 12, shell_z1 - 5, 3.3, 12)];             // cupola spigot; the hit LED (WS2812) sits under it
+    zcyl(-14, 12, shell_z1 - 5, 3.35, 12)];             // cupola spigot; the hit LED (WS2812) sits under it
 for a in [45.0, 135.0, 225.0, 315.0] {
-    // TSOP38238 windows: 6 wide, 7 tall through the wall
-    s_cuts.push(block(vec3(22, -3.0, 68.5), vec3(50, 3.0, 75.5)).rotate_z(a));
+    // TSOP38238 windows through the wall, for its 6.0 × 7.0 body (glued in): 6.4 wide, 7.4 tall
+    s_cuts.push(block(vec3(22, -3.2, 68.3), vec3(50, 3.2, 75.7)).rotate_z(a));
 }
 let s_adds = [];
 for p in tur_screws {
     // tube from the roof down to the ring: the screw drops in from the roof and its countersunk head
     // seats on a 45° cone 2 mm above the ring (printed roof down, the cone is the only overhang: 45°)
     s_adds.push(zcyl(p[0], p[1], ring_z1, 2.6, shell_z1 - ring_z1).cut([
-        zcyl(p[0], p[1], ring_z1 - 1, 1.1, 4), cone(vec3(p[0], p[1], ring_z1 + 2.0), vec3(0, 0, 1), 1.1, 2.1, 1.0),
-        zcyl(p[0], p[1], ring_z1 + 3.0, 2.1, shell_z1)]));
+        zcyl(p[0], p[1], ring_z1 - 1, 1.2, 4), cone(vec3(p[0], p[1], ring_z1 + 2.0), vec3(0, 0, 1), 1.2, 2.2, 1.0),
+        zcyl(p[0], p[1], ring_z1 + 3.0, 2.2, shell_z1)]));
 }
 // trunnion brackets either side of the drum (M2 pivot screws), hanging from the roof
 for y0 in [14.9, -16.9] {
@@ -365,17 +372,21 @@ for y0 in [14.9, -16.9] {
 }
 // elevation servo (SG90) in the bustle, output axis along +Y at (-10, 65.5): two brackets for its tabs
 for x in [-29.15, -1.55] {
-    s_adds.push(block(vec3(x - 2.4, -3.5, 59.0), vec3(x + 2.4, 1.0, shell_z1)).common([tvol]).cut([ycyl(x, -4.5, GUN[1], 0.8, 6)]));
+    // 1.9 on the inner side leaves 0.65 between the bracket and the servo body
+    let xi = if x < -15.0 { x + 1.9 } else { x - 1.9 }; let xo = if x < -15.0 { x - 2.4 } else { x + 2.4 };
+    s_adds.push(block(vec3(xi.min(xo), -3.5, 59.0), vec3(xi.max(xo), 1.0, shell_z1)).common([tvol]).cut([ycyl(x, -4.5, GUN[1], 0.8, 6)]));
 }
 // M2 pivot holes through the brackets and the side walls (the screws go in from outside)
-tshell = fuse([tshell.cut(s_cuts)] + s_adds).cut([ycyl(GUN[0], -40, GUN[1], 1.1, 80)]).unify();
+tshell = fuse([tshell.cut(s_cuts)] + s_adds).cut([ycyl(GUN[0], -40, GUN[1], 1.2, 80)]).unify();
 
 // gun drum: holds the Pi camera (looking out of the front window) and the barrel, turns on two M2
 // screws in the trunnion brackets; open at the back to put the camera in and let its ribbon out.
 // The camera board screws (M2) to four standoffs on a plate inside the front of the drum.
 // Elevation linkage: a parallelogram. The servo horn and the drum's arm both point 10 mm straight down
-// at level, joined by a 34 mm pushrod (1 mm wire, Z-bends) that runs inside the open back of the drum,
-// so the gun turns exactly as far as the servo, with the rod square to both arms at level.
+// at level, joined by a 34 mm pushrod (1 mm wire) that runs inside the open back of the drum, so the gun
+// turns exactly as far as the servo, with the rod square to both arms at level. A Z-bend goes through
+// the horn; at the drum an L-bend goes into a blind hole in the side wall (there's only 0.5 between the
+// drum and the trunnion bracket, too little for a Z-bend to come through).
 let gx = GUN[0]; let gz = GUN[1];
 let DW = 14.4;   // drum half width
 let inside = ycyl(gx, -DW + 1.6, gz, DRUM_R - 1.6, 2.0 * DW - 3.2);
@@ -393,11 +404,11 @@ let collar = fuse([xcyl(gx + 12.0, 0, BARREL_Z, 6.8, 3.5),
     block(vec3(gx + 12.0, -DW, BARREL_Z - 1.5), vec3(gx + 15.5, DW, BARREL_Z + 1.5))]).common([ycyl(gx, -DW, gz, DRUM_R + 6.0, 2.0 * DW)]);
 drum = fuse([drum, plate, collar] + standoffs).cut([
     xcyl(gx + 6, 0, CAM_Z, 4.5, 15),               // camera window
-    xcyl(gx + 11.0, 0, BARREL_Z, 5.15, 7),         // barrel socket, 4.5 deep
-    cone(vec3(gx + 14.45, 0, BARREL_Z), vec3(1, 0, 0), 5.15, 6.25, 1.1),   // countersink for the barrel's conical flange
+    xcyl(gx + 11.0, 0, BARREL_Z, 5.25, 7),         // barrel socket, 4.5 deep, 0.25 glue gap
+    cone(vec3(gx + 14.45, 0, BARREL_Z), vec3(1, 0, 0), 5.25, 6.35, 1.1),   // countersink for the barrel's conical flange
     xcyl(gx, 0, BARREL_Z, 1.5, 14),                // LED leads
     ycyl(gx, -DW - 1, gz, 0.8, 2.0 * DW + 2),      // M2 pivot screws
-    ycyl(gx, DW - 3, gz - 10, 0.8, 4)]).unify();   // pushrod
+    ycyl(gx, DW - 3, gz - 10, 0.8, 2.7)]).unify();   // pushrod: blind hole, the wire's L-bend sits in it
 // printed in two halves (split at y = 0) so nothing bridges: each half lies on its outer side face.
 // The camera standoffs get ribs to the side wall so they aren't horizontal posts in mid-air.
 let ribs = [];
@@ -417,7 +428,7 @@ let barrel = fuse([xcyl(xr, 0, BARREL_Z, 5.0, 43.0),
     xcone(xr + 3.5, BARREL_Z, 5.0, 6.0, 1.0), xcyl(xr + 4.5, 0, BARREL_Z, 6.0, 1.0), xcone(xr + 5.5, BARREL_Z, 6.0, 5.0, 1.0),     // flange in the collar's countersink
     xcone(xr + 20.0, BARREL_Z, 5.0, 6.2, 1.2), xcyl(xr + 21.2, 0, BARREL_Z, 6.2, 6.0), xcone(xr + 27.2, BARREL_Z, 6.2, 5.0, 1.2),   // fume extractor
     xcone(xr + 35.8, BARREL_Z, 5.0, 6.0, 1.0), xcyl(xr + 36.8, 0, BARREL_Z, 6.0, 6.2)])  // muzzle
-    .cut([xcyl(xr - 1, 0, BARREL_Z, 2.6, 46), xcyl(xr - 1, 0, BARREL_Z, 3.0, 4.2), xcone(xr + 3.2, BARREL_Z, 3.0, 2.6, 0.4)]);
+    .cut([xcyl(xr - 1, 0, BARREL_Z, 2.65, 46), xcyl(xr - 1, 0, BARREL_Z, 3.1, 4.2), xcone(xr + 3.2, BARREL_Z, 3.1, 2.65, 0.45)]);   // 5 mm LED and its flange
 
 // ---------------------------------------------------------------- drivetrain placement
 let sprocket_l = sprocket(SPR_R, SPR_N, 7.0);

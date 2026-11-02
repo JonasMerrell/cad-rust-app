@@ -49,6 +49,21 @@ fn run(t) {
     }
     report.sweep = #{poses: poses, turret: [-90, 90], gun: t.elev, clashes: clashes};
 
+    // ---- FDM clearance: moving parts must still clear with 0.2 mm of print error in any direction
+    let fit = [];
+    let dirs = [vec3(0.2, 0, 0), vec3(-0.2, 0, 0), vec3(0, 0.2, 0), vec3(0, -0.2, 0), vec3(0, 0, 0.2), vec3(0, 0, -0.2)];
+    for d in dirs {
+        for g in t.gun { for p in t.turret {
+            let v = overlap(g.shape.translate(d), p.shape);
+            if v > 0.05 { fit.push(#{moving: g.name, fixed: p.name, shift: [d.x, d.y, d.z], mm3: v}); }
+        } }
+        for p in t.turret { for f in t.fixed {
+            let v = overlap(p.shape.translate(d), f.shape);
+            if v > 0.05 { fit.push(#{moving: p.name, fixed: f.name, shift: [d.x, d.y, d.z], mm3: v}); }
+        } }
+    }
+    report.fdm_clearance = #{shift_mm: 0.2, touching: fit};
+
     // ---- elevation linkage: horn and drum arm, both r long and pointing down at level, rod between
     let lk = [];
     let r = t.arm; let H = [t.servo_x, t.gz]; let G = [t.gx, t.gz];
