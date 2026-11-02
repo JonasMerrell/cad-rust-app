@@ -411,6 +411,31 @@ pub(crate) fn export_fab(app: &mut App) {
     }
 }
 
+/// Run the PCB's output job into a ZIP: Gerbers with the X2 job file and drill drawing, BOM,
+/// pick and place, IPC-D-356A, ODB++ and the PDF prints, as the job has them turned on.
+pub(crate) fn run_output_job(app: &mut App) {
+    let Some(p) = pcb_ref(app).cloned() else { return };
+    let name = format!("{}-outputs.zip", p.name.replace(['/', '\\'], "_"));
+    let Some(path) = app.save_file_dialog("Output job ZIP", &["zip"], name) else { return };
+    match crate::pcb_fab::run(&p, &p.outputs, &path) {
+        Ok(files) => app.flash_info(format!("Saved {}", files.join(", ")), Some(Duration::from_secs(5))),
+        Err(e) => app.flash(format!("Could not run the output job: {e}"), ToastKind::Error),
+    }
+}
+
+fn output_job_ui(app: &mut App, ui: &mut Ui) {
+    let Some(pi) = index(app) else { return };
+    let job = &mut app.ws.pcbs[pi].outputs;
+    for (k, d) in crate::pcb_fab::OutJob::NAMES {
+        if let Some(v) = job.get_mut(k) {
+            ui.checkbox(v, d);
+        }
+    }
+    if ui.button("Run output job…").on_hover_text("Write every output that is ticked into one ZIP").clicked() {
+        run_output_job(app);
+    }
+}
+
 pub(crate) fn to_3d(app: &mut App) {
     let Some(i) = index(app) else { return };
     app.sync_ws();
@@ -797,6 +822,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             section(ui, "Board", |ui| board_ui(app, ui));
             section(ui, "Layers", |ui| layers_ui(app, ui));
             section(ui, "Lengths and pairs", |ui| lengths_ui(app, ui));
+            section(ui, "Output job", |ui| output_job_ui(app, ui));
             if let Some(issues) = app.pcb.issues.clone() {
                 section(ui, "Check", |ui| issues_ui(app, ui, &issues));
             }
@@ -1470,6 +1496,7 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
         ("Place parts on the board", "pcbPlace", auto_place),
         ("Design rule check", "pcbDrc", run_drc),
         ("Export Gerbers…", "export", export_fab),
+        ("Run output job…", "export", run_output_job),
         ("3D board (Part Studio)", "cube", to_3d),
     ]
 }

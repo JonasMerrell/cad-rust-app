@@ -50,6 +50,7 @@ mod mcu_rp2040;
 mod pcb;
 mod pcb_erc;
 mod pcb_export;
+mod pcb_fab;
 mod pcb_lib;
 mod pcb_route;
 mod pcb_tune;

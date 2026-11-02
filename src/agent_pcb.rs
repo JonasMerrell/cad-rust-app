@@ -468,8 +468,22 @@ impl Session {
             "export_pcb" => {
                 let pi = self.pcb_idx(a)?;
                 let path = a.get("path").and_then(|v| v.as_str()).ok_or("give path: a .zip for the Gerbers and drill files, or a folder")?;
-                let files = crate::pcb_export::export(&self.ws.pcbs[pi], std::path::Path::new(path))?;
-                json!({"pcb": pi, "written": files})
+                let sets = a.get("outputs").and_then(|v| v.as_object());
+                if let Some(o) = sets {
+                    let job = &mut self.ws.pcbs[pi].outputs;
+                    for (k, v) in o {
+                        let slot = job.get_mut(k).ok_or_else(|| format!("unknown output {k}; outputs are {}", crate::pcb_fab::OutJob::NAMES.iter().map(|n| n.0).collect::<Vec<_>>().join(", ")))?;
+                        *slot = v.as_bool().ok_or_else(|| format!("outputs.{k} should be true or false"))?;
+                    }
+                }
+                if sets.is_some() || a.get("job").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let p = &self.ws.pcbs[pi];
+                    let files = crate::pcb_fab::run(p, &p.outputs, std::path::Path::new(path))?;
+                    json!({"pcb": pi, "job": p.outputs, "written": files})
+                } else {
+                    let files = crate::pcb_export::export(&self.ws.pcbs[pi], std::path::Path::new(path))?;
+                    json!({"pcb": pi, "written": files})
+                }
             }
             "pcb_3d" => {
                 let pi = self.pcb_idx(a)?;
@@ -774,6 +788,7 @@ pub fn tools() -> Vec<Value> {
         }
         m
     };
+    let job_props: serde_json::Map<String, Value> = crate::pcb_fab::OutJob::NAMES.iter().map(|(k, d)| (k.to_string(), json!({"type": "boolean", "description": d}))).collect();
     let mut edit = board.clone();
     edit["pcb"] = pcb.clone();
     edit["parts"] = json!({"type": "array", "items": {"type": "object", "properties": part_fields(json!({"reference": {"type": "string", "description": "which part (R1, U2, …)"}, "new_reference": {"type": "string", "description": "rename it"}, "symbol": {"type": "string", "description": "change the library symbol (part type)"}, "delete": {"type": "boolean", "description": "remove the part"}})), "required": ["reference"], "additionalProperties": false}, "description": "change parts: [{reference, at, rot, side, value, footprint, …}]"});
@@ -796,7 +811,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
-        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}}), &["pcb", "path"])}),
+        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
         json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
         json!({"name": "pcb_3d", "description": "Make or update the Part Studio \"<pcb name> 3D\": the board (with its holes) and a simple body for every part, as separate parts named by reference and value, ready to insert into assemblies or export as STEP. Running it again updates the same parts. The Part Studio becomes the active one.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
