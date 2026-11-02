@@ -151,6 +151,11 @@ pub const PRINTED: &[Printed] = &[
     Printed { name: "PETG-CF", e_xy: 2460.0, e_z: 1340.0, s_xy: 35.0, s_z: 29.0, source: "Bambu Lab PETG-CF TDS V3" },
     Printed { name: "ASA-CF", e_xy: 4200.0, e_z: 2290.0, s_xy: 34.0, s_z: 30.0, source: "Bambu Lab ASA-CF TDS V1" },
     Printed { name: "PET-CF", e_xy: 4730.0, e_z: 2160.0, s_xy: 74.0, s_z: 35.0, source: "Bambu Lab PET-CF TDS V3" },
+    Printed { name: "PPS-CF", e_xy: 8230.0, e_z: 2850.0, s_xy: 87.0, s_z: 24.0, source: "Bambu Lab PPS-CF TDS V1 (not annealed)" },
+    Printed { name: "PA6-CF", e_xy: 8637.0, e_z: 3760.0, s_xy: 109.3, s_z: 54.0, source: "Polymaker Fiberon PA6-CF20 TDS V1.1 (dry, annealed)" },
+    Printed { name: "PA6-CF (humid)", e_xy: 2508.0, e_z: 1056.0, s_xy: 54.7, s_z: 25.5, source: "Polymaker Fiberon PA6-CF20 TDS V1.1 (wet, 5 % water)" },
+    Printed { name: "PA12-CF", e_xy: 3311.0, e_z: 1807.0, s_xy: 77.4, s_z: 52.2, source: "Polymaker Fiberon PA12-CF10 TDS V1.1 (dry, annealed)" },
+    Printed { name: "PA12-CF (humid)", e_xy: 3132.0, e_z: 1622.0, s_xy: 71.7, s_z: 42.1, source: "Polymaker Fiberon PA12-CF10 TDS V1.1 (wet, 3 % water)" },
 ];
 
 /// The settings in a few words: "20% grid, 2 walls, layered".
