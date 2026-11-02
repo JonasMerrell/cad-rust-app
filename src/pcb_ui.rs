@@ -111,6 +111,8 @@ pub struct PcbUi {
     /// Counts board changes, so the walkaround grid is rebuilt after one.
     cache_gen: u64,
     lib_search: String,
+    /// The IPC-7351 footprint wizard's inputs while it is open.
+    wizard: Option<crate::pcb_ipc::IpcSpec>,
     label_text: String,
     zone_net: String,
     highlight: Option<String>,
@@ -155,6 +157,7 @@ impl Default for PcbUi {
             walk_path: None,
             cache_gen: 0,
             lib_search: String::new(),
+            wizard: None,
             label_text: String::new(),
             zone_net: String::new(),
             highlight: None,
@@ -544,7 +547,7 @@ fn mirror_sel(app: &mut App) {
 pub fn hint(app: &App) -> String {
     match (&app.pcb.view, &app.pcb.tool) {
         (_, Tool::Place(_)) if crate::digikey_ui::placing_name(app).is_some() => format!("Click to place {} · R rotates, X mirrors · Esc when done", crate::digikey_ui::placing_name(app).unwrap_or_default()),
-        (_, Tool::Place(k)) => format!("Click to place {} · R rotates, X mirrors · Esc when done", pcb_lib::symbol_kind(k).map(|s| s.name).unwrap_or("the part")),
+        (_, Tool::Place(k)) => format!("Click to place {} · R rotates, X mirrors · Esc when done", pcb_lib::kind_info(k).map(|s| s.name).unwrap_or("the part".into())),
         (_, Tool::Wire) if app.pcb.wire.is_empty() => "Click a pin or wire end to start a wire · Esc stops".into(),
         (_, Tool::Wire) => "Click to add a corner, click a pin or wire to finish · / flips the corner · Esc or double-click ends".into(),
         (_, Tool::Label(_)) => "Click a pin or wire to name its net · the text is in the sidebar".into(),
@@ -858,18 +861,181 @@ fn library_ui(app: &mut App, ui: &mut Ui) {
             start_place(app, s.key);
         }
     }
+    let Some(pi) = index(app) else { return };
+    let imported: Vec<(String, String, String)> = app.ws.pcbs[pi].symbols.iter().filter(|s| q.is_empty() || s.key.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)).map(|s| (s.key.clone(), s.footprint.clone(), s.description.clone())).collect();
+    if !imported.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Imported").color(theme::muted()).size(11.5));
+    }
+    for (key, fp, desc) in imported {
+        let on = app.pcb.tool == Tool::Place(key.clone());
+        let name = key.rsplit(':').next().unwrap_or(&key).to_string();
+        let r = ui.add_sized([ui.available_width(), 22.0], egui::Button::selectable(on, RichText::new(format!("{name}  ·  {fp}")).size(12.5)));
+        if r.on_hover_text(if desc.is_empty() { key.clone() } else { format!("{key}: {desc}") }).clicked() {
+            start_place(app, &key);
+        }
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Import KiCad…").on_hover_text("Footprints (.kicad_mod), symbols (.kicad_sym) or a ZIP from SnapEDA, Ultra Librarian and the like").clicked() {
+            if let Some(path) = app.open_file_dialog("KiCad library", &["kicad_mod", "kicad_sym", "zip", "KICAD_MOD", "KICAD_SYM", "ZIP"]) {
+                import_kicad(app, pi, &path);
+            }
+        }
+        if ui.button("Folder…").on_hover_text("Every footprint and symbol in a folder (.pretty, .kicad_symdir)").clicked() {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                import_kicad(app, pi, &path);
+            }
+        }
+        let open = app.pcb.wizard.is_some();
+        if ui.selectable_label(open, "IPC wizard").on_hover_text("Make an IPC-7351 footprint from datasheet dimensions").clicked() {
+            app.pcb.wizard = if open { None } else { Some(crate::pcb_ipc::IpcSpec { size: "0805".into(), ..Default::default() }) };
+        }
+    });
+    if app.pcb.wizard.is_some() {
+        wizard_ui(app, ui, pi);
+    }
+}
+
+fn import_kicad(app: &mut App, pi: usize, path: &std::path::Path) {
+    match crate::pcb_kicad::import_path(path) {
+        Ok(im) => {
+            let (nf, ns) = (im.footprints.len(), im.symbols.len());
+            let notes = crate::pcb_kicad::add_to(&mut app.ws.pcbs[pi], im);
+            let mut msg = format!("Imported {nf} footprint(s) and {ns} symbol(s)");
+            if !notes.is_empty() {
+                msg += &format!(" · {}", notes.join(" · "));
+            }
+            app.flash_info(msg, Some(Duration::from_secs(8)));
+        }
+        Err(e) => app.flash(format!("Could not import: {e}"), ToastKind::Error),
+    }
+}
+
+fn wizard_ui(app: &mut App, ui: &mut Ui, pi: usize) {
+    use crate::pcb_ipc::Family;
+    let sel_part = match app.pcb.sel {
+        Some(Sel::Part(i)) if i < app.ws.pcbs[pi].parts.len() => Some(i),
+        _ => None,
+    };
+    let Some(w) = app.pcb.wizard.as_mut() else { return };
+    let num = |ui: &mut Ui, label: &str, v: &mut f64| {
+        row(ui, label, |ui| {
+            ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=100.0).max_decimals(3).suffix(" mm"));
+        });
+    };
+    row(ui, "Package", |ui| {
+        egui::ComboBox::from_id_salt("ipc-family").width(140.0).selected_text(format!("{:?}", w.family).to_uppercase()).show_ui(ui, |ui| {
+            for (f, n) in [(Family::Chip, "Chip (R, C, L, D)"), (Family::Sop, "SOIC / SOP / TSSOP"), (Family::Qfp, "QFP"), (Family::Son, "SON / DFN"), (Family::Qfn, "QFN"), (Family::Bga, "BGA")] {
+                ui.selectable_value(&mut w.family, f, n);
+            }
+        });
+    });
+    match w.family {
+        Family::Chip => {
+            row(ui, "Kind", |ui| {
+                egui::ComboBox::from_id_salt("ipc-kind").width(140.0).selected_text(w.kind.clone()).show_ui(ui, |ui| {
+                    for k in ["R", "C", "L", "D", "LED", "F"] {
+                        ui.selectable_value(&mut w.kind, k.to_string(), k);
+                    }
+                });
+            });
+            row(ui, "EIA size", |ui| {
+                egui::ComboBox::from_id_salt("ipc-size").width(140.0).selected_text(if w.size.is_empty() { "custom".to_string() } else { w.size.clone() }).show_ui(ui, |ui| {
+                    for k in ["0201", "0402", "0603", "0805", "1206", "1210", "2010", "2512"] {
+                        ui.selectable_value(&mut w.size, k.to_string(), k);
+                    }
+                    ui.selectable_value(&mut w.size, String::new(), "custom");
+                });
+            });
+            if w.size.is_empty() {
+                num(ui, "Body length", &mut w.body[0]);
+                num(ui, "Body width", &mut w.body[1]);
+                num(ui, "Terminal", &mut w.lead);
+                num(ui, "Height", &mut w.height);
+            }
+        }
+        Family::Bga => {
+            num(ui, "Pitch", &mut w.pitch);
+            num(ui, "Ball", &mut w.ball);
+            row(ui, "Rows × cols", |ui| {
+                ui.add(egui::DragValue::new(&mut w.rows).range(1..=40));
+                ui.add(egui::DragValue::new(&mut w.cols).range(1..=40));
+            });
+            num(ui, "Body", &mut w.body[0]);
+            num(ui, "Height", &mut w.height);
+        }
+        f => {
+            row(ui, "Pins", |ui| {
+                ui.add(egui::DragValue::new(&mut w.pins).range(0..=400));
+            });
+            num(ui, "Pitch", &mut w.pitch);
+            num(ui, "Body length", &mut w.body[0]);
+            num(ui, "Body width", &mut w.body[1]);
+            if matches!(f, Family::Sop | Family::Qfp) {
+                num(ui, "Lead span", &mut w.span[0]);
+                if f == Family::Qfp {
+                    num(ui, "Lead span y", &mut w.span[1]);
+                }
+            }
+            num(ui, "Foot length", &mut w.lead);
+            num(ui, "Lead width", &mut w.lead_w);
+            num(ui, "Height", &mut w.height);
+            num(ui, "Exposed pad w", &mut w.ep[0]);
+            num(ui, "Exposed pad h", &mut w.ep[1]);
+        }
+    }
+    row(ui, "Density", |ui| {
+        for (d, tip) in [('M', "Most: big fillets, for hand soldering and rework"), ('N', "Nominal"), ('L', "Least: dense boards")] {
+            ui.selectable_value(&mut w.density, d, d.to_string()).on_hover_text(tip);
+        }
+    });
+    let made = crate::pcb_ipc::generate(w);
+    match &made {
+        Ok(f) => {
+            ui.label(RichText::new(format!("{} · {} pads", f.name, f.pads.len())).strong().size(12.5));
+            if let Some(p) = f.pads.first() {
+                ui.label(RichText::new(format!("pad 1 {:.2} × {:.2} mm at ({:.3}, {:.3})", p.size[0], p.size[1], p.at[0], p.at[1])).color(theme::muted()).size(11.5));
+            }
+        }
+        Err(e) => {
+            ui.label(RichText::new(e).color(theme::muted()).size(11.5));
+        }
+    }
+    if let Ok(f) = made {
+        ui.horizontal(|ui| {
+            let mut add = ui.button("Add to library").clicked();
+            let mut use_on = None;
+            if let Some(i) = sel_part {
+                let r = app.ws.pcbs[pi].parts[i].reference.clone();
+                if ui.button(format!("Add and use on {r}")).clicked() {
+                    add = true;
+                    use_on = Some(i);
+                }
+            }
+            if add {
+                let name = f.name.clone();
+                crate::pcb_kicad::add_to(&mut app.ws.pcbs[pi], crate::pcb_kicad::Imported { footprints: vec![f], ..Default::default() });
+                if let Some(i) = use_on {
+                    app.ws.pcbs[pi].parts[i].footprint = name.clone();
+                }
+                app.flash_info(format!("{name} is in the library"), Some(Duration::from_secs(3)));
+            }
+        });
+    }
 }
 
 fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
     let Some(pi) = index(app) else { return };
     let board = app.pcb.view == View::Board;
     let fps = pcb_lib::footprint_names();
+    let lib_keys: Vec<String> = app.ws.pcbs[pi].symbols.iter().map(|s| s.key.clone()).collect();
     let p = &mut app.ws.pcbs[pi];
     match s {
         Sel::Part(i) if i < p.parts.len() => {
             let kind = pcb_lib::symbol_kind(&p.parts[i].symbol);
             let sim_model = crate::circuit::model_params(&p.parts[i], &p.sim);
-            ui.label(RichText::new(kind.map(|k| k.name).unwrap_or("Part")).strong());
+            ui.label(RichText::new(kind.map(|k| k.name).unwrap_or(p.parts[i].symbol.rsplit(':').next().unwrap_or("Part"))).strong());
             let part = &mut p.parts[i];
             row(ui, "Reference", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.reference).desired_width(120.0));
@@ -881,6 +1047,9 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 egui::ComboBox::from_id_salt("pcb-sym").width(140.0).selected_text(kind.map(|k| k.name).unwrap_or(part.symbol.as_str()).to_string()).height(320.0).show_ui(ui, |ui| {
                     for k in pcb_lib::SYMBOLS {
                         ui.selectable_value(&mut part.symbol, k.key.to_string(), k.name);
+                    }
+                    for s in &lib_keys {
+                        ui.selectable_value(&mut part.symbol, s.clone(), s);
                     }
                 })
                 .response
@@ -1598,8 +1767,8 @@ fn paint(painter: &egui::Painter, xf: &Xf, list: &[Draw]) {
 
 /// The ghost of the part being placed, as a part at the cursor.
 fn ghost_part(key: &str, at: P, rot: u8, mirror: bool) -> Option<pcb::Part> {
-    let k = pcb_lib::symbol_kind(key)?;
-    Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value.into(), symbol: k.key.into(), footprint: k.footprint.into(), sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })
+    let k = pcb_lib::kind_info(key)?;
+    Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value, symbol: k.key, footprint: k.footprint, sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })
 }
 
 /// Hit-test the schematic at a world point.

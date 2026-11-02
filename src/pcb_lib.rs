@@ -4,13 +4,19 @@
 //! part's pin count follows its footprint. Coordinates are millimetres with y up; a symbol's pin
 //! numbers match its footprint's pad numbers.
 
+use std::collections::BTreeMap;
+use std::sync::{LazyLock, RwLock};
+
+use serde::{Deserialize, Serialize};
+
 pub type P = [f64; 2];
 
 /// Schematic grid (100 mil).
 pub const GRID: f64 = 2.54;
 
 /// A drawing primitive of a symbol or a footprint's silkscreen.
-#[derive(Clone, Debug, PartialEq)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum G {
     Line(P, P),
     Rect(P, P),
@@ -177,12 +183,163 @@ pub fn footprint_names() -> Vec<String> {
     for s in ["Terminal_2P", "Terminal_3P", "SW_6mm", "Crystal_HC49", "RPi_Pico", "StepStick"] {
         v.push(s.into());
     }
+    if let Ok(m) = FOOTPRINTS.read() {
+        v.extend(m.keys().cloned());
+    }
     v
+}
+
+// ---------------------------------------------------------------- imported library
+
+/// Footprints and symbols imported from KiCad or made by the footprint generator. Each PCB
+/// keeps its own copies (`Pcb::footprints`, `Pcb::symbols`), which register here when the
+/// document loads, so parts find them by name like the generated ones.
+static FOOTPRINTS: LazyLock<RwLock<BTreeMap<String, Footprint>>> = LazyLock::new(Default::default);
+static LIB_SYMBOLS: LazyLock<RwLock<BTreeMap<String, LibSymbol>>> = LazyLock::new(Default::default);
+
+pub fn register_footprints(fps: &[Footprint]) {
+    if let Ok(mut m) = FOOTPRINTS.write() {
+        for f in fps {
+            m.insert(f.name.clone(), f.clone());
+        }
+    }
+}
+
+pub fn register_symbols(syms: &[LibSymbol]) {
+    if let Ok(mut m) = LIB_SYMBOLS.write() {
+        for s in syms {
+            m.insert(s.key.clone(), s.clone());
+        }
+    }
+}
+
+pub fn lib_symbol(key: &str) -> Option<LibSymbol> {
+    LIB_SYMBOLS.read().ok()?.get(key).cloned()
+}
+
+/// Deserialize a PCB's footprint library and register it.
+pub fn de_footprints<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<Footprint>, D::Error> {
+    let v = Vec::<Footprint>::deserialize(d)?;
+    register_footprints(&v);
+    Ok(v)
+}
+
+/// Deserialize a PCB's symbol library and register it.
+pub fn de_symbols<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<LibSymbol>, D::Error> {
+    let v = Vec::<LibSymbol>::deserialize(d)?;
+    register_symbols(&v);
+    Ok(v)
+}
+
+/// A schematic pin of an imported symbol.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct LibPin {
+    pub num: String,
+    pub name: String,
+    pub at: P,
+    pub dir: P,
+    pub len: f64,
+    /// Electrical type as KiCad names it (input, output, bidirectional, power_in, …).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub kind: String,
+}
+
+/// A schematic symbol imported from a KiCad library.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize, Default)]
+pub struct LibSymbol {
+    /// "Library:Name", as KiCad's lib_id.
+    pub key: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    pub prefix: String,
+    pub value: String,
+    pub footprint: String,
+    /// KiCad footprint filters (`SOIC*3.9x4.9mm*`), for linking and the footprint picker.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fp_filters: Vec<String>,
+    pub pins: Vec<LibPin>,
+    pub g: Vec<G>,
+    #[serde(default)]
+    pub pin_numbers: bool,
+    #[serde(default)]
+    pub pin_names: bool,
+    pub ref_at: P,
+    pub value_at: P,
+}
+
+impl LibSymbol {
+    pub fn symbol(&self) -> Symbol {
+        Symbol {
+            pins: self.pins.iter().map(|p| SymPin { num: p.num.clone(), name: p.name.clone(), at: p.at, dir: p.dir, len: p.len }).collect(),
+            g: self.g.clone(),
+            pin_numbers: self.pin_numbers,
+            pin_names: self.pin_names,
+            ref_at: self.ref_at,
+            value_at: self.value_at,
+        }
+    }
+    /// The name shown in the library list.
+    pub fn name(&self) -> &str {
+        self.key.rsplit(':').next().unwrap_or(&self.key)
+    }
+}
+
+/// KiCad footprint filter match: `*` any run, `?` one character, case blind.
+pub fn glob(pat: &str, name: &str) -> bool {
+    let (p, n): (Vec<char>, Vec<char>) = (pat.to_lowercase().chars().collect(), name.to_lowercase().chars().collect());
+    let (mut i, mut j, mut star, mut mark) = (0, 0, None, 0);
+    while j < n.len() {
+        if i < p.len() && (p[i] == '?' || p[i] == n[j]) {
+            i += 1;
+            j += 1;
+        } else if i < p.len() && p[i] == '*' {
+            star = Some(i);
+            mark = j;
+            i += 1;
+        } else if let Some(st) = star {
+            i = st + 1;
+            mark += 1;
+            j = mark;
+        } else {
+            return false;
+        }
+    }
+    while i < p.len() && p[i] == '*' {
+        i += 1;
+    }
+    i == p.len()
+}
+
+/// What a new part of a library key starts with: built in or imported.
+pub struct KindInfo {
+    pub key: String,
+    pub name: String,
+    pub prefix: String,
+    pub value: String,
+    pub footprint: String,
+}
+
+pub fn kind_info(key: &str) -> Option<KindInfo> {
+    if let Some(k) = symbol_kind(key) {
+        return Some(KindInfo { key: k.key.into(), name: k.name.into(), prefix: k.prefix.into(), value: k.value.into(), footprint: k.footprint.into() });
+    }
+    let l = lib_symbol(key)?;
+    Some(KindInfo { key: l.key.clone(), name: l.name().to_string(), prefix: l.prefix.clone(), value: l.value.clone(), footprint: l.footprint.clone() })
+}
+
+/// The known symbol keys, for error messages.
+pub fn symbol_keys() -> String {
+    let mut v: Vec<String> = SYMBOLS.iter().map(|s| s.key.to_string()).collect();
+    if let Ok(m) = LIB_SYMBOLS.read() {
+        v.extend(m.keys().cloned());
+    }
+    v.join(", ")
 }
 
 // ---------------------------------------------------------------- footprints
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum PadShape {
     Rect,
     Round,
@@ -190,7 +347,7 @@ pub enum PadShape {
     RoundRect,
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Pad {
     pub num: String,
     pub at: P,
@@ -201,13 +358,14 @@ pub struct Pad {
 }
 
 /// A 3D body: a box or an upright cylinder, in footprint coordinates (z up from the board).
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
 pub enum Solid {
     Box { lo: [f64; 3], hi: [f64; 3] },
     Cyl { c: P, r: f64, z0: f64, h: f64 },
 }
 
-#[derive(Clone, Debug)]
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 pub struct Footprint {
     pub name: String,
     pub pads: Vec<Pad>,
@@ -263,8 +421,14 @@ fn bx(w: f64, l: f64, h: f64) -> Solid {
     Solid::Box { lo: [-w / 2.0, -l / 2.0, 0.0], hi: [w / 2.0, l / 2.0, h] }
 }
 
-/// Build a footprint from its name, or None for an unknown name.
+/// A footprint by name: a generated one, or one imported into (or generated for) a document's
+/// library.
 pub fn footprint(name: &str) -> Option<Footprint> {
+    generated(name).or_else(|| FOOTPRINTS.read().ok()?.get(name).cloned())
+}
+
+/// Build a footprint from its name, or None for an unknown name.
+fn generated(name: &str) -> Option<Footprint> {
     let mut f = Footprint { name: name.into(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44] };
     let body_rect;
     // two-terminal chips: pads along x, pad 1 on the left (the cathode for diodes and LEDs)
@@ -549,6 +713,9 @@ fn arc(c: P, r: f64, a0: f64, a1: f64) -> G {
 /// The symbol for a library key; `pins` are the footprint's pad numbers (for ICs and connectors)
 /// and `names` optional pin names by position.
 pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
+    if let Some(l) = lib_symbol(key) {
+        return l.symbol();
+    }
     if matches!(key, "PICO" | "SERVO" | "ENC" | "STEPPER" | "STEPDRV") {
         let names = if names.is_empty() { default_pin_names(key, "") } else { names.to_vec() };
         return symbol("U", pins, &names);

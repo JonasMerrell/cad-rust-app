@@ -94,6 +94,33 @@ fn free_sch_spot(p: &Pcb) -> P {
     pcb::snap([col as f64 * 30.48, -(rowi as f64) * 35.56], GRID)
 }
 
+/// Move part `i` (just added) off any symbol it overlaps: the column slot if that is clear,
+/// else the first clear spot in reading order. Big imported symbols need the room.
+fn clear_sch_spot(p: &mut Pcb, i: usize) {
+    let boxes: Vec<(P, P)> = p.parts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| crate::pcb_export::sch_bbox(q)).collect();
+    let at = p.parts[i].sch;
+    p.parts[i].sch = [0.0; 2];
+    let (lo, hi) = crate::pcb_export::sch_bbox(&p.parts[i]);
+    let hits = |c: P| {
+        // room for the reference and value written right of each symbol
+        let (a, b) = ([c[0] + lo[0] - 12.7, c[1] + lo[1] - 2.54], [c[0] + hi[0] + 12.7, c[1] + hi[1] + 2.54]);
+        boxes.iter().any(|(l, h)| a[0] < h[0] && b[0] > l[0] && a[1] < h[1] && b[1] > l[1])
+    };
+    let mut spot = at;
+    if hits(at) {
+        'search: for row in 0..200 {
+            for col in 0..80 {
+                let c = [col as f64 * 5.08, -(row as f64) * 5.08];
+                if !hits(c) {
+                    spot = c;
+                    break 'search;
+                }
+            }
+        }
+    }
+    p.parts[i].sch = pcb::snap(spot, GRID);
+}
+
 impl Session {
     pub(super) fn pcb_idx(&self, a: &Value) -> R<usize> {
         let i = a.get("pcb").and_then(|v| v.as_u64()).ok_or("give pcb (the PCB tab's index from create_pcb)")? as usize;
@@ -149,6 +176,9 @@ impl Session {
                         p.parts[i].reference = r.to_string();
                     }
                     edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    if x.get("sch").is_none() {
+                        clear_sch_spot(&mut p, i);
+                    }
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
                 let nl = p.netlist();
@@ -485,6 +515,32 @@ impl Session {
                     json!({"pcb": pi, "written": files})
                 }
             }
+            "pcb_library" => {
+                let pi = self.pcb_idx(a)?;
+                let mut im = crate::pcb_kicad::Imported::default();
+                if let Some(path) = a.get("import").and_then(|v| v.as_str()) {
+                    im = crate::pcb_kicad::import_path(std::path::Path::new(path))?;
+                }
+                for g in a.get("generate").and_then(|v| v.as_array()).into_iter().flatten() {
+                    let spec: crate::pcb_ipc::IpcSpec = serde_json::from_value(g.clone()).map_err(|e| format!("generate: {e}"))?;
+                    im.footprints.push(crate::pcb_ipc::generate(&spec)?);
+                }
+                let fps: Vec<Value> = im.footprints.iter().map(|f| json!({"name": f.name, "pads": f.pads.len()})).collect();
+                let syms: Vec<Value> = im.symbols.iter().map(|s| json!({"symbol": s.key, "pins": s.pins.len()})).collect();
+                let p = &mut self.ws.pcbs[pi];
+                let notes = crate::pcb_kicad::add_to(p, im);
+                let syms: Vec<Value> = syms.into_iter().map(|mut v| {
+                    let key = v["symbol"].as_str().unwrap_or("").to_string();
+                    if let Some(s) = p.symbols.iter().find(|s| s.key == key) {
+                        v["footprint"] = json!(s.footprint);
+                        v["reference"] = json!(s.prefix);
+                    }
+                    v
+                }).collect();
+                json!({"pcb": pi, "footprints": fps, "symbols": syms, "notes": notes,
+                    "library": {"footprints": p.footprints.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), "symbols": p.symbols.iter().map(|s| s.key.clone()).collect::<Vec<_>>()},
+                    "hint": "add parts with pcb_add_parts using symbol: \"Library:Name\" for imported symbols, and footprint: \"<name>\" for imported or generated footprints"})
+            }
             "pcb_3d" => {
                 let pi = self.pcb_idx(a)?;
                 self.sync();
@@ -592,8 +648,8 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
     }
     if let Some(sym) = x.get("symbol").and_then(|v| v.as_str()) {
         if sym != part.symbol {
-            let k = pcb_lib::symbol_kind(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
-            part.symbol = k.key.to_string();
+            let k = pcb_lib::kind_info(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::symbol_keys()))?;
+            part.symbol = k.key;
         }
     }
     for (key, field) in [
@@ -814,6 +870,26 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
         json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
+        json!({"name": "pcb_library", "description": "The PCB's own part library. import: a KiCad footprint (.kicad_mod), symbol library (.kicad_sym), a folder (.pretty, .kicad_symdir or a download with both) or a ZIP (SnapEDA, Ultra Librarian, SamacSys and similar give KiCad ZIPs). Symbols become \"Library:Name\" keys with their pins, drawing and electrical pin types (used by the ERC); a symbol's footprint is linked when it was imported too. generate: IPC-7351B land patterns from datasheet dimensions (mm, nominal), named the IPC way (RESC2012X50N, SOIC127P600X175-8N, QFN50P400X400X90-17N): chip {family: chip, size: 0805, kind: R|C|L|D|LED} or {body: [L, W], lead, height}; sop/qfp {pins, pitch, body, span: [toe-to-toe x, y], lead (foot length), lead_w, height, ep}; son/qfn {pins, pitch, body, lead, lead_w, height, ep: [w, h] exposed pad}; bga {pitch, ball, rows, cols, height}. density M, N (default) or L.", "inputSchema": obj(json!({"pcb": pcb, "import": {"type": "string", "description": "KiCad file, folder or ZIP to import"}, "generate": {"type": "array", "description": "IPC-7351 footprints to generate", "items": {"type": "object", "properties": {
+            "family": {"type": "string", "enum": ["chip", "sop", "qfp", "son", "qfn", "bga"], "description": "package family"},
+            "kind": {"type": "string", "description": "chip: R, C, L, D, LED or F"},
+            "size": {"type": "string", "description": "chip: EIA size 0201 0402 0603 0805 1206 1210 2010 2512"},
+            "pins": {"type": "integer", "description": "leads, not counting the exposed pad"},
+            "pitch": {"type": "number", "description": "lead or ball pitch"},
+            "body": {"type": "array", "items": {"type": "number"}, "description": "[length x, width y]"},
+            "span": {"type": "array", "items": {"type": "number"}, "description": "gull-wing toe-to-toe span [x, y]"},
+            "lead": {"type": "number", "description": "terminal (foot) length"},
+            "lead_w": {"type": "number", "description": "lead width"},
+            "height": {"type": "number", "description": "seated height"},
+            "ep": {"type": "array", "items": {"type": "number"}, "description": "exposed pad [w, h]"},
+            "span_tol": {"type": "number", "description": "span tolerance range (default 0.2)"},
+            "lead_tol": {"type": "number", "description": "foot length tolerance range (default 0.3)"},
+            "width_tol": {"type": "number", "description": "lead width tolerance range (default 0.1)"},
+            "ball": {"type": "number", "description": "BGA ball diameter"},
+            "rows": {"type": "integer", "description": "BGA rows"},
+            "cols": {"type": "integer", "description": "BGA columns"},
+            "density": {"type": "string", "enum": ["M", "N", "L"], "description": "IPC density level: M most, N nominal, L least"}
+        }, "additionalProperties": false}}}), &["pcb"])}),
         json!({"name": "pcb_3d", "description": "Make or update the Part Studio \"<pcb name> 3D\": the board (with its holes) and a simple body for every part, as separate parts named by reference and value, ready to insert into assemblies or export as STEP. Running it again updates the same parts. The Part Studio becomes the active one.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
     ]
 }

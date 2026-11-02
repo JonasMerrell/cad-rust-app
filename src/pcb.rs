@@ -37,6 +37,12 @@ pub struct Pcb {
     /// Output job: which fabrication and documentation outputs a run writes.
     #[serde(default, skip_serializing_if = "crate::pcb_fab::OutJob::is_default")]
     pub outputs: crate::pcb_fab::OutJob,
+    /// Footprints imported from KiCad or made by the IPC-7351 generator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::pcb_lib::de_footprints")]
+    pub footprints: Vec<Footprint>,
+    /// Schematic symbols imported from KiCad.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::pcb_lib::de_symbols")]
+    pub symbols: Vec<pcb_lib::LibSymbol>,
     #[serde(default)]
     pub next_id: u64,
 }
@@ -804,21 +810,21 @@ impl Pcb {
 
     /// Add a part from the library. Its board spot is beside the board until it is placed.
     pub fn add_part(&mut self, key: &str, footprint: Option<&str>, value: Option<&str>, sch: P) -> Result<usize, String> {
-        let k = pcb_lib::symbol_kind(key).ok_or_else(|| format!("no symbol {key}; the symbols are {}", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
-        let fp = footprint.unwrap_or(k.footprint);
+        let k = pcb_lib::kind_info(key).ok_or_else(|| format!("no symbol {key}; the symbols are {}", pcb_lib::symbol_keys()))?;
+        let fp = footprint.unwrap_or(&k.footprint);
         if pcb_lib::footprint(fp).is_none() {
             return Err(format!("no footprint {fp}; e.g. {}", pcb_lib::footprint_names().join(", ")));
         }
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        let value = value.unwrap_or(k.value);
+        let value = value.unwrap_or(&k.value);
         let mut p = Part {
             id,
-            reference: self.next_reference(k.prefix),
+            reference: self.next_reference(&k.prefix),
             value: value.to_string(),
             symbol: k.key.to_string(),
             footprint: fp.to_string(),
-            pin_names: pcb_lib::default_pin_names(k.key, value),
+            pin_names: pcb_lib::default_pin_names(&k.key, value),
             sch: snap(sch, pcb_lib::GRID),
             ..Default::default()
         };
