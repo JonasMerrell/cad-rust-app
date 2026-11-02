@@ -22,7 +22,7 @@ should be none). The `stl/` folder here has a build of the STLs.
 
     python3 examples/fpv-tank/make_project.py <path to rcad> out
 
-writes `out/FPV Tank.zip`, an rCAD project: open it with File > Import project. Its Part Studio
+writes `out/FPV Tank.zip`, an rCAD project: open it with Import project (ZIP)… in the File menu, or Import project… on the home screen. Its Part Studio
 has all 35 parts where they sit in the tank, named and coloured, with their materials, and the
 project folder also holds the scripts, this README and the print STLs (`print/`). It takes about
 4 minutes, most of it rCAD importing each part.
