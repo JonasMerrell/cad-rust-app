@@ -18,6 +18,19 @@ should be none). The `stl/` folder here has a build of the STLs.
 <img alt="From the front" src="fpv-tank-front.png" width="49%"> <img alt="Gun elevated 15°" src="fpv-tank-elevated.png" width="49%">
 <img alt="Side view, gun elevated 15°" src="fpv-tank-elevated-side.png" width="100%">
 
+## Animation
+
+    mkdir -p out/frames && rcad script examples/fpv-tank/parts.rhai out animate
+    ffmpeg -framerate 15 -i out/frames/f%04d.png -c:v libx264 -pix_fmt yuv420p fpv-tank-drive.mp4
+
+`anim.rhai` drives the tank around an arena: the hull's speed and turn rate come from the two track
+speeds (skid steering, 89 mm between the track centres), the wheels, sprockets and grousers turn to
+match, then it traverses the turret, elevates the gun and fires the IR beam at a second tank, whose
+hit LED lights up. Left: a chase camera. Right: what the tank's camera sees (OV5647, 53° × 41°), with
+the barrel at the bottom as the aim mark. About 150 frames, 20 minutes to render.
+
+<img alt="The tank driving, turning, aiming and firing; chase view and the tank's camera view" src="fpv-tank-drive.gif" width="100%">
+
 ## Printed parts
 
 | part | qty | material | notes |
@@ -85,3 +98,6 @@ the RP2040 firmware.
 - TPU track length: printed at the exact belt length (336 mm inside), the idler slot gives ±3 mm.
 - The barrel is a plain tube; a 10 mm lens at the muzzle would give a tighter, longer beam.
 - Ground clearance is 5 mm: fine on hard floors and thin rugs.
+- The barrel fills the bottom third of the camera's view (see the animation) with the standard
+  OV5647 lens. A wide-angle OV5647 (120°–160°, same board size) makes it smaller and is easier to
+  drive with.

@@ -146,7 +146,7 @@ fn rim_chamfer(w, r) {
 }
 
 // the track as fitted, following the wheels: inner surface is the belt around them
-fn track_fitted(circles, band, y0, w) {
+fn track_fitted(circles, band, y0, w, with_grousers) {
     let pts = [];
     for c in circles {
         for i in 0..180 {
@@ -157,6 +157,7 @@ fn track_fitted(circles, band, y0, w) {
     let inner = offset2d(polygon(convex_hull(pts)), 0.1)[0];   // 0.1 clearance over the chords
     let outer = offset2d(inner, band)[0];
     let b = extrude(outer, vec3(0, 0, w)).cut([extrude(inner, vec3(0, 0, w + 2.0)).translate(vec3(0, 0, -1))]);
+    if !with_grousers { return b.rotate_x(90.0).translate(vec3(0, y0 + w, 0)); }
     // grousers on the outside every lug pitch, walking the belt outline
     let hp = convex_hull(pts);
     let ribs = [];
@@ -383,7 +384,7 @@ let idler_l = wheel(IDL_R);
 let road_l = wheel(RW_R);
 let circles = [[SPR[0], SPR[1], SPR_R], [IDL[0], IDL[1], IDL_R]];
 for x in RW_X { circles.push([x, RW_Z, RW_R]); }
-let track_l = track_fitted(circles, BAND, TRACK_Y0, TRACK_W);
+let track_l = track_fitted(circles, BAND, TRACK_Y0, TRACK_W, true);
 
 let o = vec3(0, 0, 0);
 let ny = vec3(0, 1, 0);
@@ -405,6 +406,28 @@ let battery = block(vec3(7.0, -15.5, HULL_Z0 + WALL), vec3(65.0, 15.5, HULL_Z0 +
 let drv = block(vec3(-52, 4, HULL_Z0 + WALL), vec3(-33.5, 20, HULL_Z0 + WALL + 1.6));
 let buck = block(vec3(-52, -17, HULL_Z0 + WALL), vec3(-30, -1, HULL_Z0 + WALL + 4));
 let led = xcyl(xr, 0, BARREL_Z, 2.5, 8.6);
+
+// ---------------------------------------------------------------- animation (third argument "animate")
+if ARGS.len() > 1 && ARGS[1] == "animate" {
+    import "anim" as anim;
+    let belt = [];
+    for c in circles { for i in 0..180 { let a = (2.0 * i).to_radians(); belt.push([c[0] + c[2] * cos(a), c[1] + c[2] * sin(a)]); } }
+    let wheels = [#{shape: sprocket_l.translate(vec3(SPR[0], 0, SPR[1])), x: SPR[0], z: SPR[1], r: SPR_R},
+                  #{shape: idler_l.translate(vec3(IDL[0], 0, IDL[1])), x: IDL[0], z: IDL[1], r: IDL_R}];
+    for x in RW_X { wheels.push(#{shape: road_l.translate(vec3(x, 0, RW_Z)), x: x, z: RW_Z, r: RW_R}); }
+    let t = #{
+        hull: [#{shape: tub, paint: true}, #{shape: deck, paint: true},
+               #{shape: motor_l, paint: false, color: "#c8a040"}, #{shape: motor_l.mirror(o, ny), paint: false, color: "#c8a040"}],
+        wheels: wheels, band: track_fitted(circles, BAND, TRACK_Y0, TRACK_W, false), band_t: BAND,
+        hull_pts: convex_hull(belt), track_y0: TRACK_Y0, track_w: TRACK_W,
+        turret: [#{shape: tring, paint: false, color: "#454f33"}, #{shape: tshell, paint: true}],
+        gun: [#{name: "gun-drum", shape: drum, paint: true}, #{name: "barrel", shape: barrel, paint: false, color: "#2a2a2a"},
+              #{name: "pi camera", shape: cam, paint: false, color: "#1d7a46"}, #{name: "ir-led", shape: led, paint: false, color: "#dddddd"}],
+        cupola: cupola, gx: gx, gz: gz, cam_z: CAM_Z, barrel_z: BARREL_Z, muzzle_x: xr + 43.0,
+        max_frames: if ARGS.len() > 2 { parse_int(ARGS[2]) } else { 100000 },
+    };
+    return anim::run(t, out);
+}
 
 // ---------------------------------------------------------------- parts list, masses, files
 let PLA = 1.24e-3; let TPU = 1.21e-3;
