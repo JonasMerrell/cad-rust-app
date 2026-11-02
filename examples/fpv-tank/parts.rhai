@@ -579,6 +579,22 @@ fn posed(gun, gx, gz, deg) {
     for g in gun { out.push(#{name: g.name, shape: g.shape.rotate(vec3(gx, 0, gz), vec3(0, 1, 0), -deg), color: g.color}); }
     out
 }
+// fourth argument "project": write every part where it sits in the tank, one STEP each, and a list of
+// them, for building an rCAD project (make_project.py)
+if ARGS.len() > 1 && ARGS[1] == "project" {
+    let list = [];
+    let i = 0;
+    // the gun drum as its two printed halves
+    let parts = asm + [#{name: "gun-drum-left", shape: drum_l, color: DECK_C}, #{name: "gun-drum-right", shape: drum_r, color: DECK_C}];
+    for g in gun { if g.name != "gun-drum" { parts.push(g); } }
+    for a in parts {
+        let file = "part" + (if i < 10 { "0" } else { "" }) + i + ".step";
+        export_step(a.shape, out + file);
+        list.push(#{file: file, name: a.name, color: a.color});
+        i += 1;
+    }
+    return list;
+}
 // clashes of the gun with everything else at full depression and full elevation
 let gun_clashes = [];
 for deg in [ELEV[0], 0.0, ELEV[1]] {

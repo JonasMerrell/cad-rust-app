@@ -18,6 +18,15 @@ should be none). The `stl/` folder here has a build of the STLs.
 <img alt="From the front" src="fpv-tank-front.png" width="49%"> <img alt="Gun elevated 15°" src="fpv-tank-elevated.png" width="49%">
 <img alt="Side view, gun elevated 15°" src="fpv-tank-elevated-side.png" width="100%">
 
+## rCAD project
+
+    python3 examples/fpv-tank/make_project.py <path to rcad> out
+
+writes `out/FPV Tank.zip`, an rCAD project: open it with File > Import project. Its Part Studio
+has all 35 parts where they sit in the tank, named and coloured, with their materials, and the
+project folder also holds the scripts, this README and the print STLs (`print/`). It takes about
+4 minutes, most of it rCAD importing each part.
+
 ## Motion check
 
     rcad script examples/fpv-tank/parts.rhai out motion
