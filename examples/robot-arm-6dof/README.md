@@ -13,6 +13,8 @@ cut part (`cut-*.step`), the whole arm posed and stretched out as STEP, four ren
 
 ![The arm, posed](robot-arm-6dof.png)
 
+![From behind: the belt cover and J2 motor cap](robot-arm-6dof-back.png)
+
 ## Layout
 
 | | |
@@ -21,7 +23,12 @@ cut part (`cut-*.step`), the whole arm posed and stretched out as STEP, four ren
 | J2 height | 222 mm above the table |
 | Wrist | spherical: J4, J5 and J6 meet at one point, so inverse kinematics has a closed form |
 | Arm mass | about 7.2 kg without the tool |
-| Materials | PA-CF (carbon-filled nylon) for every printed part, which the heated chamber and hardened nozzle handle |
+| Materials | PA-CF (carbon-filled nylon) for every structural print, which the heated chamber and hardened nozzle handle; ASA for the cosmetic parts (base drum, gearbox cover rings, motor caps, belt cover) |
+
+The links are rounded, filleted shells rather than plates: teardrop hubs taper into the upper arm
+tube, the elbow is a closed housing around the J4 motor, and the base is a tapered drum. Motors that
+stick out of their brackets get vented caps, and a band closes the J2 belt bay. The renders show
+the structure in graphite (PA-CF) with orange accents (ASA).
 
 The upper arm is a 40×40×2 aluminium square tube cut to 180 mm with four Ø4.3 holes; everything else
 structural is printed. The base plate is 8 mm aluminium with drilled holes only. Every printed part

@@ -27,6 +27,25 @@ fn ring_holes(n, pcd, a0, z0, r, h) {
 
 fn ycyl(x, y0, z, r, h) { cylinder(vec3(x, y0, z), vec3(0, 1, 0), r, h) }
 
+// fillet every edge, or half as much if that fails, or leave it
+fn soft(s, r) {
+    try { return s.fillet(r); } catch (e) { }
+    try { return s.fillet(r * 0.5); } catch (e) { }
+    s
+}
+
+fn circle_pts(cx, cz, r, n) {
+    let pts = [];
+    for i in 0..n { let a = 6.283185307179586 * i / n; pts.push([cx + r * cos(a), cz + r * sin(a)]); }
+    pts
+}
+
+// planar face of the convex hull of 2D points, in the XY plane at z = c or the XZ plane at y = c
+fn hull_face(pts, plane, c) {
+    let h = convex_hull(pts);
+    if plane == "xy" { face(wire(h.map(|p| [p.x, p.y, c]), true)) } else { face(wire(h.map(|p| [p.x, c, p.y]), true)) }
+}
+
 fn ring(z0, ri, ro, h) { zcyl(0, 0, z0, ro, h).cut([zcyl(0, 0, z0 - 1, ri, h + 2)]) }
 
 // cycloid disc outline for N ring pins of radius Rr on radius R, eccentricity E (N - 1 lobes)
@@ -71,7 +90,7 @@ fn actuator(s) {
     for i in 0..N { let a = 6.283185307179586 * i / N; hc.push(zcyl(s.R * cos(a), s.R * sin(a), s.tr - 3, s.Rr, z.b0 - s.tr + 3.01)); }
     let cover_pcd = s.bod / 2.0 + rr;
     hc += ring_holes(6, s.pcd_mount, 0, -1, 2.0, 9) + ring_holes(6, cover_pcd, 30, z.top - 8, 2.0, 9);
-    let housing = zcyl(0, 0, 0, rr, z.top).cut(hc);
+    let housing = soft(zcyl(0, 0, 0, rr, z.top), 2.0).cut(hc);
     // discs
     let prof = offset2d(face(wire(cyc_pts(s.R, s.Rr, s.E, N, (N - 1) * 16), true)), -0.08)[0];
     // the second disc is the first turned half a lobe; its bore and output holes stay on the same pattern
@@ -83,7 +102,7 @@ fn actuator(s) {
     let fr = s.flange_od / 2.0;
     let carrier = fuse([zcyl(0, 0, z.b0, s.bid / 2.0, s.bw), zcyl(0, 0, z.top, fr, 6)]).unify()
         .cut([zcyl(0, 0, z.b0 - 1, 4, 20)] + ring_holes(s.nout, 2.0 * s.rh, 0, z.b0 - 1, s.rp, 9) + ring_holes(6, s.flange_od - 12.0, 30, z.out - 8, 2.0, 9));
-    let cover = ring(z.top, fr + 1.0, rr, 3).cut(ring_holes(6, cover_pcd, 30, z.top - 1, 1.7, 5));
+    let cover = soft(ring(z.top, fr + 1.0, rr, 3), 1.0).cut(ring_holes(6, cover_pcd, 30, z.top - 1, 1.7, 5));
     // cam on the motor shaft: collar, two eccentrics, D-bore
     let cam = fuse([zcyl(0, 0, 2.5, 8, z.d1 - 2.5), zcyl(s.E, 0, z.d1, s.ebid / 2.0, s.d + 0.5), zcyl(-s.E, 0, z.d2 - 0.5, s.ebid / 2.0, s.d + 0.5)]).unify()
         .cut([zcyl(0, 0, 0, if s.belt { 4.0 } else { 2.55 }, z.d2 + s.d + 1)]);
@@ -163,23 +182,28 @@ let base_plate = block(vec3(-110, -110, 0), vec3(110, 110, 8)).cut(
     ring_holes(4, 268.7, 45, -1, 3.3, 10) + ring_holes(6, 150, 0, -1, 2.2, 10) + [zcyl(-60, 0, -1, 8, 10)]);
 base_plate = base_plate.fillet(base_plate.edges().filter(|e| e.kind() == "line" && abs(e.start().z - e.end().z) > 1.0), 10);
 
-// base housing Ø170: wall 4, inner lip at the bottom for the plate screws, 8 mm deck carrying J1
-let bh_cuts = [zcyl(0, 0, 12, 81, zB - 8.0 - 12.0), zcyl(0, 0, 7, 69, 6), block(vec3(-21.9, -21.9, zB - 9.0), vec3(21.9, 21.9, zB + 1.0)),
+// base housing: a tapered, filleted drum (Ø172 at the foot, Ø148 at the deck), wall about 4,
+// inner lip at the bottom for the plate screws, 8 mm deck carrying J1, cable notch at the back
+let bh_outer = soft(revolve([[0, 8], [86, 8], [86, 16], [78, zB - 6.0], [74, zB], [0, zB]], 360.0), 3.0);
+let bh_inner = revolve([[0, 12], [82, 12], [82, 16], [74.5, zB - 8.0], [0, zB - 8.0]], 360.0);
+let bh_cuts = [bh_inner, zcyl(0, 0, 7, 69, 6), block(vec3(-21.9, -21.9, zB - 9.0), vec3(21.9, 21.9, zB + 1.0)),
     block(vec3(-90, -22, 14), vec3(-70, 22, 40))]
     + ring_holes(6, 150, 0, 7, 2.0, 9) + ring_holes(6, 104, 0, zB - 9.0, 1.7, 10) + ring_holes(6, 104, 0, zB - 9.0, 3.2, 4.0);
-let base_housing = zcyl(0, 0, 8, 85, zB - 8.0).cut(bh_cuts);
+let base_housing = bh_outer.cut(bh_cuts);
 
-// turntable + tower + belt bay: disc on J1, plate carrying J2, then a 25 mm bay for the 2:1 GT2 belt
-// and an outrigger plate carrying the J2 motor (behind the axis, shaft pointing back into the bay).
+// turntable + tower + belt bay: disc on J1, gable-shaped plate carrying J2, a 25 mm bay for the 2:1 GT2
+// belt, and an outrigger plate carrying the J2 motor (behind the axis, shaft pointing back into the bay).
 // The J2 input is an Ø8 shaft from the cam through 608 bearings in the tower and the outrigger.
+// A printed belt cover closes the bay between the two plates and stiffens them.
 let tw_y0 = yR;  let tw_y1 = yR + 10.0;
 let or_y0 = tw_y1 + 25.0;  let or_y1 = or_y0 + 8.0;
 let xM2 = -58.0;           // J2 motor axis, 58 mm behind J2 (GT2 20T -> 40T)
 let tt_z0 = z1o;  let tt_z1 = z1o + tt;
-let ttable = fuse([zcyl(0, 0, tt_z0, 60, tt), block(vec3(-92, -20, tt_z0), vec3(60, or_y1, tt_z1))]).unify();
-let tower = fuse([block(vec3(-92, tw_y0, tt_z1 - 1.0), vec3(60, tw_y1, H2)), cylinder(vec3(0, tw_y0, H2), vec3(0, 1, 0), 62, 10)]).unify();
-let outrigger = block(vec3(-92, or_y0, tt_z1 - 1.0), vec3(52, or_y1, H2 + 30.0));
-let walls = [block(vec3(-92, tw_y1 - 1.0, tt_z1 - 1.0), vec3(-84, or_y0 + 1.0, H2 + 30.0)), block(vec3(44, tw_y1 - 1.0, tt_z1 - 1.0), vec3(52, or_y0 + 1.0, H2 + 30.0))];
+let ttable = extrude(hull_face(circle_pts(0, 0, 60, 48) + circle_pts(-82, or_y1 - 10.0, 10, 16) + circle_pts(50, or_y1 - 10.0, 10, 16), "xy", tt_z0), vec3(0, 0, tt));
+let tower_outline = circle_pts(0, H2, 62, 48) + [[-92, tt_z1 - 1.0], [60, tt_z1 - 1.0]];
+let tower = extrude(hull_face(tower_outline, "xz", tw_y0), vec3(0, 10, 0));
+let or_outline = circle_pts(0, H2, 32, 32) + circle_pts(xM2, H2, 34, 32) + [[-92, tt_z1 - 1.0], [52, tt_z1 - 1.0]];
+let outrigger = extrude(hull_face(or_outline, "xz", or_y0), vec3(0, 8, 0));
 let tw_cuts = [ycyl(0, tw_y0 - 1.0, H2, 6, 12), ycyl(0, tw_y1 - 7.0, H2, 11, 8), ycyl(0, or_y0 - 1.0, H2, 5, 10), ycyl(0, or_y0 - 1.0, H2, 11, 8),
                ycyl(xM2, or_y0 - 1.0, H2, 11.25, 10)];
 for p in [[15.5, 15.5], [-15.5, 15.5], [15.5, -15.5], [-15.5, -15.5]] { tw_cuts.push(ycyl(xM2 + p[0], or_y0 - 1.0, H2 + p[1], 1.7, 10)); }
@@ -190,7 +214,11 @@ for i in 0..6 {
 }
 for i in 0..6 { let a = (30.0 + 60.0 * i).to_radians(); tw_cuts.push(zcyl(31 * cos(a), 31 * sin(a), tt_z0 - 1.0, 1.7, tt + 2.0)); tw_cuts.push(zcyl(31 * cos(a), 31 * sin(a), tt_z1 - 3.5, 3.2, 4)); }
 tw_cuts.push(zcyl(0, 0, tt_z0 - 1.0, 8, tt + 2.0));
-let turntable = fuse([ttable, tower, outrigger] + walls).unify().cut(tw_cuts);
+let turntable = fuse([soft(ttable, 3.0), soft(tower, 3.0), soft(outrigger, 2.5)]).unify().cut(tw_cuts);
+// belt cover: a 2.5 mm band following the outrigger outline, from the tower to the outrigger
+let bc_face = hull_face(or_outline, "xz", tw_y1);
+let belt_cover = extrude(bc_face, vec3(0, 25, 0)).cut([extrude(offset2d(bc_face, -2.5)[0], vec3(0, 25, 0)).translate(vec3(0, 0, 0)),
+    block(vec3(-200, tw_y1 - 1.0, tt_z1 - 10.0), vec3(200, or_y0 + 1.0, tt_z1 + 1.5))]);
 
 // belt stage: pulleys, belt loop, input shaft, motor
 fn loop_xz(c1, r1, c2, r2, y0, w) {
@@ -205,6 +233,7 @@ let pulley40 = fuse([ycyl(0, by - 1.5, H2, 14.5, 1.5), ycyl(0, by, H2, 12.73, 6)
 let pulley20 = fuse([ycyl(xM2, by - 1.5, H2, 8, 1.5), ycyl(xM2, by, H2, 6.37, 6), ycyl(xM2, by + 6.0, H2, 8, 1.5), ycyl(xM2, by + 7.5, H2, 7, 7)]).unify().cut([ycyl(xM2, by - 3.0, H2, 2.5, 20)]);
 let j2_shaft = ycyl(0, yR - 23.0, H2, 4, or_y1 + 2.0 - (yR - 23.0));
 let j2_motor = nema17(60.0).rotate(vec3(0, 0, 0), vec3(1, 0, 0), 90.0).translate(vec3(xM2, or_y1, H2));
+let j2_cap = motor_cap(63.0).rotate(vec3(0, 0, 0), vec3(1, 0, 0), 90.0).translate(vec3(xM2, or_y1, H2));
 let j2_608 = compound([ycyl(0, tw_y1 - 7.0, H2, 11, 7).cut([ycyl(0, tw_y1 - 8.0, H2, 4, 9)]), ycyl(0, or_y0, H2, 11, 7).cut([ycyl(0, or_y0 - 1.0, H2, 4, 9)])]);
 
 // upper arm: 40x40x2 aluminium tube between a shoulder hub (on J2) and an elbow hub (carries J3)
@@ -215,7 +244,7 @@ let upper_tube = block(vec3(tube_x0, -20, H2 - 20.0), vec3(tube_x1, 20, H2 + 20.
        cylinder(vec3(L1 - 45.0, -30, H2), vec3(0, 1, 0), 2.15, 60), cylinder(vec3(L1 - 65.0, -30, H2), vec3(0, 1, 0), 2.15, 60)]);
 
 
-// shoulder hub: disc around J2, socket for the tube along +X, J2 carrier screws from the -Y side
+// shoulder hub: a teardrop around J2 tapering into the tube socket, J2 carrier screws from the -Y side
 let sh_cuts = [block(vec3(tube_x0, -TS / 2.0, H2 - TS / 2.0), vec3(80, TS / 2.0, H2 + TS / 2.0)), ycyl(0, -wH - 1.0, H2, 8, 2.0 * wH + 2.0),
                ycyl(45, -wH - 1.0, H2, 2.15, 2.0 * wH + 2.0), ycyl(65, -wH - 1.0, H2, 2.15, 2.0 * wH + 2.0)];
 for i in 0..6 {
@@ -223,9 +252,10 @@ for i in 0..6 {
     sh_cuts.push(ycyl(31 * cos(a), -wH - 1.0, H2 + 31 * sin(a), 1.7, 2.0 * wH + 2.0));
     sh_cuts.push(ycyl(31 * cos(a), -wH - 1.0, H2 + 31 * sin(a), 3.2, 2.0 * wH - 6.0));
 }
-let shoulder_hub = fuse([ycyl(0, -wH, H2, 40, 2.0 * wH), block(vec3(0, -wH, H2 - 28.0), vec3(75, wH, H2 + 28.0))]).unify().cut(sh_cuts);
+let sh_body = extrude(hull_face(circle_pts(0, H2, 40, 48) + circle_pts(69, H2 - 22.0, 6, 12) + circle_pts(69, H2 + 22.0, 6, 12), "xz", -wH), vec3(0, 2.0 * wH, 0));
+let shoulder_hub = soft(sh_body, 4.0).cut(sh_cuts);
 
-// elbow hub: disc around J3 with the J3 motor pocket, socket for the tube along -X; J3 bolts to its +Y face
+// elbow hub: a teardrop around J3 with the J3 motor pocket, tapering into the tube socket; J3 bolts to its +Y face
 let eh_cuts = [block(vec3(L1 - 86.0, -TS / 2.0, H2 - TS / 2.0), vec3(L1 - 30.0, TS / 2.0, H2 + TS / 2.0)),
                block(vec3(L1 - 21.9, -wH - 1.0, H2 - 21.9), vec3(L1 + 21.9, wH + 1.0, H2 + 21.9)),
                ycyl(L1 - 45.0, -wH - 1.0, H2, 2.15, 2.0 * wH + 2.0), ycyl(L1 - 65.0, -wH - 1.0, H2, 2.15, 2.0 * wH + 2.0)];
@@ -234,26 +264,25 @@ for i in 0..6 {
     eh_cuts.push(ycyl(L1 + 44 * cos(a), -wH - 1.0, H2 + 44 * sin(a), 1.7, 2.0 * wH + 2.0));
     eh_cuts.push(ycyl(L1 + 44 * cos(a), -wH - 1.0, H2 + 44 * sin(a), 3.2, 2.0 * wH - 6.0));
 }
-let elbow_hub = fuse([ycyl(L1, -wH, H2, 52, 2.0 * wH), block(vec3(L1 - 85.0, -wH, H2 - 28.0), vec3(L1, wH, H2 + 28.0))]).unify().cut(eh_cuts);
+let eh_body = extrude(hull_face(circle_pts(L1, H2, 52, 48) + circle_pts(L1 - 79.0, H2 - 22.0, 6, 12) + circle_pts(L1 - 79.0, H2 + 22.0, 6, 12), "xz", -wH), vec3(0, 2.0 * wH, 0));
+let elbow_hub = soft(eh_body, 4.0).cut(eh_cuts);
 
-// elbow block: plate on the J3 carrier, plate across X carrying J4 (motor through it), bottom web
+// elbow housing: a closed box around the J4 motor: side plate on the J3 carrier, end plate carrying J4,
+// top, bottom and outer walls; open at the back for the wiring
 let eb_y0 = yJ3o;  let eb_y1 = yF + 42.0;
-let eb_cuts = [block(vec3(xJ4 - 11.0, yF - 21.9, H2 - 21.9), vec3(xJ4 + 1.0, yF + 21.9, H2 + 21.9)), ycyl(L1, eb_y0 - 1.0, H2, 8, 12)];
+let eb_cuts = [block(vec3(xJ4 - 11.0, yF - 21.9, H2 - 21.9), vec3(xJ4 + 1.0, yF + 21.9, H2 + 21.9)), ycyl(L1, eb_y0 - 1.0, H2, 8, 12),
+               block(vec3(L1 - 60.0, eb_y0 + 10.0, H2 - 37.0), vec3(xJ4 - 10.0, eb_y1 - 4.0, H2 + 37.0))];
 for i in 0..6 {
     let a = (30.0 + 60.0 * i).to_radians();
     eb_cuts.push(ycyl(L1 + 26 * cos(a), eb_y0 - 1.0, H2 + 26 * sin(a), 1.7, 12));
     let b = (30.0 + 60.0 * i).to_radians();   // J4 housing inserts (local 60i) after RY(90)
     eb_cuts.push(cylinder(vec3(xJ4 + 1.0, yF + 35 * cos(b), H2 + 35 * sin(b)), vec3(-1, 0, 0), 1.7, 12));
-    eb_cuts.push(cylinder(vec3(xJ4 - 7.0, yF + 35 * cos(b), H2 + 35 * sin(b)), vec3(-1, 0, 0), 3.2, 5));
 }
-let elbow_block = fuse([
-    fuse([ycyl(L1, eb_y0, H2, 42, 10), block(vec3(L1, eb_y0, H2 - 42.0), vec3(xJ4, eb_y0 + 10.0, H2 + 42.0))]).unify(),
-    block(vec3(xJ4 - 10.0, eb_y0, H2 - 42.0), vec3(xJ4, eb_y1, H2 + 42.0)),
-    block(vec3(L1 + 10.0, eb_y0, H2 - 42.0), vec3(xJ4, eb_y1, H2 - 34.0)),
-    block(vec3(L1 + 10.0, eb_y0, H2 + 34.0), vec3(xJ4, eb_y1, H2 + 42.0)),
-]).unify().cut(eb_cuts);
+let eb_box = block(vec3(L1 + 4.0, eb_y0, H2 - 42.0), vec3(xJ4, eb_y1, H2 + 42.0));
+let eb_side = extrude(hull_face(circle_pts(L1, H2, 42, 48) + [[xJ4, H2 - 42.0], [xJ4, H2 + 42.0]], "xz", eb_y0), vec3(0, 10, 0));
+let elbow_block = soft(fuse([eb_side, soft(eb_box, 10.0)]).unify(), 2.0).cut(eb_cuts);
 
-// forearm, one print: flange on the J4 carrier, hollow box, bridge across to the J5 cheek
+// forearm, one print: flange on the J4 carrier, hollow rounded box, bridge across to the J5 cheek
 let xa = W - 55.0;
 let fcheek_y0 = yJ5r - 10.0;
 let fa_cuts = [block(vec3(xJ4o + 8.0, yF - 23.0, H2 - 23.0), vec3(xa - 50.0, yF + 23.0, H2 + 23.0)),
@@ -267,19 +296,14 @@ for i in 0..6 {
     fa_cuts.push(ycyl(W + 32 * cos(b), fcheek_y0 - 1.0, H2 + 32 * sin(b), 1.7, 12));
     fa_cuts.push(ycyl(W + 32 * cos(b), fcheek_y0 - 1.0, H2 + 32 * sin(b), 3.2, 4));
 }
-let cheek_pts = [];
-for i in 0..24 { let a = TAU * i / 24; cheek_pts.push([W + 40.0 * cos(a), H2 + 40.0 * sin(a)]); }
-for p in [[xa - 50.0, H2 - 28.0], [xa - 50.0, H2 + 28.0]] { cheek_pts.push(p); }
-let hull = convex_hull(cheek_pts);
-let cheek_face = face(wire(hull.map(|p| [p.x, fcheek_y0, p.y]), true));
-let forearm = fuse([
-    cylinder(vec3(xJ4o, yF, H2), vec3(1, 0, 0), 30, 8),
-    block(vec3(xJ4o, yF - 28.0, H2 - 28.0), vec3(xa, yF + 28.0, H2 + 28.0)),
-    block(vec3(xa - 50.0, fcheek_y0, H2 - 28.0), vec3(xa, yF - 23.0, H2 + 28.0)),
+let cheek_face = hull_face(circle_pts(W, H2, 40, 48) + [[xa - 50.0, H2 - 28.0], [xa - 50.0, H2 + 28.0]], "xz", fcheek_y0);
+let fa_box = fuse([block(vec3(xJ4o, yF - 28.0, H2 - 28.0), vec3(xa, yF + 28.0, H2 + 28.0)), block(vec3(xa - 50.0, fcheek_y0 + 5.0, H2 - 28.0), vec3(xa, yF, H2 + 28.0))]).unify();
+let forearm = soft(fuse([
+    soft(fa_box, 8.0),
     extrude(cheek_face, vec3(0, 10, 0)),
-]).unify().cut(fa_cuts);
+]).unify(), 2.0).cut(fa_cuts);
 
-// wrist link: plate on the J5 carrier, plate across X carrying J6 (pancake motor through it)
+// wrist link: teardrop plate on the J5 carrier, round plate across X carrying J6 (pancake motor through it)
 let wl_y0 = yJ5o;  let wl_y1 = yF + 38.0;
 let wl_cuts = [block(vec3(xJ6 - 9.0, yF - 21.9, H2 - 21.9), vec3(xJ6 + 1.0, yF + 21.9, H2 + 21.9)), ycyl(W, wl_y0 - 1.0, H2, 5, 10)];
 for i in 0..6 {
@@ -288,10 +312,25 @@ for i in 0..6 {
     let b = (30.0 + 60.0 * i).to_radians();   // J6 housing inserts after RY(90)
     wl_cuts.push(cylinder(vec3(xJ6 + 1.0, yF + 32 * cos(b), H2 + 32 * sin(b)), vec3(-1, 0, 0), 1.7, 10));
 }
-let wrist_link = fuse([
-    fuse([ycyl(W, wl_y0, H2, 28, 8), block(vec3(W, wl_y0, H2 - 28.0), vec3(xJ6, wl_y0 + 8.0, H2 + 28.0))]).unify(),
-    block(vec3(xJ6 - 8.0, wl_y0, H2 - 38.0), vec3(xJ6, wl_y1, H2 + 38.0)),
-]).unify().cut(wl_cuts);
+let wrist_link = soft(fuse([
+    extrude(hull_face(circle_pts(W, H2, 28, 32) + [[xJ6, H2 - 34.0], [xJ6, H2 + 34.0]], "xz", wl_y0), vec3(0, 8, 0)),
+    soft(cylinder(vec3(xJ6 - 8.0, yF, H2), vec3(1, 0, 0), 38, 8), 2.0),
+    block(vec3(xJ6 - 8.0, wl_y0, H2 - 28.0), vec3(xJ6, yF, H2 + 28.0)),
+]).unify(), 1.5).cut(wl_cuts);
+
+// motor caps (printed, accent colour): a shell over each motor end that sticks out of its bracket
+fn motor_cap(len) {
+    let shell = soft(zcyl(0, 0, -len, 31.5, len), 6.0);
+    let vents = [];
+    for i in 0..8 { let a = (22.5 + 45.0 * i).to_radians(); vents.push(zcyl(18 * cos(a), 18 * sin(a), -len - 1.0, 2.5, 4)); }
+    shell.cut([zcyl(0, 0, -len + 2.0, 29.6, len)] + vents)
+}
+// in each actuator's local frame: the cap starts where the bracket ends
+let caps = #{
+    J3: place(motor_cap(13.0).translate(vec3(0, 0, -2.0 * wH)), act_place.J3),
+    J5: place(motor_cap(27.0).translate(vec3(0, 0, -10.0)), act_place.J5),
+    J6: place(motor_cap(18.0).translate(vec3(0, 0, -8.0)), act_place.J6),
+};
 
 // ================================================================ tool changer
 // Arm side: Ø68 x 12 on the J6 carrier. Kinematic coupling: three V-grooves made of pairs of Ø4 dowels
@@ -365,12 +404,18 @@ for jn in joints { act[jn.j] = actuator(jn.spec); }
 // group: which joint moves it (base, J1 ... J6, tool). kind: printed / bought / cut
 let parts = [];
 fn add(name, shape, group, kind, material, color) { this.push(#{name: name, shape: shape, group: group, kind: kind, material: material, color: color}); }
-let C_P = "#e8742a";  let C_D = "#3a3f45";  let C_AL = "#c4ccd4";  let C_M = "#2b2f33";  let C_ST = "#7d858c";
+// render colours: PA-CF structure in graphite, cosmetic covers and caps in orange ASA
+let C_P = "#41464d";  let C_H = "#565d66";  let C_A = "#f07a1c";  let C_D = "#2f3338";  let C_AL = "#c9d0d6";  let C_M = "#24272b";  let C_ST = "#8a9299";
 parts.add("Base plate", base_plate, "base", "cut", "Aluminium 6061", C_AL);
-parts.add("Base housing", base_housing, "base", "printed", "PA-CF", C_P);
+parts.add("Base housing", base_housing, "base", "printed", "ASA", "#e9e7e2");
 parts.add("Controller board", controller, "base", "bought", "PCB", "#1f6e3a");
 parts.add("Turntable", turntable, "J1", "printed", "PA-CF", C_P);
 parts.add("J2 L50 motor", j2_motor, "J1", "bought", "motor", C_M);
+parts.add("Belt cover", belt_cover, "J1", "printed", "ASA", C_A);
+parts.add("Motor cap J2", j2_cap, "J1", "printed", "ASA", C_A);
+parts.add("Motor cap J3", caps.J3, "J2", "printed", "ASA", C_A);
+parts.add("Motor cap J5", caps.J5, "J4", "printed", "ASA", C_A);
+parts.add("Motor cap J6", caps.J6, "J5", "printed", "ASA", C_A);
 parts.add("J2 GT2 pulley 40T", pulley40, "J1", "bought", "Aluminium 6061", "#d6a83a");
 parts.add("J2 GT2 pulley 20T", pulley20, "J1", "bought", "Aluminium 6061", "#d6a83a");
 parts.add("J2 GT2 belt 6 mm", belt, "J1", "bought", "PCB", "#202326");
@@ -379,10 +424,10 @@ parts.add("J2 input bearings 608", j2_608, "J1", "bought", "Steel", C_ST);
 parts.add("Shoulder hub", shoulder_hub, "J2", "printed", "PA-CF", C_P);
 parts.add("Upper arm tube 40x40x2", upper_tube, "J2", "cut", "Aluminium 6061", C_AL);
 parts.add("Elbow hub", elbow_hub, "J2", "printed", "PA-CF", C_P);
-parts.add("Elbow block", elbow_block, "J3", "printed", "PA-CF", C_P);
+parts.add("Elbow housing", elbow_block, "J3", "printed", "PA-CF", C_P);
 parts.add("Forearm", forearm, "J4", "printed", "PA-CF", C_P);
 parts.add("Wrist link", wrist_link, "J5", "printed", "PA-CF", C_P);
-parts.add("Tool changer (arm side)", tc_arm, "J6", "printed", "PA-CF", C_D);
+parts.add("Tool changer (arm side)", tc_arm, "J6", "printed", "PA-CF", C_A);
 parts.add("V-groove dowels 4x12", compound(vpins), "J6", "bought", "Steel", C_ST);
 parts.add("Magnets 10x3 (arm)", compound(magnets), "J6", "bought", "NdFeB", "#9aa3ab");
 parts.add("Pogo connector 8-pin", pogo, "J6", "bought", "Brass", "#d6a83a");
@@ -390,8 +435,8 @@ parts.add("Tool plate", tool_plate, "tool", "printed", "PA-CF", C_D);
 parts.add("Coupling balls 8", compound(balls), "tool", "bought", "Steel", C_ST);
 parts.add("Magnets 10x3 (tool)", compound(tool_magnets), "tool", "bought", "NdFeB", "#9aa3ab");
 parts.add("Tool pad PCB", pad_pcb, "tool", "bought", "PCB", "#1f6e3a");
-parts.add("Example tool body", tool_body, "tool", "printed", "PA-CF", "#4a7bd0");
-parts.add("Example tool fingers", tool_fingers, "tool", "printed", "PA-CF", "#2c3e60");
+parts.add("Example tool body", tool_body, "tool", "printed", "PA-CF", C_H);
+parts.add("Example tool fingers", tool_fingers, "tool", "printed", "PA-CF", C_A);
 
 // an actuator's stator (housing, cover, pins, bearings outer, motor) moves with the link it is bolted to,
 // its output side (carrier, output pins) with the next link. Mount links: J1 on base, J2 on J1, J3 on J2,
@@ -399,21 +444,21 @@ parts.add("Example tool fingers", tool_fingers, "tool", "printed", "PA-CF", "#2c
 let mount_of = #{J1: "base", J2: "J1", J3: "J2", J4: "J3", J5: "J4", J6: "J5"};
 for jn in joints {
     let a = act[jn.j];  let p = act_place[jn.j];  let n = jn.j + " " + jn.spec.name;  let g = mount_of[jn.j];
-    parts.add(n + " housing", place(a.housing, p), g, "printed", "PA-CF", "#d9662a");
-    parts.add(n + " cover", place(a.cover, p), g, "printed", "PA-CF", "#d9662a");
+    parts.add(n + " housing", place(a.housing, p), g, "printed", "PA-CF", C_H);
+    parts.add(n + " cover", place(a.cover, p), g, "printed", "ASA", C_A);
     parts.add(n + " cycloid disc A", place(a.disc1, p), g, "printed", "PA-CF", C_D);
     parts.add(n + " cycloid disc B", place(a.disc2, p), g, "printed", "PA-CF", C_D);
     parts.add(n + " cam", place(a.cam, p), g, "printed", "PA-CF", "#555b62");
     parts.add(n + " ring pins", place(a.pins, p), g, "bought", "Steel", C_ST);
     parts.add(n + " bearings", place(a.bearings, p), g, "bought", "Steel", C_ST);
     if type_of(a.motor) != "()" { parts.add(n + " motor", place(a.motor, p), g, "bought", "motor", C_M); }
-    parts.add(n + " carrier", place(a.carrier, p), jn.j, "printed", "PA-CF", "#b0b8c0");
+    parts.add(n + " carrier", place(a.carrier, p), jn.j, "printed", "PA-CF", C_D);
     parts.add(n + " output pins", place(a.opins, p), jn.j, "bought", "Steel", C_ST);
 }
 
 // ================================================================ mass and torque
 // PA-CF printed with 4 walls and 40 % gyroid comes out near 65 % of solid; bearings ~70 % of a solid ring
-let density = #{"PA-CF": 1.20e-3 * 0.65, "Aluminium 6061": 2.70e-3, "Steel": 7.85e-3, "NdFeB": 7.5e-3, "Brass": 8.5e-3, "PCB": 1.9e-3};
+let density = #{"PA-CF": 1.20e-3 * 0.65, "ASA": 1.07e-3 * 0.5, "Aluminium 6061": 2.70e-3, "Steel": 7.85e-3, "NdFeB": 7.5e-3, "Brass": 8.5e-3, "PCB": 1.9e-3};
 let motor_mass = #{};
 for jn in joints { motor_mass[jn.j + " " + jn.spec.name + " motor"] = jn.spec.motor_mass; }
 let order = ["base", "J1", "J2", "J3", "J4", "J5", "J6", "tool"];
@@ -478,8 +523,10 @@ fn posed(s, group, pose, axes) {
 let checks = [];
 fn find(parts, name) { for p in parts { if p.name == name { return p.shape; } } () }
 for pair in [["Turntable", "J2 L50 housing"], ["Turntable", "J2 L50 motor"], ["Turntable", "J2 GT2 pulley 40T"], ["Turntable", "J2 GT2 pulley 20T"], ["Turntable", "J2 GT2 belt 6 mm"], ["J2 L50 cam", "J2 input shaft 8 mm"], ["Turntable", "J2 input shaft 8 mm"], ["Shoulder hub", "J2 L50 carrier"], ["Shoulder hub", "J2 L50 housing"],
-             ["Elbow hub", "J3 M30 housing"], ["Elbow hub", "J3 M30 motor"], ["Upper arm tube 40x40x2", "Elbow hub"], ["Elbow block", "J3 M30 housing"],
-             ["Elbow block", "J4 S20 motor"], ["Elbow block", "J4 S20 housing"], ["Forearm", "J4 S20 housing"], ["Forearm", "J5 XS20 housing"],
+             ["Elbow hub", "J3 M30 housing"], ["Elbow hub", "J3 M30 motor"], ["Upper arm tube 40x40x2", "Elbow hub"], ["Elbow housing", "J3 M30 housing"],
+             ["Elbow housing", "J4 S20 motor"], ["Belt cover", "J2 GT2 pulley 40T"], ["Belt cover", "J2 GT2 belt 6 mm"], ["Belt cover", "Turntable"],
+             ["Motor cap J2", "J2 L50 motor"], ["Motor cap J3", "J3 M30 motor"], ["Motor cap J3", "Elbow hub"], ["Motor cap J5", "J5 XS20 motor"], ["Motor cap J5", "Forearm"],
+             ["Motor cap J6", "J6 XS20P motor"], ["Motor cap J6", "Wrist link"], ["Motor cap J6", "J5 XS20 housing"], ["Elbow housing", "J4 S20 housing"], ["Forearm", "J4 S20 housing"], ["Forearm", "J5 XS20 housing"],
              ["Forearm", "J5 XS20 motor"], ["Wrist link", "J5 XS20 housing"], ["Wrist link", "J6 XS20P motor"], ["Wrist link", "J6 XS20P housing"],
              ["Forearm", "J6 XS20P housing"], ["Tool changer (arm side)", "J6 XS20P housing"], ["Tool plate", "Tool changer (arm side)"],
              ["Tool plate", "V-groove dowels 4x12"], ["Coupling balls 8", "V-groove dowels 4x12"], ["Base housing", "J1 L30 motor"],
@@ -511,8 +558,9 @@ for p in parts {
 }
 export_step(shapes_posed, out + "robot-arm-6dof-posed.step");
 export_step(parts.map(|p| p.shape), out + "robot-arm-6dof-stretched.step");
-render(placed, #{path: out + "robot-arm-6dof.png", width: 1600, height: 1200, view: "iso"});
-render(stretched, #{path: out + "robot-arm-6dof-stretched.png", width: 1600, height: 900, view: "front"});
+render(placed, #{path: out + "robot-arm-6dof.png", width: 1600, height: 1200, eye: [900, -1050, 700], target: [170, 40, 250], up: [0, 0, 1], fov: 28, background: "#f3f4f6"});
+render(placed, #{path: out + "robot-arm-6dof-back.png", width: 1600, height: 1200, eye: [-750, 1050, 650], target: [130, 40, 250], up: [0, 0, 1], fov: 28, background: "#f3f4f6"});
+render(stretched, #{path: out + "robot-arm-6dof-stretched.png", width: 1600, height: 900, view: "front", background: "#f3f4f6"});
 // one gearbox, opened up: housing at 35 % so the discs and pins show
 let a2 = act["J2"];
 render([#{shape: a2.housing, color: "#d9662a", opacity: 0.35}, #{shape: a2.disc1, color: C_D}, #{shape: a2.disc2, color: "#6b7178"},
