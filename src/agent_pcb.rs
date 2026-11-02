@@ -337,11 +337,48 @@ impl Session {
                     let nr = p.net_rules(&nl, &net);
                     p.board.vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net });
                 }
-                let auto = a.get("auto").and_then(|v| v.as_bool()).unwrap_or(a.get("tracks").is_none() && a.get("vias").is_none());
                 let mut v = json!({});
+                // differential pairs first, so the autorouter goes round them
+                let mut pairs_out = vec![];
+                if let Some(which) = a.get("pairs").and_then(|v| v.as_array()) {
+                    let names: Vec<&str> = which.iter().filter_map(|x| x.as_str()).collect();
+                    let list: Vec<pcb::DiffPair> = p.board.rules.pairs.iter().filter(|d| names.contains(&"all") || names.contains(&d.name.as_str())).cloned().collect();
+                    if list.is_empty() {
+                        return Err(format!("pairs: no such pair; the pairs are {}", p.board.rules.pairs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")));
+                    }
+                    for d in list {
+                        match crate::pcb_route::route_pair(&mut p, &d) {
+                            Ok(o) => pairs_out.push(json!({"pair": d.name, "tracks": o.tracks, "layer": o.layer.label().to_lowercase(), "lengths": [round(o.p_len), round(o.n_len)]})),
+                            Err(e) => pairs_out.push(json!({"pair": d.name, "error": e})),
+                        }
+                    }
+                    v["pairs"] = json!(pairs_out);
+                }
+                let tuning = a.get("tune").is_some() || a.get("match").is_some();
+                let auto = a.get("auto").and_then(|v| v.as_bool()).unwrap_or(a.get("tracks").is_none() && a.get("vias").is_none() && a.get("pairs").is_none() && !tuning);
                 if auto {
                     let o = crate::pcb_route::autoroute(&mut p, a.get("net").and_then(|v| v.as_str()));
-                    v = json!({"routed": o.routed, "tracks_added": o.tracks, "vias_added": o.vias, "failed": o.failed});
+                    for (k, x) in json!({"routed": o.routed, "tracks_added": o.tracks, "vias_added": o.vias, "failed": o.failed}).as_object().unwrap() {
+                        v[k] = x.clone();
+                    }
+                }
+                // length tuning last, on the finished routing
+                let mut tuned = vec![];
+                for (k, t) in a.get("tune").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
+                    let net = t.get("net").and_then(|v| v.as_str()).ok_or_else(|| format!("tune[{k}]: give net"))?;
+                    let target = t.get("length").and_then(|v| v.as_f64()).ok_or_else(|| format!("tune[{k}]: give length (mm)"))?;
+                    let before = crate::pcb_tune::net_length(&p, net);
+                    let after = crate::pcb_tune::tune(&mut p, net, target)?;
+                    tuned.push(json!({"net": net, "before": round(before), "after": round(after), "target": target}));
+                }
+                if let Some(m) = a.get("match").and_then(|v| v.as_str()) {
+                    let rule = p.board.rules.lengths.iter().find(|r| r.name == m).cloned().ok_or_else(|| format!("match: no length rule {m}"))?;
+                    for (n, b, af) in crate::pcb_tune::match_lengths(&mut p, &rule) {
+                        tuned.push(json!({"net": n, "before": round(b), "after": round(af)}));
+                    }
+                }
+                if !tuned.is_empty() {
+                    v["tuned"] = json!(tuned);
                 }
                 let nl = p.netlist();
                 p.retag_copper(&nl);
@@ -384,6 +421,7 @@ impl Session {
                 v["rules"] = serde_json::to_value(&p.board.rules).unwrap_or_default();
                 v["parts"] = json!(parts);
                 v["nets"] = json!(nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", p.parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>());
+                v["lengths"] = json!(nl.nets.iter().filter(|n| p.board.tracks.iter().any(|t| t.net == n.name)).map(|n| json!({"net": n.name, "length": round(crate::pcb_tune::net_length(p, &n.name))})).collect::<Vec<_>>());
                 v["airwires"] = json!(air.iter().take(100).map(|w| json!({"net": w.net, "from": r2(w.a), "to": r2(w.b)})).collect::<Vec<_>>());
                 v
             }
@@ -693,6 +731,20 @@ pub fn tools() -> Vec<Value> {
             "silk_gap": num("silkscreen to exposed pad copper (0)"),
             "max_height": num("tallest part allowed above/below the board, 0 = no limit"),
             "body_gap": num("gap kept between parts' 3D bodies (0)"),
+            "pairs": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "pair name, e.g. USB"},
+                "p": {"type": "string", "description": "positive net"},
+                "n": {"type": "string", "description": "negative net"},
+                "width": num("track width, 0 = the net's"),
+                "gap": num("gap between the tracks, 0 = the clearance"),
+            }, "required": ["name", "p", "n"], "additionalProperties": false}, "description": "differential pairs (replaces the list); pcb_route pairs routes them side by side"},
+            "lengths": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "rule name"},
+                "nets": {"type": "array", "items": {"type": "string"}, "description": "nets (M1_* matches a prefix)"},
+                "min": num("shortest routed length, mm (0 = none)"),
+                "max": num("longest routed length, mm (0 = none)"),
+                "tolerance": num("matched length: every net within this of the longest, mm (0 = not matched)"),
+            }, "required": ["name", "nets"], "additionalProperties": false}, "description": "length and matched-length rules (replaces the list), checked by check_pcb; pcb_route match tunes a group"},
             "off": {"type": "array", "items": {"type": "string", "enum": pcb::CHECKS.iter().map(|c| c.0).collect::<Vec<_>>()}, "description": "checks to turn off"},
         }, "additionalProperties": false, "description": "design rules, mm; only the ones given change"},
     });
@@ -740,7 +792,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_add_parts", "description": format!("Add parts from the library. symbol: {}. Each part gets the next reference for its prefix (R1, C2, U1) unless reference is given, its library footprint and value unless given, and a spot beside the board until placed. Returns each part's reference and pins.", pcb_lib::SYMBOLS.iter().map(|s| format!("{} ({}, {})", s.key, s.name, s.footprint)).collect::<Vec<_>>().join(", ")), "inputSchema": obj(json!({"pcb": pcb, "parts": {"type": "array", "description": "parts to add", "items": {"type": "object", "properties": part_fields(json!({"symbol": {"type": "string", "description": "library symbol key"}, "reference": {"type": "string", "description": "reference designator, default the next free one"}})), "required": ["symbol"], "additionalProperties": false}}}), &["pcb", "parts"])}),
         json!({"name": "pcb_connect", "description": "Connect pins into nets on the schematic: {\"nets\": {\"VCC\": [\"U1.8\", \"R1.1\"], \"GND\": [\"U1.1\", \"C1.2\"]}}. Pins are REF.PIN by number or by pin name. Each pin gets a short wire and a label (ground and supply ports for names like GND, VCC, +5V, 3V3); nets named by a port get the wider power track width. Returns the netlist.", "inputSchema": obj(json!({"pcb": pcb, "nets": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "description": "REF.PIN"}, "description": "pins"}, "description": "net name → list of pins"}}), &["pcb", "nets"])}),
         json!({"name": "pcb_edit", "description": "Change a PCB tab: board size/outline/thickness/colour/rules, parts (place them with at/rot/side, change value or footprint, delete), schematic wires and labels, mounting holes, copper pours (zones), clear_routing, auto_place.", "inputSchema": obj(edit, &["pcb"])}),
-        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}}), &["pcb"])}),
+        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
