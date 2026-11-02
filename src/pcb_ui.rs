@@ -2048,6 +2048,13 @@ fn route_end(start: P, h: P, grid: f64, tol: f64) -> P {
     e
 }
 
+/// A walkaround path that only strays from the plain 45° bend by the router's grid (its cells
+/// are centred off the route grid) is that bend, without the small jogs at its ends.
+fn tidy_walk(start: P, end: P, walked: Vec<P>) -> Vec<P> {
+    let straight = route45(start, end);
+    if walked.iter().all(|v| straight.windows(2).any(|s| pcb::seg_point(s[0], s[1], *v) <= 0.11)) { straight } else { walked }
+}
+
 fn add_wire_path(p: &mut Pcb, pts: &[P]) {
     for s in pts.windows(2) {
         if pcb::dist(s[0], s[1]) > 1e-9 {
@@ -2481,9 +2488,11 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                         // the walkaround path when there is one to this point, else a 45° bend
                         let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == rl && pcb::dist(w.1, end) < 0.1).and_then(|w| w.3.clone());
                         let path = match walked {
+                            // a click on the last corner (the second click of a double-click) adds nothing
+                            _ if pcb::dist(start, end) <= 1e-6 => vec![],
                             Some(mut w) => {
                                 *w.last_mut().unwrap() = end;
-                                w
+                                tidy_walk(start, end, w)
                             }
                             None => route45(start, end),
                         };
@@ -2703,7 +2712,7 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         let col = if r.layer == Layer::Top { pcb_export::colors::TOP } else { pcb_export::colors::BOTTOM };
         let col = Color32::from_rgba_unmultiplied(col[0], col[1], col[2], 170);
         let start = *r.pts.last().unwrap();
-        let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == r.layer).and_then(|w| w.3.clone());
+        let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == r.layer).and_then(|w| w.3.clone().map(|p| tidy_walk(start, w.1, p)));
         let path = walked.unwrap_or_else(|| route45(start, route_end(start, h, ROUTE_GRID, (6.0 / xf.zoom) as f64)));
         let wpx = (r.width as f32 * xf.zoom).max(1.5);
         for s in path.windows(2) {
@@ -2739,6 +2748,16 @@ mod tests {
         let e = route_end(pad, [pad[0] + 3.02, pad[1] - 2.95], ROUTE_GRID, 0.2);
         assert!(((e[0] - pad[0]).abs() - (e[1] - pad[1]).abs()).abs() < 1e-9, "{e:?}");
         assert_eq!(route45(pad, e).len(), 2);
+    }
+
+    #[test]
+    fn walkaround_jogs_are_tidied() {
+        // the router's cells sit 0.05 mm off the route grid: a clear straight run comes back jogged
+        let walked = vec![[10.85, 25.8], [10.75, 25.85], [7.25, 25.85], [7.15, 25.8]];
+        assert_eq!(tidy_walk([10.85, 25.8], [7.15, 25.8], walked), vec![[10.85, 25.8], [7.15, 25.8]]);
+        // a real detour stays
+        let detour = vec![[0.0, 0.0], [0.0, 2.0], [5.0, 2.0], [5.0, 0.0]];
+        assert_eq!(tidy_walk([0.0, 0.0], [5.0, 0.0], detour.clone()), detour);
     }
 
     #[test]
