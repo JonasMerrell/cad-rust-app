@@ -265,7 +265,7 @@ pub fn for_mesh(positions: &[f32], pref: &StockPref, imperial: bool) -> Option<S
 }
 
 /// Materials that are printed or poured rather than cut from stock.
-const NOT_STOCK: [&str; 5] = ["PLA", "ABS", "PETG", "Nylon", "Urethane foam"];
+const NOT_STOCK: [&str; 11] = ["PLA", "ABS", "PETG", "Nylon", "ASA", "PC", "PLA-CF", "PETG-CF", "ASA-CF", "PET-CF", "Urethane foam"];
 
 /// Whether a part is cut from raw stock: it has a stock setting, or a material that is not a printing plastic.
 pub fn wants_stock(props: &crate::doc::PartProps) -> bool {
