@@ -22,6 +22,8 @@ use crate::workspace::Tab;
 
 #[path = "fea_adv_ui.rs"]
 mod adv;
+#[path = "fea_bc_ui.rs"]
+mod bc;
 
 /// What the colours show.
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -108,6 +110,12 @@ pub struct FeaUi {
     allowed_big: Option<u64>,
     /// Picking a periodic pair's side B (else side A).
     side_b: bool,
+    /// The BC whose card is open in the sidebar (its fields shown).
+    pub open: Option<u64>,
+    /// The BC whose point a click on the part places.
+    pub point_pick: Option<u64>,
+    /// Face areas, centroids and glyph points, by `picks_key`.
+    geo: Option<(u64, Arc<bc::Geo>)>,
 }
 
 impl Default for FeaUi {
@@ -150,6 +158,9 @@ impl Default for FeaUi {
             big: Default::default(),
             allowed_big: Default::default(),
             side_b: false,
+            open: None,
+            point_pick: None,
+            geo: None,
         }
     }
 }
@@ -306,7 +317,8 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                         }
                         app.fea.outcome = Some(Arc::new(o));
                         app.fea.stress_hi = 0.0;
-                        if app.fea.sel.is_none() {
+                        // not while a BC's card is open or its faces or point are being picked
+                        if app.fea.sel.is_none() && app.fea.open.is_none() && app.fea.point_pick.is_none() {
                             app.fea.show_results = true;
                         }
                         app.fea.error = None;
@@ -539,14 +551,17 @@ pub(crate) fn add_support(app: &mut App, k: SupportKind) {
     let mut id = 0;
     edit(app, |s| id = s.add_support(k));
     app.fea.sel = Some(id);
+    app.fea.open = Some(id);
     app.fea.show_results = false;
 }
 
 pub(crate) fn add_load(app: &mut App, k: LoadKind) {
     let mut id = 0;
     edit(app, |s| id = s.add_load(k));
-    app.fea.sel = Some(id);
+    app.fea.sel = (k != LoadKind::Gravity).then_some(id);
+    app.fea.open = Some(id);
     app.fea.show_results = false;
+    app.fea.scene_dirty = true;
 }
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
@@ -561,11 +576,15 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
     if pressed(Key::Escape) {
         app.fea.sel = None;
+        app.fea.point_pick = None;
         app.fea.show_results = true;
         app.fea.scene_dirty = true;
     }
     if pressed(Key::Delete) || pressed(Key::Backspace) {
         if let Some(id) = app.fea.sel.take() {
+            if app.fea.open == Some(id) {
+                app.fea.open = None;
+            }
             edit(app, |s| {
                 s.supports.retain(|x| x.id != id);
                 s.loads.retain(|x| x.id != id);
@@ -604,16 +623,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         if advanced {
             adv::sections(app, ui);
         } else {
-            section(ui, "Supports", |ui| items_ui(app, ui, true));
-            section(ui, "Loads", |ui| items_ui(app, ui, false));
-        }
-        if let Some(id) = app.fea.sel.filter(|_| !advanced) {
-            let s = study(app);
-            if s.map(|s| s.supports.iter().any(|x| x.id == id)).unwrap_or(false) {
-                section(ui, "Support", |ui| support_ui(app, ui, id));
-            } else if s.map(|s| s.loads.iter().any(|x| x.id == id)).unwrap_or(false) {
-                section(ui, "Load", |ui| load_ui(app, ui, id));
-            }
+            section(ui, "Boundary conditions", |ui| bc::simple(app, ui));
         }
         match study(app).filter(|s| s.mode == fea::SimMode::Simple).map(|s| s.analysis) {
             Some(Analysis::Modal) => section(ui, "Modes", |ui| modal_settings(app, ui)),
@@ -816,78 +826,6 @@ fn print_rows(ui: &mut Ui, s: &mut Study, printable: &[&'static crate::fea_print
     ui.label(RichText::new(info.join("\n")).color(theme::muted()).size(11.5));
 }
 
-fn items_ui(app: &mut App, ui: &mut Ui, supports: bool) {
-    let Some(s) = study(app) else { return };
-    let rows: Vec<(u64, &'static str, String, bool, String)> = if supports {
-        s.supports.iter().map(|x| (x.id, x.kind.icon(), x.name.clone(), x.suppressed, faces_text(x.faces.len()))).collect()
-    } else {
-        s.loads
-            .iter()
-            .map(|x| {
-                let v = format!("{}{}", trim(x.value), x.kind.unit());
-                let f = if x.kind == LoadKind::Gravity { v } else { format!("{v} · {}", faces_text(x.faces.len())) };
-                (x.id, x.kind.icon(), x.name.clone(), x.suppressed, f)
-            })
-            .collect()
-    };
-    if rows.is_empty() {
-        let text =
-            if supports { "Add Fixed or Roller supports from the toolbar, then click the faces that are held." } else { "Add a Force, Pressure or Gravity load from the toolbar." };
-        ui.label(RichText::new(text).color(theme::muted()).size(12.0));
-    }
-    let mut action: Option<(&str, u64)> = None;
-    for (id, icon, name, sup, info) in rows {
-        let sel = app.fea.sel == Some(id);
-        ui.horizontal(|ui| {
-            ui.add(icons::image(icon, 15.0).tint(if sup { theme::muted() } else { theme::text() }));
-            let mut text = RichText::new(&name).size(12.5);
-            if sup {
-                text = text.color(theme::muted()).strikethrough();
-            }
-            let r = ui.add(egui::Button::selectable(sel, text).truncate());
-            if r.clicked() {
-                app.fea.sel = if sel { None } else { Some(id) };
-                if app.fea.sel.is_some() {
-                    app.fea.show_results = false;
-                }
-                app.fea.scene_dirty = true;
-            }
-            r.context_menu(|ui| {
-                if ui.button(if sup { "Unsuppress" } else { "Suppress" }).clicked() {
-                    action = Some(("suppress", id));
-                    ui.close();
-                }
-                if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
-                    action = Some(("delete", id));
-                    ui.close();
-                }
-            });
-            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                ui.label(RichText::new(info).color(theme::muted()).size(11.5));
-            });
-        });
-    }
-    if let Some((a, id)) = action {
-        edit(app, |s| match a {
-            "suppress" => {
-                if let Some(x) = s.support_mut(id) {
-                    x.suppressed = !x.suppressed;
-                }
-                if let Some(x) = s.load_mut(id) {
-                    x.suppressed = !x.suppressed;
-                }
-            }
-            _ => {
-                s.supports.retain(|x| x.id != id);
-                s.loads.retain(|x| x.id != id);
-            }
-        });
-        if a == "delete" && app.fea.sel == Some(id) {
-            app.fea.sel = None;
-        }
-    }
-}
-
 fn faces_text(n: usize) -> String {
     match n {
         0 => "no faces".into(),
@@ -898,83 +836,6 @@ fn faces_text(n: usize) -> String {
 
 fn trim(v: f64) -> String {
     crate::expr::trim(v, 4)
-}
-
-fn faces_row(app: &mut App, ui: &mut Ui, id: u64) {
-    let n = study(app).and_then(|s| s.faces(id)).map(|f| f.len()).unwrap_or(0);
-    ui.horizontal(|ui| {
-        ui.label(RichText::new(faces_text(n)).strong().size(12.5));
-        if n > 0 && ui.small_button("Clear").clicked() {
-            edit(app, |s| {
-                if let Some(f) = s.faces_mut(id) {
-                    f.clear();
-                }
-            });
-        }
-    });
-    ui.label(RichText::new("Click faces in the viewport to add or remove them.").color(theme::muted()).size(12.0));
-}
-
-fn support_ui(app: &mut App, ui: &mut Ui, id: u64) {
-    let Some(si) = index(app) else { return };
-    let Some(sp) = app.ws.sims[si].support_mut(id) else { return };
-    row(ui, "Name", |ui| {
-        ui.text_edit_singleline(&mut sp.name);
-    });
-    row(ui, "Type", |ui| {
-        for k in [SupportKind::Fixed, SupportKind::Roller] {
-            ui.radio_value(&mut sp.kind, k, k.label());
-        }
-    });
-    faces_row(app, ui, id);
-}
-
-const DIRS: [(&str, [f64; 3]); 6] =
-    [("−Z (down)", [0.0, 0.0, -1.0]), ("+Z", [0.0, 0.0, 1.0]), ("−X", [-1.0, 0.0, 0.0]), ("+X", [1.0, 0.0, 0.0]), ("−Y", [0.0, -1.0, 0.0]), ("+Y", [0.0, 1.0, 0.0])];
-
-fn load_ui(app: &mut App, ui: &mut Ui, id: u64) {
-    let Some(si) = index(app) else { return };
-    let Some(l) = app.ws.sims[si].load_mut(id) else { return };
-    let kind = l.kind;
-    row(ui, "Name", |ui| {
-        ui.text_edit_singleline(&mut l.name);
-    });
-    let (label, speed) = match kind {
-        LoadKind::Force => ("Force", 1.0),
-        LoadKind::Pressure => ("Pressure", 0.01),
-        LoadKind::Gravity => ("Acceleration", 0.05),
-    };
-    row(ui, label, |ui| {
-        ui.add(egui::DragValue::new(&mut l.value).speed(speed).suffix(kind.unit()).max_decimals(4));
-    });
-    if kind == LoadKind::Pressure {
-        ui.label(RichText::new("1 MPa = 10 bar = 145 psi").color(theme::muted()).size(11.5));
-    }
-    if kind != LoadKind::Pressure {
-        row(ui, "Direction", |ui| {
-            let text = if l.normal {
-                "Into the faces".to_string()
-            } else {
-                DIRS.iter().find(|d| d.1 == l.direction).map(|d| d.0.to_string()).unwrap_or_else(|| format!("{:?}", l.direction.map(|x| (x * 1000.0).round() / 1000.0)))
-            };
-            egui::ComboBox::from_id_salt("fea-dir").width(140.0).selected_text(text).show_ui(ui, |ui| {
-                if kind == LoadKind::Force && ui.selectable_label(l.normal, "Into the faces").clicked() {
-                    l.normal = true;
-                }
-                for (n, d) in DIRS {
-                    if ui.selectable_label(!l.normal && l.direction == d, n).clicked() {
-                        l.normal = false;
-                        l.direction = d;
-                    }
-                }
-            });
-        });
-    }
-    if kind != LoadKind::Gravity {
-        faces_row(app, ui, id);
-    } else {
-        ui.label(RichText::new("Acts on the whole part: 1 g is its own weight.").color(theme::muted()).size(12.0));
-    }
 }
 
 fn modal_settings(app: &mut App, ui: &mut Ui) {
@@ -1173,6 +1034,21 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new(format!("{} mm is too small for parts this big: {} mm is used", trim(want), trim(used))).color(theme::error_soft()).size(12.0));
     }
     ui.label(RichText::new("Smaller elements are more accurate but slower. Thin walls want at least two elements across.").color(theme::muted()).size(11.5));
+}
+
+fn faces_row(app: &mut App, ui: &mut Ui, id: u64) {
+    let n = study(app).and_then(|s| s.faces(id)).map(|f| f.len()).unwrap_or(0);
+    ui.horizontal(|ui| {
+        ui.label(RichText::new(faces_text(n)).strong().size(12.5));
+        if n > 0 && ui.small_button("Clear").clicked() {
+            edit(app, |s| {
+                if let Some(f) = s.faces_mut(id) {
+                    f.clear();
+                }
+            });
+        }
+    });
+    ui.label(RichText::new("Click faces in the viewport to add or remove them.").color(theme::muted()).size(12.0));
 }
 
 fn mesh_control_ui(app: &mut App, ui: &mut Ui, id: u64) {
@@ -1626,6 +1502,7 @@ fn update_picks(app: &mut App) {
         return;
     }
     app.fea.picks_key = key;
+    app.fea.scene_dirty = true;
     let ids = s
         .supports
         .iter()
@@ -1640,8 +1517,9 @@ fn update_picks(app: &mut App) {
 
 fn build_scene(app: &mut App) -> SceneData {
     let mut sd = SceneData::default();
+    let _ = bc::geo(app);
     let Some(s) = study(app).cloned() else { return sd };
-    let results = app.fea.show_results && app.fea.sel.is_none();
+    let results = app.fea.show_results && app.fea.sel.is_none() && app.fea.point_pick.is_none();
     let outcome = app.fea.outcome.clone().filter(|_| results);
     // displacements, exaggeration and colour values of the result being shown
     let shown = outcome.as_ref().map(|o| {
@@ -1654,29 +1532,10 @@ fn build_scene(app: &mut App) -> SceneData {
     let bodies = app.studio_bodies(s.studio);
     let globals = body_faces(bodies, doc, &s);
     let face_of_item = |id: u64| app.fea.picks.iter().find(|p| p.0 == id).map(|p| p.1.clone()).unwrap_or_default();
-    let support_col = Color32::from_rgb(0x2a, 0xa1, 0x98);
-    let roller_col = Color32::from_rgb(0x4a, 0x7c, 0xd8);
-    let load_col = Color32::from_rgb(0xa8, 0x4c, 0xd8);
     let sel_col = vp::picked();
-    // face colours in setup view
-    let mut tint: std::collections::HashMap<u32, Color32> = std::collections::HashMap::new();
-    for sp in s.supports.iter().filter(|x| !x.suppressed) {
-        for f in face_of_item(sp.id) {
-            tint.insert(f, if sp.kind == SupportKind::Fixed { support_col } else { roller_col });
-        }
-    }
-    for l in s.loads.iter().filter(|x| !x.suppressed) {
-        for f in face_of_item(l.id) {
-            tint.insert(f, load_col);
-        }
-    }
+    // face colours in setup view: each BC's in its type's colour
+    let mut tint = bc::tints(app, &s);
     if s.mode == fea::SimMode::Advanced {
-        tint.clear();
-        for b in s.advanced.bcs.iter().filter(|x| !x.suppressed) {
-            for f in face_of_item(b.id) {
-                tint.insert(f, if b.bc.holds() { support_col } else { load_col });
-            }
-        }
         let (side_a, side_b) = (Color32::from_rgb(0x2f, 0x9e, 0x5b), Color32::from_rgb(0xd8, 0x8a, 0x2a));
         for p in s.advanced.periodic.iter().filter(|x| !x.suppressed) {
             for f in face_of_item(p.id) {
@@ -1693,7 +1552,7 @@ fn build_scene(app: &mut App) -> SceneData {
             tint.insert(f, sel_col);
         }
     }
-    if let Some(h) = app.fea.hover.filter(|_| app.fea.sel.is_some()) {
+    if let Some(h) = app.fea.hover {
         tint.entry(h).and_modify(|c| *c = theme::lerp(*c, vp::hover(), 0.5)).or_insert(vp::hover());
     }
     let (lo, hi) = {
@@ -1766,46 +1625,13 @@ fn build_scene(app: &mut App) -> SceneData {
                     }
                 }
             }
-            // load arrows
-            let len = size * 0.07;
-            for l in s.loads.iter().filter(|x| !x.suppressed) {
-                let c = rgba(if app.fea.sel == Some(l.id) { sel_col } else { load_col }, 1.0);
-                let dir = Vec3::from(l.direction.map(|x| x as f32)).normalize_or_zero();
-                if l.kind == LoadKind::Gravity {
-                    let p = (lo + hi) * 0.5;
-                    arrow(&mut sd, p - dir * len * 1.5, p, c, len);
-                    continue;
-                }
-                let into = l.normal || l.kind == LoadKind::Pressure;
-                let faces = face_of_item(l.id);
-                for (b, g) in bodies.iter().zip(&globals) {
-                    let Some((_, base)) = g else { continue };
-                    let tris: Vec<usize> = (0..b.indices.len() / 3).filter(|ti| faces.contains(&(base + b.tri_face.get(*ti).copied().unwrap_or(0)))).collect();
-                    let step = (tris.len() / 9).max(1);
-                    for &ti in tris.iter().step_by(step) {
-                        let t = &b.indices[3 * ti..3 * ti + 3];
-                        let p = |i: u32| Vec3::new(b.positions[3 * i as usize], b.positions[3 * i as usize + 1], b.positions[3 * i as usize + 2]);
-                        let (a, bb, cc) = (p(t[0]), p(t[1]), p(t[2]));
-                        let n = (bb - a).cross(cc - a).normalize_or_zero();
-                        let at = (a + bb + cc) / 3.0;
-                        let d = if into { -n } else { dir };
-                        arrow(&mut sd, at - d * len, at, c, len);
-                    }
-                }
+            // supports' and loads' glyphs
+            if let Some((_, g)) = &app.fea.geo {
+                bc::glyphs(app, &s, g, &mut sd);
             }
         }
     }
     sd
-}
-
-fn arrow(sd: &mut SceneData, from: Vec3, to: Vec3, c: [f32; 4], len: f32) {
-    let d = (to - from).normalize_or_zero();
-    let side = if d.z.abs() < 0.9 { d.cross(Vec3::Z) } else { d.cross(Vec3::X) }.normalize_or_zero();
-    let up = d.cross(side);
-    sd.lines_top.push(crate::render::LineInst { a: from.into(), b: to.into(), width: 2.2, bias: 0.0, color: c });
-    for s in [side, -side, up, -up] {
-        sd.lines_top.push(crate::render::LineInst { a: to.into(), b: (to - d * len * 0.28 + s * len * 0.12).into(), width: 2.2, bias: 0.0, color: c });
-    }
 }
 
 /// The face under the cursor: a pick for it and its global face number.
@@ -2026,6 +1852,39 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                 app.fea.scene_dirty = true;
             }
         }
+    } else if let (Some(id), Some(s)) = (app.fea.point_pick, study(app).cloned()) {
+        // placing a BC's point: on the part under the cursor
+        if app.fea.hover.take().is_some() {
+            app.fea.scene_dirty = true;
+        }
+        if resp.clicked() {
+            match local.and_then(|l| hit(app, &s, l)) {
+                Some((pick, _)) => bc::set_point(app, id, pick.point),
+                None => app.fea.point_pick = None,
+            }
+            app.fea.scene_dirty = true;
+        }
+    } else if !(app.fea.show_results && app.fea.outcome.is_some()) {
+        // the setup view: hovering shows which BC owns a face, a click opens it
+        let s = study(app).cloned();
+        let h = s.as_ref().and_then(|s| local.and_then(|l| hit(app, s, l)));
+        let hf = h.as_ref().map(|x| x.1).filter(|f| s.as_ref().is_some_and(|s| bc::owner(app, s, *f).is_some()));
+        if hf != app.fea.hover {
+            app.fea.hover = hf;
+            app.fea.scene_dirty = true;
+        }
+        if resp.clicked() {
+            if let Some((id, _)) = hf.and_then(|f| s.as_ref().and_then(|s| bc::owner(app, s, f))) {
+                if s.as_ref().is_some_and(|s| s.advanced.periodic.iter().any(|p| p.id == id)) {
+                    // a periodic pair has no card: select it, as its list does
+                    app.fea.sel = Some(id);
+                    app.fea.side_b = false;
+                } else {
+                    app.fea.open = Some(id);
+                }
+                app.fea.scene_dirty = true;
+            }
+        }
     } else {
         if app.fea.hover.take().is_some() {
             app.fea.scene_dirty = true;
@@ -2095,12 +1954,32 @@ fn overlay(app: &mut App, ui: &mut Ui, painter: &egui::Painter, rect: egui::Rect
     if app.fea.sel.is_some() && !app.fea.computing {
         line = "Click faces to add or remove them · Esc when done".into();
     }
+    if app.fea.point_pick.is_some() && !app.fea.computing {
+        line = "Click the part to place the point · Esc cancels".into();
+    }
+    // the face under the cursor while picking (or in the setup view): which BC owns it
+    if let (Some(f), Some(l), Some(s)) = (app.fea.hover, local, study(app)) {
+        if app.fea.point_pick.is_none() {
+            let own = bc::owner(app, s, f);
+            let text = match (app.fea.sel, own) {
+                (Some(id), Some((oid, n))) if (oid == id) => format!("{n} · click to remove it"),
+                (Some(_), Some((_, n))) => format!("face of {n} · click to add it here too"),
+                (Some(_), None) => "click to add this face".to_string(),
+                (None, Some((_, n))) => format!("{n} · click to open it"),
+                (None, None) => String::new(),
+            };
+            if !text.is_empty() {
+                let w = painter.layout_no_wrap(text.clone(), egui::FontId::proportional(12.0), theme::text()).size().x;
+                crate::viewport::label_box(painter, rect.left_top() + egui::vec2(l.x + 16.0 + w / 2.0, l.y + 18.0), &text, theme::text());
+            }
+        }
+    }
     if !line.is_empty() {
         let col = if app.fea.error.is_some() && !app.fea.computing && app.fea.sel.is_none() { theme::error_soft() } else { theme::text() };
         let w = painter.layout_no_wrap(line.clone(), egui::FontId::proportional(12.0), col).size().x;
         crate::viewport::label_box(painter, rect.left_top() + egui::vec2(16.0 + w / 2.0 + 6.0, 20.0), &line, col);
     }
-    let results = app.fea.show_results && app.fea.sel.is_none();
+    let results = app.fea.show_results && app.fea.sel.is_none() && app.fea.point_pick.is_none();
     let Some(o) = app.fea.outcome.clone().filter(|_| results) else { return };
     let Some(disp) = current_disp(app, &o) else { return };
     let (vals, lo, hi, unit, rev) = field_values(app, &o, &disp);

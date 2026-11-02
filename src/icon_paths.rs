@@ -207,4 +207,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("pcbKeepout", "M4 4h16v16H4zM12 6a6 6 0 1 0 0 12a6 6 0 1 0 0-12zM7.8 7.8l8.4 8.4"),
     ("pcbNoConnect", "M2 12h8M10 8l8 8M10 16l8-8"),
     ("pcbErc", "M4 12h4l2-5 4 10 2-5h4M12 3l8 3M12 3L4 6"),
+    ("copy", "M9 9h11v11H9zM5 15H4V4h11v1"),
+    ("pin", "M12 21s-6-5.5-6-11a6 6 0 0 1 12 0c0 5.5-6 11-6 11zM12 8a2 2 0 1 0 0 4a2 2 0 1 0 0-4"),
+    ("target", "M12 5a7 7 0 1 0 0 14a7 7 0 1 0 0-14zM12 2v5M12 17v5M2 12h5M17 12h5"),
 ];
