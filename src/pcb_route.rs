@@ -132,7 +132,8 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
             let mut path = None;
             // the net's width, then the board's narrower signal width when that doesn't fit
             let mut widths = vec![nr.track];
-            if p.board.rules.track < nr.track - 1e-9 {
+            // (not for a net that carries a current: a thin track would overheat)
+            if p.board.rules.track < nr.track - 1e-9 && crate::pcb_trace::target(&p, &nl, &a.net).current <= 0.0 {
                 widths.push(p.board.rules.track);
             }
             for w in widths {

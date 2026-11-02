@@ -309,6 +309,8 @@ pub struct Rules {
     pub body_gap: f64,
     /// Checks turned off, by id (see `CHECKS`).
     pub off: Vec<String>,
+    /// How much a track may heat up at its net's current, °C (the trace solver's width rule).
+    pub temp_rise: f64,
 }
 
 /// The design rule and electrical rule checks, by id, with what each looks for.
@@ -329,6 +331,8 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("antenna", "Track ends that connect to nothing"),
     ("thermal", "Thermal reliefs with fewer than two spokes"),
     ("unrouted", "Connections not routed yet"),
+    ("current", "Tracks too thin for their net class's current"),
+    ("impedance", "Tracks off their net class's impedance by over 10 %"),
     ("erc_unconnected", "Pins left unconnected (no no-connect mark)"),
     ("erc_single", "Nets with one pin"),
     ("erc_drivers", "Outputs driving each other"),
@@ -384,6 +388,7 @@ impl Default for Rules {
             max_height: 0.0,
             body_gap: 0.0,
             off: vec![],
+            temp_rise: 10.0,
         }
     }
 }
@@ -409,6 +414,9 @@ pub struct Board {
     /// Solder mask colour name (green, black, blue, red, white, purple), for previews.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub color: String,
+    /// Copper weights and dielectrics, top to bottom, for the trace solver.
+    #[serde(default)]
+    pub stackup: crate::pcb_trace::Stackup,
 }
 
 fn thickness() -> f64 {
@@ -417,7 +425,7 @@ fn thickness() -> f64 {
 
 impl Default for Board {
     fn default() -> Self {
-        Board { outline: rect_outline(50.0, 40.0, 0.0), thickness: 1.6, tracks: vec![], vias: vec![], zones: vec![], holes: vec![], keepouts: vec![], rules: Rules::default(), color: String::new() }
+        Board { outline: rect_outline(50.0, 40.0, 0.0), thickness: 1.6, tracks: vec![], vias: vec![], zones: vec![], holes: vec![], keepouts: vec![], rules: Rules::default(), color: String::new(), stackup: Default::default() }
     }
 }
 
@@ -996,7 +1004,10 @@ impl Pcb {
     /// The rules for a net: its class's, or the board's.
     pub fn net_rules(&self, nl: &Netlist, net: &str) -> NetRules {
         let power = nl.by_name(net).is_some_and(|n| nl.nets[n].power);
-        self.board.rules.for_net(net, power)
+        let mut r = self.board.rules.for_net(net, power);
+        // tracks wide enough for the net class's current at the allowed heating
+        r.track = crate::pcb_trace::routed_width(self, r.track, crate::pcb_trace::target(self, nl, net));
+        r
     }
 }
 
@@ -1642,6 +1653,8 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     for a in &air {
         out.push(Issue::new("unrouted", [(a.a[0] + a.b[0]) / 2.0, (a.a[1] + a.b[1]) / 2.0], true, format!("Unrouted: {}", a.net)));
     }
+    // tracks too thin for their net's current, or off its impedance
+    out.extend(crate::pcb_trace::check(pcb, &|n| crate::pcb_trace::target(pcb, nl, n)));
     out.retain(|i| r.checks(i.rule));
     out
 }

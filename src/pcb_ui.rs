@@ -71,7 +71,7 @@ struct Route {
 pub(crate) struct Cache {
     pcb: Option<usize>,
     pub(crate) nl: Netlist,
-    pads: Vec<WPad>,
+    pub(crate) pads: Vec<WPad>,
     fills: Vec<pcb::Fill>,
     air: Vec<pcb::Airwire>,
 }
@@ -106,7 +106,7 @@ pub struct PcbUi {
     lib_search: String,
     label_text: String,
     zone_net: String,
-    highlight: Option<String>,
+    pub(crate) highlight: Option<String>,
     pub(crate) hover: P,
     pin_text: String,
     pin_text_for: Option<u64>,
@@ -116,6 +116,8 @@ pub struct PcbUi {
     field_new: (String, String),
     /// The PCB tab the history and selection belong to.
     tab: Option<usize>,
+    /// The trace solver's calculator and per-net report.
+    pub(crate) trace: crate::pcb_trace_ui::TraceUi,
 }
 
 impl Default for PcbUi {
@@ -154,6 +156,7 @@ impl Default for PcbUi {
             dk: Default::default(),
             field_new: Default::default(),
             tab: None,
+            trace: Default::default(),
         }
     }
 }
@@ -285,6 +288,7 @@ fn refresh(app: &mut App) {
     let air = pcb::ratsnest(&its, &pads, &fills);
     app.pcb.cache = Cache { pcb: Some(i), nl, pads, fills, air };
     app.pcb.dirty = false;
+    app.pcb.trace.invalidate();
 }
 
 fn vi(v: View) -> usize {
@@ -736,6 +740,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             if app.tool_button(ui, "pcbDrc", "Check", "Design rule check: clearances by net class, shorts, holes, keepouts, 3D bodies, unrouted nets", true, app.pcb.issues.is_some(), true).clicked() {
                 run_drc(app);
             }
+            if app.tool_button(ui, "pcbTrace", "Trace solver", "Current, heating, resistance and impedance of tracks", false, app.pcb.trace.open, true).clicked() {
+                app.pcb.trace.open = !app.pcb.trace.open;
+            }
         });
     }
     App::group(ui, |ui| {
@@ -784,12 +791,15 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         if app.pcb.view == View::Board {
             section(ui, "Board", |ui| board_ui(app, ui));
             section(ui, "Layers", |ui| layers_ui(app, ui));
+            section(ui, "Stackup", |ui| crate::pcb_trace_ui::stackup_ui(app, ui));
+            section(ui, "Traces", |ui| crate::pcb_trace_ui::nets_ui(app, ui));
             if let Some(issues) = app.pcb.issues.clone() {
                 section(ui, "Check", |ui| issues_ui(app, ui, &issues));
             }
         }
         section(ui, "Nets", |ui| nets_ui(app, ui));
     });
+    crate::pcb_trace_ui::window(app, ui.ctx());
     // edits made through edit() have their own undo step
     if app.ws.pcbs[i] != before && app.pcb.drag.is_none() && app.pcb.undo.last() != Some(&before) {
         record(app, before);
@@ -1030,6 +1040,10 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 ui.selectable_value(&mut t.layer, Layer::Top, "Top");
                 ui.selectable_value(&mut t.layer, Layer::Bottom, "Bottom");
             });
+            let tc = t.clone();
+            crate::pcb_trace_ui::track_info(app, ui, &tc);
+            let p = &mut app.ws.pcbs[pi];
+            let t = &mut p.board.tracks[i];
             let net = t.net.clone();
             if ui.button("Width for the whole net").on_hover_text("Give every track of this net this width").clicked() {
                 let w = t.width;
@@ -1340,6 +1354,7 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
         ("Autoroute", "pcbAutoroute", autoroute),
         ("Place parts on the board", "pcbPlace", auto_place),
         ("Design rule check", "pcbDrc", run_drc),
+        ("Trace calculator", "pcbTrace", |a| a.pcb.trace.open = true),
         ("Export Gerbers…", "export", export_fab),
         ("3D board (Part Studio)", "cube", to_3d),
     ]
