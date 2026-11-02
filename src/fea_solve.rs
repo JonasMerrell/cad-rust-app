@@ -19,6 +19,70 @@ pub struct Elastic {
     pub rho: f64,
     pub yield_mpa: f64,
     pub eta: f64,
+    /// Anisotropic stiffness (6×6, global axes, stresses and engineering strains in the order xx, yy,
+    /// zz, xy, yz, zx), replacing `e` and `nu` in the solve (3D-printed parts); `e` is then only a
+    /// representative modulus.
+    pub d: Option<[[f64; 6]; 6]>,
+    /// Strengths of a layered (3D-printed) material, judged in place of `yield_mpa`.
+    pub layer: Option<Layer>,
+}
+
+impl Elastic {
+    pub const fn iso(e: f64, nu: f64, rho: f64, yield_mpa: f64, eta: f64) -> Elastic {
+        Elastic { e, nu, rho, yield_mpa, eta, d: None, layer: None }
+    }
+
+    /// Stress [xx, yy, zz, xy, yz, zx] from a displacement gradient h[a][b] = ∂u_a/∂x_b.
+    pub fn stress(&self, h: &[[f64; 3]; 3]) -> [f64; 6] {
+        match &self.d {
+            None => {
+                let (lam, mu) = lame(self);
+                let tr = h[0][0] + h[1][1] + h[2][2];
+                [
+                    lam * tr + 2.0 * mu * h[0][0],
+                    lam * tr + 2.0 * mu * h[1][1],
+                    lam * tr + 2.0 * mu * h[2][2],
+                    mu * (h[0][1] + h[1][0]),
+                    mu * (h[1][2] + h[2][1]),
+                    mu * (h[2][0] + h[0][2]),
+                ]
+            }
+            Some(d) => {
+                let eps = [h[0][0], h[1][1], h[2][2], h[0][1] + h[1][0], h[1][2] + h[2][1], h[2][0] + h[0][2]];
+                std::array::from_fn(|i| (0..6).map(|j| d[i][j] * eps[j]).sum())
+            }
+        }
+    }
+
+    /// How close a stress comes to failing the material (1 = at its strength): von Mises over the yield
+    /// strength, or for a layered material the larger of von Mises over the in-plane strength and the
+    /// quadratic interlayer criterion √((⟨σn⟩/Z)² + (τ/S)²) on the layer planes (compression across the
+    /// layers closes them, so only tension counts).
+    pub fn failure_index(&self, s: &[f32; 6]) -> f64 {
+        let vm = von_mises(s) as f64;
+        match &self.layer {
+            None => vm / self.yield_mpa.max(1e-12),
+            Some(l) => {
+                let [xx, yy, zz, xy, yz, zx] = s.map(|v| v as f64);
+                let b = DVec3::from(l.axis).normalize_or(DVec3::Z);
+                let t = DVec3::new(xx * b.x + xy * b.y + zx * b.z, xy * b.x + yy * b.y + yz * b.z, zx * b.x + yz * b.y + zz * b.z);
+                let sn = t.dot(b);
+                let tau = (t - b * sn).length();
+                let inter = ((sn.max(0.0) / l.z.max(1e-12)).powi(2) + (tau / l.s.max(1e-12)).powi(2)).sqrt();
+                (vm / l.x.max(1e-12)).max(inter)
+            }
+        }
+    }
+}
+
+/// Strengths (MPa) of a layered material: `x` in the layer plane (von Mises), `z` across the layers in
+/// tension and `s` in shear along the layer planes; `axis` is the build direction.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Layer {
+    pub axis: [f64; 3],
+    pub x: f64,
+    pub z: f64,
+    pub s: f64,
 }
 
 /// What holds the part.
@@ -130,6 +194,59 @@ fn grads(x: &[DVec3; 10], l: [f64; 4]) -> Option<([DVec3; 10], f64)> {
 
 pub fn coords(mesh: &Mesh, e: &[u32; 10]) -> [DVec3; 10] {
     e.map(|n| mesh.nodes[n as usize])
+}
+
+/// Element stiffness (30×30, node-major) and volume of a material.
+fn stiffness_of(x: &[DVec3; 10], m: &Elastic) -> Option<([[f64; 30]; 30], f64)> {
+    match &m.d {
+        None => {
+            let (lam, mu) = lame(m);
+            stiffness(x, lam, mu)
+        }
+        Some(d) => stiffness_d(x, d),
+    }
+}
+
+/// Element stiffness with an anisotropic material: ∫ Bᵀ D B.
+fn stiffness_d(x: &[DVec3; 10], d: &[[f64; 6]; 6]) -> Option<([[f64; 30]; 30], f64)> {
+    let mut k = [[0.0f64; 30]; 30];
+    let mut vol = 0.0;
+    for l in GP {
+        let (g, det) = grads(x, l)?;
+        let w = det / 24.0;
+        vol += w;
+        // B (6×30): engineering strains of each node's displacements
+        let mut bm = [[0.0f64; 30]; 6];
+        for i in 0..10 {
+            let (gx, gy, gz) = (g[i].x, g[i].y, g[i].z);
+            bm[0][3 * i] = gx;
+            bm[1][3 * i + 1] = gy;
+            bm[2][3 * i + 2] = gz;
+            bm[3][3 * i] = gy;
+            bm[3][3 * i + 1] = gx;
+            bm[4][3 * i + 1] = gz;
+            bm[4][3 * i + 2] = gy;
+            bm[5][3 * i] = gz;
+            bm[5][3 * i + 2] = gx;
+        }
+        // D B
+        let mut db = [[0.0f64; 30]; 6];
+        for r in 0..6 {
+            for c in 0..30 {
+                db[r][c] = (0..6).map(|q| d[r][q] * bm[q][c]).sum();
+            }
+        }
+        for a in 0..30 {
+            for b in 0..30 {
+                let mut v = 0.0;
+                for r in 0..6 {
+                    v += bm[r][a] * db[r][b];
+                }
+                k[a][b] += v * w;
+            }
+        }
+    }
+    Some((k, vol))
 }
 
 /// Element stiffness (30×30, node-major) and volume.
@@ -356,9 +473,8 @@ pub fn assemble(p: &Problem, cancel: &dyn Fn() -> bool) -> Result<System, String
             return Err("cancelled".into());
         }
         let mat = *p.mat_of(ei);
-        let (lam, mu) = lame(&mat);
         let x = coords(mesh, e);
-        let Some((ke, vol)) = stiffness(&x, lam, mu) else {
+        let Some((ke, vol)) = stiffness_of(&x, &mat) else {
             let part = mesh.body.get(ei).map(|b| format!(" (part {b})")).unwrap_or_default();
             return Err(format!("The mesh has an inverted element{part}; try another element size"));
         };
@@ -514,7 +630,7 @@ pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> 
     let mut acc = vec![[0.0f64; 6]; mesh.nodes.len()];
     let mut cnt = vec![0u32; mesh.nodes.len()];
     for (ei, e) in mesh.tets.iter().enumerate() {
-        let (lam, mu) = lame(mat_at(mesh, mats, mat, ei));
+        let m = mat_at(mesh, mats, mat, ei);
         let x = coords(mesh, e);
         for (k, l) in NODE_L.iter().enumerate() {
             let Some((g, _)) = grads(&x, *l) else { continue };
@@ -528,15 +644,7 @@ pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> 
                     }
                 }
             }
-            let tr = h[0][0] + h[1][1] + h[2][2];
-            let s = [
-                lam * tr + 2.0 * mu * h[0][0],
-                lam * tr + 2.0 * mu * h[1][1],
-                lam * tr + 2.0 * mu * h[2][2],
-                mu * (h[0][1] + h[1][0]),
-                mu * (h[1][2] + h[2][1]),
-                mu * (h[2][0] + h[0][2]),
-            ];
+            let s = m.stress(&h);
             let n = e[k] as usize;
             for c in 0..6 {
                 acc[n][c] += s[c];
@@ -545,6 +653,34 @@ pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> 
         }
     }
     acc.iter().zip(&cnt).map(|(s, c)| s.map(|v| (v / (*c).max(1) as f64) as f32)).collect()
+}
+
+/// Failure index (see `Elastic::failure_index`) at each node: every element's own stress there against
+/// its own material, averaged over the elements around the node (as stresses are).
+pub fn element_failure(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> Vec<f64> {
+    let mut out = vec![0.0f64; mesh.nodes.len()];
+    let mut cnt = vec![0u32; mesh.nodes.len()];
+    for (ei, e) in mesh.tets.iter().enumerate() {
+        let m = mat_at(mesh, mats, mat, ei);
+        let x = coords(mesh, e);
+        for (k, l) in NODE_L.iter().enumerate() {
+            let Some((g, _)) = grads(&x, *l) else { continue };
+            let mut h = [[0.0f64; 3]; 3];
+            for (i, n) in e.iter().enumerate() {
+                for a in 0..3 {
+                    let ua = u[3 * *n as usize + a];
+                    for b in 0..3 {
+                        h[a][b] += ua * g[i][b];
+                    }
+                }
+            }
+            let s = m.stress(&h).map(|v| v as f32);
+            let n = e[k] as usize;
+            out[n] += m.failure_index(&s);
+            cnt[n] += 1;
+        }
+    }
+    out.iter().zip(&cnt).map(|(f, c)| f / (*c).max(1) as f64).collect()
 }
 
 pub fn von_mises(s: &[f32; 6]) -> f32 {
@@ -589,8 +725,7 @@ pub fn node_reactions(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64], f
     }
     let mut r = vec![DVec3::ZERO; nodes.len()];
     for (ei, e) in mesh.tets.iter().enumerate().filter(|(_, e)| e.iter().any(|n| slot[*n as usize] != usize::MAX)) {
-        let (lam, mu) = lame(mat_at(mesh, mats, mat, ei));
-        let Some((ke, _)) = stiffness(&coords(mesh, e), lam, mu) else { continue };
+        let Some((ke, _)) = stiffness_of(&coords(mesh, e), mat_at(mesh, mats, mat, ei)) else { continue };
         for i in 0..10 {
             let k = slot[e[i] as usize];
             if k == usize::MAX {
@@ -1237,7 +1372,7 @@ mod tests {
         (t, f, vec![body; 12])
     }
 
-    const STEEL: Elastic = Elastic { e: 200000.0, nu: 0.3, rho: 7.85e-9, yield_mpa: 250.0, eta: 0.0 };
+    const STEEL: Elastic = Elastic::iso(200000.0, 0.3, 7.85e-9, 250.0, 0.0);
 
     fn cantilever(m: &Mesh) -> Problem<'_> {
         let fixed: Vec<u32> = m.faces.iter().filter(|f| f.1 == 0).flat_map(|f| f.0).collect();

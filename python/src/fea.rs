@@ -90,7 +90,7 @@ impl FeModel {
         let idx = &v[2 + 3 * nv..2 + 3 * nv + 3 * nt];
         let tris = idx.chunks_exact(3).map(|c| [pts[c[0] as usize], pts[c[1] as usize], pts[c[2] as usize]]).collect();
         let faces = v[2 + 3 * nv + 3 * nt..].iter().map(|x| *x as u32).collect();
-        self.bodies.push(Body { name, tris, faces, mat: Elastic { e, nu, rho: rho * 1e-9, yield_mpa: 0.0, eta: 0.0 }, size });
+        self.bodies.push(Body { name, tris, faces, mat: Elastic::iso(e, nu, rho * 1e-9, 0.0, 0.0), size });
         self.mesh = None;
         Ok(self.bodies.len() - 1)
     }
