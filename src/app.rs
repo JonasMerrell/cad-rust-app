@@ -2856,7 +2856,8 @@ impl App {
             ToastKind::Error => (theme::toast_err(), theme::toast_err_border()),
         };
         let text = t.text.clone();
-        let bottom = if self.phone { 70.0 } else { 14.0 };
+        // above the hint line drawn at the bottom left
+        let bottom = if self.phone { 70.0 } else { 48.0 };
         egui::Area::new(egui::Id::new("toast"))
             .order(egui::Order::Foreground)
             .pivot(egui::Align2::CENTER_BOTTOM)
