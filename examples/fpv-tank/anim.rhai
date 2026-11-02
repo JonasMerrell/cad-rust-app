@@ -107,8 +107,8 @@ fn run(t, out) {
         [pivot, -70.0, 70.0, 0.0, 0.0, false],
         [1.4, 220.0, 220.0, 0.0, 0.0, false],
         [1.6, 0.0, 0.0, -48.0, 12.0, false],
-        [0.6, 0.0, 0.0, -48.0, 3.0, false],
-        [0.8, 0.0, 0.0, -48.0, 3.0, true],
+        [0.6, 0.0, 0.0, -48.0, 1.3, false],
+        [0.8, 0.0, 0.0, -48.0, 1.3, true],
         [1.0, 0.0, 0.0, 0.0, 0.0, false],
         [1.8, 240.0, 160.0, 0.0, 0.0, false],
     ];
@@ -137,7 +137,7 @@ fn run(t, out) {
         let psi0 = psi; let elev0 = elev;
         for k in 1..=n {
             if frame >= t.max_frames { break; }
-            let dt = 1.0 / FPS;
+            let dt = seg[0] / n;
             let f = k / n.to_float();
             let ease = 0.5 - 0.5 * cos(PI() * f);
             // skid steering: forward speed is the mean of the tracks, turn rate their difference over B
