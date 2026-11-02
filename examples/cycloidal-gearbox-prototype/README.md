@@ -9,10 +9,25 @@ first.
     mkdir out && rcad script examples/cycloidal-gearbox-prototype/parts.rhai out          # ~3 min
     mkdir out && rcad script examples/cycloidal-gearbox-prototype/parts.rhai out quick    # renders and summary only
 
-To get an rCAD project file (one Part Studio per part plus a "Test unit" assembly), run the tool
-script in that output folder afterwards:
+To get an rCAD project file, run the tool script in that output folder afterwards
+(`make_project.py` writes `project.json`):
 
     cd out && rcad run ../examples/cycloidal-gearbox-prototype/project.json    # writes cycloidal-gearbox-prototype.rcad.json
+
+The project has one Part Studio per part and a "Test unit" assembly with the mechanism mated so it moves:
+
+| Mate | Kind | Between |
+|---|---|---|
+| Stator | fastened | housing to stand, cover, motor and each of the 51 ring pins |
+| Motor shaft (input) | revolute | housing to cam A; cam B fastened to cam A (D-flat) |
+| Disc A on lobe A / Disc B on lobe B | revolute | each disc on its cam lobe axis (±0.8 mm off centre); its 6805 fastened to it |
+| Output bearing | revolute | housing to carrier; 6814, output pins, flange and lever fastened to it |
+| Gear relation | 1 : 50 | input → output bearing (θout = −θin / 50) |
+| Gear relation | 51 : 50 | input → each disc on its lobe (each disc turns −θin / 50 absolute, −51θin / 50 on its lobe) |
+
+Turn cam A (the input mate) and the discs wobble round on their lobes while the carrier and lever turn
+50 times slower the other way. I checked this by turning the input 45° with the relations solved: the
+discs' centres moved to 0.8∠45° and the discs, carrier and lever all turned −0.90°.
 
 The parts script writes `print-*.stl` and `printed-*.step` for every printed part, `bought-*.step` for the bought ones, the assembly as
 `cycloidal-gearbox-prototype.step`, five renders and `summary.json` (BOM, masses, z stack, and the

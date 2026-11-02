@@ -250,7 +250,8 @@ parts.add("Tolerance coupon 6814", coupon_big.translate(vec3(150, 260, -H)), "pr
 parts.add("Ring pins 3x20", compound(ring_pins), "bought", 51, "Steel", C_ST, "ISO 8734 dowel 3 m6 x 20");
 parts.add("Output pins 6x30", m0.opins, "bought", 6, "Steel", "#d6a83a", "ISO 8734 dowel 6 m6 x 30");
 parts.add("Output bearing 6814", bearing_out, "bought", 1, "Steel", C_ST, "6814-2RS 70x90x10");
-parts.add("Cam bearings 6805", compound([m0.ebA, m0.ebB]), "bought", 2, "Steel", C_ST, "6805-2RS 25x37x7");
+parts.add("Cam bearing 6805 A", m0.ebA, "bought", 1, "Steel", C_ST, "6805-2RS 25x37x7, in disc A");
+parts.add("Cam bearing 6805 B", m0.ebB, "bought", 1, "Steel", C_ST, "6805-2RS 25x37x7, in disc B");
 parts.add("Motor 17HS24", motor, "bought", 1, "motor", C_M, "NEMA 17, 60 mm, ~0.65 N·m, Ø5 D-shaft >= 20 mm");
 
 // ================================================================ checks
