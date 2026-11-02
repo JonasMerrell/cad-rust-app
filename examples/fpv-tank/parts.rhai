@@ -257,8 +257,8 @@ for p in deck_screws {
     adds.push(zcyl(p[0], p[1], HULL_Z0 + 1, 3.5, HULL_Z1 - HULL_Z0 - 1));
     cuts.push(zcyl(p[0], p[1], HULL_Z1 - 14, 1.25, 15));
 }
-// power switch in the rear wall (mini slide switch)
-cuts.push(block(vec3(-74, -4.5, 31), vec3(-66, 4.5, 35)));
+// power switch in the rear wall: KCD11 rocker (3 A), standing upright, 8.7 × 13.2 snap-in cutout
+cuts.push(block(vec3(-74, -4.35, 17.0), vec3(-66, 4.35, 30.2)));
 // standoffs for the Radxa Zero 3W (Pi Zero holes: M2.5, 58 × 23) from the right wall
 // (the board's face is at y = -19.9; x is clear of the road wheel screw at x = 14)
 for x in [-40.0, 18.0] { for z in [13.0, 36.0] {
