@@ -254,6 +254,32 @@ pub struct NetClass {
     pub impedance: f64,
 }
 
+/// Two nets routed side by side at a fixed gap (USB D+/D-, LVDS, CAN).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DiffPair {
+    pub name: String,
+    /// The positive and negative nets.
+    pub p: String,
+    pub n: String,
+    /// Track width and the gap between the two tracks; 0 takes the net's track width and its
+    /// clearance.
+    pub width: f64,
+    pub gap: f64,
+}
+
+/// A length rule: the nets' routed length must lie in [min, max] (0 = no bound), and when
+/// `tolerance` is set they must all be within it of the longest (a matched-length group).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LengthRule {
+    pub name: String,
+    pub nets: Vec<String>,
+    pub min: f64,
+    pub max: f64,
+    pub tolerance: f64,
+}
+
 /// The rules a net is routed and checked with.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetRules {
@@ -309,6 +335,10 @@ pub struct Rules {
     pub body_gap: f64,
     /// Checks turned off, by id (see `CHECKS`).
     pub off: Vec<String>,
+    /// Differential pairs.
+    pub pairs: Vec<DiffPair>,
+    /// Length and matched-length rules.
+    pub lengths: Vec<LengthRule>,
 }
 
 /// The design rule and electrical rule checks, by id, with what each looks for.
@@ -329,6 +359,9 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("antenna", "Track ends that connect to nothing"),
     ("thermal", "Thermal reliefs with fewer than two spokes"),
     ("unrouted", "Connections not routed yet"),
+    ("length", "Nets outside their length rule"),
+    ("matched", "Matched-length nets out of tolerance"),
+    ("pair", "Differential pairs with uneven lengths or the wrong gap"),
     ("erc_unconnected", "Pins left unconnected (no no-connect mark)"),
     ("erc_single", "Nets with one pin"),
     ("erc_drivers", "Outputs driving each other"),
@@ -384,6 +417,8 @@ impl Default for Rules {
             max_height: 0.0,
             body_gap: 0.0,
             off: vec![],
+            pairs: vec![],
+            lengths: vec![],
         }
     }
 }
@@ -1638,6 +1673,7 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             }
         }
     }
+    out.extend(crate::pcb_tune::length_issues(pcb, nl));
     let air = ratsnest(&all, pads, fills);
     for a in &air {
         out.push(Issue::new("unrouted", [(a.a[0] + a.b[0]) / 2.0, (a.a[1] + a.b[1]) / 2.0], true, format!("Unrouted: {}", a.net)));
