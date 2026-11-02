@@ -340,11 +340,16 @@ let caps = #{
 };
 
 // ================================================================ tool changer
-// Arm side: Ø68 x 12 on the J6 carrier. Kinematic coupling: three V-grooves made of pairs of Ø4 dowels
-// (at 90°, 210°, 330°) take three Ø8 balls on the tool; three Ø10x3 N52 magnets hold it; an 8-pin
+// Arm side: Ø84 x 12 on the J6 carrier. Kinematic coupling: three V-grooves made of pairs of Ø4 dowels
+// (at 90°, 210°, 330°) take three Ø8 balls on the tool, which locate it. Two M4 screws in the tool plate
+// (at 0° and 180°, on Ø72, outside the tool body so a hex key reaches them) go into M4 heat-set inserts
+// and clamp it; three Ø10x3 N52 magnets only hold the tool in place while the screws go in. An 8-pin
 // 2.54 mm spring-loaded pogo connector in the middle meets gold pads on the tool's PCB.
 // Pins: 24V, 24V, GND, GND, CAN-H, CAN-L, TOOL_DETECT (tool ties it to GND), spare.
 fn xcyl(x0, y, z, r, h) { cylinder(vec3(x0, y, z), vec3(1, 0, 0), r, h) }
+let TC_R = 42.0;           // changer plate radius
+let LOCK_R = 36.0;         // lock screws on Ø72, at 0° and 180°
+let BALL_X = -0.5 + sqrt((4.0 + 2.0) * (4.0 + 2.0) - 2.6 * 2.6);   // ball centre above the arm face
 let tc_cuts = [block(vec3(xT - 8.0, yF - 6.0, H2 - 3.5), vec3(xT + 1.0, yF + 6.0, H2 + 3.5)), xcyl(xJ6o - 1.0, yF, H2, 3.0, 14)];
 let vpins = [];
 let balls = [];
@@ -360,7 +365,8 @@ for k in 0..3 {
         let pc = c + v * (2.6 * sgn) - u * 6.0;
         vpins.push(cylinder(vec3(pc.x - 0.5, pc.y, pc.z), u, 2.0, 12));
     }
-    balls.push(sphere_at(vec3(xT + 5.41, c.y, c.z), 4.0));
+    // Ø8 ball on two Ø4 pins 5.2 apart whose centres are 0.5 below the face: centre at xT + 4.91
+    balls.push(sphere_at(vec3(xT + BALL_X, c.y, c.z), 4.0));
     let m = (30.0 + 120.0 * k).to_radians();
     tc_cuts.push(xcyl(xT - 3.0, yF + 22 * cos(m), H2 + 22 * sin(m), 5.1, 4));
 }
@@ -369,24 +375,30 @@ for i in 0..6 {
     tc_cuts.push(xcyl(xJ6o - 1.0, yF + 15.5 * cos(a), H2 + 15.5 * sin(a), 1.7, 14));
     tc_cuts.push(xcyl(xT - 3.5, yF + 15.5 * cos(a), H2 + 15.5 * sin(a), 3.0, 4));
 }
-let tc_arm = xcyl(xJ6o, yF, H2, 34, 12).cut(tc_cuts);
+for sgn in [-1.0, 1.0] { tc_cuts.push(xcyl(xT - 10.0, yF + sgn * LOCK_R, H2, 2.8, 11)); }   // M4 heat-set inserts, Ø5.6 x 10
+let tc_arm = soft(xcyl(xJ6o, yF, H2, TC_R, 12), 1.5).cut(tc_cuts);
+let lock_inserts = compound([-1.0, 1.0].map(|sgn| xcyl(xT - 9.0, yF + sgn * 36.0, H2, 2.8, 9).cut([xcyl(xT - 10.0, yF + sgn * 36.0, H2, 1.75, 11)])));
 let pogo = fuse([block(vec3(xT - 8.0, yF - 5.1, H2 - 2.55), vec3(xT, yF + 5.1, H2 + 2.55))]
     + [-3.81, -1.27, 1.27, 3.81].map(|y| [-1.27, 1.27].map(|z| xcyl(xT - 1.0, yF + y, H2 + z, 0.5, 2.5))).reduce(|a, b| a + b, [])).unify();
 let magnets = [];
 for k in 0..3 { let m = (30.0 + 120.0 * k).to_radians(); magnets.push(xcyl(xT - 3.0, yF + 22 * cos(m), H2 + 22 * sin(m), 5.0, 3)); }
 
-// tool side: Ø68 x 10 plate 1 mm off the face, recesses over the pins, ball pockets, magnet pockets, pad PCB
+// tool side: Ø84 x 10 plate 1 mm off the face, recesses over the pins, ball pockets, magnet pockets, pad PCB,
+// two counterbored M4 lock screw holes
 let xTt = xT + 1.0;
 let tp_cuts = [block(vec3(xTt - 1.0, yF - 7.5, H2 - 5.0), vec3(xTt + 1.6, yF + 7.5, H2 + 5.0))];
 for k in 0..3 {
     let a = (90.0 + 120.0 * k).to_radians();
     let c = vec3(xTt, yF + 24.0 * cos(a), H2 + 24.0 * sin(a));
     tp_cuts.push(block(vec3(-1.0, -7.0, -5.0), vec3(3.0, 7.0, 5.0)).rotate(vec3(0, 0, 0), vec3(1, 0, 0), (90.0 + 120.0 * k)).translate(c));
-    tp_cuts.push(xcyl(xTt + 2.0, c.y, c.z, 4.0, 6));
+    tp_cuts.push(xcyl(xTt + 2.0, c.y, c.z, 4.0, xT + BALL_X + 4.0 - (xTt + 2.0)));   // the ball bottoms out here
     let m = (30.0 + 120.0 * k).to_radians();
     tp_cuts.push(xcyl(xTt - 1.0, yF + 22 * cos(m), H2 + 22 * sin(m), 5.1, 4));
 }
-let tool_plate = xcyl(xTt, yF, H2, 34, 10).cut(tp_cuts);
+for sgn in [-1.0, 1.0] { tp_cuts.push(xcyl(xTt - 1.0, yF + sgn * LOCK_R, H2, 2.25, 12)); tp_cuts.push(xcyl(xTt + 5.5, yF + sgn * LOCK_R, H2, 4.0, 6)); }
+let tool_plate = soft(xcyl(xTt, yF, H2, TC_R, 10), 1.5).cut(tp_cuts);
+// M4 x 16 socket head screws, head in the counterbore, 9 mm of thread in the insert
+let lock_screws = compound([-1.0, 1.0].map(|sgn| fuse([xcyl(xTt + 5.5, yF + sgn * LOCK_R, H2, 3.5, 4), xcyl(xTt + 5.5 - 16.0, yF + sgn * LOCK_R, H2, 2.0, 16)])));
 let pad_pcb = block(vec3(xTt, yF - 7.0, H2 - 4.5), vec3(xTt + 1.6, yF + 7.0, H2 + 4.5));
 let tool_magnets = [];
 for k in 0..3 { let m = (30.0 + 120.0 * k).to_radians(); tool_magnets.push(xcyl(xTt, yF + 22 * cos(m), H2 + 22 * sin(m), 5.0, 3)); }
@@ -437,8 +449,10 @@ parts.add("Wrist link", wrist_link, "J5", "printed", "PA-CF", C_P);
 parts.add("Tool changer (arm side)", tc_arm, "J6", "printed", "PA-CF", C_A);
 parts.add("V-groove dowels 4x12", compound(vpins), "J6", "bought", "Steel", C_ST);
 parts.add("Magnets 10x3 (arm)", compound(magnets), "J6", "bought", "NdFeB", "#9aa3ab");
+parts.add("Lock inserts M4 heat-set", lock_inserts, "J6", "bought", "Brass", "#d6a83a");
 parts.add("Pogo connector 8-pin", pogo, "J6", "bought", "Brass", "#d6a83a");
 parts.add("Tool plate", tool_plate, "tool", "printed", "PA-CF", C_D);
+parts.add("Lock screws M4x16", lock_screws, "tool", "bought", "Steel", "#202326");
 parts.add("Coupling balls 8", compound(balls), "tool", "bought", "Steel", C_ST);
 parts.add("Magnets 10x3 (tool)", compound(tool_magnets), "tool", "bought", "NdFeB", "#9aa3ab");
 parts.add("Tool pad PCB", pad_pcb, "tool", "bought", "PCB", "#1f6e3a");
@@ -537,7 +551,8 @@ for pair in [["Turntable", "J2 L50 housing"], ["Turntable", "J2 L50 motor"], ["T
              ["Motor cap J6", "J6 XS20P motor"], ["Motor cap J6", "Wrist link"], ["Motor cap J6", "J5 XS20 housing"], ["Elbow housing", "J4 S20 housing"], ["Forearm", "J4 S20 housing"], ["Forearm", "J5 XS20 housing"],
              ["Forearm", "J5 XS20 motor"], ["Wrist link", "J5 XS20 housing"], ["Wrist link", "J6 XS20P motor"], ["Wrist link", "J6 XS20P housing"],
              ["Forearm", "J6 XS20P housing"], ["Tool changer (arm side)", "J6 XS20P housing"], ["Tool plate", "Tool changer (arm side)"],
-             ["Tool plate", "V-groove dowels 4x12"], ["Coupling balls 8", "V-groove dowels 4x12"], ["Base housing", "J1 L30 motor"],
+             ["Tool plate", "V-groove dowels 4x12"], ["Coupling balls 8", "V-groove dowels 4x12"], ["Coupling balls 8", "Tool plate"], ["Lock screws M4x16", "Tool plate"], ["Lock screws M4x16", "Tool changer (arm side)"],
+             ["Lock screws M4x16", "Example tool body"], ["Lock inserts M4 heat-set", "Tool changer (arm side)"], ["Tool changer (arm side)", "Forearm"], ["Tool changer (arm side)", "Wrist link"], ["Base housing", "J1 L30 motor"],
              ["J1 L30 cycloid disc A", "J1 L30 ring pins"], ["J2 L50 cycloid disc A", "J2 L50 ring pins"], ["J2 L50 cycloid disc B", "J2 L50 ring pins"],
              ["J2 L50 cycloid disc A", "J2 L50 output pins"], ["J5 XS20 cycloid disc B", "J5 XS20 output pins"], ["J3 M30 cam", "J3 M30 bearings"]] {
     let v = (find(parts, pair[0]) & find(parts, pair[1])).volume();
@@ -574,8 +589,16 @@ let a2 = act["J2"];
 render([#{shape: a2.housing, color: "#d9662a", opacity: 0.35}, #{shape: a2.disc1, color: C_D}, #{shape: a2.disc2, color: "#6b7178"},
         #{shape: a2.pins, color: C_ST}, #{shape: a2.opins, color: "#d6a83a"}, #{shape: a2.cam, color: "#555b62"}, #{shape: a2.carrier, color: "#b0b8c0", opacity: 0.5},
         #{shape: nema17(60.0), color: C_M}], #{path: out + "gearbox-L50.png", width: 1200, height: 1000, view: "iso"});
-render([#{shape: tc_arm, color: C_D}, #{shape: compound(vpins), color: C_ST}, #{shape: compound(magnets), color: "#9aa3ab"}, #{shape: pogo, color: "#d6a83a"}],
-       #{path: out + "tool-changer.png", width: 1000, height: 1000, eye: [xT + 120.0, yF + 60.0, H2 + 70.0], target: [xT, yF, H2], up: [0, 0, 1]});
+// tool changer, opened like a book: arm side, and the tool side beside it turned round to show its face
+let tool_side = [#{shape: tool_plate, color: C_D}, #{shape: compound(balls), color: C_ST}, #{shape: compound(tool_magnets), color: "#9aa3ab"},
+                 #{shape: pad_pcb, color: "#1f6e3a"}, #{shape: lock_screws, color: "#202326"}];
+render([#{shape: tc_arm, color: C_A}, #{shape: compound(vpins), color: C_ST}, #{shape: compound(magnets), color: "#9aa3ab"}, #{shape: pogo, color: "#d6a83a"},
+        #{shape: lock_inserts, color: "#d6a83a"}] + tool_side.map(|t| #{shape: t.shape.rotate(vec3(xT, yF, H2), vec3(0, 0, 1), 180.0).translate(vec3(0, 95, 0)), color: t.color}),
+       #{path: out + "tool-changer.png", width: 1400, height: 900, eye: [xT + 260.0, yF + 47.0, H2 + 120.0], target: [xT, yF + 47.0, H2], up: [0, 0, 1], fov: 30, background: "#f3f4f6"});
+render([#{shape: tc_arm, color: C_A}, #{shape: compound(vpins), color: C_ST}, #{shape: compound(magnets), color: "#9aa3ab"}, #{shape: pogo, color: "#d6a83a"}],
+       #{path: out + "tool-changer-arm-face.png", width: 1000, height: 1000, eye: [xT + 130.0, yF + 50.0, H2 + 60.0], target: [xT, yF, H2], up: [0, 0, 1], fov: 30, background: "#f3f4f6"});
+// ball seat check: the balls should just touch the pins (no overlap), and overlap them if pushed 0.05 mm in
+checks.push(#{pair: "Coupling balls pushed 0.05 mm into the V-grooves", overlap_mm3: (compound(balls).translate(vec3(-0.05, 0, 0)) & compound(vpins)).volume()});
 
 // what each bracket carries (for fea.json): everything outboard of its load face, payload included
 fn outboard(parts, gm, order, k, stator_prefix, extra) {
