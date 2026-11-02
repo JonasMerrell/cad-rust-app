@@ -22,12 +22,12 @@ for lift-off, collisions on the CAD meshes, joint limits, payload capacity and t
 | | |
 |---|---|
 | Static check | Matches rcad's `summary.json` to 0.3 % (J2 14.36 against 14.40 N·m stretched out). |
-| Payload | Holds 1 kg in every pose using at most 58 % of the usable torque. The heaviest tool it can hold still is 2.2 kg (J3, stretched out); J5 caps it at 2.5 kg elsewhere. |
+| Payload | Holds 1 kg in every pose using at most 59 % of the usable torque. The heaviest tool it can hold still is 2.2 kg (J3, stretched out); J5 caps it at 2.5 kg elsewhere. |
 | Cycle | Fastest stepper-safe pick-and-place: 5.9 s, tool up to 1.4 m/s. Six of the seven moves are limited by J2, whose 100:1 reduction runs its motor at 1430 rpm. 25 % faster stalls J1 and J2. |
 | Tool changer | With 3 × 20 N magnets the safety factor against a ball lifting off is 1.8 held level (as the README says), but 1.15 with the tool rolled to its worst angle, 1.36 through the cycle and 0.79 at 1.5× speed. It needs a latch or about twice the magnet pull. |
-| Collisions | None along the cycle. 12 % of random poses inside the limits collide, mostly the forearm or wrist folding back into the turntable or base. |
-| Joint limits | J3 −145…146° (self-collision at −148/+149°), J5 −110…118° at any J4. J1, J4, J6 ±170° for cables. |
-| Reach | Tool face centre 512 mm from the J1 axis, 722 mm above the table. |
+| Collisions | None along the cycle. 15 % of random poses inside the limits collide, mostly the forearm or wrist folding back into the turntable or base. |
+| Joint limits | J2 down to 31° below level (the shoulder hub's tail meets the turntable at 34°; it was 40° before the turntable went to 20 mm), J3 −145…146° (self-collision at −148/+149°), J5 −110…118° at any J4. J1, J4, J6 ±170° for cables. |
+| Reach | Tool face centre 512 mm from the J1 axis, 721 mm above the table. |
 
 The ball seat in the CAD is 0.5 mm off: the dowel axes sit at x = −0.5 but the balls are placed as if they sat
 at x = 0, so in reality a ball seats at 4.91 mm and the tool plate gap is 0.5 mm rather than 1 mm. Its contact

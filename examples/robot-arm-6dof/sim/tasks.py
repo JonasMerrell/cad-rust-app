@@ -95,14 +95,16 @@ def limit(jidx, base, sign, stop=180):
         if h: return sign * (a - 1), h
     return sign * stop, []
 R['J3_self_limits'] = [limit(2, [0, rad(-90), 0, 0, 0, 0], s)[0] for s in (-1, 1)]
+# J2 lowering: the shoulder hub's tail meets the turntable (forearm folded up, clear of the table)
+R['J2_self_limit'], R['J2_self_limit_pair'] = limit(1, [0, 0, rad(-90), 0, 0, 0], 1)
 j5 = {}
 for r4 in range(0, 181, 15):
     j5[r4] = [limit(4, [0, rad(-60), rad(60), rad(r4), 0, 0], s) for s in (-1, 1)]
 R['J5_self_limits_by_J4'] = {k: [v[0][0], v[1][0]] for k, v in j5.items()}
-print('J3 self limits', R['J3_self_limits'], 'J5', R['J5_self_limits_by_J4'], 'collision maps', round(time.time() - t0_), 's')
+print('J2 self limit', R['J2_self_limit'], R['J2_self_limit_pair'], 'J3 self limits', R['J3_self_limits'], 'J5', R['J5_self_limits_by_J4'], 'collision maps', round(time.time() - t0_), 's')
 
 # recommended soft limits (a couple of degrees inside the hard stops found above; J1/J4/J6 for cables)
-LIM = {'J1': (-170, 170), 'J2': (-180, 20), 'J3': (R['J3_self_limits'][0] + 3, R['J3_self_limits'][1] - 3),
+LIM = {'J1': (-170, 170), 'J2': (-180, R['J2_self_limit'] - 3), 'J3': (R['J3_self_limits'][0] + 3, R['J3_self_limits'][1] - 3),
        'J4': (-170, 170), 'J5': (max(v[0] for v in R['J5_self_limits_by_J4'].values()) + 3, min(v[1] for v in R['J5_self_limits_by_J4'].values()) - 3), 'J6': (-170, 170)}
 R['limits_deg'] = LIM
 
