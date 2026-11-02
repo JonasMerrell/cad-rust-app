@@ -7,9 +7,9 @@
 // Printed: hull tub, deck (PLA or ABS); turret shell, turret ring, cupola, gun drum, barrel,
 // sprockets, idlers and road wheels (PLA); tracks (TPU 95A).
 // Bought (stand-ins with their outline sizes): 2 × N20 gear motors (6 V, 3 mm D shaft), 2 × SG90
-// servos (turret ±90°, gun −6°…+20°), Seeed XIAO ESP32S3 Sense (camera, WiFi video, control; it
-// rides in the gun drum so the camera elevates with the barrel), DRV8833 motor driver,
-// MP1584 5 V buck, 2S 450 mAh LiPo, 940 nm 5 mm IR LED in the barrel, 4 × TSOP38238 hit sensors,
+// servos (turret ±90°, gun −6°…+20°), Radxa Zero 3W (Pi Zero size; WiFi, H.264 video) standing
+// along the hull side, OV5647 Pi camera v1.3 in the gun drum so
+// it elevates with the barrel, RP2040-Zero for the real-time IO, DRV8833 motor driver, MP1584 5 V buck, 2S 450 mAh LiPo, 940 nm 5 mm IR LED in the barrel, 4 × TSOP38238 hit sensors,
 // M3 screws as wheel axles.
 
 let out = if ARGS.len() > 0 { ARGS[0] + "/" } else { "" };
@@ -38,8 +38,8 @@ let TUR_Z0 = 43.2;           // underside of the turret ring (its bearing rib re
 let TUR_R = 30.0;             // turret ring radius (the shell above it is faceted and wider)
 let GUN = [24.0, 65.5];      // gun drum pivot (x, z): the camera looks out along this axis
 let DRUM_R = 15.5;           // gun drum radius, half width 11
-let CAM_Z = GUN[1];          // camera axis height
-let BARREL_Z = GUN[1] - 9.5; // IR barrel axis height (shows at the bottom of the video as an aim mark)
+let CAM_Z = GUN[1] + 3.0;    // camera axis height (the camera board is mounted upside down)
+let BARREL_Z = GUN[1] - 8.0; // IR barrel axis height (shows at the bottom of the video as an aim mark)
 let ELEV = [-6.0, 20.0];     // gun depression and elevation limits (degrees)
 
 fn ycyl(x, y0, z, r, len) { cylinder(vec3(x, y0, z), vec3(0, 1, 0), r, len) }
@@ -90,13 +90,17 @@ fn sg90() {
     fuse([body, tabs, zcyl(0, 0, 0, 2.4, 3.5), zcyl(0, 0, 2.0, 3.5, 2.0), block(vec3(-3, -16, 3.5), vec3(3, 16, 5))])
 }
 
-// XIAO ESP32S3 Sense stack standing up, camera looking along +X: lens tip at the origin
-fn xiao_sense() {
-    let stack = block(vec3(-19, -8.9, -10.5), vec3(-4, 8.9, 10.5));
-    let cam = block(vec3(-4, -4, -4), vec3(-2, 4, 4));
-    let lens = xcyl(-2, 0, 0, 3.5, 2);
-    let usb = block(vec3(-18.5, -4.5, 10.5), vec3(-15.3, 4.5, 11.5));
-    fuse([stack, cam, lens, usb])
+// OV5647 Pi camera (25 × 24 board), upside down, looking along +X: lens centre at the origin,
+// board front face at x = -6.5 (so the lens tip is at the origin)
+fn pi_cam() {
+    let board = block(vec3(-7.5, -12.5, -14.5), vec3(-6.5, 12.5, 9.4));
+    let cmod = block(vec3(-6.5, -4.25, -4.25), vec3(-2, 4.25, 4.25));
+    fuse([board, cmod, xcyl(-2, 0, 0, 3.6, 2)])
+}
+
+// Radxa Zero 3W (Pi Zero size, 65 × 30) standing on its long edge, component side towards +Y: corner at the origin
+fn pi_zero() {
+    fuse([block(vec3(0, 0, 0), vec3(65, 1.4, 30)), block(vec3(10, 1.4, 8), vec3(50, 3.4, 22)), block(vec3(60, 1.4, 9), vec3(65, 2.6, 21))])
 }
 
 // ---------------------------------------------------------------- drivetrain (left side; right is mirrored)
@@ -248,6 +252,11 @@ for p in deck_screws {
 }
 // power switch in the rear wall (mini slide switch)
 cuts.push(block(vec3(-74, -4.5, 31), vec3(-66, 4.5, 35)));
+// standoffs for the Radxa Zero 3W (Pi Zero holes: M2.5, 58 × 23) from the right wall
+for x in [-41.5, 16.5] { for z in [13.0, 36.0] {
+    adds.push(ycyl(x, -y_in - 0.5, z, 2.6, y_in + 0.5 - 23.5));
+    cuts.push(ycyl(x, -y_in - 1, z, 1.05, 9));
+} }
 tub = fuse([tub] + adds).cut(cuts).unify();
 
 // ---------------------------------------------------------------- deck (lid with fenders over the tracks)
@@ -267,7 +276,7 @@ for sy in [1.0, -1.0] {
 for y in [-8.45, 19.15] {
     d_adds.push(block(vec3(-5, y - 2.4, HULL_Z1 - 5), vec3(5, y + 2.4, HULL_Z1)).cut([zcyl(0, y, HULL_Z1 - 6, 0.8, 7)]));
 }
-let d_cuts = [zcyl(0, 0, HULL_Z1 - 6, 6.0, 12), zcyl(22, 0, HULL_Z1 - 6, 4.5, 12)];   // spline and wire hole
+let d_cuts = [zcyl(0, 0, HULL_Z1 - 6, 6.0, 12), block(vec3(19, -8, HULL_Z1 - 6), vec3(25, 8, HULL_Z1 + 6))];   // spline; slot for the camera ribbon and wires
 for p in deck_screws {
     // countersunk M3
     d_cuts.push(zcyl(p[0], p[1], HULL_Z1 - 6, 1.7, 12));
@@ -319,7 +328,7 @@ for e in cupola.edges() { if e.mid().z > shell_z1 + 2.9 { ce.push(e); } }
 cupola = fuse([cupola.chamfer(ce, 1.0), zcyl(-14, 12, shell_z1 - 2, 3.2, 2.1)])
     .cut([zcyl(-14, 12, shell_z1 - 3, 2.0, 8), zcyl(-14, 12, shell_z1 + 2.4, 6.0, 2)]);   // light pipe hole for the hit LED, hatch recess
 let s_cuts = [
-    ycyl(GUN[0], -11.3, GUN[1], DRUM_R + 0.3, 22.6),   // embrasure the gun drum turns in
+    ycyl(GUN[0], -14.7, GUN[1], DRUM_R + 0.3, 29.4),   // embrasure the gun drum turns in
     zcyl(-14, 12, shell_z1 - 5, 3.3, 12)];             // cupola spigot; the hit LED (WS2812) sits under it
 for a in [45.0, 135.0, 225.0, 315.0] {
     // TSOP38238 windows: 6 wide, 7 tall through the wall
@@ -328,28 +337,35 @@ for a in [45.0, 135.0, 225.0, 315.0] {
 let s_adds = [];
 for p in tur_screws { s_adds.push(zcyl(p[0], p[1], ring_z1, 2.4, 8).cut([zcyl(p[0], p[1], ring_z1 - 1, 0.8, 8)])); }
 // trunnion brackets either side of the drum (M2 pivot screws), hanging from the roof
-for y0 in [11.5, -13.5] {
+for y0 in [14.9, -16.9] {
     s_adds.push(block(vec3(12, y0, 52), vec3(32, y0 + 2.0, shell_z1)).common([tvol]).cut([ycyl(GUN[0], -15, GUN[1], 1.1, 30)]));
 }
 // elevation servo (SG90) in the bustle, output axis along +Y at (-10, 65.5): two brackets for its tabs
 for x in [-29.15, -1.55] {
-    s_adds.push(block(vec3(x - 2.4, -6.0, 59.0), vec3(x + 2.4, -1.5, shell_z1)).common([tvol]).cut([ycyl(x, -7, GUN[1], 0.8, 6)]));
+    s_adds.push(block(vec3(x - 2.4, -3.5, 59.0), vec3(x + 2.4, 1.0, shell_z1)).common([tvol]).cut([ycyl(x, -4.5, GUN[1], 0.8, 6)]));
 }
 tshell = fuse([tshell.cut(s_cuts)] + s_adds).unify();
 
-// gun drum: holds the XIAO stack (camera looking out of the front) and the barrel, turns on two M2
-// screws in the trunnion brackets; open at the back to slide the XIAO in and let the wires out.
+// gun drum: holds the Pi camera (looking out of the front window) and the barrel, turns on two M2
+// screws in the trunnion brackets; open at the back to put the camera in and let its ribbon out.
+// The camera board screws (M2) to four standoffs on a plate inside the front of the drum.
 // A pushrod from the elevation servo's horn goes through the hole at 13 mm behind the pivot.
 let gx = GUN[0]; let gz = GUN[1];
-let drum = ycyl(gx, -11, gz, DRUM_R, 22).cut([ycyl(gx, -9.4, gz, DRUM_R - 1.6, 18.8), block(vec3(0, -9.4, 40), vec3(gx - 4.5, 9.4, 90))]);
-let ledge = block(vec3(gx - 4.5, -9.4, gz - 12.5), vec3(gx + 9, 9.4, gz - 10.5)).common([ycyl(gx, -11, gz, DRUM_R - 0.5, 22)]);
+let DW = 14.4;   // drum half width
+let inside = ycyl(gx, -DW + 1.6, gz, DRUM_R - 1.6, 2.0 * DW - 3.2);
+let drum = ycyl(gx, -DW, gz, DRUM_R, 2.0 * DW).cut([inside, block(vec3(0, -DW + 1.6, 40), vec3(gx - 4.5, DW - 1.6, 90))]);
+let cam_face = gx + 5.5;   // front face of the camera board
+let plate = block(vec3(cam_face + 2.0, -DW + 1.6, gz - 14), vec3(cam_face + 4.0, DW - 1.6, gz + 13)).common([inside])
+    .cut([block(vec3(cam_face, -5.2, CAM_Z - 5.2), vec3(cam_face + 5, 5.2, CAM_Z + 5.2))]);
+let standoffs = [];
+for y in [-10.5, 10.5] { for z in [CAM_Z, CAM_Z - 12.5] { standoffs.push(xcyl(cam_face, y, z, 2.0, 2.2).cut([xcyl(cam_face - 1, y, z, 0.8, 6)])); } }
 let collar = xcyl(gx + 12.0, 0, BARREL_Z, 6.8, 3.5);
-drum = fuse([drum, ledge, collar]).cut([
-    xcyl(gx + 6, 0, gz, 4.5, 15),                  // camera window
+drum = fuse([drum, plate, collar] + standoffs).cut([
+    xcyl(gx + 6, 0, CAM_Z, 4.5, 15),               // camera window
     xcyl(gx + 11.0, 0, BARREL_Z, 5.15, 7),         // barrel socket, 4.5 deep
     xcyl(gx, 0, BARREL_Z, 1.5, 14),                // LED leads
-    ycyl(gx, -12, gz, 0.8, 24),                    // M2 pivot screws
-    ycyl(gx - 13, 8, gz, 0.8, 4)]).unify();        // pushrod
+    ycyl(gx, -DW - 1, gz, 0.8, 2.0 * DW + 2),      // M2 pivot screws
+    ycyl(gx - 13, DW - 3, gz, 0.8, 4)]).unify();   // pushrod
 
 // IR barrel: pushed into the drum's socket, flange against the collar; LED seated at the back
 // 45° cones on every step so it prints standing on its back end without supports
@@ -379,12 +395,15 @@ for x in RW_X { left.push(#{name: "road wheel", shape: road_l.translate(vec3(x, 
 // ---------------------------------------------------------------- bought parts placed
 let motor_l = n20().translate(vec3(SPR[0], HULL_Y - 1.0, SPR[1]));
 let servo = sg90().rotate_z(90.0).translate(vec3(0, 0, HULL_Z1 - 1.0));
-let xiao = xiao_sense().translate(vec3(GUN[0] + 12.5, 0, CAM_Z));
-let elev_servo = sg90_body().rotate_z(180.0).rotate_x(-90.0).translate(vec3(-10, 5, GUN[1]));
-let elev_horn = block(vec3(-10, 9.0, GUN[1] - 1.5), vec3(3, 10.5, GUN[1] + 1.5));
+let cam = pi_cam().translate(vec3(cam_face + 6.5, 0, CAM_Z));
+let elev_servo = sg90_body().rotate_z(180.0).rotate_x(-90.0).translate(vec3(-10, 7.5, GUN[1]));
+let elev_horn = block(vec3(-10, 11.5, GUN[1] - 1.5), vec3(3, 13.0, GUN[1] + 1.5));
+// Radxa Zero 3W standing along the right hull wall on four M2.5 standoffs, RP2040-Zero on the floor
+let pi = pi_zero().rotate_z(180.0).translate(vec3(20, -18.5, 9.5));
+let rp2040 = block(vec3(-27, 0, HULL_Z0 + WALL), vec3(-3.5, 18, HULL_Z0 + WALL + 4));
 let battery = block(vec3(7.0, -15.5, HULL_Z0 + WALL), vec3(65.0, 15.5, HULL_Z0 + WALL + 14));
 let drv = block(vec3(-52, 4, HULL_Z0 + WALL), vec3(-33.5, 20, HULL_Z0 + WALL + 1.6));
-let buck = block(vec3(-52, -21, HULL_Z0 + WALL), vec3(-30, -4, HULL_Z0 + WALL + 4));
+let buck = block(vec3(-52, -17, HULL_Z0 + WALL), vec3(-30, -1, HULL_Z0 + WALL + 4));
 let led = xcyl(xr, 0, BARREL_Z, 2.5, 8.6);
 
 // ---------------------------------------------------------------- parts list, masses, files
@@ -405,7 +424,7 @@ let printed = [
 ];
 let bought = [
     #{name: "N20 gear motor 6 V", mass: 10.0, qty: 2}, #{name: "SG90 servo (turret and gun)", mass: 9.0, qty: 2},
-    #{name: "XIAO ESP32S3 Sense", mass: 7.0, qty: 1}, #{name: "2S 450 mAh LiPo", mass: 28.0, qty: 1},
+    #{name: "Radxa Zero 3W + microSD + antenna", mass: 12.0, qty: 1}, #{name: "OV5647 camera + Zero ribbon", mass: 4.0, qty: 1}, #{name: "RP2040-Zero", mass: 2.0, qty: 1}, #{name: "2S 450 mAh LiPo", mass: 28.0, qty: 1},
     #{name: "DRV8833 board", mass: 2.0, qty: 1}, #{name: "MP1584 buck", mass: 2.0, qty: 1},
     #{name: "IR LED, TSOPs, WS2812, switch, wire", mass: 8.0, qty: 1}, #{name: "M3 screws and nuts", mass: 14.0, qty: 1},
 ];
@@ -441,12 +460,13 @@ for side in [0, 1] {
     asm.push(#{name: if side == 0 { "motor L" } else { "motor R" }, shape: m, color: "#c8a040"});
 }
 for b in [[servo, "#2f6db5", "servo"], [elev_servo, "#2f6db5", "elevation servo"], [elev_horn, "#dddddd", "elevation horn"],
-          [battery, "#b83a3a", "battery"], [drv, "#7a3fb0", "drv8833"], [buck, "#2f8fb5", "buck"]] {
+          [battery, "#b83a3a", "battery"], [drv, "#7a3fb0", "drv8833"], [buck, "#2f8fb5", "buck"],
+          [pi, "#1d7a46", "radxa zero 3w"], [rp2040, "#1d4f7a", "rp2040-zero"]] {
     asm.push(#{name: b[2], shape: b[0], color: b[1]});
 }
 // the gun: everything that elevates with the drum
 let gun = [#{name: "gun-drum", shape: drum, color: DECK_C}, #{name: "barrel", shape: barrel, color: "#2a2a2a"},
-           #{name: "xiao", shape: xiao, color: "#1d7a46"}, #{name: "ir-led", shape: led, color: "#dddddd"}];
+           #{name: "pi camera", shape: cam, color: "#1d7a46"}, #{name: "ir-led", shape: led, color: "#dddddd"}];
 fn posed(gun, gx, gz, deg) {
     let out = [];
     for g in gun { out.push(#{name: g.name, shape: g.shape.rotate(vec3(gx, 0, gz), vec3(0, 1, 0), -deg), color: g.color}); }
@@ -461,6 +481,17 @@ for deg in [ELEV[0], 0.0, ELEV[1]] {
             if p.max.x < q.min.x || q.max.x < p.min.x || p.max.y < q.min.y || q.max.y < p.min.y || p.max.z < q.min.z || q.max.z < p.min.z { continue; }
             let v = (g.shape & a.shape).volume();
             if v > 0.5 { gun_clashes.push(#{elevation: deg, a: g.name, b: a.name, mm3: v}); }
+        }
+    }
+}
+// full depression with the turret turned 45° and 90°: the barrel must clear the deck
+for psi in [45.0, 90.0, -45.0, -90.0] {
+    for g in posed(gun, gx, gz, ELEV[0]) {
+        let gs = g.shape.rotate_z(psi);
+        for a in asm {
+            if a.name != "deck" && a.name != "hull-tub" { continue; }
+            let v = (gs & a.shape).volume();
+            if v > 0.5 { gun_clashes.push(#{elevation: ELEV[0], turret: psi, a: g.name, b: a.name, mm3: v}); }
         }
     }
 }
