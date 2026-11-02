@@ -4,10 +4,11 @@
 // renders, and parts.json with each part's mass and the build envelope checks.
 // Units mm. World: X forward, Y left, Z up, ground at z = 0.
 //
-// Printed: hull tub, deck (PLA or ABS); turret shell, turret ring, barrel, sprockets, idlers and
-// road wheels (PLA); tracks (TPU 95A).
-// Bought (stand-ins with their outline sizes): 2 × N20 gear motors (6 V, 3 mm D shaft), SG90 servo
-// (turret, ±90°), Seeed XIAO ESP32S3 Sense (camera, WiFi video, control), DRV8833 motor driver,
+// Printed: hull tub, deck (PLA or ABS); turret shell, turret ring, cupola, gun drum, barrel,
+// sprockets, idlers and road wheels (PLA); tracks (TPU 95A).
+// Bought (stand-ins with their outline sizes): 2 × N20 gear motors (6 V, 3 mm D shaft), 2 × SG90
+// servos (turret ±90°, gun −6°…+20°), Seeed XIAO ESP32S3 Sense (camera, WiFi video, control; it
+// rides in the gun drum so the camera elevates with the barrel), DRV8833 motor driver,
 // MP1584 5 V buck, 2S 450 mAh LiPo, 940 nm 5 mm IR LED in the barrel, 4 × TSOP38238 hit sensors,
 // M3 screws as wheel axles.
 
@@ -35,8 +36,11 @@ let HULL_Z1 = 40.0;          // top of the tub = underside of the deck
 let DECK_T = 2.4;
 let TUR_Z0 = 43.2;           // underside of the turret ring (its bearing rib reaches down to 42.6)
 let TUR_R = 30.0;             // turret ring radius (the shell above it is faceted and wider)
-let CAM_Z = 66.0;            // camera axis height
-let BARREL_Z = 54.5;         // IR barrel axis height
+let GUN = [24.0, 65.5];      // gun drum pivot (x, z): the camera looks out along this axis
+let DRUM_R = 15.5;           // gun drum radius, half width 11
+let CAM_Z = GUN[1];          // camera axis height
+let BARREL_Z = GUN[1] - 9.5; // IR barrel axis height (shows at the bottom of the video as an aim mark)
+let ELEV = [-6.0, 20.0];     // gun depression and elevation limits (degrees)
 
 fn ycyl(x, y0, z, r, len) { cylinder(vec3(x, y0, z), vec3(0, 1, 0), r, len) }
 fn zcyl(x, y, z0, r, h) { cylinder(vec3(x, y, z0), vec3(0, 0, 1), r, h) }
@@ -70,6 +74,13 @@ fn n20() {
     let motor = ycyl(0, -24, 0, 6, 15).common([block(vec3(-7, -25, -5), vec3(7, 0, 5))]);
     let shaft = ycyl(0, 0, 0, 1.5, 10).cut([block(vec3(1.25, -1, -2), vec3(2, 11, 2))]);
     fuse([gear, motor, ycyl(0, 0, 0, 2, 1), shaft, block(vec3(-2, -26, -1), vec3(2, -24, 1))])
+}
+
+// SG90 without its horn
+fn sg90_body() {
+    let body = block(vec3(-5.9, -6.1, -22.7), vec3(16.6, 6.1, 0));
+    let tabs = block(vec3(-10.75, -6.1, -6.5), vec3(21.45, 6.1, -4)).cut([zcyl(-8.45, 0, -7, 1, 4), zcyl(19.15, 0, -7, 1, 4)]);
+    fuse([body, tabs, zcyl(0, 0, 0, 2.4, 3.5), zcyl(0, 0, 2.0, 3.5, 2.0)])
 }
 
 // SG90 micro servo: output axis +Z, spline at the origin, top face z = 0, body along +X
@@ -289,52 +300,66 @@ for a in [45.0, 135.0, 225.0, 315.0] {
 }
 tring = tring.cut(r_cuts).unify();
 
-// turret shell: flat front with the camera window and the barrel socket, hit sensors in the walls
-// faceted turret: sloped walls lofted from the base outline to a smaller roof, a bustle at the rear
+// turret shell: faceted, sloped walls lofted from the base outline to a smaller roof, a bustle at the
+// rear; the gun drum sits in a round embrasure in the front
 fn outline_at(pts, z) { let w = []; for p in pts { w.push([p[0], p[1], z]); } wire(w, true) }
 let base_pts = [[30, -12], [30, 12], [18, 32], [-24, 32], [-40, 18], [-40, -18], [-24, -32], [18, -32]];
 let roof_pts = [[25, -10], [25, 10], [15, 27], [-22, 27], [-36, 15], [-36, -15], [-22, -27], [15, -27]];
-let tshell = loft([outline_at(base_pts, ring_z1), outline_at(roof_pts, shell_z1)], true);
+let tvol = loft([outline_at(base_pts, ring_z1), outline_at(roof_pts, shell_z1)], true);
 let bottom = ();
-for f in tshell.faces() { if f.normal().z < -0.9 { bottom = f; } }
-tshell = tshell.shell([bottom], 2.0);
+for f in tvol.faces() { if f.normal().z < -0.9 { bottom = f; } }
+let tshell = tvol.shell([bottom], 2.0);
 let roof_e = [];
 for e in tshell.edges() { if (e.start().z - shell_z1).abs() < 0.01 && (e.end().z - shell_z1).abs() < 0.01 { roof_e.push(e); } }
 tshell = tshell.chamfer(roof_e, 1.2);
-// gun mantlet around the barrel and camera, commander's cupola on the roof
-let mantlet = block(vec3(25.5, -8.5, 48.5), vec3(33, 8.5, 72.5));
-let me = [];
-for e in mantlet.edges() { if e.mid().x > 32.9 { me.push(e); } }
-mantlet = mantlet.chamfer(me, 1.5);
-let cupola = zcyl(-14, 12, shell_z1 - 1, 8, 4);
+// the cupola is a separate part (so the shell can print roof down): a spigot goes into the roof
+let cupola = zcyl(-14, 12, shell_z1, 8, 3);
 let ce = [];
 for e in cupola.edges() { if e.mid().z > shell_z1 + 2.9 { ce.push(e); } }
-cupola = cupola.chamfer(ce, 1.0);
-tshell = fuse([tshell, mantlet, cupola]);
+cupola = fuse([cupola.chamfer(ce, 1.0), zcyl(-14, 12, shell_z1 - 2, 3.2, 2.1)])
+    .cut([zcyl(-14, 12, shell_z1 - 3, 2.0, 8), zcyl(-14, 12, shell_z1 + 2.4, 6.0, 2)]);   // light pipe hole for the hit LED, hatch recess
 let s_cuts = [
-    xcyl(20, 0, CAM_Z, 4.5, 20),            // camera window
-    xcyl(20, 0, BARREL_Z, 5.15, 20),        // barrel socket
-    zcyl(-14, 12, shell_z1 - 5, 2.6, 12),   // hit LED (WS2812) in the cupola
-    zcyl(-14, 12, shell_z1 + 2.4, 6.0, 2),  // cupola hatch recess
-    block(vec3(5, -5, shell_z1 - 5), vec3(10.5, 5, shell_z1 + 1))];   // USB-C for programming
+    ycyl(GUN[0], -11.3, GUN[1], DRUM_R + 0.3, 22.6),   // embrasure the gun drum turns in
+    zcyl(-14, 12, shell_z1 - 5, 3.3, 12)];             // cupola spigot; the hit LED (WS2812) sits under it
 for a in [45.0, 135.0, 225.0, 315.0] {
     // TSOP38238 windows: 6 wide, 7 tall through the wall
     s_cuts.push(block(vec3(22, -3.0, 68.5), vec3(50, 3.0, 75.5)).rotate_z(a));
 }
 let s_adds = [];
 for p in tur_screws { s_adds.push(zcyl(p[0], p[1], ring_z1, 2.4, 8).cut([zcyl(p[0], p[1], ring_z1 - 1, 0.8, 8)])); }
-// cradle for the XIAO stack: two rails either side of it
-for sy in [1.0, -1.0] { s_adds.push(block(vec3(5.5, sy * 9.0 - (if sy > 0.0 { 0.0 } else { 2.0 }), ring_z1), vec3(20.5, sy * 9.0 + (if sy > 0.0 { 2.0 } else { 0.0 }), CAM_Z - 10.5))); }
+// trunnion brackets either side of the drum (M2 pivot screws), hanging from the roof
+for y0 in [11.5, -13.5] {
+    s_adds.push(block(vec3(12, y0, 52), vec3(32, y0 + 2.0, shell_z1)).common([tvol]).cut([ycyl(GUN[0], -15, GUN[1], 1.1, 30)]));
+}
+// elevation servo (SG90) in the bustle, output axis along +Y at (-10, 65.5): two brackets for its tabs
+for x in [-29.15, -1.55] {
+    s_adds.push(block(vec3(x - 2.4, -6.0, 59.0), vec3(x + 2.4, -1.5, shell_z1)).common([tvol]).cut([ycyl(x, -7, GUN[1], 0.8, 6)]));
+}
 tshell = fuse([tshell.cut(s_cuts)] + s_adds).unify();
 
-// IR barrel: pushed into the socket, flange against the front face; LED seated at the back
+// gun drum: holds the XIAO stack (camera looking out of the front) and the barrel, turns on two M2
+// screws in the trunnion brackets; open at the back to slide the XIAO in and let the wires out.
+// A pushrod from the elevation servo's horn goes through the hole at 13 mm behind the pivot.
+let gx = GUN[0]; let gz = GUN[1];
+let drum = ycyl(gx, -11, gz, DRUM_R, 22).cut([ycyl(gx, -9.4, gz, DRUM_R - 1.6, 18.8), block(vec3(0, -9.4, 40), vec3(gx - 4.5, 9.4, 90))]);
+let ledge = block(vec3(gx - 4.5, -9.4, gz - 12.5), vec3(gx + 9, 9.4, gz - 10.5)).common([ycyl(gx, -11, gz, DRUM_R - 0.5, 22)]);
+let collar = xcyl(gx + 12.0, 0, BARREL_Z, 6.8, 3.5);
+drum = fuse([drum, ledge, collar]).cut([
+    xcyl(gx + 6, 0, gz, 4.5, 15),                  // camera window
+    xcyl(gx + 11.0, 0, BARREL_Z, 5.15, 7),         // barrel socket, 4.5 deep
+    xcyl(gx, 0, BARREL_Z, 1.5, 14),                // LED leads
+    ycyl(gx, -12, gz, 0.8, 24),                    // M2 pivot screws
+    ycyl(gx - 13, 8, gz, 0.8, 4)]).unify();        // pushrod
+
+// IR barrel: pushed into the drum's socket, flange against the collar; LED seated at the back
 // 45° cones on every step so it prints standing on its back end without supports
 fn xcone(x0, z, r0, r1, len) { cone(vec3(x0, 0, z), vec3(1, 0, 0), r0, r1, len) }
-let barrel = fuse([xcyl(29.0, 0, BARREL_Z, 5.0, 43.0),
-    xcyl(33.0, 0, BARREL_Z, 6.5, 1.0), xcone(34.0, BARREL_Z, 6.5, 5.0, 1.5),            // flange against the mantlet
-    xcone(49.0, BARREL_Z, 5.0, 6.2, 1.2), xcyl(50.2, 0, BARREL_Z, 6.2, 6.0), xcone(56.2, BARREL_Z, 6.2, 5.0, 1.2),   // fume extractor
-    xcone(64.8, BARREL_Z, 5.0, 6.0, 1.0), xcyl(65.8, 0, BARREL_Z, 6.0, 6.2)])          // muzzle
-    .cut([xcyl(28, 0, BARREL_Z, 2.6, 46), xcyl(28, 0, BARREL_Z, 3.0, 3.2)]);
+let xr = gx + 11.0;   // back end of the barrel
+let barrel = fuse([xcyl(xr, 0, BARREL_Z, 5.0, 43.0),
+    xcyl(xr + 4.5, 0, BARREL_Z, 6.5, 1.0), xcone(xr + 5.5, BARREL_Z, 6.5, 5.0, 1.5),     // flange against the collar
+    xcone(xr + 20.0, BARREL_Z, 5.0, 6.2, 1.2), xcyl(xr + 21.2, 0, BARREL_Z, 6.2, 6.0), xcone(xr + 27.2, BARREL_Z, 6.2, 5.0, 1.2),   // fume extractor
+    xcone(xr + 35.8, BARREL_Z, 5.0, 6.0, 1.0), xcyl(xr + 36.8, 0, BARREL_Z, 6.0, 6.2)])  // muzzle
+    .cut([xcyl(xr - 1, 0, BARREL_Z, 2.6, 46), xcyl(xr - 1, 0, BARREL_Z, 3.0, 4.2)]);
 
 // ---------------------------------------------------------------- drivetrain placement
 let sprocket_l = sprocket(SPR_R, SPR_N, 7.0);
@@ -354,11 +379,13 @@ for x in RW_X { left.push(#{name: "road wheel", shape: road_l.translate(vec3(x, 
 // ---------------------------------------------------------------- bought parts placed
 let motor_l = n20().translate(vec3(SPR[0], HULL_Y - 1.0, SPR[1]));
 let servo = sg90().rotate_z(90.0).translate(vec3(0, 0, HULL_Z1 - 1.0));
-let xiao = xiao_sense().translate(vec3(24.5, 0, CAM_Z));
+let xiao = xiao_sense().translate(vec3(GUN[0] + 12.5, 0, CAM_Z));
+let elev_servo = sg90_body().rotate_z(180.0).rotate_x(-90.0).translate(vec3(-10, 5, GUN[1]));
+let elev_horn = block(vec3(-10, 9.0, GUN[1] - 1.5), vec3(3, 10.5, GUN[1] + 1.5));
 let battery = block(vec3(7.0, -15.5, HULL_Z0 + WALL), vec3(65.0, 15.5, HULL_Z0 + WALL + 14));
 let drv = block(vec3(-52, 4, HULL_Z0 + WALL), vec3(-33.5, 20, HULL_Z0 + WALL + 1.6));
 let buck = block(vec3(-52, -21, HULL_Z0 + WALL), vec3(-30, -4, HULL_Z0 + WALL + 4));
-let led = xcyl(29.0, 0, BARREL_Z, 2.5, 8.6);
+let led = xcyl(xr, 0, BARREL_Z, 2.5, 8.6);
 
 // ---------------------------------------------------------------- parts list, masses, files
 let PLA = 1.24e-3; let TPU = 1.21e-3;
@@ -368,6 +395,8 @@ let printed = [
     #{name: "deck", shape: deck, density: PLA, fill: 0.8, qty: 1, layout: deck.mirror(o, vec3(0, 0, 1))},
     #{name: "turret-shell", shape: tshell, density: PLA, fill: 0.7, qty: 1, layout: tshell.mirror(o, vec3(0, 0, 1))},
     #{name: "turret-ring", shape: tring, density: PLA, fill: 0.8, qty: 1, layout: tring.mirror(o, vec3(0, 0, 1))},
+    #{name: "cupola", shape: cupola, density: PLA, fill: 1.0, qty: 1, layout: cupola.mirror(o, vec3(0, 0, 1))},
+    #{name: "gun-drum", shape: drum, density: PLA, fill: 0.9, qty: 1, layout: drum.rotate_x(90.0)},
     #{name: "barrel", shape: barrel, density: PLA, fill: 1.0, qty: 1, layout: barrel.rotate(o, ny, -90.0)},
     #{name: "sprocket", shape: sprocket_l, density: PLA, fill: 0.8, qty: 2, layout: sprocket_l.rotate_x(-90.0)},
     #{name: "idler", shape: idler_l, density: PLA, fill: 0.8, qty: 2, layout: idler_l.rotate_x(-90.0)},
@@ -375,7 +404,7 @@ let printed = [
     #{name: "track", shape: track_l, density: TPU, fill: 1.0, qty: 2, layout: track_print(LUGS, PITCH, BAND, TRACK_W)},
 ];
 let bought = [
-    #{name: "N20 gear motor 6 V", mass: 10.0, qty: 2}, #{name: "SG90 servo", mass: 9.0, qty: 1},
+    #{name: "N20 gear motor 6 V", mass: 10.0, qty: 2}, #{name: "SG90 servo (turret and gun)", mass: 9.0, qty: 2},
     #{name: "XIAO ESP32S3 Sense", mass: 7.0, qty: 1}, #{name: "2S 450 mAh LiPo", mass: 28.0, qty: 1},
     #{name: "DRV8833 board", mass: 2.0, qty: 1}, #{name: "MP1584 buck", mass: 2.0, qty: 1},
     #{name: "IR LED, TSOPs, WS2812, switch, wire", mass: 8.0, qty: 1}, #{name: "M3 screws and nuts", mass: 14.0, qty: 1},
@@ -400,8 +429,8 @@ summary.total_g += summary.printed_g;
 let HULL_C = "#4e5b38"; let DECK_C = "#5f6e45"; let RING_C = "#454f33";
 let hero = #{eye: [300, -250, 210], target: [0, 0, 38], up: [0, 0, 1], fov: 28};
 let asm = [#{name: "hull-tub", shape: tub, color: HULL_C}, #{name: "deck", shape: deck, color: DECK_C},
-           #{name: "turret-ring", shape: tring, color: RING_C}, #{name: "turret-shell", shape: tshell, color: DECK_C}, #{name: "barrel", shape: barrel, color: "#2a2a2a"}];
-let steps = [tub, deck, tring, tshell, barrel];
+           #{name: "turret-ring", shape: tring, color: RING_C}, #{name: "turret-shell", shape: tshell, color: DECK_C}, #{name: "cupola", shape: cupola, color: DECK_C}];
+let steps = [tub, deck, tring, tshell, cupola];
 for side in [0, 1] {
     for p in left {
         let s = if side == 0 { p.shape } else { p.shape.mirror(o, ny) };
@@ -411,9 +440,32 @@ for side in [0, 1] {
     let m = if side == 0 { motor_l } else { motor_l.mirror(o, ny) };
     asm.push(#{name: if side == 0 { "motor L" } else { "motor R" }, shape: m, color: "#c8a040"});
 }
-for b in [[servo, "#2f6db5", "servo"], [xiao, "#1d7a46", "xiao"], [battery, "#b83a3a", "battery"], [drv, "#7a3fb0", "drv8833"], [buck, "#2f8fb5", "buck"], [led, "#dddddd", "ir-led"]] {
+for b in [[servo, "#2f6db5", "servo"], [elev_servo, "#2f6db5", "elevation servo"], [elev_horn, "#dddddd", "elevation horn"],
+          [battery, "#b83a3a", "battery"], [drv, "#7a3fb0", "drv8833"], [buck, "#2f8fb5", "buck"]] {
     asm.push(#{name: b[2], shape: b[0], color: b[1]});
 }
+// the gun: everything that elevates with the drum
+let gun = [#{name: "gun-drum", shape: drum, color: DECK_C}, #{name: "barrel", shape: barrel, color: "#2a2a2a"},
+           #{name: "xiao", shape: xiao, color: "#1d7a46"}, #{name: "ir-led", shape: led, color: "#dddddd"}];
+fn posed(gun, gx, gz, deg) {
+    let out = [];
+    for g in gun { out.push(#{name: g.name, shape: g.shape.rotate(vec3(gx, 0, gz), vec3(0, 1, 0), -deg), color: g.color}); }
+    out
+}
+// clashes of the gun with everything else at full depression and full elevation
+let gun_clashes = [];
+for deg in [ELEV[0], 0.0, ELEV[1]] {
+    for g in posed(gun, gx, gz, deg) {
+        for a in asm {
+            let p = g.shape.bbox(); let q = a.shape.bbox();
+            if p.max.x < q.min.x || q.max.x < p.min.x || p.max.y < q.min.y || q.max.y < p.min.y || p.max.z < q.min.z || q.max.z < p.min.z { continue; }
+            let v = (g.shape & a.shape).volume();
+            if v > 0.5 { gun_clashes.push(#{elevation: deg, a: g.name, b: a.name, mm3: v}); }
+        }
+    }
+}
+summary.gun_clashes = gun_clashes;
+for g in gun { asm.push(g); steps.push(g.shape); }
 // interference check between every pair of placed parts (bounding boxes first)
 let clashes = [];
 for i in 0..asm.len() {
@@ -433,6 +485,11 @@ render(asm, #{path: out + "fpv-tank.png", width: 1400, height: 1000, eye: hero.e
 render(asm, #{path: out + "fpv-tank-front.png", width: 1400, height: 1000, eye: [320, 180, 140], target: [0, 0, 35], up: [0, 0, 1], fov: 28, background: "#eef0ea"});
 render(asm, #{path: out + "fpv-tank-side.png", width: 1400, height: 700, view: "front"});
 render(asm, #{path: out + "fpv-tank-end.png", width: 1000, height: 700, view: "right"});
+let raised = [];
+for a in asm { if !gun.some(|g| g.name == a.name) { raised.push(a); } }
+raised += posed(gun, gx, gz, 15.0);
+render(raised, #{path: out + "fpv-tank-elevated.png", width: 1400, height: 1000, eye: hero.eye, target: hero.target, up: hero.up, fov: hero.fov, background: "#eef0ea"});
+render(raised, #{path: out + "fpv-tank-elevated-side.png", width: 1400, height: 700, view: "front"});
 let xray = [];
 for a in asm { xray.push(#{shape: a.shape, color: a.color, opacity: if a.color == HULL_C || a.color == DECK_C || a.color == RING_C { 0.25 } else { 1.0 }}); }
 render(xray, #{path: out + "fpv-tank-xray.png", width: 1400, height: 1000, eye: hero.eye, target: hero.target, up: hero.up, fov: hero.fov, background: "#eef0ea"});
