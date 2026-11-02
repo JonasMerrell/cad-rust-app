@@ -96,11 +96,24 @@ pub struct Print {
     pub layer_height: f64,
     /// Build direction (the printer's Z) in the Part Studio's axes.
     pub build_dir: [f64; 3],
+    /// Layer bond strength over the data sheet's Z values (1 = as tested; 0.5-0.8 for cool, fast or
+    /// tall prints, where each layer has cooled before the next lands).
+    pub layer_bond: f64,
 }
 
 impl Default for Print {
     fn default() -> Self {
-        Print { model: PrintModel::Layered, infill: 20.0, pattern: Infill::Grid, walls: 2, line_width: 0.45, top_bottom: 4, layer_height: 0.2, build_dir: [0.0, 0.0, 1.0] }
+        Print {
+            model: PrintModel::Layered,
+            infill: 20.0,
+            pattern: Infill::Grid,
+            walls: 2,
+            line_width: 0.45,
+            top_bottom: 4,
+            layer_height: 0.2,
+            build_dir: [0.0, 0.0, 1.0],
+            layer_bond: 1.0,
+        }
     }
 }
 
@@ -113,6 +126,15 @@ impl Print {
     /// Top and bottom skin thickness (mm).
     pub fn skin(&self) -> f64 {
         self.top_bottom as f64 * self.layer_height.max(0.0)
+    }
+
+    /// Layer bond factor, clamped to 0.05-1.5.
+    pub fn bond(&self) -> f64 {
+        if self.layer_bond.is_finite() {
+            self.layer_bond.clamp(0.05, 1.5)
+        } else {
+            1.0
+        }
     }
 
     pub fn axis(&self) -> DVec3 {
@@ -161,7 +183,8 @@ pub const PRINTED: &[Printed] = &[
 /// The settings in a few words: "20% grid, 2 walls, layered".
 pub fn summary(p: &Print) -> String {
     let dir = if (p.axis() - DVec3::Z).length() < 1e-9 { String::new() } else { format!(", build {}", fmt_dir(p.axis())) };
-    format!("{}% {}, {} walls, {}{dir}", crate::expr::trim(p.infill, 1), p.pattern.key(), p.walls, if p.model == PrintModel::Layered { "layered" } else { "isotropic" })
+    let bond = if (p.bond() - 1.0).abs() < 1e-9 { String::new() } else { format!(", layer bond ×{}", crate::expr::trim(p.bond(), 2)) };
+    format!("{}% {}, {} walls, {}{dir}{bond}", crate::expr::trim(p.infill, 1), p.pattern.key(), p.walls, if p.model == PrintModel::Layered { "layered" } else { "isotropic" })
 }
 
 /// A direction like +X or (0.71, 0, 0.71).
@@ -267,6 +290,10 @@ pub fn rotate(d: &[[f64; 6]; 6], axis: DVec3) -> [[f64; 6]; 6] {
     out
 }
 
+/// Compressive over tensile strength of printed plastics: 1.2-1.5 for PLA, PETG and nylon, up to 2 for
+/// ABS (Ahn et al. 2002); 1.3 is the usual figure for Raghava's criterion on glassy polymers.
+pub const COMPRESSION: f64 = 1.3;
+
 /// The material of printed plastic `p` (its library entry `base`: Poisson's ratio, density, loss
 /// factor) where a share `shell` (0-1) of the volume is solid shell and the rest infill.
 pub fn material(p: &Printed, base: &Elastic, print: &Print, shell: f64) -> Elastic {
@@ -279,9 +306,12 @@ pub fn material(p: &Printed, base: &Elastic, print: &Print, shell: f64) -> Elast
         PrintModel::Isotropic => {
             let es = (2.0 * p.e_xy + p.e_z) / 3.0;
             let ec = (2.0 * k.e_p * p.e_xy + k.e_z * p.e_z) / 3.0;
-            let ys = p.s_xy.min(p.s_z);
-            let yc = (k.s_p * p.s_xy).min(k.s_z * p.s_z);
-            Elastic { e: lerp(es, ec), nu, rho, yield_mpa: lerp(ys, yc), eta: base.eta, d: None, layer: None }
+            let sz = p.s_z * print.bond();
+            let ys = p.s_xy.min(sz);
+            let yc = (k.s_p * p.s_xy).min(k.s_z * sz);
+            let y = lerp(ys, yc);
+            let layer = Layer { axis: print.axis().to_array(), x: y, c: COMPRESSION, z: y, s: y / 3f64.sqrt(), interface: false };
+            Elastic { e: lerp(es, ec), nu, rho, yield_mpa: y, eta: base.eta, d: None, layer: Some(layer) }
         }
         PrintModel::Layered => {
             let gz = p.e_z / (2.0 * (1.0 + nu));
@@ -298,10 +328,12 @@ pub fn material(p: &Printed, base: &Elastic, print: &Print, shell: f64) -> Elast
                 }
             }
             let x = lerp(p.s_xy, k.s_p * p.s_xy);
-            let z = lerp(p.s_z, k.s_z * p.s_z);
+            let sz = p.s_z * print.bond();
+            let z = lerp(sz, k.s_z * sz);
             // interlayer shear strength: the bond's tensile strength over √3, as von Mises would give
-            let s = lerp(p.s_z, k.s_z.min(k.s_p) * p.s_z) / 3f64.sqrt();
-            Elastic { e: lerp(p.e_xy, ep), nu, rho, yield_mpa: x, eta: base.eta, d: Some(rotate(&d, print.axis())), layer: Some(Layer { axis: print.axis().to_array(), x, z, s }) }
+            let s = lerp(sz, k.s_z.min(k.s_p) * sz) / 3f64.sqrt();
+            let layer = Layer { axis: print.axis().to_array(), x, c: COMPRESSION, z, s, interface: true };
+            Elastic { e: lerp(p.e_xy, ep), nu, rho, yield_mpa: x, eta: base.eta, d: Some(rotate(&d, print.axis())), layer: Some(layer) }
         }
     }
 }
@@ -487,10 +519,22 @@ mod tests {
         let squeezed = m.failure_index(&[0.0, 0.0, -30.0, 0.0, 0.0, 0.0]);
         assert!((along - 30.0 / pla.s_xy).abs() < 1e-6);
         assert!((across - 30.0 / pla.s_z).abs() < 1e-6);
-        assert!(squeezed < across);
-        // the isotropic model uses the weakest strength everywhere
+        // compression across the layers is a bulk check, 1.3 × stronger than tension
+        assert!((squeezed - 30.0 / (COMPRESSION * pla.s_xy)).abs() < 1e-6, "{squeezed}");
+        let pressed = m.failure_index(&[-30.0, 0.0, 0.0, 0.0, 0.0, 0.0]);
+        assert!((pressed - 30.0 / (COMPRESSION * pla.s_xy)).abs() < 1e-6);
+        // shear along the layers against Z/√3, raised by squeezing them together
+        let sheared = m.failure_index(&[0.0, 0.0, 0.0, 0.0, 10.0, 0.0]);
+        assert!((sheared - 10.0 * 3f64.sqrt() / pla.s_z).abs() < 1e-6, "{sheared}");
+        assert!(m.failure_index(&[0.0, 0.0, -10.0, 0.0, 10.0, 0.0]) < sheared);
+        // a weaker layer bond lowers the Z strength only
+        let weak = material(pla, &base, &Print { layer_bond: 0.5, ..Print::default() }, 1.0);
+        assert!((weak.failure_index(&[0.0, 0.0, 30.0, 0.0, 0.0, 0.0]) - 2.0 * across).abs() < 1e-6);
+        assert!((weak.failure_index(&[30.0, 0.0, 0.0, 0.0, 0.0, 0.0]) - along).abs() < 1e-6);
+        // the isotropic model uses the weakest strength everywhere, still stronger in compression
         let iso = material(pla, &base, &Print { model: PrintModel::Isotropic, ..Print::default() }, 1.0);
         assert!((iso.failure_index(&[30.0, 0.0, 0.0, 0.0, 0.0, 0.0]) - 30.0 / pla.s_z).abs() < 1e-6);
+        assert!((iso.failure_index(&[-30.0, 0.0, 0.0, 0.0, 0.0, 0.0]) - 30.0 / (COMPRESSION * pla.s_z)).abs() < 1e-6);
         // infill is lighter and softer
         let core = material(pla, &base, &Print::default(), 0.0);
         assert!((core.rho - 0.2 * base.rho).abs() < 1e-15);

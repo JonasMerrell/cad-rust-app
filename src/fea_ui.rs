@@ -777,7 +777,7 @@ fn print_rows(ui: &mut Ui, s: &mut Study, printable: &[&'static crate::fea_print
     row(ui, "Print model", |ui| {
         egui::ComboBox::from_id_salt("fea-print-model").width(160.0).selected_text(p.model.label()).show_ui(ui, |ui| {
             ui.selectable_value(&mut p.model, PrintModel::Layered, PrintModel::Layered.label()).on_hover_text(
-                "Transversely isotropic about the build direction: stiffer and stronger along the layers than across them. Judged by von Mises against the in-plane strength and by tension across / shear along the layers against the layer bond",
+                "Transversely isotropic about the build direction: stiffer and stronger along the layers than across them. Judged by pressure-modified von Mises against the in-plane strength (1.3 × stronger in compression) and by tension across / shear along the layers against the layer bond",
             );
             ui.selectable_value(&mut p.model, PrintModel::Isotropic, PrintModel::Isotropic.label())
                 .on_hover_text("The same in every direction: the modulus averaged over directions and the weakest (between-layer) strength, so it is safe whichever way the part is printed");
@@ -817,6 +817,11 @@ fn print_rows(ui: &mut Ui, s: &mut Study, printable: &[&'static crate::fea_print
         })
         .response
         .on_hover_text("The printer's Z (up from the bed) in the Part Studio's axes: the layers lie across it");
+    });
+    row(ui, "Layer bond", |ui| {
+        ui.add(egui::DragValue::new(&mut p.layer_bond).range(0.05..=1.5).speed(0.01).fixed_decimals(2).prefix("× ")).on_hover_text(
+            "Strength between layers over the data sheet's Z value. 1 = as tested (small specimens, tuned printer). Use 0.5-0.8 for tall or fast prints, a part cooling fan at full, or a cold enclosure: each layer has cooled before the next lands and bonds less",
+        );
     });
     let mut info = vec![];
     for m in printable {

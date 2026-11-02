@@ -1,0 +1,528 @@
+{
+  "format": "cad-rust-app/workspace-1",
+  "studios": [
+    {
+      "name": "Part Studio 1",
+      "doc": {
+        "format": "cad-rust-app/1",
+        "units": "mm",
+        "variables": [],
+        "features": [
+          {
+            "id": 1,
+            "name": "Sketch 1",
+            "suppressed": false,
+            "hidden": false,
+            "op": {
+              "type": "sketch",
+              "plane": {
+                "kind": "origin_plane",
+                "plane": "Top"
+              },
+              "sketch": {
+                "points": [
+                  {
+                    "id": 1,
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  {
+                    "id": 2,
+                    "x": 80.0,
+                    "y": 0.0
+                  },
+                  {
+                    "id": 3,
+                    "x": 80.0,
+                    "y": 40.0
+                  },
+                  {
+                    "id": 4,
+                    "x": 0.0,
+                    "y": 40.0
+                  },
+                  {
+                    "id": 9,
+                    "x": 60.0,
+                    "y": 20.0
+                  }
+                ],
+                "curves": [
+                  {
+                    "id": 5,
+                    "type": "line",
+                    "a": 1,
+                    "b": 2,
+                    "construction": false
+                  },
+                  {
+                    "id": 6,
+                    "type": "line",
+                    "a": 2,
+                    "b": 3,
+                    "construction": false
+                  },
+                  {
+                    "id": 7,
+                    "type": "line",
+                    "a": 3,
+                    "b": 4,
+                    "construction": false
+                  },
+                  {
+                    "id": 8,
+                    "type": "line",
+                    "a": 4,
+                    "b": 1,
+                    "construction": false
+                  },
+                  {
+                    "id": 10,
+                    "type": "circle",
+                    "c": 9,
+                    "r": 6.0,
+                    "construction": false
+                  }
+                ],
+                "constraints": [
+                  {
+                    "type": "horizontal",
+                    "l": 5
+                  },
+                  {
+                    "type": "horizontal",
+                    "l": 7
+                  },
+                  {
+                    "type": "vertical",
+                    "l": 6
+                  },
+                  {
+                    "type": "vertical",
+                    "l": 8
+                  }
+                ],
+                "next_id": 10,
+                "texts": []
+              },
+              "frame": {
+                "origin": [
+                  0.0,
+                  0.0,
+                  0.0
+                ],
+                "x": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "y": [
+                  0.0,
+                  1.0,
+                  0.0
+                ],
+                "normal": [
+                  0.0,
+                  0.0,
+                  1.0
+                ]
+              }
+            }
+          },
+          {
+            "id": 2,
+            "name": "Extrude 1",
+            "suppressed": false,
+            "hidden": false,
+            "op": {
+              "type": "extrude",
+              "profiles": [
+                {
+                  "kind": "region",
+                  "sketch": 1,
+                  "point": [
+                    20.0,
+                    20.0
+                  ]
+                }
+              ],
+              "end": "blind",
+              "depth": "8",
+              "opposite": false,
+              "second": false,
+              "depth2": "10",
+              "up_to": null,
+              "op": "add",
+              "draft": "0"
+            }
+          },
+          {
+            "id": 3,
+            "name": "Sketch 2",
+            "suppressed": false,
+            "hidden": false,
+            "op": {
+              "type": "sketch",
+              "plane": {
+                "kind": "face",
+                "point": [
+                  20.0,
+                  20.0,
+                  8.0
+                ],
+                "normal": [
+                  0.0,
+                  0.0,
+                  1.0
+                ],
+                "name": [
+                  {
+                    "feature": 2,
+                    "role": "end",
+                    "n": 0
+                  }
+                ]
+              },
+              "sketch": {
+                "points": [
+                  {
+                    "id": 1,
+                    "x": 0.0,
+                    "y": 0.0
+                  },
+                  {
+                    "id": 2,
+                    "x": 8.0,
+                    "y": 0.0
+                  },
+                  {
+                    "id": 3,
+                    "x": 8.0,
+                    "y": 40.0
+                  },
+                  {
+                    "id": 4,
+                    "x": 0.0,
+                    "y": 40.0
+                  }
+                ],
+                "curves": [
+                  {
+                    "id": 5,
+                    "type": "line",
+                    "a": 1,
+                    "b": 2,
+                    "construction": false
+                  },
+                  {
+                    "id": 6,
+                    "type": "line",
+                    "a": 2,
+                    "b": 3,
+                    "construction": false
+                  },
+                  {
+                    "id": 7,
+                    "type": "line",
+                    "a": 3,
+                    "b": 4,
+                    "construction": false
+                  },
+                  {
+                    "id": 8,
+                    "type": "line",
+                    "a": 4,
+                    "b": 1,
+                    "construction": false
+                  }
+                ],
+                "constraints": [
+                  {
+                    "type": "horizontal",
+                    "l": 5
+                  },
+                  {
+                    "type": "horizontal",
+                    "l": 7
+                  },
+                  {
+                    "type": "vertical",
+                    "l": 6
+                  },
+                  {
+                    "type": "vertical",
+                    "l": 8
+                  }
+                ],
+                "next_id": 8,
+                "texts": []
+              },
+              "frame": {
+                "origin": [
+                  0.0,
+                  0.0,
+                  8.0
+                ],
+                "x": [
+                  1.0,
+                  0.0,
+                  0.0
+                ],
+                "y": [
+                  0.0,
+                  1.0,
+                  0.0
+                ],
+                "normal": [
+                  0.0,
+                  0.0,
+                  1.0
+                ]
+              }
+            }
+          },
+          {
+            "id": 4,
+            "name": "Extrude 2",
+            "suppressed": false,
+            "hidden": false,
+            "op": {
+              "type": "extrude",
+              "profiles": [
+                {
+                  "kind": "region",
+                  "sketch": 3,
+                  "point": [
+                    5.333333333333333,
+                    13.333333333333334
+                  ]
+                }
+              ],
+              "end": "blind",
+              "depth": "50",
+              "opposite": false,
+              "second": false,
+              "depth2": "10",
+              "up_to": null,
+              "op": "add",
+              "draft": "0"
+            }
+          },
+          {
+            "id": 5,
+            "name": "Fillet 1",
+            "suppressed": false,
+            "hidden": false,
+            "op": {
+              "type": "fillet",
+              "edges": [
+                {
+                  "kind": "edge",
+                  "point": [
+                    8.0,
+                    20.0,
+                    8.0
+                  ],
+                  "name": [
+                    {
+                      "feature": 4,
+                      "role": "side",
+                      "n": 6
+                    },
+                    {
+                      "feature": 2,
+                      "role": "end",
+                      "n": 0
+                    }
+                  ]
+                }
+              ],
+              "radius": "5",
+              "variable": false,
+              "end_radius": "4"
+            }
+          }
+        ],
+        "rollback": null,
+        "next_id": 5,
+        "parts": {},
+        "configs": [],
+        "active_config": null
+      }
+    }
+  ],
+  "assemblies": [],
+  "drawings": [],
+  "simulations": [
+    {
+      "name": "Printed flat",
+      "studio": 0,
+      "bodies": [],
+      "analysis": "static",
+      "material": "PLA",
+      "mesh_size": 2.0,
+      "refine": true,
+      "supports": [
+        {
+          "id": 1,
+          "name": "Fixed 1",
+          "kind": "fixed",
+          "faces": [
+            {
+              "point": [
+                0.0,
+                20.0,
+                30.0
+              ],
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        }
+      ],
+      "loads": [
+        {
+          "id": 2,
+          "name": "Force 1",
+          "kind": "force",
+          "faces": [
+            {
+              "point": [
+                60.0,
+                26.0,
+                4.0
+              ],
+              "normal": [
+                0.0,
+                1.0,
+                0.0
+              ]
+            }
+          ],
+          "value": 40.0,
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "normal": false
+        }
+      ],
+      "modes": 6,
+      "transient": {
+        "profile": "step",
+        "time": 0.001,
+        "frequency": 100.0,
+        "duration": null,
+        "steps": 400,
+        "damping": 0.02
+      },
+      "print": {
+        "model": "layered",
+        "infill": 20.0,
+        "pattern": "gyroid",
+        "walls": 3,
+        "line_width": 0.45,
+        "top_bottom": 4,
+        "layer_height": 0.2,
+        "build_dir": [
+          0.0,
+          0.0,
+          1.0
+        ],
+        "layer_bond": 1.0
+      },
+      "next_id": 3
+    },
+    {
+      "name": "Printed on its side",
+      "studio": 0,
+      "bodies": [],
+      "analysis": "static",
+      "material": "PLA",
+      "mesh_size": 2.0,
+      "refine": true,
+      "supports": [
+        {
+          "id": 1,
+          "name": "Fixed 1",
+          "kind": "fixed",
+          "faces": [
+            {
+              "point": [
+                0.0,
+                20.0,
+                30.0
+              ],
+              "normal": [
+                -1.0,
+                0.0,
+                0.0
+              ]
+            }
+          ]
+        }
+      ],
+      "loads": [
+        {
+          "id": 2,
+          "name": "Force 1",
+          "kind": "force",
+          "faces": [
+            {
+              "point": [
+                60.0,
+                26.0,
+                4.0
+              ],
+              "normal": [
+                0.0,
+                1.0,
+                0.0
+              ]
+            }
+          ],
+          "value": 40.0,
+          "direction": [
+            0.0,
+            0.0,
+            -1.0
+          ],
+          "normal": false
+        }
+      ],
+      "modes": 6,
+      "transient": {
+        "profile": "step",
+        "time": 0.001,
+        "frequency": 100.0,
+        "duration": null,
+        "steps": 400,
+        "damping": 0.02
+      },
+      "print": {
+        "model": "layered",
+        "infill": 20.0,
+        "pattern": "gyroid",
+        "walls": 3,
+        "line_width": 0.45,
+        "top_bottom": 4,
+        "layer_height": 0.2,
+        "build_dir": [
+          0.0,
+          1.0,
+          0.0
+        ],
+        "layer_bond": 1.0
+      },
+      "next_id": 3
+    }
+  ],
+  "active": {
+    "Studio": 0
+  },
+  "versions": []
+}

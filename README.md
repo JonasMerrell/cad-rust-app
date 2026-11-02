@@ -152,7 +152,9 @@ unit cells.
 **3D-printed plastics** (PLA, PETG, ABS, ASA, PC, nylon and carbon-fibre grades) can be modelled as
 printed: solid walls and top/bottom layers around a sparse infill (grid, triangles, honeycomb or gyroid
 at any density), either layered (weaker across the layers, about a build direction you choose) or
-effective isotropic. The defaults come from makers' X-Y and Z data and Gibson–Ashby infill scaling; see
+effective isotropic. The defaults come from makers' X-Y and Z data and Gibson–Ashby infill scaling, and
+the factor of safety uses a pressure-sensitive polymer criterion plus a layer-bond check with an
+adjustable bond factor; see
 [docs/fea-printed-plastics.md](docs/fea-printed-plastics.md).
 
 ### PCB design
