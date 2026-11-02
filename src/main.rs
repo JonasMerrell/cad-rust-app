@@ -57,6 +57,8 @@ mod pcb_kicad;
 mod pcb_lib;
 mod pcb_route;
 mod pcb_tune;
+mod pcb_trace;
+mod pcb_trace_ui;
 mod pcb_ui;
 mod digikey;
 mod digikey_ui;

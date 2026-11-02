@@ -148,6 +148,88 @@ impl Session {
         })
     }
 
+    /// The trace solver: a calculator, and the board's nets solved for current, heating,
+    /// resistance, voltage drop and impedance.
+    fn pcb_traces(&mut self, a: &Value) -> R<Value> {
+        use crate::pcb_trace::{self as tr, LineKind};
+        let mut out = json!({});
+        if let Some(c) = a.get("calc") {
+            let mut k = tr::Calc::default();
+            let f = |n: &str| c.get(n).and_then(|v| v.as_f64());
+            if let Some(pi) = a.get("pcb").and_then(|v| v.as_u64()).map(|v| v as usize).filter(|i| *i < self.ws.pcbs.len()) {
+                // start from the board's top layer
+                let st = tr::stack(&self.ws.pcbs[pi].board);
+                k.geometry = st.line(Layer::Top);
+                k.copper_oz = st.copper_oz(Layer::Top);
+                k.temp_rise = self.ws.pcbs[pi].board.rules.temp_rise;
+            }
+            k.width = f("width").unwrap_or(k.width);
+            k.copper_oz = f("copper_oz").unwrap_or(k.copper_oz);
+            k.outer = c.get("layer").and_then(|v| v.as_str()) != Some("inner");
+            k.current = f("current").unwrap_or(k.current);
+            k.length = f("length").unwrap_or(k.length);
+            k.temp_rise = f("temp_rise").unwrap_or(k.temp_rise);
+            k.ambient = f("ambient").unwrap_or(k.ambient);
+            k.geometry.h = f("h").unwrap_or(k.geometry.h);
+            k.geometry.h2 = f("h2").unwrap_or(0.0);
+            k.geometry.er = f("er").unwrap_or(k.geometry.er);
+            k.gap = f("gap").unwrap_or(0.0);
+            match c.get("line").and_then(|v| v.as_str()) {
+                None | Some("microstrip") => k.geometry.kind = LineKind::Microstrip,
+                Some("stripline") => k.geometry.kind = LineKind::Stripline,
+                Some(o) => return Err(format!("calc.line is microstrip or stripline, not {o}")),
+            }
+            if k.width <= 0.0 || k.copper_oz <= 0.0 || k.geometry.h <= 0.0 || k.geometry.er < 1.0 {
+                return Err("calc: width, copper_oz and h must be positive and er at least 1".into());
+            }
+            let o = k.solve();
+            let g = tr::Geometry { t: k.t(), ..k.geometry };
+            let mut v = serde_json::to_value(&o).unwrap_or_default();
+            if let Some(m) = v.as_object_mut() {
+                for x in m.values_mut() {
+                    if let Some(n) = x.as_f64() {
+                        *x = json!((n * 10000.0).round() / 10000.0);
+                    }
+                }
+            }
+            v["inputs"] = serde_json::to_value(&k).unwrap_or_default();
+            if let Some(z) = f("z_target") {
+                v["width_for_z"] = json!(g.width_for(z).map(|w| (w * 10000.0).round() / 10000.0));
+            }
+            if let Some(z) = f("zdiff_target") {
+                let s = if k.gap > 0.0 { k.gap } else { k.width };
+                v["width_for_zdiff"] = json!(g.diff_width_for(z, s).map(|w| (w * 10000.0).round() / 10000.0));
+                v["gap_for_zdiff"] = json!(g.diff_gap_for(z, k.width).map(|w| (w * 10000.0).round() / 10000.0));
+            }
+            out["calc"] = v;
+        }
+        if a.get("pcb").is_some() {
+            let pi = self.pcb_idx(a)?;
+            let p = &self.ws.pcbs[pi];
+            let nl = p.netlist();
+            let pads = p.pads(&nl);
+            let rep = tr::nets(p, &nl, &pads, &|n| tr::target(p, &nl, n));
+            let r4 = |x: f64| if x.is_finite() { json!((x * 10000.0).round() / 10000.0) } else { Value::Null };
+            out["pcb"] = json!(pi);
+            out["stackup"] = serde_json::to_value(tr::stack(&p.board)).unwrap_or_default();
+            out["temp_rise"] = json!(p.board.rules.temp_rise);
+            out["nets"] = rep
+                .iter()
+                .map(|r| {
+                    json!({"net": r.net, "current": r.current, "impedance": r.impedance, "tracks": r.tracks, "vias": r.vias, "length": r4(r.length), "min_width": r4(r.min_width), "max_width": r4(r.max_width),
+                        "resistance": r4(r.resistance), "worst_path": [r.worst.0, r.worst.1], "drop": r4(r.drop), "rise": r4(r.rise), "need_width": r4(r.need_width),
+                        "z_min": r4(r.z_min), "z_max": r4(r.z_max), "z_width": r4(r.z_width), "poured": r.poured, "open": r.open})
+                })
+                .collect::<Vec<_>>()
+                .into();
+            out["issues"] = tr::check(p, &|n| tr::target(p, &nl, n)).iter().map(|i| json!({"at": r2(i.at), "message": i.message, "error": i.error})).collect::<Vec<_>>().into();
+        }
+        if out.as_object().is_some_and(|o| o.is_empty()) {
+            return Err("give pcb (to solve its nets) or calc (a track to work out), or both".into());
+        }
+        Ok(out)
+    }
+
     pub(super) fn pcb_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
         let v = match name {
             "create_pcb" => {
@@ -541,6 +623,7 @@ impl Session {
                     "library": {"footprints": p.footprints.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), "symbols": p.symbols.iter().map(|s| s.key.clone()).collect::<Vec<_>>()},
                     "hint": "add parts with pcb_add_parts using symbol: \"Library:Name\" for imported symbols, and footprint: \"<name>\" for imported or generated footprints"})
             }
+            "pcb_traces" => self.pcb_traces(a)?,
             "pcb_3d" => {
                 let pi = self.pcb_idx(a)?;
                 self.sync();
@@ -745,6 +828,22 @@ fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
     if let Some(t) = a.get("thickness").and_then(|v| v.as_f64()) {
         b.thickness = t;
     }
+    b.stackup = crate::pcb_trace::stack(b);
+    if let Some(oz) = a.get("copper_oz").and_then(|v| v.as_f64()) {
+        if !(0.25..=6.0).contains(&oz) {
+            return Err("copper_oz: 0.5, 1, 2 or 3 (oz/ft²)".into());
+        }
+        b.stackup.set_copper(Some(oz), Some(oz));
+        b.stackup.set_total(b.thickness);
+    }
+    if let Some(er) = a.get("er").and_then(|v| v.as_f64()) {
+        if !(1.0..=15.0).contains(&er) {
+            return Err("er: the dielectric's relative permittivity, 1 to 15 (FR4 about 4.5)".into());
+        }
+        for l in b.stackup.layers.iter_mut().filter(|l| matches!(l.kind, crate::pcb_trace::StackKind::Core | crate::pcb_trace::StackKind::Prepreg)) {
+            l.er = er;
+        }
+    }
     if let Some(c) = a.get("color").and_then(|v| v.as_str()) {
         b.color = if c == "green" { String::new() } else { c.to_string() };
     }
@@ -776,6 +875,8 @@ pub fn tools() -> Vec<Value> {
         "outline": pts("board outline [[x, y], …] mm, instead of width/height"),
         "thickness": {"type": "number", "description": "board thickness mm (default 1.6)"},
         "color": {"type": "string", "enum": ["green", "black", "blue", "red", "white", "purple"], "description": "solder mask colour"},
+        "copper_oz": {"type": "number", "description": "copper weight of every layer, oz/ft² (default 1; 2 for high current)"},
+        "er": {"type": "number", "description": "dielectric relative permittivity for impedance (default 4.5, FR4)"},
         "rules": {"type": "object", "properties": {
             "clearance": num("copper to copper (0.2)"),
             "track": num("signal track width (0.25)"),
@@ -815,6 +916,7 @@ pub fn tools() -> Vec<Value> {
                 "max": num("longest routed length, mm (0 = none)"),
                 "tolerance": num("matched length: every net within this of the longest, mm (0 = not matched)"),
             }, "required": ["name", "nets"], "additionalProperties": false}, "description": "length and matched-length rules (replaces the list), checked by check_pcb; pcb_route match tunes a group"},
+            "temp_rise": num("allowed track temperature rise at its net class's current, °C (10)"),
             "off": {"type": "array", "items": {"type": "string", "enum": pcb::CHECKS.iter().map(|c| c.0).collect::<Vec<_>>()}, "description": "checks to turn off"},
         }, "additionalProperties": false, "description": "design rules, mm; only the ones given change"},
     });
@@ -890,6 +992,12 @@ pub fn tools() -> Vec<Value> {
             "cols": {"type": "integer", "description": "BGA columns"},
             "density": {"type": "string", "enum": ["M", "N", "L"], "description": "IPC density level: M most, N nominal, L least"}
         }, "additionalProperties": false}}}), &["pcb"])}),
+        json!({"name": "pcb_traces", "description": "Trace solver. pcb: every routed net (or net with a current/impedance target) solved: track length and widths, worst pad-to-pad resistance through tracks and vias and the voltage drop at the net's current, temperature rise (IPC-2221), the width the current needs at the allowed rise, impedance of its tracks (microstrip over the stackup) and the width an impedance target needs; plus the stackup and the current/impedance findings check_pcb also reports. calc: work out one track: current capacity, rise, resistance, drop, power, Z0, εeff, delay and differential impedance, and the widths or gap for z_target / zdiff_target (defaults from the board's top layer when pcb is given).", "inputSchema": obj(json!({"pcb": pcb, "calc": {"type": "object", "properties": {
+            "width": num("track width mm"), "copper_oz": num("copper weight oz (1 = 35 µm)"), "layer": {"type": "string", "enum": ["outer", "inner"], "description": "for heating (default outer)"},
+            "current": num("A"), "length": num("mm, for resistance and drop"), "temp_rise": num("allowed rise °C (10)"), "ambient": num("°C (25)"),
+            "line": {"type": "string", "enum": ["microstrip", "stripline"], "description": "default microstrip"}, "h": num("dielectric to the plane mm (stripline: to each plane)"), "h2": num("stripline: to the other plane mm (0 centred)"),
+            "er": num("relative permittivity (4.5)"), "gap": num("differential pair edge gap mm"), "z_target": num("solve the width for this single-ended Ω"), "zdiff_target": num("solve width (at gap) and gap (at width) for this differential Ω"),
+        }, "additionalProperties": false, "description": "one track to work out"}}), &[])}),
         json!({"name": "pcb_3d", "description": "Make or update the Part Studio \"<pcb name> 3D\": the board (with its holes) and a simple body for every part, as separate parts named by reference and value, ready to insert into assemblies or export as STEP. Running it again updates the same parts. The Part Studio becomes the active one.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
     ]
 }
