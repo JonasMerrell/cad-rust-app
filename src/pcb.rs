@@ -2302,6 +2302,17 @@ pub(crate) mod tests {
     }
 
     #[test]
+    fn a_turn_onto_another_pin_is_reported() {
+        let mut p = Pcb::new("t");
+        let r1 = p.add_part("R", None, None, [0.0, 0.0]).unwrap();
+        // R2's pin 1 sits where R1's pin 1 goes on a quarter turn
+        p.add_part("R", None, None, [-5.08, -5.08]).unwrap();
+        let old = p.parts[r1].clone();
+        p.parts[r1].sch_rot = 1;
+        assert!(!p.carry_to_pins(r1, &old));
+    }
+
+    #[test]
     fn wires_know_their_net_and_odd_labels_are_flagged() {
         let mut p = led_board();
         let nl = p.netlist();

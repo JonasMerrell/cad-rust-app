@@ -644,6 +644,8 @@ fn mirror_sel(app: &mut App) {
     }
 }
 
+const NOT_TURNED: &str = "Not turned: its pins would land on other wires here. Move it to a clear spot first";
+
 /// Turn or mirror a symbol, its wires and labels going along with the pins (else a half turn
 /// would swap them unseen). A change that would still make or lose a connection is refused.
 fn sch_turn(app: &mut App, i: usize, f: impl FnOnce(&mut pcb::Part)) {
@@ -658,7 +660,7 @@ fn sch_turn(app: &mut App, i: usize, f: impl FnOnce(&mut pcb::Part)) {
         }
     });
     if !ok {
-        app.flash("Not turned: its pins would land on other wires here. Move it to a clear spot first", ToastKind::Error);
+        app.flash(NOT_TURNED, ToastKind::Error);
     }
 }
 
@@ -958,7 +960,18 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
             if let Some((k, was)) = old {
                 if app.ws.pcbs[i].parts.get(k).is_some_and(|x| *x != was) {
-                    app.ws.pcbs[i].carry_to_pins(k, &was);
+                    // the same pins rearranged (turned, mirrored, renamed) must keep their joins, as
+                    // with R and X; a new footprint or type with other pins may drop some
+                    let nums = |x: &pcb::Part| {
+                        let mut v: Vec<String> = x.symbol().pins.into_iter().map(|q| q.num).collect();
+                        v.sort();
+                        v
+                    };
+                    let same_pins = nums(&was) == nums(&app.ws.pcbs[i].parts[k]);
+                    if !app.ws.pcbs[i].carry_to_pins(k, &was) && same_pins {
+                        app.ws.pcbs[i] = before.clone();
+                        app.flash(NOT_TURNED, ToastKind::Error);
+                    }
                 }
             }
         }
