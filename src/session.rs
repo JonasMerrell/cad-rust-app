@@ -618,6 +618,7 @@ impl App {
             back.restores_studio = Some((i, hist));
         }
         let n = s.ws.studios.len();
+        let pcb_before = crate::pcb_ui::history_pcb(self);
         self.ws = s.ws;
         self.studio_undo.retain(|k, _| *k < n);
         self.cur_studio = s.cur_studio.min(n - 1);
@@ -638,7 +639,8 @@ impl App {
         self.asm.dialog = None;
         self.cam = Default::default();
         self.fea = Default::default();
-        self.pcb = Default::default();
+        // the PCB editor keeps its history and view while its tab is still there
+        crate::pcb_ui::ws_replaced(self, pcb_before, false);
         self.renaming_tab = None;
         self.changed();
         let t = s.tab;
