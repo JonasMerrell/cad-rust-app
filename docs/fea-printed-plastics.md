@@ -43,6 +43,11 @@ solid).
   | PETG-CF | 2460 / 1340 | 35 / 29 | Bambu Lab PETG-CF |
   | ASA-CF | 4200 / 2290 | 34 / 30 | Bambu Lab ASA-CF |
   | PET-CF | 4730 / 2160 | 74 / 35 | Bambu Lab PET-CF |
+  | PPS-CF | 8230 / 2850 | 87 / 24 | Bambu Lab PPS-CF (not annealed) |
+  | PA6-CF | 8637 / 3760 | 109.3 / 54.0 | Polymaker Fiberon PA6-CF20, dry, annealed |
+  | PA6-CF (humid) | 2508 / 1056 | 54.7 / 25.5 | Polymaker Fiberon PA6-CF20, wet (5 % water) |
+  | PA12-CF | 3311 / 1807 | 77.4 / 52.2 | Polymaker Fiberon PA12-CF10, dry, annealed |
+  | PA12-CF (humid) | 3132 / 1622 | 71.7 / 42.1 | Polymaker Fiberon PA12-CF10, wet (3 % water) |
 
 - **Infill** scales the solid's properties with its density ρ (Gibson–Ashby): exponent 1 where the
   infill's walls stretch, 2–3 where they bend.
@@ -79,7 +84,10 @@ from 3.0 to 3.6.
 
 - Polymaker technical data sheets: PolyLite PLA, PETG, ABS, PC, PLA-CF; Polymaker ASA; PolyMide CoPA.
   https://wiki.polymaker.com/polymaker-products/more-about-our-products/documents/technical-data-sheets
-- Bambu Lab technical data sheets: PETG-CF (V3), ASA-CF (V1), PET-CF (V3).
+- Bambu Lab technical data sheets: PETG-CF (V3), ASA-CF (V1), PET-CF (V3), PPS-CF (V1).
+- Polymaker Fiberon technical data sheets: PA6-CF20 (V1.1), PA12-CF10 (V1.1).
+  https://fiberon.polymaker.com/wp-content/uploads/TDS_FIBERON-PA6-CF20_V1.1_EN.pdf,
+  https://fiberon.polymaker.com/wp-content/uploads/TDS_FIBERON-PA12-CF10_V1.1_EN.pdf
 - S.-H. Ahn, M. Montero, D. Odell, S. Roundy, P. K. Wright (2002), Anisotropic material properties of
   fused deposition modeling ABS, Rapid Prototyping Journal 8(4) 248–257, doi:10.1108/13552540210441166.
 - C. Casavola, A. Cazzato, V. Moramarco, C. Pappalettere (2016), Orthotropic mechanical properties of
