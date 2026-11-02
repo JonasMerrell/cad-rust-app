@@ -1084,15 +1084,28 @@ impl Pcb {
     }
 
     /// Keep part `i`'s connections after its pins moved (turned, mirrored, new pin names, footprint
-    /// or type); `old` is `sch_pins()` from before. Pins are matched by number. A stub (a wire from
+    /// or type); `before` is the part as it was. Pins are matched by number. A stub (a wire from
     /// the pin to an end that touches nothing but labels) turns with its pin, labels and all; other
     /// wires keep their far end and are redrawn to the pin's new spot clear of other pins. Labels
-    /// right on a pin follow it. Ends on pins that are gone stay where they are.
-    pub fn carry_to_pins(&mut self, i: usize, old: &[SchPin]) {
+    /// right on a pin follow it. Ends on pins that are gone stay where they are. Returns whether
+    /// every pin is still joined to the same pins as before (false: a crowded spot made a new or
+    /// lost connection, and the caller had better not make the change).
+    pub fn carry_to_pins(&mut self, i: usize, before: &Part) -> bool {
+        let groups = |p: &Pcb| {
+            let mut g: Vec<Vec<(usize, String)>> = p.netlist().nets.into_iter().map(|n| n.pins).filter(|v| v.len() > 1).collect();
+            g.sort();
+            g
+        };
+        if i >= self.parts.len() {
+            return true;
+        }
+        let mut was = self.clone();
+        was.parts[i] = before.clone();
+        let old: Vec<SchPin> = was.sch_pins().into_iter().filter(|x| x.part == i).collect();
         let new: Vec<SchPin> = self.sch_pins().into_iter().filter(|x| x.part == i).collect();
         let moves: Vec<(&SchPin, &SchPin)> = old.iter().filter(|o| o.part == i).filter_map(|o| new.iter().find(|n| n.num == o.num).map(|n| (o, n))).filter(|(o, n)| dist(o.at, n.at) > 1e-9 || dist(o.inner, n.inner) > 1e-9).collect();
         if moves.is_empty() {
-            return;
+            return true;
         }
         let near = |a: P, b: P| dist(a, b) < 1e-6;
         let unit = |v: P| {
@@ -1106,6 +1119,8 @@ impl Pcb {
         let others_at = |p: &Pcb, q: P, skip: usize| p.wires.iter().enumerate().any(|(k, w)| k != skip && seg_point(w.a, w.b, q) < EPS) || p.sch_pins().iter().any(|x| near(x.at, q));
         // work from the state before: every decision looks at where things were
         let snapshot = self.clone();
+        // the joins as they were
+        let want = groups(&was);
         let mut redraw: Vec<(usize, P, P)> = vec![];
         let mut moved_labels: Vec<bool> = vec![false; self.labels.len()];
         for (k, w) in snapshot.wires.iter().enumerate() {
@@ -1168,6 +1183,23 @@ impl Pcb {
         });
         self.wires.extend(add_wires);
         self.wires.retain(|w| dist(w.a, w.b) > 1e-9);
+        // a pin that lands in the middle of a wire going past would join it: that wire steps aside
+        let landed: Vec<P> = moves.iter().map(|m| m.1.at).collect();
+        let crossing: Vec<usize> = (0..self.wires.len())
+            .filter(|&k| {
+                let w = &self.wires[k];
+                landed.iter().any(|q| seg_point(w.a, w.b, *q) < EPS && !near(w.a, *q) && !near(w.b, *q))
+            })
+            .collect();
+        for &k in crossing.iter().rev() {
+            let w = self.wires[k].clone();
+            let path = self.wire_path(w.a, w.b, false, Some(k));
+            self.wires.remove(k);
+            for s in path.windows(2) {
+                self.wires.push(Wire { a: s[0], b: s[1] });
+            }
+        }
+        groups(self) == want
     }
 
     /// A schematic wire from a to b: the orthogonal path (preferred corner first) that touches no
@@ -2228,22 +2260,34 @@ pub(crate) mod tests {
         let names = |p: &Pcb| -> Vec<(String, Vec<(usize, String)>)> { p.netlist().nets.into_iter().map(|n| (n.name, n.pins)).collect() };
         let want = names(&p);
         // the 555's box is symmetric: mirrored, its pins land on the other side's wires
-        let old = p.sch_pins();
+        let old = p.parts[u].clone();
         p.parts[u].sch_mirror = true;
-        p.carry_to_pins(u, &old);
+        assert!(p.carry_to_pins(u, &old));
         assert_eq!(names(&p), want);
         // half a turn of the LED would reverse it on its own wires
         for r in 1..4 {
             let mut q = p.clone();
-            let old = q.sch_pins();
+            let old = q.parts[1].clone();
             q.parts[1].sch_rot = r;
-            q.carry_to_pins(1, &old);
+            assert!(q.carry_to_pins(1, &old), "turned {r}");
             assert_eq!(names(&q), want, "turned {r}");
         }
+        // and turn by turn, where a pin can land on the wire an earlier turn drew
+        // (a turn that would make or lose a join says so, and the editor leaves the part as it was)
+        let mut q = p.clone();
+        for r in 1..=4 {
+            let keep = q.clone();
+            let old = q.parts[1].clone();
+            q.parts[1].sch_rot = r % 4;
+            if !q.carry_to_pins(1, &old) {
+                q = keep;
+            }
+            assert_eq!(names(&q), want, "turn {r}");
+        }
         // a longer pin name widens the box and moves the pins out; the wires follow
-        let old = p.sch_pins();
+        let old = p.parts[u].clone();
         p.parts[u].pin_names = vec!["GND".into(), "TRIGGER_INPUT".into()];
-        p.carry_to_pins(u, &old);
+        assert!(p.carry_to_pins(u, &old));
         assert_eq!(names(&p), want);
     }
 

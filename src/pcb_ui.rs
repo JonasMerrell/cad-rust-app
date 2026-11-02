@@ -611,14 +611,9 @@ fn rotate_sel(app: &mut App) {
     }
     let view = app.pcb.view;
     match app.pcb.sel {
+        Some(Sel::Part(i)) if view == View::Schematic => sch_turn(app, i, |part| part.sch_rot = (part.sch_rot + 1) % 4),
         Some(Sel::Part(i)) => edit(app, |p| {
-            let old = p.sch_pins();
-            let Some(part) = p.parts.get_mut(i) else { return };
-            if view == View::Schematic {
-                part.sch_rot = (part.sch_rot + 1) % 4;
-                // the wires stay on their pins (else a half turn would swap them unseen)
-                p.carry_to_pins(i, &old);
-            } else {
+            if let Some(part) = p.parts.get_mut(i) {
                 part.rot = (part.rot + 90.0).rem_euclid(360.0);
             }
         }),
@@ -638,16 +633,32 @@ fn mirror_sel(app: &mut App) {
     }
     let view = app.pcb.view;
     if let Some(Sel::Part(i)) = app.pcb.sel {
+        if view == View::Schematic {
+            return sch_turn(app, i, |part| part.sch_mirror = !part.sch_mirror);
+        }
         edit(app, |p| {
-            let old = p.sch_pins();
-            let Some(part) = p.parts.get_mut(i) else { return };
-            if view == View::Schematic {
-                part.sch_mirror = !part.sch_mirror;
-                p.carry_to_pins(i, &old);
-            } else {
+            if let Some(part) = p.parts.get_mut(i) {
                 part.bottom = !part.bottom;
             }
         });
+    }
+}
+
+/// Turn or mirror a symbol, its wires and labels going along with the pins (else a half turn
+/// would swap them unseen). A change that would still make or lose a connection is refused.
+fn sch_turn(app: &mut App, i: usize, f: impl FnOnce(&mut pcb::Part)) {
+    let mut ok = true;
+    edit(app, |p| {
+        let Some(before) = p.parts.get(i).cloned() else { return };
+        let keep = p.clone();
+        f(&mut p.parts[i]);
+        if !p.carry_to_pins(i, &before) {
+            *p = keep;
+            ok = false;
+        }
+    });
+    if !ok {
+        app.flash("Not turned: its pins would land on other wires here. Move it to a clear spot first", ToastKind::Error);
     }
 }
 
@@ -940,14 +951,14 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         if let Some(s) = app.pcb.sel {
             // a symbol whose pins move (new pin names, footprint or type) takes its wires along
-            let old_pins = match (s, app.pcb.view) {
-                (Sel::Part(k), View::Schematic) => Some((k, app.ws.pcbs[i].sch_pins())),
+            let old = match (s, app.pcb.view) {
+                (Sel::Part(k), View::Schematic) => app.ws.pcbs[i].parts.get(k).cloned().map(|x| (k, x)),
                 _ => None,
             };
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
-            if let Some((k, old)) = old_pins {
-                if k < app.ws.pcbs[i].parts.len() && app.ws.pcbs[i].parts[k] != before.parts.get(k).cloned().unwrap_or_default() {
-                    app.ws.pcbs[i].carry_to_pins(k, &old);
+            if let Some((k, was)) = old {
+                if app.ws.pcbs[i].parts.get(k).is_some_and(|x| *x != was) {
+                    app.ws.pcbs[i].carry_to_pins(k, &was);
                 }
             }
         }
