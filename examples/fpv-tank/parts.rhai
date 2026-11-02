@@ -34,7 +34,7 @@ let HULL_Z0 = 5.0;           // belly
 let HULL_Z1 = 40.0;          // top of the tub = underside of the deck
 let DECK_T = 2.4;
 let TUR_Z0 = 43.2;           // underside of the turret ring (its bearing rib reaches down to 42.6)
-let TUR_R = 32.0;
+let TUR_R = 30.0;             // turret ring radius (the shell above it is faceted and wider)
 let CAM_Z = 66.0;            // camera axis height
 let BARREL_Z = 54.5;         // IR barrel axis height
 
@@ -98,13 +98,36 @@ fn sprocket(r, n, pitch_w) {
         pockets.push(block(vec3(-2.6, 41.0, r - 2.4), vec3(2.6, 48.0, r + 1)).rotate(vec3(0, 0, 0), vec3(0, 1, 0), 360.0 * i / n));
     }
     let bore = ycyl(0, 33.5, 0, 1.6, 9.5).cut([block(vec3(1.3, 33, -2), vec3(2, 44, 2))]);
-    drum.cut(pockets + [bore])
+    rim_chamfer(drum.cut(pockets + [bore] + face_pockets(5, 7.6, 2.1)), r)
 }
 
 // road wheel or idler on y 35.5..53.5 with a groove for the track lugs and a spacer hub to the hull
 fn wheel(r) {
     let w = fuse([ycyl(0, 35.5, 0, r, 18.0), ycyl(0, 33.2, 0, 4.0, 2.4)]);
-    w.cut([ycyl(0, 41.0, 0, r - 2.5, 7.0), ycyl(0, 30, 0, 1.7, 30)])
+    let n = if r > 10.0 { 6 } else { 5 };
+    let cuts = [ycyl(0, 41.0, 0, r - 2.5, 7.0), ycyl(0, 30, 0, 1.7, 30)];
+    cuts += face_pockets(n, r * 0.62, r * 0.19);
+    rim_chamfer(w.cut(cuts), r)
+}
+
+// round pockets in the outer face (y = 53.5) of a wheel, 1.6 deep
+fn face_pockets(n, pcd_r, r) {
+    let ps = [];
+    for i in 0..n {
+        let a = (360.0 * i / n + 90.0).to_radians();
+        ps.push(ycyl(pcd_r * cos(a), 51.9, pcd_r * sin(a), r, 3.0));
+    }
+    ps
+}
+
+// chamfer the outer rim edge of a wheel (the edge on the bed when printed)
+fn rim_chamfer(w, r) {
+    let es = [];
+    for e in w.edges() {
+        let c = e.circle();
+        if c != () && (e.mid().y - 53.5).abs() < 0.01 && (c.radius - r).abs() < 0.01 { es.push(e); }
+    }
+    if es.len() > 0 { w.chamfer(es, 0.8) } else { w }
 }
 
 // the track as fitted, following the wheels: inner surface is the belt around them
@@ -119,6 +142,27 @@ fn track_fitted(circles, band, y0, w) {
     let inner = offset2d(polygon(convex_hull(pts)), 0.1)[0];   // 0.1 clearance over the chords
     let outer = offset2d(inner, band)[0];
     let b = extrude(outer, vec3(0, 0, w)).cut([extrude(inner, vec3(0, 0, w + 2.0)).translate(vec3(0, 0, -1))]);
+    // grousers on the outside every lug pitch, walking the belt outline
+    let hp = convex_hull(pts);
+    let ribs = [];
+    let next = 4.0; let run = 0.0;
+    for i in 0..hp.len() {
+        let a = hp[i]; let c = hp[(i + 1) % hp.len()];
+        let dx = c.x - a.x; let dz = c.y - a.y;
+        let l = (dx * dx + dz * dz).sqrt();
+        if l < 1e-9 { continue; }
+        let tx = dx / l; let tz = dz / l; let nx = tz; let nz = -tx;   // outward normal (counter-clockwise outline)
+        while next <= run + l {
+            let u = next - run;
+            let px = a.x + tx * u + nx * (band + 0.1); let pz = a.y + tz * u + nz * (band + 0.1);
+            let q = [[px - tx * 1.2 - nx * 0.3, pz - tz * 1.2 - nz * 0.3, 0.0], [px + tx * 1.2 - nx * 0.3, pz + tz * 1.2 - nz * 0.3, 0.0],
+                     [px + tx * 1.0 + nx * 1.0, pz + tz * 1.0 + nz * 1.0, 0.0], [px - tx * 1.0 + nx * 1.0, pz - tz * 1.0 + nz * 1.0, 0.0]];
+            ribs.push(extrude(polygon(q), vec3(0, 0, w)));
+            next += 8.0;
+        }
+        run += l;
+    }
+    b = fuse([b] + ribs);
     // XY → XZ plane (y becomes z), width along Y
     b.rotate_x(90.0).translate(vec3(0, y0 + w, 0))
 }
@@ -141,13 +185,23 @@ fn track_print(lugs, pitch, band, w) {
         else { let th = PI() / 2.0 + (t - 2.0 * s - PI() * r) / r; p = [-s / 2.0 + r * cos(th), r * sin(th)]; ang = th.to_degrees() + 90.0; }
         tools.push(block(vec3(-2.0, -0.2, w / 2.0 - 3.0), vec3(2.0, 2.0, w / 2.0 + 3.0)).rotate_z(ang).translate(vec3(p[0], p[1], 0)));
     }
+    for i in 0..lugs {
+        // grousers on the outside, between the lugs
+        let t = pitch * i;
+        let p = [0.0, 0.0]; let ang = 0.0;
+        if t < s { p = [-s / 2.0 + t, -r]; ang = 0.0; }
+        else if t < s + PI() * r { let th = -PI() / 2.0 + (t - s) / r; p = [s / 2.0 + r * cos(th), r * sin(th)]; ang = th.to_degrees() + 90.0; }
+        else if t < 2.0 * s + PI() * r { p = [s / 2.0 - (t - s - PI() * r), r]; ang = 180.0; }
+        else { let th = PI() / 2.0 + (t - 2.0 * s - PI() * r) / r; p = [-s / 2.0 + r * cos(th), r * sin(th)]; ang = th.to_degrees() + 90.0; }
+        tools.push(extrude(polygon([[-1.2, -band + 0.3, 0], [1.2, -band + 0.3, 0], [1.0, -band - 1.0, 0], [-1.0, -band - 1.0, 0]]), vec3(0, 0, w)).rotate_z(ang).translate(vec3(p[0], p[1], 0)));
+    }
     fuse([ring] + tools)
 }
 
 // ---------------------------------------------------------------- hull tub
-let tub = extrude(rounded_rect(vec3(1, 0, HULL_Z0), 144, 2.0 * HULL_Y, 5), vec3(0, 0, HULL_Z1 - HULL_Z0));
-// sloped glacis at the front bottom
-tub = tub.cut([extrude(polygon([[67, -40, HULL_Z0 - 1], [80, -40, HULL_Z0 - 1], [80, -40, 20]]), vec3(0, 80, 0))]);
+// side profile: lower and upper glacis at the front, sloped plate at the rear; rounded corners in plan
+let profile = polygon([[-71, -40, HULL_Z0], [67, -40, HULL_Z0], [73, -40, 12], [73, -40, 28], [63, -40, HULL_Z1], [-64, -40, HULL_Z1], [-71, -40, 31]]);
+let tub = extrude(profile, vec3(0, 80, 0)).common([extrude(rounded_rect(vec3(1, 0, HULL_Z0 - 1), 144, 2.0 * HULL_Y, 5), vec3(0, 0, 50))]);
 let top_face = ();
 for f in tub.faces() { if f.normal().z > 0.9 && f.center().z > HULL_Z1 - 0.1 { top_face = f; } }
 tub = tub.shell([top_face], WALL);
@@ -186,14 +240,33 @@ cuts.push(block(vec3(-74, -4.5, 31), vec3(-66, 4.5, 35)));
 tub = fuse([tub] + adds).cut(cuts).unify();
 
 // ---------------------------------------------------------------- deck (lid with fenders over the tracks)
-let deck = extrude(rounded_rect(vec3(1, 0, HULL_Z1), 148, 114, 6), vec3(0, 0, DECK_T));
+// outline: the hull's glacis shows between the fenders, fender ends cut at 45°
+let deck = extrude(polygon([[63, -33, HULL_Z1], [76, -33, HULL_Z1], [76, -51, HULL_Z1], [70, -57, HULL_Z1], [-70, -57, HULL_Z1], [-76, -51, HULL_Z1], [-76, -33, HULL_Z1],
+    [-64, -33, HULL_Z1], [-64, 33, HULL_Z1], [-76, 33, HULL_Z1], [-76, 51, HULL_Z1], [-70, 57, HULL_Z1], [70, 57, HULL_Z1], [76, 51, HULL_Z1], [76, 33, HULL_Z1], [63, 33, HULL_Z1]]), vec3(0, 0, DECK_T));
+let top_edges = [];
+for e in deck.edges() { if (e.start().z - HULL_Z1 - DECK_T).abs() < 0.01 && (e.end().z - HULL_Z1 - DECK_T).abs() < 0.01 { top_edges.push(e); } }
+deck = deck.chamfer(top_edges, 0.8);
 let d_adds = [];
+// side skirts over the top run of the tracks
+for sy in [1.0, -1.0] {
+    let y0 = if sy > 0.0 { 55.4 } else { -57.0 };
+    d_adds.push(extrude(polygon([[-62, y0, HULL_Z1], [64, y0, HULL_Z1], [59, y0, 31], [-57, y0, 31]]), vec3(0, 1.6, 0)));
+}
 // SG90 hangs under the deck, body across the hull towards +Y: tab holes at y = -8.45 and y = 19.15
 for y in [-8.45, 19.15] {
     d_adds.push(block(vec3(-5, y - 2.4, HULL_Z1 - 5), vec3(5, y + 2.4, HULL_Z1)).cut([zcyl(0, y, HULL_Z1 - 6, 0.8, 7)]));
 }
 let d_cuts = [zcyl(0, 0, HULL_Z1 - 6, 6.0, 12), zcyl(22, 0, HULL_Z1 - 6, 4.5, 12)];   // spline and wire hole
-for p in deck_screws { d_cuts.push(zcyl(p[0], p[1], HULL_Z1 - 6, 1.7, 12)); }
+for p in deck_screws {
+    // countersunk M3
+    d_cuts.push(zcyl(p[0], p[1], HULL_Z1 - 6, 1.7, 12));
+    d_cuts.push(cone(vec3(p[0], p[1], HULL_Z1 + DECK_T - 1.6), vec3(0, 0, 1), 1.7, 3.3, 1.61));
+}
+// engraved engine grille behind the turret and a driver's hatch at the front (0.6 deep)
+let zt = HULL_Z1 + DECK_T;
+for y in [-16.0, -8.0, 0.0, 8.0, 16.0] { d_cuts.push(block(vec3(-62, y - 1.2, zt - 0.6), vec3(-44, y + 1.2, zt + 1))); }
+d_cuts.push(zcyl(46, -14, zt - 0.6, 7.5, 2).cut([zcyl(46, -14, zt - 1, 6.5, 3)]));
+d_cuts.push(zcyl(46, -14, zt - 0.6, 1.5, 2));
 deck = fuse([deck] + d_adds).cut(d_cuts).unify();
 
 // ---------------------------------------------------------------- turret
@@ -217,29 +290,51 @@ for a in [45.0, 135.0, 225.0, 315.0] {
 tring = tring.cut(r_cuts).unify();
 
 // turret shell: flat front with the camera window and the barrel socket, hit sensors in the walls
-let tshell = zcyl(0, 0, ring_z1, TUR_R, shell_z1 - ring_z1).cut([block(vec3(28, -40, 0), vec3(40, 40, 100))]);
-let top_e = [];
-for e in tshell.edges() { if e.mid().z > shell_z1 - 0.1 && e.kind() == "circle" { top_e.push(e); } }
-tshell = tshell.chamfer(top_e, 4.0);
-let inner = zcyl(0, 0, ring_z1 - 1, TUR_R - 2.0, shell_z1 - ring_z1 - 1.0).cut([block(vec3(26, -40, 0), vec3(40, 40, 100))]);
-let s_cuts = [inner,
+// faceted turret: sloped walls lofted from the base outline to a smaller roof, a bustle at the rear
+fn outline_at(pts, z) { let w = []; for p in pts { w.push([p[0], p[1], z]); } wire(w, true) }
+let base_pts = [[30, -12], [30, 12], [18, 32], [-24, 32], [-40, 18], [-40, -18], [-24, -32], [18, -32]];
+let roof_pts = [[25, -10], [25, 10], [15, 27], [-22, 27], [-36, 15], [-36, -15], [-22, -27], [15, -27]];
+let tshell = loft([outline_at(base_pts, ring_z1), outline_at(roof_pts, shell_z1)], true);
+let bottom = ();
+for f in tshell.faces() { if f.normal().z < -0.9 { bottom = f; } }
+tshell = tshell.shell([bottom], 2.0);
+let roof_e = [];
+for e in tshell.edges() { if (e.start().z - shell_z1).abs() < 0.01 && (e.end().z - shell_z1).abs() < 0.01 { roof_e.push(e); } }
+tshell = tshell.chamfer(roof_e, 1.2);
+// gun mantlet around the barrel and camera, commander's cupola on the roof
+let mantlet = block(vec3(25.5, -8.5, 48.5), vec3(33, 8.5, 72.5));
+let me = [];
+for e in mantlet.edges() { if e.mid().x > 32.9 { me.push(e); } }
+mantlet = mantlet.chamfer(me, 1.5);
+let cupola = zcyl(-14, 12, shell_z1 - 1, 8, 4);
+let ce = [];
+for e in cupola.edges() { if e.mid().z > shell_z1 + 2.9 { ce.push(e); } }
+cupola = cupola.chamfer(ce, 1.0);
+tshell = fuse([tshell, mantlet, cupola]);
+let s_cuts = [
     xcyl(20, 0, CAM_Z, 4.5, 20),            // camera window
-    xcyl(20, 0, BARREL_Z, 5.7, 20),         // barrel socket
-    zcyl(0, 0, shell_z1 - 5, 2.6, 10),      // hit LED (WS2812) in the roof
-    block(vec3(7.5, -5, shell_z1 - 5), vec3(12.5, 5, shell_z1 + 1))];   // USB-C for programming
+    xcyl(20, 0, BARREL_Z, 5.15, 20),        // barrel socket
+    zcyl(-14, 12, shell_z1 - 5, 2.6, 12),   // hit LED (WS2812) in the cupola
+    zcyl(-14, 12, shell_z1 + 2.4, 6.0, 2),  // cupola hatch recess
+    block(vec3(5, -5, shell_z1 - 5), vec3(10.5, 5, shell_z1 + 1))];   // USB-C for programming
 for a in [45.0, 135.0, 225.0, 315.0] {
-    // TSOP38238 pockets: 6 wide, 7 tall through the wall
-    s_cuts.push(block(vec3(TUR_R - 3, -3.0, 68.5), vec3(TUR_R + 1, 3.0, 75.5)).rotate_z(a));
+    // TSOP38238 windows: 6 wide, 7 tall through the wall
+    s_cuts.push(block(vec3(22, -3.0, 68.5), vec3(50, 3.0, 75.5)).rotate_z(a));
 }
 let s_adds = [];
 for p in tur_screws { s_adds.push(zcyl(p[0], p[1], ring_z1, 2.4, 8).cut([zcyl(p[0], p[1], ring_z1 - 1, 0.8, 8)])); }
 // cradle for the XIAO stack: two rails either side of it
-for sy in [1.0, -1.0] { s_adds.push(block(vec3(8, sy * 9.0 - (if sy > 0.0 { 0.0 } else { 2.0 }), ring_z1), vec3(23, sy * 9.0 + (if sy > 0.0 { 2.0 } else { 0.0 }), CAM_Z - 10.5))); }
+for sy in [1.0, -1.0] { s_adds.push(block(vec3(5.5, sy * 9.0 - (if sy > 0.0 { 0.0 } else { 2.0 }), ring_z1), vec3(20.5, sy * 9.0 + (if sy > 0.0 { 2.0 } else { 0.0 }), CAM_Z - 10.5))); }
 tshell = fuse([tshell.cut(s_cuts)] + s_adds).unify();
 
 // IR barrel: pushed into the socket, flange against the front face; LED seated at the back
-let barrel = fuse([xcyl(25.0, 0, BARREL_Z, 5.5, 40.0), xcyl(28.0, 0, BARREL_Z, 7.0, 1.5)])
-    .cut([xcyl(24, 0, BARREL_Z, 2.6, 45), xcyl(24, 0, BARREL_Z, 3.0, 2.2)]);
+// 45° cones on every step so it prints standing on its back end without supports
+fn xcone(x0, z, r0, r1, len) { cone(vec3(x0, 0, z), vec3(1, 0, 0), r0, r1, len) }
+let barrel = fuse([xcyl(29.0, 0, BARREL_Z, 5.0, 43.0),
+    xcyl(33.0, 0, BARREL_Z, 6.5, 1.0), xcone(34.0, BARREL_Z, 6.5, 5.0, 1.5),            // flange against the mantlet
+    xcone(49.0, BARREL_Z, 5.0, 6.2, 1.2), xcyl(50.2, 0, BARREL_Z, 6.2, 6.0), xcone(56.2, BARREL_Z, 6.2, 5.0, 1.2),   // fume extractor
+    xcone(64.8, BARREL_Z, 5.0, 6.0, 1.0), xcyl(65.8, 0, BARREL_Z, 6.0, 6.2)])          // muzzle
+    .cut([xcyl(28, 0, BARREL_Z, 2.6, 46), xcyl(28, 0, BARREL_Z, 3.0, 3.2)]);
 
 // ---------------------------------------------------------------- drivetrain placement
 let sprocket_l = sprocket(SPR_R, SPR_N, 7.0);
@@ -259,11 +354,11 @@ for x in RW_X { left.push(#{name: "road wheel", shape: road_l.translate(vec3(x, 
 // ---------------------------------------------------------------- bought parts placed
 let motor_l = n20().translate(vec3(SPR[0], HULL_Y - 1.0, SPR[1]));
 let servo = sg90().rotate_z(90.0).translate(vec3(0, 0, HULL_Z1 - 1.0));
-let xiao = xiao_sense().translate(vec3(27.0, 0, CAM_Z));
+let xiao = xiao_sense().translate(vec3(24.5, 0, CAM_Z));
 let battery = block(vec3(7.0, -15.5, HULL_Z0 + WALL), vec3(65.0, 15.5, HULL_Z0 + WALL + 14));
 let drv = block(vec3(-52, 4, HULL_Z0 + WALL), vec3(-33.5, 20, HULL_Z0 + WALL + 1.6));
 let buck = block(vec3(-52, -21, HULL_Z0 + WALL), vec3(-30, -4, HULL_Z0 + WALL + 4));
-let led = xcyl(27.0, 0, BARREL_Z, 2.5, 8.6);
+let led = xcyl(29.0, 0, BARREL_Z, 2.5, 8.6);
 
 // ---------------------------------------------------------------- parts list, masses, files
 let PLA = 1.24e-3; let TPU = 1.21e-3;
@@ -302,13 +397,15 @@ for b in bought { summary.total_g += b.mass * b.qty; }
 summary.total_g += summary.printed_g;
 
 // assembly (left side and its mirror image)
-let asm = [#{name: "hull-tub", shape: tub, color: "#5b6b4a"}, #{name: "deck", shape: deck, color: "#6f805c"},
-           #{name: "turret-ring", shape: tring, color: "#4f5d40"}, #{name: "turret-shell", shape: tshell, color: "#6f805c"}, #{name: "barrel", shape: barrel, color: "#2b2b2b"}];
+let HULL_C = "#4e5b38"; let DECK_C = "#5f6e45"; let RING_C = "#454f33";
+let hero = #{eye: [300, -250, 210], target: [0, 0, 38], up: [0, 0, 1], fov: 28};
+let asm = [#{name: "hull-tub", shape: tub, color: HULL_C}, #{name: "deck", shape: deck, color: DECK_C},
+           #{name: "turret-ring", shape: tring, color: RING_C}, #{name: "turret-shell", shape: tshell, color: DECK_C}, #{name: "barrel", shape: barrel, color: "#2a2a2a"}];
 let steps = [tub, deck, tring, tshell, barrel];
 for side in [0, 1] {
     for p in left {
         let s = if side == 0 { p.shape } else { p.shape.mirror(o, ny) };
-        asm.push(#{name: p.name + (if side == 0 { " L" } else { " R" }), shape: s, color: if p.name == "track" { "#262626" } else { "#9a9a8a" }});
+        asm.push(#{name: p.name + (if side == 0 { " L" } else { " R" }), shape: s, color: if p.name == "track" { "#1e1e1e" } else { "#454a3e" }});
         steps.push(s);
     }
     let m = if side == 0 { motor_l } else { motor_l.mirror(o, ny) };
@@ -332,10 +429,11 @@ let bb_all = compound(steps).bbox();
 summary.overall = [bb_all.size.x, bb_all.size.y, bb_all.size.z];
 export_step(steps, out + "fpv-tank-assembly.step");
 write_json(out + "parts.json", summary);
-render(asm, #{path: out + "fpv-tank.png", width: 1400, height: 1000, view: "iso"});
+render(asm, #{path: out + "fpv-tank.png", width: 1400, height: 1000, eye: hero.eye, target: hero.target, up: hero.up, fov: hero.fov, background: "#eef0ea"});
+render(asm, #{path: out + "fpv-tank-front.png", width: 1400, height: 1000, eye: [320, 180, 140], target: [0, 0, 35], up: [0, 0, 1], fov: 28, background: "#eef0ea"});
 render(asm, #{path: out + "fpv-tank-side.png", width: 1400, height: 700, view: "front"});
 render(asm, #{path: out + "fpv-tank-end.png", width: 1000, height: 700, view: "right"});
 let xray = [];
-for a in asm { xray.push(#{shape: a.shape, color: a.color, opacity: if a.color == "#5b6b4a" || a.color == "#6f805c" || a.color == "#4f5d40" { 0.25 } else { 1.0 }}); }
-render(xray, #{path: out + "fpv-tank-xray.png", width: 1400, height: 1000, view: "iso"});
+for a in asm { xray.push(#{shape: a.shape, color: a.color, opacity: if a.color == HULL_C || a.color == DECK_C || a.color == RING_C { 0.25 } else { 1.0 }}); }
+render(xray, #{path: out + "fpv-tank-xray.png", width: 1400, height: 1000, eye: hero.eye, target: hero.target, up: hero.up, fov: hero.fov, background: "#eef0ea"});
 summary

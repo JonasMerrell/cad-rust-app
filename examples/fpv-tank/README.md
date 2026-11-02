@@ -1,7 +1,7 @@
 # FPV laser tag tank
 
-`parts.rhai` builds a small tracked tank for FPV infrared laser tag: about 157 × 114 × 81 mm and
-300 g ready to drive. A phone shows the camera feed over WiFi and sends the driving commands; an Xbox
+`parts.rhai` builds a small tracked tank for FPV infrared laser tag: about 159 × 114 × 85 mm and
+310 g ready to drive. A phone shows the camera feed over WiFi and sends the driving commands; an Xbox
 style controller pairs with the phone.
 
     mkdir out && rcad script examples/fpv-tank/parts.rhai out
@@ -12,23 +12,23 @@ printed mass, its print size and whether it fits a 254 mm cube, and every pair o
 assembly that overlap (there should be none). The `stl/` folder here has a build of the STLs.
 
 <img alt="The tank" src="fpv-tank.png" width="49%"> <img alt="X-ray view with the electronics" src="fpv-tank-xray.png" width="49%">
-<img alt="Side view" src="fpv-tank-side.png" width="100%">
+<img alt="From the front" src="fpv-tank-front.png" width="49%"> <img alt="Side view" src="fpv-tank-side.png" width="49%">
 
 ## Printed parts
 
 | part | qty | material | notes |
 |---|---|---|---|
-| hull-tub | 1 | PLA or ABS | open top up; motor pockets, wheel axle bosses, idler slots, battery strap slots |
-| deck | 1 | PLA or ABS | prints upside down (flat top on the bed); fenders cover the tracks, SG90 hangs underneath |
+| hull-tub | 1 | PLA or ABS | open top up; upper and lower glacis, sloped rear plate; motor pockets, wheel axle bosses, idler slots, battery strap slots |
+| deck | 1 | PLA or ABS | prints upside down (flat top on the bed); fenders and side skirts over the tracks, engraved grille and hatch, countersunk screws, SG90 hangs underneath |
 | turret-ring | 1 | PLA | prints upside down; the servo horn screws into the cross recess, the arc slot lets the wires through for ±90° |
-| turret-shell | 1 | PLA | prints roof down; camera window, barrel socket, 4 hit sensor windows, LED and USB-C holes in the roof |
-| barrel | 1 | PLA | 5 mm IR LED at the back, pushed into the turret front |
-| sprocket | 2 | PLA | D bore for the N20 shaft, 10 pockets for the track lugs |
+| turret-shell | 1 | PLA | prints roof down; faceted with a rear bustle, gun mantlet with the camera window and barrel socket, 4 hit sensor windows, cupola with the hit LED, USB-C slot in the roof |
+| barrel | 1 | PLA | prints standing on its back end; 5 mm IR LED at the back, pushed into the mantlet |
+| sprocket | 2 | PLA | D bore for the N20 shaft, 10 pockets for the track lugs; outer face on the bed |
 | idler | 2 | PLA | on an M3 screw in the tension slot |
 | road-wheel | 8 | PLA | on M3 × 30 screws threaded into the hull bosses |
-| track | 2 | TPU 95A | a loop standing on the bed, 42 lugs at 8 mm pitch inside |
+| track | 2 | TPU 95A | a loop standing on the bed, 42 lugs at 8 mm pitch inside, grousers outside |
 
-About 210 g of filament per tank.
+About 215 g of filament per tank.
 
 ## Bought parts (per tank)
 
