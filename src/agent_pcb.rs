@@ -186,7 +186,7 @@ impl Session {
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 json!({"pcb": pi, "added": added})
             }
@@ -199,7 +199,7 @@ impl Session {
                     connect(&mut p, net, &pins);
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let nl = self.ws.pcbs[pi].netlist();
                 json!({"pcb": pi, "nets": nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", self.ws.pcbs[pi].parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>()})
@@ -326,7 +326,7 @@ impl Session {
                     Some(o) => return Err(format!("auto_place is unplaced or all, not {o}")),
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let mut v = self.pcb_summary(pi);
                 if let Some(n) = placed {
@@ -419,7 +419,7 @@ impl Session {
                     v["tuned"] = json!(tuned);
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let s = self.pcb_summary(pi);
                 for (k, x) in s.as_object().unwrap() {
@@ -611,7 +611,7 @@ impl Session {
                     }
                 };
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let x = &self.ws.pcbs[pi].parts[i];
                 json!({"pcb": pi, "reference": x.reference, "symbol": x.symbol, "value": x.value, "footprint": x.footprint, "mpn": x.mpn, "manufacturer": x.manufacturer, "digikey": x.digikey, "datasheet": x.datasheet, "changed": changed, "pins": pins_json(&self.ws.pcbs[pi], i)})
@@ -750,10 +750,12 @@ fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
         let size = b.size();
         let w = a.get("width").and_then(|v| v.as_f64()).unwrap_or(size[0]);
         let h = a.get("height").and_then(|v| v.as_f64()).unwrap_or(size[1]);
-        if w <= 0.0 || h <= 0.0 {
+        if !(w > 0.0 && h > 0.0) {
             return Err("width and height must be positive".into());
         }
-        b.outline = pcb::rect_outline(w, h, a.get("corner_radius").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        // keeps the board where it is, and its corners unless given; whole-board pours follow
+        let r = a.get("corner_radius").and_then(|v| v.as_f64()).or_else(|| b.rect_radius()).unwrap_or(0.0);
+        b.resize(w, h, r);
     }
     if let Some(t) = a.get("thickness").and_then(|v| v.as_f64()) {
         if !(0.2..=5.0).contains(&t) {
