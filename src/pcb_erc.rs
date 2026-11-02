@@ -121,7 +121,26 @@ pub fn pin_type(p: &Pcb, part: usize, num: &str, name: &str) -> PinType {
     if let Some(t) = p.pin_types.get(&format!("{}.{}", pt.reference, num)) {
         return *t;
     }
+    if let Some(l) = crate::pcb_lib::lib_symbol(&pt.symbol) {
+        if let Some(k) = l.pins.iter().find(|x| x.num == num).map(|x| x.kind.as_str()) {
+            return kicad_type(k);
+        }
+    }
     library_type(pt, name)
+}
+
+/// A KiCad pin electrical type.
+pub fn kicad_type(k: &str) -> PinType {
+    match k {
+        "input" => PinType::Input,
+        "output" => PinType::Output,
+        "bidirectional" | "tri_state" => PinType::Bidir,
+        "power_in" => PinType::PowerIn,
+        "power_out" => PinType::PowerOut,
+        "open_collector" | "open_emitter" => PinType::OpenCollector,
+        "no_connect" | "unconnected" => PinType::NoConnect,
+        _ => PinType::Passive,
+    }
 }
 
 /// Every schematic pin with its name.

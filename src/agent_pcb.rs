@@ -94,6 +94,33 @@ fn free_sch_spot(p: &Pcb) -> P {
     pcb::snap([col as f64 * 30.48, -(rowi as f64) * 35.56], GRID)
 }
 
+/// Move part `i` (just added) off any symbol it overlaps: the column slot if that is clear,
+/// else the first clear spot in reading order. Big imported symbols need the room.
+fn clear_sch_spot(p: &mut Pcb, i: usize) {
+    let boxes: Vec<(P, P)> = p.parts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| crate::pcb_export::sch_bbox(q)).collect();
+    let at = p.parts[i].sch;
+    p.parts[i].sch = [0.0; 2];
+    let (lo, hi) = crate::pcb_export::sch_bbox(&p.parts[i]);
+    let hits = |c: P| {
+        // room for the reference and value written right of each symbol
+        let (a, b) = ([c[0] + lo[0] - 12.7, c[1] + lo[1] - 2.54], [c[0] + hi[0] + 12.7, c[1] + hi[1] + 2.54]);
+        boxes.iter().any(|(l, h)| a[0] < h[0] && b[0] > l[0] && a[1] < h[1] && b[1] > l[1])
+    };
+    let mut spot = at;
+    if hits(at) {
+        'search: for row in 0..200 {
+            for col in 0..80 {
+                let c = [col as f64 * 5.08, -(row as f64) * 5.08];
+                if !hits(c) {
+                    spot = c;
+                    break 'search;
+                }
+            }
+        }
+    }
+    p.parts[i].sch = pcb::snap(spot, GRID);
+}
+
 impl Session {
     pub(super) fn pcb_idx(&self, a: &Value) -> R<usize> {
         let i = a.get("pcb").and_then(|v| v.as_u64()).ok_or("give pcb (the PCB tab's index from create_pcb)")? as usize;
@@ -231,6 +258,9 @@ impl Session {
                         p.parts[i].reference = r.to_string();
                     }
                     edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    if x.get("sch").is_none() {
+                        clear_sch_spot(&mut p, i);
+                    }
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
                 let nl = p.netlist();
@@ -419,11 +449,48 @@ impl Session {
                     let nr = p.net_rules(&nl, &net);
                     p.board.vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net });
                 }
-                let auto = a.get("auto").and_then(|v| v.as_bool()).unwrap_or(a.get("tracks").is_none() && a.get("vias").is_none());
                 let mut v = json!({});
+                // differential pairs first, so the autorouter goes round them
+                let mut pairs_out = vec![];
+                if let Some(which) = a.get("pairs").and_then(|v| v.as_array()) {
+                    let names: Vec<&str> = which.iter().filter_map(|x| x.as_str()).collect();
+                    let list: Vec<pcb::DiffPair> = p.board.rules.pairs.iter().filter(|d| names.contains(&"all") || names.contains(&d.name.as_str())).cloned().collect();
+                    if list.is_empty() {
+                        return Err(format!("pairs: no such pair; the pairs are {}", p.board.rules.pairs.iter().map(|d| d.name.as_str()).collect::<Vec<_>>().join(", ")));
+                    }
+                    for d in list {
+                        match crate::pcb_route::route_pair(&mut p, &d) {
+                            Ok(o) => pairs_out.push(json!({"pair": d.name, "tracks": o.tracks, "layer": o.layer.label().to_lowercase(), "lengths": [round(o.p_len), round(o.n_len)]})),
+                            Err(e) => pairs_out.push(json!({"pair": d.name, "error": e})),
+                        }
+                    }
+                    v["pairs"] = json!(pairs_out);
+                }
+                let tuning = a.get("tune").is_some() || a.get("match").is_some();
+                let auto = a.get("auto").and_then(|v| v.as_bool()).unwrap_or(a.get("tracks").is_none() && a.get("vias").is_none() && a.get("pairs").is_none() && !tuning);
                 if auto {
                     let o = crate::pcb_route::autoroute(&mut p, a.get("net").and_then(|v| v.as_str()));
-                    v = json!({"routed": o.routed, "tracks_added": o.tracks, "vias_added": o.vias, "failed": o.failed});
+                    for (k, x) in json!({"routed": o.routed, "tracks_added": o.tracks, "vias_added": o.vias, "failed": o.failed}).as_object().unwrap() {
+                        v[k] = x.clone();
+                    }
+                }
+                // length tuning last, on the finished routing
+                let mut tuned = vec![];
+                for (k, t) in a.get("tune").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
+                    let net = t.get("net").and_then(|v| v.as_str()).ok_or_else(|| format!("tune[{k}]: give net"))?;
+                    let target = t.get("length").and_then(|v| v.as_f64()).ok_or_else(|| format!("tune[{k}]: give length (mm)"))?;
+                    let before = crate::pcb_tune::net_length(&p, net);
+                    let after = crate::pcb_tune::tune(&mut p, net, target)?;
+                    tuned.push(json!({"net": net, "before": round(before), "after": round(after), "target": target}));
+                }
+                if let Some(m) = a.get("match").and_then(|v| v.as_str()) {
+                    let rule = p.board.rules.lengths.iter().find(|r| r.name == m).cloned().ok_or_else(|| format!("match: no length rule {m}"))?;
+                    for (n, b, af) in crate::pcb_tune::match_lengths(&mut p, &rule) {
+                        tuned.push(json!({"net": n, "before": round(b), "after": round(af)}));
+                    }
+                }
+                if !tuned.is_empty() {
+                    v["tuned"] = json!(tuned);
                 }
                 let nl = p.netlist();
                 p.retag_copper(&nl);
@@ -466,6 +533,7 @@ impl Session {
                 v["rules"] = serde_json::to_value(&p.board.rules).unwrap_or_default();
                 v["parts"] = json!(parts);
                 v["nets"] = json!(nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", p.parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>());
+                v["lengths"] = json!(nl.nets.iter().filter(|n| p.board.tracks.iter().any(|t| t.net == n.name)).map(|n| json!({"net": n.name, "length": round(crate::pcb_tune::net_length(p, &n.name))})).collect::<Vec<_>>());
                 v["airwires"] = json!(air.iter().take(100).map(|w| json!({"net": w.net, "from": r2(w.a), "to": r2(w.b)})).collect::<Vec<_>>());
                 v
             }
@@ -512,8 +580,48 @@ impl Session {
             "export_pcb" => {
                 let pi = self.pcb_idx(a)?;
                 let path = a.get("path").and_then(|v| v.as_str()).ok_or("give path: a .zip for the Gerbers and drill files, or a folder")?;
-                let files = crate::pcb_export::export(&self.ws.pcbs[pi], std::path::Path::new(path))?;
-                json!({"pcb": pi, "written": files})
+                let sets = a.get("outputs").and_then(|v| v.as_object());
+                if let Some(o) = sets {
+                    let job = &mut self.ws.pcbs[pi].outputs;
+                    for (k, v) in o {
+                        let slot = job.get_mut(k).ok_or_else(|| format!("unknown output {k}; outputs are {}", crate::pcb_fab::OutJob::NAMES.iter().map(|n| n.0).collect::<Vec<_>>().join(", ")))?;
+                        *slot = v.as_bool().ok_or_else(|| format!("outputs.{k} should be true or false"))?;
+                    }
+                }
+                if sets.is_some() || a.get("job").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    let p = &self.ws.pcbs[pi];
+                    let files = crate::pcb_fab::run(p, &p.outputs, std::path::Path::new(path))?;
+                    json!({"pcb": pi, "job": p.outputs, "written": files})
+                } else {
+                    let files = crate::pcb_export::export(&self.ws.pcbs[pi], std::path::Path::new(path))?;
+                    json!({"pcb": pi, "written": files})
+                }
+            }
+            "pcb_library" => {
+                let pi = self.pcb_idx(a)?;
+                let mut im = crate::pcb_kicad::Imported::default();
+                if let Some(path) = a.get("import").and_then(|v| v.as_str()) {
+                    im = crate::pcb_kicad::import_path(std::path::Path::new(path))?;
+                }
+                for g in a.get("generate").and_then(|v| v.as_array()).into_iter().flatten() {
+                    let spec: crate::pcb_ipc::IpcSpec = serde_json::from_value(g.clone()).map_err(|e| format!("generate: {e}"))?;
+                    im.footprints.push(crate::pcb_ipc::generate(&spec)?);
+                }
+                let fps: Vec<Value> = im.footprints.iter().map(|f| json!({"name": f.name, "pads": f.pads.len()})).collect();
+                let syms: Vec<Value> = im.symbols.iter().map(|s| json!({"symbol": s.key, "pins": s.pins.len()})).collect();
+                let p = &mut self.ws.pcbs[pi];
+                let notes = crate::pcb_kicad::add_to(p, im);
+                let syms: Vec<Value> = syms.into_iter().map(|mut v| {
+                    let key = v["symbol"].as_str().unwrap_or("").to_string();
+                    if let Some(s) = p.symbols.iter().find(|s| s.key == key) {
+                        v["footprint"] = json!(s.footprint);
+                        v["reference"] = json!(s.prefix);
+                    }
+                    v
+                }).collect();
+                json!({"pcb": pi, "footprints": fps, "symbols": syms, "notes": notes,
+                    "library": {"footprints": p.footprints.iter().map(|f| f.name.clone()).collect::<Vec<_>>(), "symbols": p.symbols.iter().map(|s| s.key.clone()).collect::<Vec<_>>()},
+                    "hint": "add parts with pcb_add_parts using symbol: \"Library:Name\" for imported symbols, and footprint: \"<name>\" for imported or generated footprints"})
             }
             "pcb_traces" => self.pcb_traces(a)?,
             "pcb_3d" => {
@@ -623,8 +731,8 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
     }
     if let Some(sym) = x.get("symbol").and_then(|v| v.as_str()) {
         if sym != part.symbol {
-            let k = pcb_lib::symbol_kind(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
-            part.symbol = k.key.to_string();
+            let k = pcb_lib::kind_info(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::symbol_keys()))?;
+            part.symbol = k.key;
         }
     }
     for (key, field) in [
@@ -794,6 +902,20 @@ pub fn tools() -> Vec<Value> {
             "silk_gap": num("silkscreen to exposed pad copper (0)"),
             "max_height": num("tallest part allowed above/below the board, 0 = no limit"),
             "body_gap": num("gap kept between parts' 3D bodies (0)"),
+            "pairs": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "pair name, e.g. USB"},
+                "p": {"type": "string", "description": "positive net"},
+                "n": {"type": "string", "description": "negative net"},
+                "width": num("track width, 0 = the net's"),
+                "gap": num("gap between the tracks, 0 = the clearance"),
+            }, "required": ["name", "p", "n"], "additionalProperties": false}, "description": "differential pairs (replaces the list); pcb_route pairs routes them side by side"},
+            "lengths": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "rule name"},
+                "nets": {"type": "array", "items": {"type": "string"}, "description": "nets (M1_* matches a prefix)"},
+                "min": num("shortest routed length, mm (0 = none)"),
+                "max": num("longest routed length, mm (0 = none)"),
+                "tolerance": num("matched length: every net within this of the longest, mm (0 = not matched)"),
+            }, "required": ["name", "nets"], "additionalProperties": false}, "description": "length and matched-length rules (replaces the list), checked by check_pcb; pcb_route match tunes a group"},
             "temp_rise": num("allowed track temperature rise at its net class's current, °C (10)"),
             "off": {"type": "array", "items": {"type": "string", "enum": pcb::CHECKS.iter().map(|c| c.0).collect::<Vec<_>>()}, "description": "checks to turn off"},
         }, "additionalProperties": false, "description": "design rules, mm; only the ones given change"},
@@ -824,6 +946,7 @@ pub fn tools() -> Vec<Value> {
         }
         m
     };
+    let job_props: serde_json::Map<String, Value> = crate::pcb_fab::OutJob::NAMES.iter().map(|(k, d)| (k.to_string(), json!({"type": "boolean", "description": d}))).collect();
     let mut edit = board.clone();
     edit["pcb"] = pcb.clone();
     edit["parts"] = json!({"type": "array", "items": {"type": "object", "properties": part_fields(json!({"reference": {"type": "string", "description": "which part (R1, U2, …)"}, "new_reference": {"type": "string", "description": "rename it"}, "symbol": {"type": "string", "description": "change the library symbol (part type)"}, "delete": {"type": "boolean", "description": "remove the part"}})), "required": ["reference"], "additionalProperties": false}, "description": "change parts: [{reference, at, rot, side, value, footprint, …}]"});
@@ -842,13 +965,33 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_add_parts", "description": format!("Add parts from the library. symbol: {}. Each part gets the next reference for its prefix (R1, C2, U1) unless reference is given, its library footprint and value unless given, and a spot beside the board until placed. Returns each part's reference and pins.", pcb_lib::SYMBOLS.iter().map(|s| format!("{} ({}, {})", s.key, s.name, s.footprint)).collect::<Vec<_>>().join(", ")), "inputSchema": obj(json!({"pcb": pcb, "parts": {"type": "array", "description": "parts to add", "items": {"type": "object", "properties": part_fields(json!({"symbol": {"type": "string", "description": "library symbol key"}, "reference": {"type": "string", "description": "reference designator, default the next free one"}})), "required": ["symbol"], "additionalProperties": false}}}), &["pcb", "parts"])}),
         json!({"name": "pcb_connect", "description": "Connect pins into nets on the schematic: {\"nets\": {\"VCC\": [\"U1.8\", \"R1.1\"], \"GND\": [\"U1.1\", \"C1.2\"]}}. Pins are REF.PIN by number or by pin name. Each pin gets a short wire and a label (ground and supply ports for names like GND, VCC, +5V, 3V3); nets named by a port get the wider power track width. Returns the netlist.", "inputSchema": obj(json!({"pcb": pcb, "nets": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "description": "REF.PIN"}, "description": "pins"}, "description": "net name → list of pins"}}), &["pcb", "nets"])}),
         json!({"name": "pcb_edit", "description": "Change a PCB tab: board size/outline/thickness/colour/rules, parts (place them with at/rot/side, change value or footprint, delete), schematic wires and labels, mounting holes, copper pours (zones), clear_routing, auto_place.", "inputSchema": obj(edit, &["pcb"])}),
-        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}}), &["pcb"])}),
+        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
-        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}}), &["pcb", "path"])}),
+        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
         json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
+        json!({"name": "pcb_library", "description": "The PCB's own part library. import: a KiCad footprint (.kicad_mod), symbol library (.kicad_sym), a folder (.pretty, .kicad_symdir or a download with both) or a ZIP (SnapEDA, Ultra Librarian, SamacSys and similar give KiCad ZIPs). Symbols become \"Library:Name\" keys with their pins, drawing and electrical pin types (used by the ERC); a symbol's footprint is linked when it was imported too. generate: IPC-7351B land patterns from datasheet dimensions (mm, nominal), named the IPC way (RESC2012X50N, SOIC127P600X175-8N, QFN50P400X400X90-17N): chip {family: chip, size: 0805, kind: R|C|L|D|LED} or {body: [L, W], lead, height}; sop/qfp {pins, pitch, body, span: [toe-to-toe x, y], lead (foot length), lead_w, height, ep}; son/qfn {pins, pitch, body, lead, lead_w, height, ep: [w, h] exposed pad}; bga {pitch, ball, rows, cols, height}. density M, N (default) or L.", "inputSchema": obj(json!({"pcb": pcb, "import": {"type": "string", "description": "KiCad file, folder or ZIP to import"}, "generate": {"type": "array", "description": "IPC-7351 footprints to generate", "items": {"type": "object", "properties": {
+            "family": {"type": "string", "enum": ["chip", "sop", "qfp", "son", "qfn", "bga"], "description": "package family"},
+            "kind": {"type": "string", "description": "chip: R, C, L, D, LED or F"},
+            "size": {"type": "string", "description": "chip: EIA size 0201 0402 0603 0805 1206 1210 2010 2512"},
+            "pins": {"type": "integer", "description": "leads, not counting the exposed pad"},
+            "pitch": {"type": "number", "description": "lead or ball pitch"},
+            "body": {"type": "array", "items": {"type": "number"}, "description": "[length x, width y]"},
+            "span": {"type": "array", "items": {"type": "number"}, "description": "gull-wing toe-to-toe span [x, y]"},
+            "lead": {"type": "number", "description": "terminal (foot) length"},
+            "lead_w": {"type": "number", "description": "lead width"},
+            "height": {"type": "number", "description": "seated height"},
+            "ep": {"type": "array", "items": {"type": "number"}, "description": "exposed pad [w, h]"},
+            "span_tol": {"type": "number", "description": "span tolerance range (default 0.2)"},
+            "lead_tol": {"type": "number", "description": "foot length tolerance range (default 0.3)"},
+            "width_tol": {"type": "number", "description": "lead width tolerance range (default 0.1)"},
+            "ball": {"type": "number", "description": "BGA ball diameter"},
+            "rows": {"type": "integer", "description": "BGA rows"},
+            "cols": {"type": "integer", "description": "BGA columns"},
+            "density": {"type": "string", "enum": ["M", "N", "L"], "description": "IPC density level: M most, N nominal, L least"}
+        }, "additionalProperties": false}}}), &["pcb"])}),
         json!({"name": "pcb_traces", "description": "Trace solver. pcb: every routed net (or net with a current/impedance target) solved: track length and widths, worst pad-to-pad resistance through tracks and vias and the voltage drop at the net's current, temperature rise (IPC-2221), the width the current needs at the allowed rise, impedance of its tracks (microstrip over the stackup) and the width an impedance target needs; plus the stackup and the current/impedance findings check_pcb also reports. calc: work out one track: current capacity, rise, resistance, drop, power, Z0, εeff, delay and differential impedance, and the widths or gap for z_target / zdiff_target (defaults from the board's top layer when pcb is given).", "inputSchema": obj(json!({"pcb": pcb, "calc": {"type": "object", "properties": {
             "width": num("track width mm"), "copper_oz": num("copper weight oz (1 = 35 µm)"), "layer": {"type": "string", "enum": ["outer", "inner"], "description": "for heating (default outer)"},
             "current": num("A"), "length": num("mm, for resistance and drop"), "temp_rise": num("allowed rise °C (10)"), "ambient": num("°C (25)"),

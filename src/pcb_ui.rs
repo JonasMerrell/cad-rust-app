@@ -103,7 +103,16 @@ pub struct PcbUi {
     pub issues: Option<Vec<Issue>>,
     /// The last electrical rule check, shown on the schematic.
     pub erc: Option<Vec<Issue>>,
+    /// Interactive routing flows round other copper (walkaround).
+    walkaround: bool,
+    /// The walkaround grid for the net being routed (net, width, board edit count) and the last path.
+    walk: Option<(crate::pcb_route::Walk, String, f64, u64)>,
+    walk_path: Option<(P, P, Layer, Option<Vec<P>>)>,
+    /// Counts board changes, so the walkaround grid is rebuilt after one.
+    cache_gen: u64,
     lib_search: String,
+    /// The IPC-7351 footprint wizard's inputs while it is open.
+    wizard: Option<crate::pcb_ipc::IpcSpec>,
     label_text: String,
     zone_net: String,
     pub(crate) highlight: Option<String>,
@@ -145,7 +154,12 @@ impl Default for PcbUi {
             cache: Cache::default(),
             issues: None,
             erc: None,
+            walkaround: true,
+            walk: None,
+            walk_path: None,
+            cache_gen: 0,
             lib_search: String::new(),
+            wizard: None,
             label_text: String::new(),
             zone_net: String::new(),
             highlight: None,
@@ -288,6 +302,7 @@ fn refresh(app: &mut App) {
     let air = pcb::ratsnest(&its, &pads, &fills);
     app.pcb.cache = Cache { pcb: Some(i), nl, pads, fills, air };
     app.pcb.dirty = false;
+    app.pcb.cache_gen += 1;
     app.pcb.trace.invalidate();
 }
 
@@ -403,6 +418,31 @@ pub(crate) fn export_fab(app: &mut App) {
     }
 }
 
+/// Run the PCB's output job into a ZIP: Gerbers with the X2 job file and drill drawing, BOM,
+/// pick and place, IPC-D-356A, ODB++ and the PDF prints, as the job has them turned on.
+pub(crate) fn run_output_job(app: &mut App) {
+    let Some(p) = pcb_ref(app).cloned() else { return };
+    let name = format!("{}-outputs.zip", p.name.replace(['/', '\\'], "_"));
+    let Some(path) = app.save_file_dialog("Output job ZIP", &["zip"], name) else { return };
+    match crate::pcb_fab::run(&p, &p.outputs, &path) {
+        Ok(files) => app.flash_info(format!("Saved {}", files.join(", ")), Some(Duration::from_secs(5))),
+        Err(e) => app.flash(format!("Could not run the output job: {e}"), ToastKind::Error),
+    }
+}
+
+fn output_job_ui(app: &mut App, ui: &mut Ui) {
+    let Some(pi) = index(app) else { return };
+    let job = &mut app.ws.pcbs[pi].outputs;
+    for (k, d) in crate::pcb_fab::OutJob::NAMES {
+        if let Some(v) = job.get_mut(k) {
+            ui.checkbox(v, d);
+        }
+    }
+    if ui.button("Run output job…").on_hover_text("Write every output that is ticked into one ZIP").clicked() {
+        run_output_job(app);
+    }
+}
+
 pub(crate) fn to_3d(app: &mut App) {
     let Some(i) = index(app) else { return };
     app.sync_ws();
@@ -511,7 +551,7 @@ fn mirror_sel(app: &mut App) {
 pub fn hint(app: &App) -> String {
     match (&app.pcb.view, &app.pcb.tool) {
         (_, Tool::Place(_)) if crate::digikey_ui::placing_name(app).is_some() => format!("Click to place {} · R rotates, X mirrors · Esc when done", crate::digikey_ui::placing_name(app).unwrap_or_default()),
-        (_, Tool::Place(k)) => format!("Click to place {} · R rotates, X mirrors · Esc when done", pcb_lib::symbol_kind(k).map(|s| s.name).unwrap_or("the part")),
+        (_, Tool::Place(k)) => format!("Click to place {} · R rotates, X mirrors · Esc when done", pcb_lib::kind_info(k).map(|s| s.name).unwrap_or("the part".into())),
         (_, Tool::Wire) if app.pcb.wire.is_empty() => "Click a pin or wire end to start a wire · Esc stops".into(),
         (_, Tool::Wire) => "Click to add a corner, click a pin or wire to finish · / flips the corner · Esc or double-click ends".into(),
         (_, Tool::Label(_)) => "Click a pin or wire to name its net · the text is in the sidebar".into(),
@@ -791,6 +831,8 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         if app.pcb.view == View::Board {
             section(ui, "Board", |ui| board_ui(app, ui));
             section(ui, "Layers", |ui| layers_ui(app, ui));
+            section(ui, "Lengths and pairs", |ui| lengths_ui(app, ui));
+            section(ui, "Output job", |ui| output_job_ui(app, ui));
             section(ui, "Stackup", |ui| crate::pcb_trace_ui::stackup_ui(app, ui));
             section(ui, "Traces", |ui| crate::pcb_trace_ui::nets_ui(app, ui));
             if let Some(issues) = app.pcb.issues.clone() {
@@ -829,18 +871,181 @@ fn library_ui(app: &mut App, ui: &mut Ui) {
             start_place(app, s.key);
         }
     }
+    let Some(pi) = index(app) else { return };
+    let imported: Vec<(String, String, String)> = app.ws.pcbs[pi].symbols.iter().filter(|s| q.is_empty() || s.key.to_lowercase().contains(&q) || s.description.to_lowercase().contains(&q)).map(|s| (s.key.clone(), s.footprint.clone(), s.description.clone())).collect();
+    if !imported.is_empty() {
+        ui.add_space(4.0);
+        ui.label(RichText::new("Imported").color(theme::muted()).size(11.5));
+    }
+    for (key, fp, desc) in imported {
+        let on = app.pcb.tool == Tool::Place(key.clone());
+        let name = key.rsplit(':').next().unwrap_or(&key).to_string();
+        let r = ui.add_sized([ui.available_width(), 22.0], egui::Button::selectable(on, RichText::new(format!("{name}  ·  {fp}")).size(12.5)));
+        if r.on_hover_text(if desc.is_empty() { key.clone() } else { format!("{key}: {desc}") }).clicked() {
+            start_place(app, &key);
+        }
+    }
+    ui.add_space(4.0);
+    ui.horizontal(|ui| {
+        if ui.button("Import KiCad…").on_hover_text("Footprints (.kicad_mod), symbols (.kicad_sym) or a ZIP from SnapEDA, Ultra Librarian and the like").clicked() {
+            if let Some(path) = app.open_file_dialog("KiCad library", &["kicad_mod", "kicad_sym", "zip", "KICAD_MOD", "KICAD_SYM", "ZIP"]) {
+                import_kicad(app, pi, &path);
+            }
+        }
+        if ui.button("Folder…").on_hover_text("Every footprint and symbol in a folder (.pretty, .kicad_symdir)").clicked() {
+            if let Some(path) = rfd::FileDialog::new().pick_folder() {
+                import_kicad(app, pi, &path);
+            }
+        }
+        let open = app.pcb.wizard.is_some();
+        if ui.selectable_label(open, "IPC wizard").on_hover_text("Make an IPC-7351 footprint from datasheet dimensions").clicked() {
+            app.pcb.wizard = if open { None } else { Some(crate::pcb_ipc::IpcSpec { size: "0805".into(), ..Default::default() }) };
+        }
+    });
+    if app.pcb.wizard.is_some() {
+        wizard_ui(app, ui, pi);
+    }
+}
+
+fn import_kicad(app: &mut App, pi: usize, path: &std::path::Path) {
+    match crate::pcb_kicad::import_path(path) {
+        Ok(im) => {
+            let (nf, ns) = (im.footprints.len(), im.symbols.len());
+            let notes = crate::pcb_kicad::add_to(&mut app.ws.pcbs[pi], im);
+            let mut msg = format!("Imported {nf} footprint(s) and {ns} symbol(s)");
+            if !notes.is_empty() {
+                msg += &format!(" · {}", notes.join(" · "));
+            }
+            app.flash_info(msg, Some(Duration::from_secs(8)));
+        }
+        Err(e) => app.flash(format!("Could not import: {e}"), ToastKind::Error),
+    }
+}
+
+fn wizard_ui(app: &mut App, ui: &mut Ui, pi: usize) {
+    use crate::pcb_ipc::Family;
+    let sel_part = match app.pcb.sel {
+        Some(Sel::Part(i)) if i < app.ws.pcbs[pi].parts.len() => Some(i),
+        _ => None,
+    };
+    let Some(w) = app.pcb.wizard.as_mut() else { return };
+    let num = |ui: &mut Ui, label: &str, v: &mut f64| {
+        row(ui, label, |ui| {
+            ui.add(egui::DragValue::new(v).speed(0.01).range(0.0..=100.0).max_decimals(3).suffix(" mm"));
+        });
+    };
+    row(ui, "Package", |ui| {
+        egui::ComboBox::from_id_salt("ipc-family").width(140.0).selected_text(format!("{:?}", w.family).to_uppercase()).show_ui(ui, |ui| {
+            for (f, n) in [(Family::Chip, "Chip (R, C, L, D)"), (Family::Sop, "SOIC / SOP / TSSOP"), (Family::Qfp, "QFP"), (Family::Son, "SON / DFN"), (Family::Qfn, "QFN"), (Family::Bga, "BGA")] {
+                ui.selectable_value(&mut w.family, f, n);
+            }
+        });
+    });
+    match w.family {
+        Family::Chip => {
+            row(ui, "Kind", |ui| {
+                egui::ComboBox::from_id_salt("ipc-kind").width(140.0).selected_text(w.kind.clone()).show_ui(ui, |ui| {
+                    for k in ["R", "C", "L", "D", "LED", "F"] {
+                        ui.selectable_value(&mut w.kind, k.to_string(), k);
+                    }
+                });
+            });
+            row(ui, "EIA size", |ui| {
+                egui::ComboBox::from_id_salt("ipc-size").width(140.0).selected_text(if w.size.is_empty() { "custom".to_string() } else { w.size.clone() }).show_ui(ui, |ui| {
+                    for k in ["0201", "0402", "0603", "0805", "1206", "1210", "2010", "2512"] {
+                        ui.selectable_value(&mut w.size, k.to_string(), k);
+                    }
+                    ui.selectable_value(&mut w.size, String::new(), "custom");
+                });
+            });
+            if w.size.is_empty() {
+                num(ui, "Body length", &mut w.body[0]);
+                num(ui, "Body width", &mut w.body[1]);
+                num(ui, "Terminal", &mut w.lead);
+                num(ui, "Height", &mut w.height);
+            }
+        }
+        Family::Bga => {
+            num(ui, "Pitch", &mut w.pitch);
+            num(ui, "Ball", &mut w.ball);
+            row(ui, "Rows × cols", |ui| {
+                ui.add(egui::DragValue::new(&mut w.rows).range(1..=40));
+                ui.add(egui::DragValue::new(&mut w.cols).range(1..=40));
+            });
+            num(ui, "Body", &mut w.body[0]);
+            num(ui, "Height", &mut w.height);
+        }
+        f => {
+            row(ui, "Pins", |ui| {
+                ui.add(egui::DragValue::new(&mut w.pins).range(0..=400));
+            });
+            num(ui, "Pitch", &mut w.pitch);
+            num(ui, "Body length", &mut w.body[0]);
+            num(ui, "Body width", &mut w.body[1]);
+            if matches!(f, Family::Sop | Family::Qfp) {
+                num(ui, "Lead span", &mut w.span[0]);
+                if f == Family::Qfp {
+                    num(ui, "Lead span y", &mut w.span[1]);
+                }
+            }
+            num(ui, "Foot length", &mut w.lead);
+            num(ui, "Lead width", &mut w.lead_w);
+            num(ui, "Height", &mut w.height);
+            num(ui, "Exposed pad w", &mut w.ep[0]);
+            num(ui, "Exposed pad h", &mut w.ep[1]);
+        }
+    }
+    row(ui, "Density", |ui| {
+        for (d, tip) in [('M', "Most: big fillets, for hand soldering and rework"), ('N', "Nominal"), ('L', "Least: dense boards")] {
+            ui.selectable_value(&mut w.density, d, d.to_string()).on_hover_text(tip);
+        }
+    });
+    let made = crate::pcb_ipc::generate(w);
+    match &made {
+        Ok(f) => {
+            ui.label(RichText::new(format!("{} · {} pads", f.name, f.pads.len())).strong().size(12.5));
+            if let Some(p) = f.pads.first() {
+                ui.label(RichText::new(format!("pad 1 {:.2} × {:.2} mm at ({:.3}, {:.3})", p.size[0], p.size[1], p.at[0], p.at[1])).color(theme::muted()).size(11.5));
+            }
+        }
+        Err(e) => {
+            ui.label(RichText::new(e).color(theme::muted()).size(11.5));
+        }
+    }
+    if let Ok(f) = made {
+        ui.horizontal(|ui| {
+            let mut add = ui.button("Add to library").clicked();
+            let mut use_on = None;
+            if let Some(i) = sel_part {
+                let r = app.ws.pcbs[pi].parts[i].reference.clone();
+                if ui.button(format!("Add and use on {r}")).clicked() {
+                    add = true;
+                    use_on = Some(i);
+                }
+            }
+            if add {
+                let name = f.name.clone();
+                crate::pcb_kicad::add_to(&mut app.ws.pcbs[pi], crate::pcb_kicad::Imported { footprints: vec![f], ..Default::default() });
+                if let Some(i) = use_on {
+                    app.ws.pcbs[pi].parts[i].footprint = name.clone();
+                }
+                app.flash_info(format!("{name} is in the library"), Some(Duration::from_secs(3)));
+            }
+        });
+    }
 }
 
 fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
     let Some(pi) = index(app) else { return };
     let board = app.pcb.view == View::Board;
     let fps = pcb_lib::footprint_names();
+    let lib_keys: Vec<String> = app.ws.pcbs[pi].symbols.iter().map(|s| s.key.clone()).collect();
     let p = &mut app.ws.pcbs[pi];
     match s {
         Sel::Part(i) if i < p.parts.len() => {
             let kind = pcb_lib::symbol_kind(&p.parts[i].symbol);
             let sim_model = crate::circuit::model_params(&p.parts[i], &p.sim);
-            ui.label(RichText::new(kind.map(|k| k.name).unwrap_or("Part")).strong());
+            ui.label(RichText::new(kind.map(|k| k.name).unwrap_or(p.parts[i].symbol.rsplit(':').next().unwrap_or("Part"))).strong());
             let part = &mut p.parts[i];
             row(ui, "Reference", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.reference).desired_width(120.0));
@@ -852,6 +1057,9 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 egui::ComboBox::from_id_salt("pcb-sym").width(140.0).selected_text(kind.map(|k| k.name).unwrap_or(part.symbol.as_str()).to_string()).height(320.0).show_ui(ui, |ui| {
                     for k in pcb_lib::SYMBOLS {
                         ui.selectable_value(&mut part.symbol, k.key.to_string(), k.name);
+                    }
+                    for s in &lib_keys {
+                        ui.selectable_value(&mut part.symbol, s.clone(), s);
                     }
                 })
                 .response
@@ -1214,7 +1422,7 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
                 ui.separator();
                 ui.horizontal(|ui| {
                     ui.add(egui::TextEdit::singleline(&mut c.name).desired_width(110.0).hint_text("Class name"));
-                    if ui.small_button("✕").on_hover_text("Remove the class").clicked() {
+                    if ui.small_button("×").on_hover_text("Remove the class").clicked() {
                         remove = Some(ci);
                     }
                 });
@@ -1288,6 +1496,122 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
     });
 }
 
+fn lengths_ui(app: &mut App, ui: &mut Ui) {
+    let Some(pi) = index(app) else { return };
+    ui.checkbox(&mut app.pcb.walkaround, "Walkaround routing").on_hover_text("While routing by hand, the track flows round other nets' copper to the cursor");
+    let nets: Vec<String> = app.pcb.cache.nl.nets.iter().map(|n| n.name.clone()).collect();
+    let mut route_pair: Option<pcb::DiffPair> = None;
+    let mut match_rule: Option<pcb::LengthRule> = None;
+    {
+        let p = &mut app.ws.pcbs[pi];
+        let len = |p: &Pcb, n: &str| crate::pcb_tune::net_length(p, n);
+        ui.label(RichText::new("Differential pairs").strong().size(12.5));
+        let mut remove = None;
+        for k in 0..p.board.rules.pairs.len() {
+            let (lp, ln) = (len(p, &p.board.rules.pairs[k].p), len(p, &p.board.rules.pairs[k].n));
+            let d = &mut p.board.rules.pairs[k];
+            ui.push_id(("pcb-pair", k), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut d.name).desired_width(70.0));
+                    for (v, id) in [(&mut d.p, "p"), (&mut d.n, "n")] {
+                        egui::ComboBox::from_id_salt(id).width(70.0).selected_text(v.clone()).show_ui(ui, |ui| {
+                            for n in &nets {
+                                ui.selectable_value(v, n.clone(), n);
+                            }
+                        });
+                    }
+                    if ui.small_button("×").clicked() {
+                        remove = Some(k);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    ui.add(egui::DragValue::new(&mut d.width).speed(0.005).range(0.0..=5.0).max_decimals(3).custom_formatter(|x, _| if x == 0.0 { "w auto".into() } else { format!("w {x:.3}") }));
+                    ui.add(egui::DragValue::new(&mut d.gap).speed(0.005).range(0.0..=5.0).max_decimals(3).custom_formatter(|x, _| if x == 0.0 { "gap auto".into() } else { format!("gap {x:.3}") }));
+                    if ui.button("Route").on_hover_text("Route the two nets side by side at the gap").clicked() {
+                        route_pair = Some(d.clone());
+                    }
+                });
+                if lp > 0.0 || ln > 0.0 {
+                    ui.label(RichText::new(format!("{:.2} / {:.2} mm (skew {:.2})", lp, ln, (lp - ln).abs())).color(theme::muted()).size(11.5));
+                }
+            });
+        }
+        if let Some(k) = remove {
+            p.board.rules.pairs.remove(k);
+        }
+        if ui.button("Add pair").on_hover_text("Nets named …_P/…_N or …+/…- are picked up").clicked() {
+            // guess a pair from net names
+            let guess = nets.iter().find_map(|a| {
+                for (sp, sn) in [("_P", "_N"), ("+", "-"), ("P", "N"), ("_DP", "_DN")] {
+                    if let Some(stem) = a.strip_suffix(sp) {
+                        let b = format!("{stem}{sn}");
+                        if nets.contains(&b) && !p.board.rules.pairs.iter().any(|d| d.p == *a) {
+                            return Some((stem.trim_end_matches('_').to_string(), a.clone(), b));
+                        }
+                    }
+                }
+                None
+            });
+            let (name, pn, nn) = guess.unwrap_or_else(|| (format!("Pair{}", p.board.rules.pairs.len() + 1), nets.first().cloned().unwrap_or_default(), nets.get(1).cloned().unwrap_or_default()));
+            p.board.rules.pairs.push(pcb::DiffPair { name, p: pn, n: nn, ..Default::default() });
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Length rules").strong().size(12.5));
+        let mut remove = None;
+        for k in 0..p.board.rules.lengths.len() {
+            let r = p.board.rules.lengths[k].clone();
+            let lens: Vec<(String, f64)> = crate::pcb_tune::rule_nets(&app.pcb.cache.nl, &r).into_iter().map(|n| (n.clone(), len(p, &n))).collect();
+            let r = &mut p.board.rules.lengths[k];
+            ui.push_id(("pcb-len", k), |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(&mut r.name).desired_width(70.0));
+                    let mut text = r.nets.join(", ");
+                    if ui.add(egui::TextEdit::singleline(&mut text).desired_width(110.0).hint_text("D0, D1, CLK")).changed() {
+                        r.nets = text.split(',').map(|x| x.trim().to_string()).filter(|x| !x.is_empty()).collect();
+                    }
+                    if ui.small_button("×").clicked() {
+                        remove = Some(k);
+                    }
+                });
+                ui.horizontal(|ui| {
+                    let f = |label: &'static str| move |x: f64, _| if x == 0.0 { format!("{label} –") } else { format!("{label} {x:.2}") };
+                    ui.add(egui::DragValue::new(&mut r.min).speed(0.1).range(0.0..=1000.0).custom_formatter(f("min")));
+                    ui.add(egui::DragValue::new(&mut r.max).speed(0.1).range(0.0..=1000.0).custom_formatter(f("max")));
+                    ui.add(egui::DragValue::new(&mut r.tolerance).speed(0.01).range(0.0..=100.0).custom_formatter(f("match ±"))).on_hover_text("Matched length: every net within this of the longest");
+                    if ui.button("Tune").on_hover_text("Lengthen the shorter nets with meanders").clicked() {
+                        match_rule = Some(r.clone());
+                    }
+                });
+                for (n, l) in &lens {
+                    ui.label(RichText::new(format!("{n}: {l:.2} mm")).color(theme::muted()).size(11.5));
+                }
+            });
+        }
+        if let Some(k) = remove {
+            p.board.rules.lengths.remove(k);
+        }
+        if ui.button("Add length rule").clicked() {
+            let n = p.board.rules.lengths.len() + 1;
+            p.board.rules.lengths.push(pcb::LengthRule { name: format!("Length{n}"), ..Default::default() });
+        }
+    }
+    if let Some(d) = route_pair {
+        let mut res = None;
+        edit(app, |p| res = Some(crate::pcb_route::route_pair(p, &d)));
+        match res {
+            Some(Ok(o)) => app.flash_info(format!("Routed pair {} on {}: {:.2} and {:.2} mm", d.name, o.layer.label().to_lowercase(), o.p_len, o.n_len), Some(Duration::from_secs(4))),
+            Some(Err(e)) => app.flash(e, ToastKind::Error),
+            None => {}
+        }
+    }
+    if let Some(r) = match_rule {
+        let mut res = vec![];
+        edit(app, |p| res = crate::pcb_tune::match_lengths(p, &r));
+        let worst = res.iter().map(|x| x.2).fold(0.0, f64::max) - res.iter().map(|x| x.2).fold(f64::INFINITY, f64::min);
+        app.flash_info(format!("Tuned {}: lengths now within {:.2} mm", r.name, if worst.is_finite() { worst } else { 0.0 }), Some(Duration::from_secs(4)));
+    }
+}
+
 fn layers_ui(app: &mut App, ui: &mut Ui) {
     let s = &mut app.pcb.show;
     ui.horizontal_wrapped(|ui| {
@@ -1356,6 +1680,7 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
         ("Design rule check", "pcbDrc", run_drc),
         ("Trace calculator", "pcbTrace", |a| a.pcb.trace.open = true),
         ("Export Gerbers…", "export", export_fab),
+        ("Run output job…", "export", run_output_job),
         ("3D board (Part Studio)", "cube", to_3d),
     ]
 }
@@ -1457,8 +1782,8 @@ fn paint(painter: &egui::Painter, xf: &Xf, list: &[Draw]) {
 
 /// The ghost of the part being placed, as a part at the cursor.
 fn ghost_part(key: &str, at: P, rot: u8, mirror: bool) -> Option<pcb::Part> {
-    let k = pcb_lib::symbol_kind(key)?;
-    Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value.into(), symbol: k.key.into(), footprint: k.footprint.into(), sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })
+    let k = pcb_lib::kind_info(key)?;
+    Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value, symbol: k.key, footprint: k.footprint, sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })
 }
 
 /// Hit-test the schematic at a world point.
@@ -1937,11 +2262,36 @@ fn bump(s: &str) -> String {
 }
 
 #[allow(clippy::too_many_arguments)]
+/// While routing, the walkaround path from the last corner to the cursor (round other nets'
+/// copper), recomputed when the cursor moves.
+fn walk_preview(app: &mut App, pi: usize, h: P) {
+    let Some(r) = &app.pcb.route else {
+        app.pcb.walk = None;
+        app.pcb.walk_path = None;
+        return;
+    };
+    let (net, width, layer, from) = (r.net.clone(), r.width, r.layer, *r.pts.last().unwrap());
+    let stale = app.pcb.walk.as_ref().is_none_or(|w| w.1 != net || (w.2 - width).abs() > 1e-9 || w.3 != app.pcb.cache_gen);
+    if stale {
+        app.pcb.walk = Some((crate::pcb_route::Walk::new(&app.ws.pcbs[pi], &net, width), net, width, app.pcb.cache_gen));
+        app.pcb.walk_path = None;
+    }
+    let to = pcb::snap(h, 0.05);
+    if app.pcb.walk_path.as_ref().is_some_and(|w| w.0 == from && pcb::dist(w.1, to) < 0.05 && w.2 == layer) {
+        return;
+    }
+    let path = app.pcb.walk.as_ref().and_then(|w| w.0.path(from, to, layer));
+    app.pcb.walk_path = Some((from, to, layer, path));
+}
+
 fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Option<P>, tol: f64, clicked: bool, double: bool, right: bool) {
     let tool = app.pcb.tool.clone();
     match tool {
         Tool::Route => {
             let Some(h) = hover else { return };
+            if app.pcb.walkaround {
+                walk_preview(app, pi, h);
+            }
             if clicked {
                 let p = &app.ws.pcbs[pi];
                 let c = &app.pcb.cache;
@@ -1968,7 +2318,15 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                         // ending on copper of the same net finishes the route there
                         let target = pcb::net_at(p, &c.nl, &c.pads, h, rl).filter(|x| x.0 == net && pcb::dist(x.1, start) > 1e-6);
                         let end = target.as_ref().map(|x| x.1).unwrap_or(h);
-                        let path = route45(start, end);
+                        // the walkaround path when there is one to this point, else a 45° bend
+                        let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == rl && pcb::dist(w.1, end) < 0.1).and_then(|w| w.3.clone());
+                        let path = match walked {
+                            Some(mut w) => {
+                                *w.last_mut().unwrap() = end;
+                                w
+                            }
+                            None => route45(start, end),
+                        };
                         edit(app, |p| {
                             for s in path.windows(2) {
                                 p.board.tracks.push(Track { a: s[0], b: s[1], width: w, layer: rl, net: net.clone() });
@@ -2172,7 +2530,9 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
     if let Some(r) = &app.pcb.route {
         let col = if r.layer == Layer::Top { pcb_export::colors::TOP } else { pcb_export::colors::BOTTOM };
         let col = Color32::from_rgba_unmultiplied(col[0], col[1], col[2], 170);
-        let path = route45(*r.pts.last().unwrap(), h);
+        let start = *r.pts.last().unwrap();
+        let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == r.layer).and_then(|w| w.3.clone());
+        let path = walked.unwrap_or_else(|| route45(start, h));
         let wpx = (r.width as f32 * xf.zoom).max(1.5);
         for s in path.windows(2) {
             painter.line_segment([xf.s(s[0]), xf.s(s[1])], Stroke::new(wpx, col));

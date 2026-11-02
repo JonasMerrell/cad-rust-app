@@ -122,7 +122,7 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
         }
         air.sort_by(|a, b| pcb::dist(a.a, a.b).total_cmp(&pcb::dist(b.a, b.b)));
         let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
-        let mut grid = build(p, &nl, &base);
+        let mut grid = build(p, &nl, &base, &[], None);
         let ids: HashMap<String, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.clone(), i as i32)).collect();
         for a in &air {
             tried.push(key(a));
@@ -140,7 +140,7 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
                 let mi = grid.find(w / 2.0, nr.clearance, false);
                 let la = layers_at(p, &pads, a.a, &a.net);
                 let lb = layers_at(p, &pads, a.b, &a.net);
-                if let Some(pth) = search(&grid, mi, vmi, net, a.a, &la, a.b, &lb) {
+                if let Some(pth) = search(&grid, mi, Some(vmi), net, a.a, &la, a.b, &lb, 4_000_000) {
                     path = Some((pth, w));
                     break;
                 }
@@ -201,7 +201,9 @@ impl Grid {
     }
 }
 
-fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item]) -> Grid {
+/// The routing grid: copper, holes, keepouts and the edge marked on a map per profile (and the
+/// `extra` ones); `alias` routes one net as another's (a pair's negative as its positive).
+fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], alias: Option<(&str, &str)>) -> Grid {
     let r = &p.board.rules;
     let (lo, hi) = p.board.bbox();
     let size = [hi[0] - lo[0], hi[1] - lo[1]];
@@ -225,6 +227,9 @@ fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item]) -> Grid {
         add(r.track.min(nr.track) / 2.0, nr.clearance, false);
         add(nr.via_d / 2.0, nr.clearance, true);
     }
+    for &(h, c, via) in extra {
+        add(h, c, via);
+    }
     let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: [vec![FREE; n], vec![FREE; n]] }).collect() };
     // the edge
     for y in 0..ny {
@@ -242,7 +247,11 @@ fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item]) -> Grid {
     let ids: HashMap<&str, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as i32)).collect();
     let mut cl: HashMap<&str, f64> = HashMap::new();
     for it in base {
-        let net = if it.net.is_empty() { WALL } else { ids.get(it.net.as_str()).copied().unwrap_or(WALL) };
+        let name = match alias {
+            Some((from, to)) if it.net == from => to,
+            _ => it.net.as_str(),
+        };
+        let net = if it.net.is_empty() { WALL } else { ids.get(name).copied().unwrap_or(WALL) };
         let c = *cl.entry(it.net.as_str()).or_insert_with(|| p.net_rules(nl, &it.net).clearance);
         grid.mark(&it.cu, it.layer, net, c);
     }
@@ -271,7 +280,7 @@ fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item]) -> Grid {
 const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
 
 /// A* from `a` to `b` on map `mi` (track width) for `net`; returns cells (x, y, layer).
-fn search(grid: &Grid, mi: usize, vmi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Layer]) -> Option<Vec<(usize, usize, usize)>> {
+fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Layer], b: P, lb: &[Layer], limit: usize) -> Option<Vec<(usize, usize, usize)>> {
     let (nx, ny) = (grid.nx, grid.ny);
     let (sx, sy) = grid.cell(a)?;
     let (tx, ty) = grid.cell(b)?;
@@ -286,7 +295,7 @@ fn search(grid: &Grid, mi: usize, vmi: usize, net: i32, a: P, la: &[Layer], b: P
     };
     let via_cost = (1.2 / grid.g) as f32 + 4.0;
     let track = &grid.maps[mi].m;
-    let via = &grid.maps[vmi].m;
+    let via = &grid.maps[vmi.unwrap_or(0)].m;
     // the start and end cells sit on the net's own copper
     for l in la {
         let s = st(sx, sy, li(*l));
@@ -314,7 +323,7 @@ fn search(grid: &Grid, mi: usize, vmi: usize, net: i32, a: P, la: &[Layer], b: P
             return Some(path);
         }
         expanded += 1;
-        if expanded > 4_000_000 {
+        if expanded > limit {
             return None;
         }
         let g0 = cost[s];
@@ -360,7 +369,7 @@ fn search(grid: &Grid, mi: usize, vmi: usize, net: i32, a: P, la: &[Layer], b: P
         // a via to the other layer
         let here = y * nx + x;
         let start_or_goal = (x == sx && y == sy) || (x == tx && y == ty);
-        if !start_or_goal && free(via[0][here], net) && free(via[1][here], net) {
+        if vmi.is_some() && !start_or_goal && free(via[0][here], net) && free(via[1][here], net) {
             let s2 = st(x, y, 1 - l);
             let g2 = g0 + via_cost;
             if g2 < cost[s2] {
@@ -423,6 +432,195 @@ fn push_run(out: &mut Vec<Track>, run: &[P], w: f64, layer: Layer, net: &str) {
         if pcb::dist(s[0], s[1]) > 1e-9 {
             out.push(Track { a: s[0], b: s[1], width: w, layer, net: net.into() });
         }
+    }
+}
+
+/// The corners of a polyline (collinear points dropped).
+fn corners(run: &[P]) -> Vec<P> {
+    if run.len() < 3 {
+        return run.to_vec();
+    }
+    let mut pts = vec![run[0]];
+    for i in 1..run.len() - 1 {
+        let (p, q, r) = (*pts.last().unwrap(), run[i], run[i + 1]);
+        let (d1, d2) = (pcb::sub(q, p), pcb::sub(r, q));
+        let cr = d1[0] * d2[1] - d1[1] * d2[0];
+        let l = (d1[0].hypot(d1[1]) * d2[0].hypot(d2[1])).max(1e-12);
+        if (cr / l).abs() > 1e-6 || d1[0] * d2[0] + d1[1] * d2[1] < 0.0 {
+            pts.push(q);
+        }
+    }
+    pts.push(*run.last().unwrap());
+    pts.dedup_by(|a, b| pcb::dist(*a, *b) < 1e-9);
+    pts
+}
+
+/// A polyline moved sideways by `d` (left of its direction), with mitred corners.
+pub fn offset_line(pts: &[P], d: f64) -> Vec<P> {
+    let n = pts.len();
+    if n < 2 {
+        return pts.to_vec();
+    }
+    let left = |a: P, b: P| {
+        let l = pcb::dist(a, b).max(1e-12);
+        [-(b[1] - a[1]) / l, (b[0] - a[0]) / l]
+    };
+    (0..n)
+        .map(|i| {
+            let n1 = if i > 0 { left(pts[i - 1], pts[i]) } else { left(pts[0], pts[1]) };
+            let n2 = if i + 1 < n { left(pts[i], pts[i + 1]) } else { n1 };
+            let m = [n1[0] + n2[0], n1[1] + n2[1]];
+            let ml = m[0].hypot(m[1]).max(1e-12);
+            let m = [m[0] / ml, m[1] / ml];
+            let k = d / (m[0] * n1[0] + m[1] * n1[1]).max(0.3);
+            [pts[i][0] + m[0] * k, pts[i][1] + m[1] * k]
+        })
+        .collect()
+}
+
+/// The cell path's centres as a polyline from `a` to `b`, corners only.
+fn path_line(grid: &Grid, path: &[(usize, usize, usize)], a: P, b: P) -> Vec<P> {
+    let mut run = vec![a];
+    for (i, &(x, y, _)) in path.iter().enumerate() {
+        if i == 0 || i == path.len() - 1 {
+            continue;
+        }
+        run.push(grid.centre(x, y));
+    }
+    run.push(b);
+    corners(&run)
+}
+
+pub struct PairOutcome {
+    pub tracks: usize,
+    pub layer: Layer,
+    pub p_len: f64,
+    pub n_len: f64,
+}
+
+/// Route a differential pair together: the two tracks run side by side at the pair's gap, from
+/// the pads where the nets start (the closest positive and negative pads) to where they end
+/// (the farthest), on one layer. Other connections of the nets are left to the autorouter.
+pub fn route_pair(p: &mut Pcb, d: &pcb::DiffPair) -> Result<PairOutcome, String> {
+    let nl = p.netlist();
+    let (Some(pi), Some(ni)) = (nl.by_name(&d.p), nl.by_name(&d.n)) else {
+        return Err(format!("pair {}: nets {} and {} must both be on the schematic", d.name, d.p, d.n));
+    };
+    let pads = p.pads(&nl);
+    let pp: Vec<&WPad> = pads.iter().filter(|x| x.net == Some(pi)).collect();
+    let np: Vec<&WPad> = pads.iter().filter(|x| x.net == Some(ni)).collect();
+    if pp.len() < 2 || np.len() < 2 {
+        return Err(format!("pair {}: each net needs two pads to join", d.name));
+    }
+    let rp = p.net_rules(&nl, &d.p);
+    let rn = p.net_rules(&nl, &d.n);
+    let w = if d.width > 0.0 { d.width } else { rp.track };
+    let g = if d.gap > 0.0 { d.gap } else { rp.clearance.max(rn.clearance) };
+    let near = |q: P, set: &[&WPad]| -> usize { (0..set.len()).min_by(|&a, &b| pcb::dist(set[a].at, q).total_cmp(&pcb::dist(set[b].at, q))).unwrap() };
+    // start where the two nets come closest, end at the positive pad farthest from there
+    let mut s = (0, 0, f64::INFINITY);
+    for (i, a) in pp.iter().enumerate() {
+        let j = near(a.at, &np);
+        let l = pcb::dist(a.at, np[j].at);
+        if l < s.2 {
+            s = (i, j, l);
+        }
+    }
+    let (sp, sn) = (pp[s.0], np[s.1]);
+    let ep = pp.iter().enumerate().filter(|(i, _)| *i != s.0).max_by(|a, b| pcb::dist(a.1.at, sp.at).total_cmp(&pcb::dist(b.1.at, sp.at))).map(|x| *x.1).unwrap();
+    let en = np[near(ep.at, &np)];
+    if std::ptr::eq(en, sn) {
+        return Err(format!("pair {}: no second negative pad near {}", d.name, d.p));
+    }
+    let mid = |a: P, b: P| [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0];
+    let (sa, sb) = (mid(sp.at, sn.at), mid(ep.at, en.at));
+    let h = g / 2.0 + w;
+    let c = rp.clearance.max(rn.clearance);
+    let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
+    let grid = build(p, &nl, &base, &[(h, c, false)], Some((&d.n, &d.p)));
+    let mi = grid.find(h, c, false);
+    let common = |a: &WPad, b: &WPad| -> Vec<Layer> { [Layer::Top, Layer::Bottom].into_iter().filter(|l| a.on(*l) && b.on(*l)).collect() };
+    let mut layers = common(sp, sn);
+    layers.retain(|l| common(ep, en).contains(l));
+    if layers.is_empty() {
+        return Err(format!("pair {}: its pads are on different sides; route it by hand with a via", d.name));
+    }
+    // leave each pad pair square to the line between its pads, so the two tracks fan in
+    // straight and don't cross
+    let escape = |a: &WPad, b: &WPad, toward: P| -> P {
+        let m = mid(a.at, b.at);
+        let ax = pcb::sub(b.at, a.at);
+        let l = (ax[0].hypot(ax[1])).max(1e-9);
+        let mut perp = [-ax[1] / l, ax[0] / l];
+        let t = pcb::sub(toward, m);
+        if perp[0] * t[0] + perp[1] * t[1] < 0.0 {
+            perp = [-perp[0], -perp[1]];
+        }
+        let e = a.size[0].max(a.size[1]).max(b.size[0].max(b.size[1])) / 2.0 + g + w;
+        [m[0] + perp[0] * e, m[1] + perp[1] * e]
+    };
+    let (sa2, sb2) = (escape(sp, sn, sb), escape(ep, en, sa));
+    let mut found = None;
+    for l in layers {
+        if let Some(path) = search(&grid, mi, None, pi as i32, sa2, &[l], sb2, &[l], 4_000_000) {
+            found = Some((path, l));
+            break;
+        }
+    }
+    let Some((path, layer)) = found else {
+        return Err(format!("pair {}: no way through for two {w} mm tracks {g} mm apart; move parts apart or narrow the pair", d.name));
+    };
+    let mut centre = vec![sa];
+    centre.extend(path_line(&grid, &path, sa2, sb2));
+    centre.push(sb);
+    let centre = corners(&centre);
+    let off = (g + w) / 2.0;
+    let dir = pcb::sub(centre[1], centre[0]);
+    let to_p = pcb::sub(sp.at, sa);
+    let p_left = dir[0] * to_p[1] - dir[1] * to_p[0] > 0.0;
+    let side = if p_left { 1.0 } else { -1.0 };
+    let line_p = offset_line(&centre, side * off);
+    let line_n = offset_line(&centre, -side * off);
+    let mut tracks = vec![];
+    for (line, a, b, net) in [(line_p, sp.at, ep.at, &d.p), (line_n, sn.at, en.at, &d.n)] {
+        let mut full = vec![a];
+        full.extend(line);
+        full.push(b);
+        let full = corners(&full);
+        for s in full.windows(2) {
+            if pcb::dist(s[0], s[1]) > 1e-9 {
+                tracks.push(Track { a: s[0], b: s[1], width: w, layer, net: net.clone() });
+            }
+        }
+    }
+    let n = tracks.len();
+    p.board.tracks.extend(tracks);
+    Ok(PairOutcome { tracks: n, layer, p_len: crate::pcb_tune::net_length(p, &d.p), n_len: crate::pcb_tune::net_length(p, &d.n) })
+}
+
+/// Walkaround for interactive routing: a grid for one net and width, searched from the last
+/// corner to the cursor on one layer, so the track preview flows round other copper.
+pub struct Walk {
+    grid: Grid,
+    net: i32,
+    mi: usize,
+}
+
+impl Walk {
+    pub fn new(p: &Pcb, net: &str, width: f64) -> Walk {
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
+        let c = p.net_rules(&nl, net).clearance;
+        let grid = build(p, &nl, &base, &[(width / 2.0, c, false)], None);
+        let mi = grid.find(width / 2.0, c, false);
+        let id = nl.by_name(net).map(|i| i as i32).unwrap_or(WALL);
+        Walk { grid, net: id, mi }
+    }
+    /// A clear path from `a` to `b` on `layer`, corners only; None when there is none nearby.
+    pub fn path(&self, a: P, b: P, layer: Layer) -> Option<Vec<P>> {
+        let path = search(&self.grid, self.mi, None, self.net, a, &[layer], b, &[layer], 150_000)?;
+        Some(path_line(&self.grid, &path, a, b))
     }
 }
 
@@ -581,5 +779,43 @@ mod tests {
         let pads = p.pads(&nl);
         let issues = pcb::drc(&p, &nl, &pads, &[]);
         assert!(!issues.iter().any(|i| i.message.contains("overlap") || i.message.contains("not inside")), "{issues:?}");
+    }
+
+    #[test]
+    fn routes_a_differential_pair_side_by_side() {
+        use crate::pcb::{Label, LabelKind};
+        let mut p = Pcb::new("pair");
+        p.board.outline = pcb::rect_outline(60.0, 30.0, 0.0);
+        let a = p.add_part("J", Some("PinHeader_1x02"), None, [0.0, 0.0]).unwrap();
+        let b = p.add_part("J", Some("PinHeader_1x02"), None, [30.0, 0.0]).unwrap();
+        let pins = p.sch_pins();
+        for (part, num, net) in [(a, "1", "D_P"), (a, "2", "D_N"), (b, "1", "D_P"), (b, "2", "D_N")] {
+            let at = pins.iter().find(|x| x.part == part && x.num == num).unwrap().at;
+            p.labels.push(Label { at, text: net.into(), kind: LabelKind::Net, rot: 0 });
+        }
+        p.parts[a].at = [8.0, 15.0];
+        p.parts[b].at = [50.0, 12.0];
+        // a part in the way
+        let r = p.add_part("R", Some("R_1206"), None, [0.0, 20.0]).unwrap();
+        p.parts[r].at = [30.0, 14.0];
+        let d = pcb::DiffPair { name: "D".into(), p: "D_P".into(), n: "D_N".into(), width: 0.3, gap: 0.25 };
+        let o = route_pair(&mut p, &d).unwrap();
+        assert!(o.tracks >= 4);
+        assert!((o.p_len - o.n_len).abs() < 3.0, "{} {}", o.p_len, o.n_len);
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = pcb::drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "short" || i.rule == "unrouted" || i.rule == "edge"), "{issues:#?}");
+        // the two tracks run at the gap along the middle of the route
+        let tp: Vec<&Track> = p.board.tracks.iter().filter(|t| t.net == "D_P").collect();
+        let tn: Vec<&Track> = p.board.tracks.iter().filter(|t| t.net == "D_N").collect();
+        let mid = tp.iter().max_by(|x, y| pcb::dist(x.a, x.b).total_cmp(&pcb::dist(y.a, y.b))).unwrap();
+        let m = [(mid.a[0] + mid.b[0]) / 2.0, (mid.a[1] + mid.b[1]) / 2.0];
+        let gap = tn.iter().map(|t| pcb::seg_point(t.a, t.b, m)).fold(f64::INFINITY, f64::min) - 0.3;
+        assert!((gap - 0.25).abs() < 0.02, "gap {gap}");
+        // walkaround finds a way round the resistor on the top layer
+        let w = Walk::new(&p, "GND", 0.25);
+        let path = w.path([20.0, 5.0], [40.0, 5.0], Layer::Top).unwrap();
+        assert!(path.len() >= 2);
     }
 }

@@ -34,6 +34,15 @@ pub struct Pcb {
     /// Circuit simulation: sources, ground, analysis.
     #[serde(default, skip_serializing_if = "crate::circuit::SimSetup::is_empty")]
     pub sim: crate::circuit::SimSetup,
+    /// Output job: which fabrication and documentation outputs a run writes.
+    #[serde(default, skip_serializing_if = "crate::pcb_fab::OutJob::is_default")]
+    pub outputs: crate::pcb_fab::OutJob,
+    /// Footprints imported from KiCad or made by the IPC-7351 generator.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::pcb_lib::de_footprints")]
+    pub footprints: Vec<Footprint>,
+    /// Schematic symbols imported from KiCad.
+    #[serde(default, skip_serializing_if = "Vec::is_empty", deserialize_with = "crate::pcb_lib::de_symbols")]
+    pub symbols: Vec<pcb_lib::LibSymbol>,
     #[serde(default)]
     pub next_id: u64,
 }
@@ -254,6 +263,32 @@ pub struct NetClass {
     pub impedance: f64,
 }
 
+/// Two nets routed side by side at a fixed gap (USB D+/D-, LVDS, CAN).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct DiffPair {
+    pub name: String,
+    /// The positive and negative nets.
+    pub p: String,
+    pub n: String,
+    /// Track width and the gap between the two tracks; 0 takes the net's track width and its
+    /// clearance.
+    pub width: f64,
+    pub gap: f64,
+}
+
+/// A length rule: the nets' routed length must lie in [min, max] (0 = no bound), and when
+/// `tolerance` is set they must all be within it of the longest (a matched-length group).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct LengthRule {
+    pub name: String,
+    pub nets: Vec<String>,
+    pub min: f64,
+    pub max: f64,
+    pub tolerance: f64,
+}
+
 /// The rules a net is routed and checked with.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct NetRules {
@@ -309,6 +344,10 @@ pub struct Rules {
     pub body_gap: f64,
     /// Checks turned off, by id (see `CHECKS`).
     pub off: Vec<String>,
+    /// Differential pairs.
+    pub pairs: Vec<DiffPair>,
+    /// Length and matched-length rules.
+    pub lengths: Vec<LengthRule>,
     /// How much a track may heat up at its net's current, °C (the trace solver's width rule).
     pub temp_rise: f64,
 }
@@ -331,6 +370,9 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("antenna", "Track ends that connect to nothing"),
     ("thermal", "Thermal reliefs with fewer than two spokes"),
     ("unrouted", "Connections not routed yet"),
+    ("length", "Nets outside their length rule"),
+    ("matched", "Matched-length nets out of tolerance"),
+    ("pair", "Differential pairs with uneven lengths or the wrong gap"),
     ("current", "Tracks too thin for their net class's current"),
     ("impedance", "Tracks off their net class's impedance by over 10 %"),
     ("erc_unconnected", "Pins left unconnected (no no-connect mark)"),
@@ -388,6 +430,8 @@ impl Default for Rules {
             max_height: 0.0,
             body_gap: 0.0,
             off: vec![],
+            pairs: vec![],
+            lengths: vec![],
             temp_rise: 10.0,
         }
     }
@@ -774,21 +818,21 @@ impl Pcb {
 
     /// Add a part from the library. Its board spot is beside the board until it is placed.
     pub fn add_part(&mut self, key: &str, footprint: Option<&str>, value: Option<&str>, sch: P) -> Result<usize, String> {
-        let k = pcb_lib::symbol_kind(key).ok_or_else(|| format!("no symbol {key}; the symbols are {}", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
-        let fp = footprint.unwrap_or(k.footprint);
+        let k = pcb_lib::kind_info(key).ok_or_else(|| format!("no symbol {key}; the symbols are {}", pcb_lib::symbol_keys()))?;
+        let fp = footprint.unwrap_or(&k.footprint);
         if pcb_lib::footprint(fp).is_none() {
             return Err(format!("no footprint {fp}; e.g. {}", pcb_lib::footprint_names().join(", ")));
         }
         let id = self.next_id.max(1);
         self.next_id = id + 1;
-        let value = value.unwrap_or(k.value);
+        let value = value.unwrap_or(&k.value);
         let mut p = Part {
             id,
-            reference: self.next_reference(k.prefix),
+            reference: self.next_reference(&k.prefix),
             value: value.to_string(),
             symbol: k.key.to_string(),
             footprint: fp.to_string(),
-            pin_names: pcb_lib::default_pin_names(k.key, value),
+            pin_names: pcb_lib::default_pin_names(&k.key, value),
             sch: snap(sch, pcb_lib::GRID),
             ..Default::default()
         };
@@ -1649,6 +1693,7 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             }
         }
     }
+    out.extend(crate::pcb_tune::length_issues(pcb, nl));
     let air = ratsnest(&all, pads, fills);
     for a in &air {
         out.push(Issue::new("unrouted", [(a.a[0] + a.b[0]) / 2.0, (a.a[1] + a.b[1]) / 2.0], true, format!("Unrouted: {}", a.net)));
