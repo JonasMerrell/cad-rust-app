@@ -306,6 +306,10 @@ pub struct Study {
     /// Loss factors (η) by material name, replacing the library's values.
     #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
     pub loss_factors: std::collections::BTreeMap<String, f64>,
+    /// Parts of printable plastics are 3D printed with these settings (walls, infill, build direction);
+    /// None: solid and isotropic.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub print: Option<crate::fea_print::Print>,
     #[serde(default)]
     pub next_id: u64,
 }
@@ -344,6 +348,7 @@ impl Default for Study {
             modes: modes(),
             transient: Transient::default(),
             loss_factors: Default::default(),
+            print: None,
             next_id: 1,
         }
     }
@@ -462,12 +467,19 @@ pub const MATERIALS: &[(&str, f64, f64, f64, f64)] = &[
     ("ABS", 2200.0, 0.35, 1.04, 40.0),
     ("PETG", 2100.0, 0.38, 1.27, 50.0),
     ("Nylon", 2700.0, 0.39, 1.14, 70.0),
+    ("Nylon (humid)", 720.0, 0.39, 1.14, 34.0),
+    ("ASA", 2400.0, 0.35, 1.07, 44.0),
+    ("PC", 2500.0, 0.37, 1.20, 69.0),
+    ("PLA-CF", 3300.0, 0.35, 1.29, 31.0),
+    ("PETG-CF", 2500.0, 0.36, 1.25, 35.0),
+    ("ASA-CF", 4200.0, 0.35, 1.10, 34.0),
+    ("PET-CF", 4700.0, 0.36, 1.29, 74.0),
     ("Oak", 11000.0, 0.35, 0.75, 50.0),
     ("Pine", 9000.0, 0.35, 0.50, 40.0),
 ];
 
 pub fn elastic(name: &str) -> Option<Elastic> {
-    MATERIALS.iter().find(|m| m.0.eq_ignore_ascii_case(name)).map(|m| Elastic { e: m.1, nu: m.2, rho: m.3 * 1e-9, yield_mpa: m.4, eta: loss_factor(m.0) })
+    MATERIALS.iter().find(|m| m.0.eq_ignore_ascii_case(name)).map(|m| Elastic::iso(m.1, m.2, m.3 * 1e-9, m.4, loss_factor(m.0)))
 }
 
 /// Typical loss factor (structural damping η) of a library material at room temperature.
@@ -477,8 +489,9 @@ pub fn loss_factor(name: &str) -> f64 {
         "Steel" | "Stainless steel" | "Stainless steel 303" | "Titanium" | "Tungsten alloy" => 0.0005,
         "Brass" => 0.001,
         "Copper" => 0.002,
-        "PLA" | "ABS" | "PETG" => 0.02,
-        "Nylon" => 0.03,
+        "PLA" | "ABS" | "PETG" | "ASA" | "PC" => 0.02,
+        "PLA-CF" | "PETG-CF" | "ASA-CF" | "PET-CF" => 0.02,
+        "Nylon" | "Nylon (humid)" => 0.03,
         "Oak" | "Pine" => 0.01,
         "Urethane foam" => 0.1,
         _ => 0.0,
@@ -641,8 +654,14 @@ pub struct Outcome {
     pub mesh: Arc<Mesh>,
     pub material: String,
     pub mat: Elastic,
-    /// Each part's material when they differ (`mesh.body` numbering); empty: `mat` everywhere.
+    /// Each part's material when they differ (`mesh.body` numbering); empty: `mat` everywhere. With
+    /// 3D-printed parts, `mesh.body` numbers material slots instead (shell and infill blends).
     pub body_mats: Vec<Elastic>,
+    /// Whether 3D-printed parts were modelled with walls and infill (`body_mats` are then slots of
+    /// shell / infill blends, and the factor of safety is judged element by element).
+    pub printed: bool,
+    /// Static runs with printed parts: the factor of safety of the walls and of the infill.
+    pub safety: Option<(f64, f64)>,
     pub solution: Solution,
     pub warnings: Vec<String>,
     pub mass: f64,
@@ -770,15 +789,35 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         if let Some(w) = hole_warning(input, &mesh) {
             warnings.push(w);
         }
+        if study.print.is_some() && part_materials(study, input).iter().any(|p| crate::fea_print::printed(&p.0).is_some()) {
+            warnings.push("Advanced mode treats 3D-printed parts as solid and isotropic: use Simple mode for walls, infill and layers".into());
+        }
         return crate::fea_adv::run(study, input, mesh, progress, &mut warnings);
     }
     let (mut material, mat) = material_of(study, input);
     let parts = part_materials(study, input);
-    let body_mats: Vec<Elastic> = if mesh.body.is_empty() { vec![] } else { parts.iter().map(|p| p.1).collect() };
+    let mut body_mats: Vec<Elastic> = if mesh.body.is_empty() { vec![] } else { parts.iter().map(|p| p.1).collect() };
     if !body_mats.is_empty() {
         let mut names: Vec<String> = parts.iter().map(|p| p.0.clone()).collect();
         names.dedup();
         material = names.join(" + ");
+    }
+    // 3D-printed parts: each element gets its share of solid shell and infill
+    let mut printed = false;
+    let mut shell = vec![];
+    let mut mesh = mesh;
+    if let Some(print) = &study.print {
+        let list: Vec<(String, Elastic)> = if mesh.body.is_empty() { vec![(material.clone(), mat)] } else { parts.clone() };
+        progress("Walls and infill", 0.05);
+        let surf = Surface::new(input.tris.clone(), input.face.clone(), input.body.clone());
+        if let Some(a) = crate::fea_print::assign(&mesh, &surf, &input.tris, &list, print) {
+            mesh = Arc::new(a.mesh);
+            body_mats = a.mats;
+            printed = true;
+            shell = a.shell;
+            warnings.extend(a.warnings);
+            material = format!("{material}, printed: {}", crate::fea_print::summary(print));
+        }
     }
     let nn = mesh.nodes.len();
     // mesh faces of a list of picks, and the area of the CAD faces they stand for
@@ -941,14 +980,16 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             let mut vm: Vec<f32> = stress.iter().map(crate::fea_solve::von_mises).collect();
             vm.sort_unstable_by(|a, b| a.total_cmp(b));
             if let (Some(&top), Some(&near)) = (vm.last(), vm.get(vm.len() * 999 / 1000)) {
-                if top > 5.0 * near && top as f64 > 0.2 * mat.yield_mpa {
+                if top > 5.0 * near && top as f64 > 0.2 * body_mats.iter().map(|m| m.yield_mpa).fold(mat.yield_mpa, f64::min) {
                     warnings.push(format!(
                         "The largest stress ({top:.3e} MPa) is a spike at a few nodes, over 5 times the 99.9th percentile ({near:.3} MPa): most likely badly shaped elements, so don't trust the peak or the factor of safety; use a smaller mesh size (now {size} mm)"
                     ));
                 }
             }
             let reactions = reactions(&mesh, &mat, &body_mats, &r.u, &problem.force, &support_nodes);
-            if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &stress, None) {
+            if printed {
+                warnings.extend(printed_warning(&mesh, &mat, &body_mats, &shell, &r.u, None));
+            } else if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &stress, None) {
                 warnings.push(w);
             }
             Solution::Static { u: r.u, stress, reactions }
@@ -995,8 +1036,9 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 }
             }
             best.map(|(vm, tt, s)| {
-                if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &s, Some(tt)) {
-                    warnings.push(w);
+                match t.frames.iter().find(|f| f.0 == tt).filter(|_| printed) {
+                    Some(f) => warnings.extend(printed_warning(&mesh, &mat, &body_mats, &shell, &f.1, Some(tt))),
+                    None => warnings.extend(yield_warning(&mesh, &mat, &body_mats, &s, Some(tt))),
                 }
                 (vm, tt)
             })
@@ -1004,7 +1046,14 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         _ => None,
     };
     let mass = (0..mesh.tets.len()).map(|ei| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * crate::fea_solve::element_volume(&mesh, ei)).sum();
-    Ok(Outcome { mesh, material, mat, body_mats, solution, warnings, mass, peak_stress })
+    let safety = match &solution {
+        Solution::Static { u, .. } if printed => {
+            let (w, c) = shell_core_failure(&mesh, &mat, &body_mats, &shell, u);
+            Some((1.0 / w.max(1e-12), 1.0 / c.max(1e-12)))
+        }
+        _ => None,
+    };
+    Ok(Outcome { mesh, material, mat, body_mats, printed, safety, solution, warnings, mass, peak_stress })
 }
 
 /// Reaction force of each support. Every node's reaction is counted once: a Fixed support takes all of it
@@ -1037,22 +1086,74 @@ fn reactions(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], u: &[f64], force
     out
 }
 
-/// Yield strength at each node: the weakest material of the elements around it.
-pub fn node_yield(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic]) -> Vec<f64> {
-    let mut y = vec![f64::INFINITY; mesh.nodes.len()];
+/// How close each node's stress comes to failing its material (1 = at its strength; the factor of
+/// safety is its inverse): the averaged nodal stress against the weakest material around the node, or
+/// with displacements `u` (3D-printed parts, whose walls and infill differ widely in stiffness) each
+/// element's own stress against its own material, the worst at each node.
+pub fn node_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], u: Option<&[f64]>, stress: &[[f32; 6]]) -> Vec<f64> {
+    if let Some(u) = u {
+        return crate::fea_solve::element_failure(mesh, mat, body_mats, u);
+    }
+    let mut out = vec![f64::NEG_INFINITY; mesh.nodes.len()];
     for (ei, t) in mesh.tets.iter().enumerate() {
-        let ym = crate::fea_solve::mat_at(mesh, body_mats, mat, ei).yield_mpa;
+        let m = crate::fea_solve::mat_at(mesh, body_mats, mat, ei);
         for v in t {
-            y[*v as usize] = y[*v as usize].min(ym);
+            let k = *v as usize;
+            if let Some(s) = stress.get(k) {
+                out[k] = out[k].max(m.failure_index(s));
+            }
         }
     }
-    y.iter().map(|v| if v.is_finite() { *v } else { mat.yield_mpa }).collect()
+    out.iter().zip(stress).map(|(v, s)| if v.is_finite() { *v } else { mat.failure_index(s) }).collect()
 }
 
-/// A warning when the stress somewhere passes the material's yield strength (at time `at` of a time history).
+/// Factor of safety at each node (see `node_failure`) for displacements `u` and their nodal stresses.
+pub fn node_safety(o: &Outcome, u: &[f64], stress: &[[f32; 6]]) -> Vec<f64> {
+    node_failure(&o.mesh, &o.mat, &o.body_mats, o.printed.then_some(u), stress).iter().map(|f| 1.0 / f.max(1e-12)).collect()
+}
+
+/// The largest nodal failure index in the walls (nodes whose elements are mostly shell) and in the infill.
+fn shell_core_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: &[f32], u: &[f64]) -> (f64, f64) {
+    let fi = crate::fea_solve::element_failure(mesh, mat, body_mats, u);
+    let mut share = vec![(0.0f64, 0u32); mesh.nodes.len()];
+    for (t, s) in mesh.tets.iter().zip(shell) {
+        for v in t {
+            share[*v as usize].0 += *s as f64;
+            share[*v as usize].1 += 1;
+        }
+    }
+    let (mut w, mut c) = (0.0f64, 0.0f64);
+    for (f, (s, n)) in fi.iter().zip(&share) {
+        if *s >= 0.5 * (*n).max(1) as f64 {
+            w = w.max(*f);
+        } else {
+            c = c.max(*f);
+        }
+    }
+    (w, c)
+}
+
+/// Warnings when the walls or the infill of 3D-printed parts pass their strength.
+fn printed_warning(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: &[f32], u: &[f64], at: Option<f64>) -> Vec<String> {
+    let (w, c) = shell_core_failure(mesh, mat, body_mats, shell, u);
+    let when = at.map(|t| format!(" at {}", fmt_time(t))).unwrap_or_default();
+    let mut out = vec![];
+    if w > 1.0 {
+        out.push(format!("The stress in the walls reaches {:.0}% of the printed material's strength{when}: the layers would split or the part would break there", 100.0 * w));
+    }
+    if c > 1.0 {
+        out.push(format!(
+            "The infill is loaded past its strength{when} ({:.0}%): it would crush or tear locally, leaving more of the load to the walls; more infill, a stronger pattern or more walls help",
+            100.0 * c
+        ));
+    }
+    out
+}
+
+/// A warning when the stress somewhere passes the material's strength (at time `at` of a time history).
 fn yield_warning(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], stress: &[[f32; 6]], at: Option<f64>) -> Option<String> {
-    let y = node_yield(mesh, mat, body_mats);
-    let (k, ratio) = stress.iter().zip(&y).enumerate().map(|(k, (s, y))| (k, crate::fea_solve::von_mises(s) as f64 / y.max(1e-12))).fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
+    let fi = node_failure(mesh, mat, body_mats, None, stress);
+    let (k, ratio) = fi.iter().copied().enumerate().fold((0, 0.0), |a, b| if b.1 > a.1 { b } else { a });
     if ratio <= 1.0 {
         return None;
     }
@@ -1060,7 +1161,7 @@ fn yield_warning(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], stress: &[[f
     let when = at.map(|t| format!(" at {}", fmt_time(t))).unwrap_or_default();
     Some(format!(
         "The stress reaches {vm:.0} MPa{when}, above the yield strength ({:.0} MPa): the part would bend permanently there, which a linear analysis does not model",
-        y[k]
+        vm as f64 / ratio
     ))
 }
 
@@ -1296,6 +1397,73 @@ mod tests {
             assert!((u[3 * i] - 0.001 * p.x).abs() < 1e-7, "u_x {} at {p}", u[3 * i]);
             assert!((stress[i][0] - 200.0).abs() < 0.1, "σx {} at {p}", stress[i][0]);
         }
+    }
+
+    /// A 40 × 10 × 10 PLA bar pulled 1000 N along x, held by rollers on its −x, −y and −z faces.
+    fn printed_bar(print: Option<crate::fea_print::Print>, size: f64) -> (Input, Study) {
+        let input = block(DVec3::new(40.0, 10.0, 10.0));
+        let mut s = Study { material: "PLA".into(), mesh_size: Some(size), refine: false, print, ..Default::default() };
+        for (p, n) in [([0.0, 5.0, 5.0], [-1.0, 0.0, 0.0]), ([20.0, 0.0, 5.0], [0.0, -1.0, 0.0]), ([20.0, 5.0, 0.0], [0.0, 0.0, -1.0])] {
+            let id = s.add_support(SupportKind::Roller);
+            s.support_mut(id).unwrap().faces = vec![pick(p, n)];
+        }
+        let id = s.add_load(LoadKind::Force);
+        let l = s.load_mut(id).unwrap();
+        l.value = 1000.0;
+        l.direction = [1.0, 0.0, 0.0];
+        l.faces = vec![pick([40.0, 5.0, 5.0], [1.0, 0.0, 0.0])];
+        (input, s)
+    }
+
+    fn end_stretch(o: &Outcome) -> f64 {
+        let Solution::Static { u, .. } = &o.solution else { panic!() };
+        o.mesh.nodes.iter().enumerate().filter(|(_, p)| p.x > 40.0 - 1e-6).map(|(i, _)| u[3 * i]).sum::<f64>() / o.mesh.nodes.iter().filter(|p| p.x > 40.0 - 1e-6).count() as f64
+    }
+
+    #[test]
+    fn printed_solid_is_stiffer_along_its_layers() {
+        use crate::fea_print::{Print, PRINTED};
+        let pla = PRINTED[0];
+        let solid = Print { infill: 100.0, ..Print::default() };
+        // 10 MPa of plain tension over 40 mm: σ L / E
+        let (input, s) = printed_bar(Some(solid.clone()), 2.5);
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let along = end_stretch(&o);
+        assert!((along - 10.0 * 40.0 / pla.e_xy).abs() < 0.005 * along, "{along} vs {}", 10.0 * 40.0 / pla.e_xy);
+        // printed on its end, the bar is pulled across its layers
+        let (input, s) = printed_bar(Some(Print { build_dir: [1.0, 0.0, 0.0], ..solid.clone() }), 2.5);
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let across = end_stretch(&o);
+        assert!((across - 10.0 * 40.0 / pla.e_z).abs() < 0.005 * across, "{across} vs {}", 10.0 * 40.0 / pla.e_z);
+        // and its safety is the Z strength's
+        let Solution::Static { stress, .. } = &o.solution else { panic!() };
+        let Solution::Static { u, .. } = &o.solution else { panic!() };
+        let sf = node_safety(&o, u, stress).into_iter().fold(f64::INFINITY, f64::min);
+        assert!((sf - pla.s_z / 10.0).abs() < 0.02 * sf, "{sf}");
+    }
+
+    #[test]
+    fn infill_lightens_and_softens_a_printed_bar() {
+        use crate::fea_print::Print;
+        let (input, s) = printed_bar(Some(Print { infill: 100.0, ..Print::default() }), 1.25);
+        let solid = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let (input, s) = printed_bar(Some(Print::default()), 1.25);
+        let sparse = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        // 0.9 mm walls on 10 × 10 sides: about a third of the section is shell
+        let share = 1.0 - (10.0f64 - 1.8) * (10.0 - 1.8) / 100.0;
+        let (a, b) = (end_stretch(&solid), end_stretch(&sparse));
+        eprintln!("solid {a} sparse {b} mass {} / {} warnings {:?}", solid.mass, sparse.mass, sparse.warnings);
+        let mass_ratio = sparse.mass / solid.mass;
+        let want = share + (1.0 - share) * 0.2;
+        assert!((mass_ratio - want).abs() < 0.12, "mass ratio {mass_ratio} vs {want}");
+        // the walls carry most of the load: the bar stretches about 1 / (shell share + core) as much
+        let core = crate::fea_print::infill_factors(crate::fea_print::Infill::Grid, 0.2).e_p;
+        let stiff = share + (1.0 - share) * core;
+        assert!(b > 1.5 * a && (a / b - stiff).abs() < 0.12, "stiffness ratio {} vs {stiff}", a / b);
+        // a coarse mesh says the walls are blended in
+        let (input, s) = printed_bar(Some(Print::default()), 5.0);
+        let coarse = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        assert!(coarse.warnings.iter().any(|w| w.contains("coarser than the printed walls")), "{:?}", coarse.warnings);
     }
 
     #[test]
