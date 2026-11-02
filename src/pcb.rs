@@ -2260,6 +2260,16 @@ pub(crate) mod tests {
         let names = |p: &Pcb| -> Vec<(String, Vec<(usize, String)>)> { p.netlist().nets.into_iter().map(|n| (n.name, n.pins)).collect() };
         let want = names(&p);
         // the 555's box is symmetric: mirrored, its pins land on the other side's wires
+        // a no-connect mark on pin 5 (its stub taken away) stays on pin 5
+        let pin5 = |p: &Pcb| p.sch_pins().into_iter().find(|x| x.part == u && x.num == "5").unwrap().at;
+        let at5 = pin5(&p);
+        let mut q = p.clone();
+        q.wires.retain(|w| dist(w.a, at5) > 1e-6 && dist(w.b, at5) > 1e-6);
+        q.no_connects.push(at5);
+        let old = q.parts[u].clone();
+        q.parts[u].sch_mirror = true;
+        q.carry_to_pins(u, &old);
+        assert_eq!(q.no_connects, vec![pin5(&q)]);
         let old = p.parts[u].clone();
         p.parts[u].sch_mirror = true;
         assert!(p.carry_to_pins(u, &old));
