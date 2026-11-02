@@ -13,6 +13,7 @@ use crate::icons;
 use crate::regions::{self, Region, find_regions};
 use crate::render::SceneData;
 use crate::sketch::{Constraint, Curve, Dim, Frame, Geom, Id, Sketch, SolveStatus, arc_angles};
+use crate::sketch_infer::{self, Dir};
 use crate::theme::{self, to_rgba, vp};
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -159,6 +160,12 @@ pub struct SketchSession {
     pub model_hover: Option<DVec2>,
     /// Constraints that stopped the last edit, shown highlighted until the next one.
     pub conflicts: Vec<usize>,
+    /// The direction the line being drawn is locked to (and the constraint it will get).
+    pub infer: Option<Dir>,
+    /// Points the cursor lines up with (dashed guides).
+    pub guides: Vec<DVec2>,
+    /// Lines the cursor recently passed over: a new line can be parallel or perpendicular to them.
+    pub woken: Vec<Id>,
 }
 
 impl SketchSession {
@@ -326,6 +333,9 @@ impl App {
             typed: None,
             model_hover: None,
             conflicts: vec![],
+            infer: None,
+            guides: vec![],
+            woken: vec![],
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
             view_normal(self, &fr);
@@ -529,22 +539,10 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     group(ui, |ui| {
-        for (icon, label, tip) in [
-            ("photo", "Photo", "Add a photo to trace (camera or file)"),
-            ("ruler", "Scale photo", "Scale photo: click two points a known distance apart"),
-            ("move", "Move photo", "Move photo"),
-            ("wand", "Trace", "Trace: click an object in the photo to outline it (magic wand / edge detect)"),
-        ] {
-            if app.tool_button(ui, icon, label, tip, false, false, icon == "photo").clicked() {
-                app.flash("Photo tracing isn't in the Rust version yet", ToastKind::Info);
-            }
-        }
-    });
-    group(ui, |ui| {
         if app.tool_button(ui, "delete", "Delete", "Delete (Del)", false, false, has_sel).clicked() {
             delete_selection(app);
         }
-        if app.tool_button(ui, "grid", "Grid", "Snap to grid (G)", false, grid, true).clicked() {
+        if app.tool_button(ui, "grid", "Grid", "Snap to grid (G): the cursor catches grid lines only when it is close to them", false, grid, true).clicked() {
             let s = app.sketch.as_mut().unwrap();
             s.grid_snap = !s.grid_snap;
         }
@@ -583,7 +581,7 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
     let base = match s.tool {
         Tool::Select => "Click to select, drag to move, drag on empty space to box-select; double-click a dimension to edit",
         Tool::Point => "Click to place points",
-        Tool::Line => "Click to place line points; Esc or right-click ends the chain",
+        Tool::Line => "Click to place line points; Esc or right-click ends the chain. Hover a line to draw parallel or perpendicular to it; hold Shift to place freely",
         Tool::Rect => "Click two opposite corners",
         Tool::CenterRect => "Click the centre, then a corner",
         Tool::Circle => "Click the centre, then a point on the circle",
@@ -734,7 +732,9 @@ fn grid_step(app: &App) -> f64 {
 }
 
 /// Snap the cursor (sketch coordinates) to points, curves, the origin or the grid.
-fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>) -> (DVec2, Option<Snap>) {
+/// Geometry snaps come first; with nothing under the cursor it lines up with points, and
+/// only then (weakly, per axis) with the grid. Also returns the points it lines up with.
+fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>) -> (DVec2, Option<Snap>, Vec<DVec2>) {
     let (sk, fr) = app.sk();
     let to_screen = |p: DVec2| {
         let v = app.camera.project(fr.to_world(p).as_vec3());
@@ -751,11 +751,11 @@ fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>)
         }
     }
     if let Some((_, p, sn)) = best {
-        return (p, Some(sn));
+        return (p, Some(sn), vec![]);
     }
     let o = (to_screen(DVec2::ZERO) - s).length();
     if o < 9.0 {
-        return (DVec2::ZERO, Some(Snap::Origin));
+        return (DVec2::ZERO, Some(Snap::Origin), vec![]);
     }
     // midpoints of sketch lines
     for c in &sk.curves {
@@ -784,7 +784,7 @@ fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>)
         }
     }
     if let Some((_, p, sn)) = best {
-        return (p, Some(sn));
+        return (p, Some(sn), vec![]);
     }
     let wpp = app.camera.wpp() as f64;
     for c in &sk.curves {
@@ -794,16 +794,14 @@ fn snap(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2, exclude: &HashSet<Id>)
         let d = sk.curve_distance(c, raw);
         if d / wpp < 6.0 {
             if let Some(u) = regions::param_at(sk, c.id, raw) {
-                return (regions::point_at(sk, c.id, u), Some(Snap::Curve(c.id)));
+                return (regions::point_at(sk, c.id, u), Some(Snap::Curve(c.id)), vec![]);
             }
         }
     }
     let sess = app.sketch.as_ref().unwrap();
-    if sess.grid_snap {
-        let g = grid_step(app);
-        return ((raw / g).round() * g, Some(Snap::Grid));
-    }
-    (raw, None)
+    let grid = sess.grid_snap.then(|| grid_step(app));
+    let inf = sketch_infer::free_point(sk, raw, wpp, grid, exclude);
+    (inf.p, inf.grid.then_some(Snap::Grid), inf.align)
 }
 
 fn sketch_cursor(app: &App, s: Pos2, rect: egui::Rect) -> Option<DVec2> {
@@ -893,13 +891,52 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
         Some(Drag::Geometry { points, .. }) => points.iter().map(|p| p.0).collect(),
         _ => HashSet::new(),
     };
-    let (snapped, snp) = if matches!(tool, Tool::Select | Tool::Dimension) { (raw, None) } else { snap(app, s, rect, raw, &exclude) };
+    // a single point being dragged shows what it would join when dropped
+    let point_drag = matches!(&app.sketch.as_ref().unwrap().drag, Some(Drag::Geometry { points, radius: None, .. }) if points.len() == 1);
+    let (mut snapped, snp, mut guides) = if point_drag {
+        match snap(app, s, rect, raw, &exclude) {
+            (p, sn @ Some(Snap::Point(_) | Snap::Curve(_) | Snap::Mid(_) | Snap::Origin), _) => (p, sn, vec![]),
+            _ => (raw, None, vec![]),
+        }
+    } else if matches!(tool, Tool::Select | Tool::Dimension) {
+        (raw, None, vec![])
+    } else {
+        match snap(app, s, rect, raw, &exclude) {
+            // Shift places freely: no grid, alignment or direction
+            (_, None | Some(Snap::Grid), _) if shift => (raw, None, vec![]),
+            x => x,
+        }
+    };
+    // lines passed over can be referenced (parallel / perpendicular) by the next line drawn
+    if let (Tool::Line, Some(Sel::Curve(c))) = (tool, h) {
+        if matches!(app.sk().0.curve(c).map(|x| &x.geom), Some(Geom::Line { .. })) {
+            let w = &mut app.sketch.as_mut().unwrap().woken;
+            if w.first() != Some(&c) {
+                w.retain(|x| *x != c);
+                w.insert(0, c);
+                w.truncate(3);
+            }
+        }
+    }
+    // the line being drawn locks to horizontal, vertical, parallel or perpendicular
+    let mut infer = None;
+    let chain = app.sketch.as_ref().unwrap().chain;
+    if let (Tool::Line, Some(a), None | Some(Snap::Grid), false) = (tool, chain, snp, shift) {
+        let sess = app.sketch.as_ref().unwrap();
+        let grid = sess.grid_snap.then(|| grid_step(app));
+        let inf = sketch_infer::line_end(app.sk().0, a, raw, app.camera.wpp() as f64, grid, &sess.woken, &exclude);
+        snapped = inf.p;
+        guides = inf.align;
+        infer = inf.dir;
+    }
     {
         let sess = app.sketch.as_mut().unwrap();
-        if sess.hover != h || sess.cursor != Some(snapped) || sess.snap != snp {
+        if sess.hover != h || sess.cursor != Some(snapped) || sess.snap != snp || sess.infer != infer || sess.guides != guides {
             sess.hover = h;
             sess.cursor = Some(snapped);
             sess.snap = snp;
+            sess.infer = infer;
+            sess.guides = guides;
             app.scene_dirty = true;
         }
     }
@@ -1013,6 +1050,23 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
             }
             if dragging {
                 app.sketch.as_mut().unwrap().drag = Some(Drag::Geometry { points, start, radius });
+            } else if let (true, Some(drop)) = (points.len() == 1 && radius.is_none(), app.sketch.as_ref().unwrap().snap.and_then(drop_target)) {
+                // dropping a point onto a point, curve, midpoint or the origin joins it there
+                let before = app.doc.clone();
+                let p = points[0].0;
+                if sketch_infer::drop_point(app.sk_mut(), p, drop) {
+                    app.solve_sketch(&[]);
+                    if let Some(e) = app.sketch.as_ref().unwrap().status.error.clone() {
+                        app.doc = before;
+                        app.solve_sketch(&[]);
+                        app.flash(format!("Can't join there: {e}"), ToastKind::Error);
+                    } else {
+                        let sess = app.sketch.as_mut().unwrap();
+                        sess.sel.remove(&Sel::Point(p));
+                        sess.snap = None;
+                    }
+                }
+                app.changed();
             } else {
                 app.changed();
             }
@@ -1185,6 +1239,18 @@ fn holds_points(g: &Geom) -> bool {
     matches!(g, Geom::Circle { .. } | Geom::Arc { .. } | Geom::Ellipse { .. } | Geom::EllipticalArc { .. })
 }
 
+/// What dropping a dragged point here joins it to.
+fn drop_target(s: Snap) -> Option<sketch_infer::Drop> {
+    use sketch_infer::Drop;
+    match s {
+        Snap::Point(p) => Some(Drop::Point(p)),
+        Snap::Curve(c) => Some(Drop::Curve(c)),
+        Snap::Mid(l) => Some(Drop::Mid(l)),
+        Snap::Origin => Some(Drop::Origin),
+        _ => None,
+    }
+}
+
 /// Use an existing point when snapped to one, else create one (adding an
 /// on-curve or origin constraint for curve/origin snaps).
 fn point_at(app: &mut App, p: DVec2, snp: Option<Snap>) -> Id {
@@ -1293,13 +1359,9 @@ fn commit_typed(app: &mut App, text: &str) {
             };
             let a = sess.chain.unwrap();
             let pa = app.sk().0.pv(a);
-            let mut dir = (cursor - pa).normalize_or(DVec2::X);
-            let hv = hv_infer(app, pa, pa + dir);
-            match hv {
-                Some(true) => dir = DVec2::new(dir.x.signum(), 0.0),
-                Some(false) => dir = DVec2::new(0.0, dir.y.signum()),
-                None => {}
-            }
+            // the cursor already follows the inferred direction
+            let dir = (cursor - pa).normalize_or(DVec2::X);
+            let infer = sess.infer;
             if len <= 0.0 {
                 return;
             }
@@ -1310,10 +1372,8 @@ fn commit_typed(app: &mut App, text: &str) {
             let existing = sk.points.iter().find(|q| q.id != a && (q.v() - end).length() < 1e-6 * len.max(1.0)).map(|q| q.id);
             let b = existing.unwrap_or_else(|| sk.add_point(end));
             let l = sk.add_curve(Geom::Line { a, b }, construction);
-            match hv {
-                Some(true) => sk.constraints.push(Constraint::Horizontal { l }),
-                Some(false) => sk.constraints.push(Constraint::Vertical { l }),
-                None => {}
+            if let Some(d) = infer {
+                sk.constraints.push(d.constraint(l));
             }
             let n = dir.perp() * (len * 0.15).max(2.0);
             let length = Constraint::Length { l, dim: dim(text, [n.x, n.y]) };
@@ -1419,23 +1479,6 @@ fn split_size(text: &str) -> Option<(&str, &str)> {
     }
 }
 
-fn hv_infer(app: &App, a: DVec2, b: DVec2) -> Option<bool> {
-    let d = b - a;
-    if d.length() < 1e-9 {
-        return None;
-    }
-    let ang = d.y.atan2(d.x).to_degrees().abs();
-    let tol = 2.5;
-    if ang < tol || (180.0 - ang) < tol {
-        Some(true)
-    } else if (ang - 90.0).abs() < tol {
-        Some(false)
-    } else {
-        let _ = app;
-        None
-    }
-}
-
 fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<Sel>, raw: DVec2) {
     let construction = app.sketch.as_ref().unwrap().construction;
     match tool {
@@ -1455,21 +1498,22 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
                 }
                 Some(a) => {
                     let pa = app.sk().0.pv(a);
-                    let mut q = p;
-                    let hv = if matches!(snp, Some(Snap::Point(_))) { None } else { hv_infer(app, pa, p) };
-                    if let Some(h) = hv {
-                        if h { q.y = pa.y } else { q.x = pa.x }
+                    // the hover already moved `p` onto the inferred direction
+                    let mut infer = app.sketch.as_ref().unwrap().infer.filter(|_| matches!(snp, None | Some(Snap::Grid)));
+                    // closing onto a point that lines up exactly (as the guides make it) is level / plumb too
+                    if let (None, Some(Snap::Point(_))) = (infer, snp) {
+                        let d = p - pa;
+                        let eps = 1e-9 * d.length().max(1.0);
+                        infer = if d.y.abs() < eps { Some(Dir::Horizontal) } else if d.x.abs() < eps { Some(Dir::Vertical) } else { None };
                     }
-                    if (q - pa).length() < 1e-9 {
+                    if (p - pa).length() < 1e-9 {
                         return;
                     }
-                    let b = point_at(app, q, snp);
+                    let b = point_at(app, p, snp);
                     let sk = app.sk_mut();
                     let l = sk.add_curve(Geom::Line { a, b }, construction);
-                    match hv {
-                        Some(true) => sk.constraints.push(Constraint::Horizontal { l }),
-                        Some(false) => sk.constraints.push(Constraint::Vertical { l }),
-                        None => {}
+                    if let Some(d) = infer {
+                        sk.constraints.push(d.constraint(l));
                     }
                     // closing onto an existing point ends the chain
                     let close = matches!(snp, Some(Snap::Point(_)));
@@ -3486,7 +3530,7 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
             }
             _ => {}
         }
-        if sess.tool != Tool::Select {
+        if sess.tool != Tool::Select || sess.snap.is_some() {
             let col = match sess.snap {
                 Some(Snap::Point(_)) | Some(Snap::Origin) | Some(Snap::Mid(_)) | Some(Snap::Model) => vp::snap(),
                 Some(Snap::Curve(_)) => vp::hover(),
@@ -3762,12 +3806,41 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         }
     }
 
+    // inference: dashed guides to the points the cursor lines up with, the line a parallel /
+    // perpendicular refers to, and the constraint the next click will add next to the cursor
+    if let (Some(c), Some(p), true) = (sess.cursor, painter.ctx().pointer_hover_pos(), sess.tool != Tool::Dimension && (sess.tool != Tool::Select || sess.snap.is_some())) {
+        if rect.contains(p) {
+            let cs = to_screen(app, &fr, rect, c);
+            let guide = Stroke::new(1.0, vp::snap().gamma_multiply(0.8));
+            for q in &sess.guides {
+                painter.add(egui::Shape::dashed_line(&[to_screen(app, &fr, rect, *q), cs], guide, 4.0, 3.0));
+            }
+            if let Some(Geom::Line { a, b }) = sess.infer.and_then(|d| d.reference()).and_then(|l| sk.curve(l)).map(|x| &x.geom) {
+                painter.line_segment([to_screen(app, &fr, rect, sk.pv(*a)), to_screen(app, &fr, rect, sk.pv(*b))], Stroke::new(3.0, vp::hover().gamma_multiply(0.7)));
+            }
+            let icon = match (sess.infer, sess.snap) {
+                (Some(d), _) => Some(d.constraint(0).icon()),
+                (None, Some(Snap::Point(_)) | Some(Snap::Curve(_)) | Some(Snap::Origin)) => Some("coincident"),
+                (None, Some(Snap::Mid(_))) => Some("midpoint"),
+                _ => None,
+            };
+            if let Some(icon) = icon {
+                let r = egui::Rect::from_center_size(cs + egui::vec2(16.0, -18.0), egui::vec2(20.0, 20.0));
+                painter.rect(r, 4.0, theme::label_bg(), Stroke::new(1.0, theme::accent()), egui::StrokeKind::Inside);
+                icons::image(icon, 15.0).tint(theme::accent()).paint_at(ui, r.shrink(2.5));
+            }
+        }
+    }
+
     // cursor label: size of what's being drawn
     if let (Some(c), Some(p)) = (sess.cursor, painter.ctx().pointer_hover_pos()) {
         if rect.contains(p) {
             let u = app.doc.units;
             let text = match sess.tool {
-                Tool::Line => sess.chain.map(|a| u.fmt((c - sk.pv(a)).length())),
+                Tool::Line => sess.chain.map(|a| {
+                    let d = c - sk.pv(a);
+                    format!("{}  {}°", u.fmt(d.length()), expr::trim(d.y.atan2(d.x).to_degrees(), 1))
+                }),
                 Tool::Rect if sess.clicks.len() == 1 => {
                     let d = c - sess.clicks[0];
                     Some(format!("{} × {}", u.fmt(d.x.abs()), u.fmt(d.y.abs())))

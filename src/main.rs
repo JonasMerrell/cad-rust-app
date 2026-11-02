@@ -68,6 +68,7 @@ mod script_num;
 mod script_ui;
 mod sketch;
 mod sketch_import;
+mod sketch_infer;
 mod session;
 mod sketcher;
 mod stdparts;
