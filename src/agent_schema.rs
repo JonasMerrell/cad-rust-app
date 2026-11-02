@@ -576,6 +576,22 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             "mesh controls: smaller elements on chosen faces (replace the list)",
         ),
         ("create_simulation" | "edit_simulation", "modes") => json!({"type": "integer", "minimum": 1, "maximum": 50, "description": "modal: how many modes (default 6)"}),
+        ("create_simulation" | "edit_simulation", "print") => json!({"oneOf": [
+            json!({"type": "null", "description": "solid, isotropic"}),
+            json!({"type": "boolean", "description": "true: the default print settings; false: solid"}),
+            obj(
+                json!({"model": en(&["layered", "isotropic"], "layered: weaker across the layers (default); isotropic: average modulus, weakest strength"),
+                    "infill": json!({"type": "number", "minimum": 0, "maximum": 100, "description": "sparse infill density, % (default 20)"}),
+                    "pattern": en(&["grid", "triangles", "honeycomb", "gyroid"], "infill pattern (default grid)"),
+                    "walls": json!({"type": "integer", "minimum": 0, "description": "wall loops (default 2)"}),
+                    "line_width": json!({"type": "number", "exclusiveMinimum": 0, "description": "mm (default 0.45)"}),
+                    "top_bottom": json!({"type": "integer", "minimum": 0, "description": "solid top and bottom layers (default 4)"}),
+                    "layer_height": json!({"type": "number", "exclusiveMinimum": 0, "description": "mm (default 0.2)"}),
+                    "build_dir": xyz("the printer's Z in the Part Studio's axes (default [0,0,1])")}),
+                &[],
+                "FDM print settings",
+            ),
+        ], "description": "3D-printed plastic parts (FDM): walls and top/bottom solid, infill inside, layered or isotropic"}),
         ("create_simulation" | "edit_simulation", "loss_factors") => {
             json!({"type": "object", "additionalProperties": {"type": "number"}, "description": "structural loss factor η per material name"})
         }
