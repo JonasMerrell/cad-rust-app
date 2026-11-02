@@ -24,7 +24,7 @@ for a, b in ADJ:
         keep = [p for p in M['coll'] if p['body'] == x and not (j and p['part'].startswith(j + ' '))]
         if b == 'tool':   # the coupling: skip the tool changer halves
             keep = [p for p in keep if p['part'] not in ('Tool changer (arm side)', 'V-groove dowels 4x12', 'Magnets 10x3 (arm)', 'Pogo connector 8-pin',
-                                                         'Tool plate', 'Coupling balls 8', 'Magnets 10x3 (tool)', 'Tool pad PCB', 'J6 XS20P carrier', 'J6 XS20P output pins')]
+                                                         'Lock inserts M4 heat-set', 'Lock screws M4x16', 'Tool plate', 'Coupling balls 8', 'Magnets 10x3 (tool)', 'Tool pad PCB', 'J6 XS20P carrier', 'J6 XS20P output pins')]
         objs[(x, a, b)] = bvh(keep)[0] if keep else None
 KEY = {}
 

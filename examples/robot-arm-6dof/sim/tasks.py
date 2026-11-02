@@ -27,18 +27,30 @@ for k in range(3):
         p = b - RBALL * n
         cols.append(np.concatenate([n, np.cross(p, n)]))
 A6 = np.array(cols).T                                   # wrench on the tool per unit contact force
-mag_w = np.zeros(6)
-for k in range(3):
-    m = np.radians(30 + 120 * k); p = np.array([0, RM * np.cos(m), RM * np.sin(m)]); f = np.array([-F_MAG, 0, 0])
-    mag_w += np.concatenate([f, np.cross(p, f)])
-c_mag = np.linalg.solve(A6, -mag_w)                     # contact forces from the magnets alone (all > 0)
+def preload_wrench(f_mag, f_screw):
+    """wrench on the tool from the magnets and the two lock screws (each pulls it towards the arm)"""
+    w = np.zeros(6)
+    for k in range(3):
+        m = np.radians(30 + 120 * k); p = np.array([0, RM * np.cos(m), RM * np.sin(m)]); f = np.array([-f_mag, 0, 0])
+        w += np.concatenate([f, np.cross(p, f)])
+    for y in (LOCK_R, -LOCK_R):
+        p = np.array([0, y, 0]); f = np.array([-f_screw, 0, 0])
+        w += np.concatenate([f, np.cross(p, f)])
+    return w
+# Two M4 lock screws on Ø72 at 0° and 180° (tool frame ±y) into heat-set inserts. Snugged to 0.5 N m:
+# preload = T / (K d) with nut factor K = 0.2, so about 625 N each.
+LOCK_R, SCREW_T, SCREW_K, SCREW_D = 0.036, 0.5, 0.2, 0.004
+F_SCREW = SCREW_T / (SCREW_K * SCREW_D)
+c_mag = np.linalg.solve(A6, -preload_wrench(F_MAG, F_SCREW))      # contact forces from the clamp alone (all > 0)
+c_mag_only = np.linalg.solve(A6, -preload_wrench(F_MAG, 0.0))     # magnets alone, while the screws go in
 
-def coupling_sf(F, M, Rt):
+def coupling_sf(F, M, Rt, c_pre=None):
     """factor by which the load could grow before a ball starts to lift off its dowels"""
+    c_pre = c_mag if c_pre is None else c_pre
     load = np.concatenate([Rt.T @ F, Rt.T @ M])         # wrench the arm puts into the tool, tool frame
     c_load = np.linalg.solve(A6, load)
     neg = c_load < -1e-12
-    return float(np.min(-c_mag[neg] / c_load[neg])) if neg.any() else np.inf
+    return float(np.min(-c_pre[neg] / c_load[neg])) if neg.any() else np.inf
 
 # A[1]: My from a +x ball force at (y, z) = (r cos a, r sin a) is z*f = r sin a * f; A[2]: Mz = -y*f
 q_flat = np.zeros(6)
@@ -46,6 +58,19 @@ F, M, Rt = arm.tool_wrench(q_flat, np.zeros(6), np.zeros(6))
 R['coupling_static_flat'] = coupling_sf(F, M, Rt); R['coupling_contact_angle_deg'] = CONTACT_ANGLE; R['coupling_ball_x_mm'] = BALL_X * 1000
 # worst static orientation: try tool roll angles while flat
 R['coupling_static_worst'] = min(coupling_sf(*arm.tool_wrench(np.array([0, 0, 0, 0, 0, a]), np.zeros(6), np.zeros(6))) for a in rad(np.arange(0, 360, 5)))
+R['coupling_screw_preload_N'] = F_SCREW
+R['coupling_magnets_only_flat'] = coupling_sf(F, M, Rt, c_mag_only)
+R['coupling_magnets_only_worst'] = min(coupling_sf(*arm.tool_wrench(np.array([0, 0, 0, 0, 0, a]), np.zeros(6), np.zeros(6)), c_pre=c_mag_only) for a in rad(np.arange(0, 360, 5)))
+R['coupling_contact_preload_N'] = float(c_mag.max())
+# Hertz peak pressure of an Ø8 steel ball on an Ø4 steel dowel (crossed curvatures) under that preload;
+# hardened steel takes about 4.2 GPa before it dents (the ISO 76 static rating for ball bearings)
+E_STAR = 200e9 / (2 * (1 - 0.3 ** 2))
+def hertz_p0(F):
+    Re = 1 / np.sqrt((1 / RBALL + 1 / RPIN) * (1 / RBALL))
+    a = (3 * F * Re / (4 * E_STAR)) ** (1 / 3)
+    return 1.5 * F / (np.pi * a * a)
+R['coupling_contact_p0_GPa'] = hertz_p0(c_mag.max()) / 1e9
+print('magnets only', R['coupling_magnets_only_flat'], R['coupling_magnets_only_worst'], 'contact preload N', c_mag.max(), 'p0 GPa', R['coupling_contact_p0_GPa'])
 print('coupling SF static flat', R['coupling_static_flat'], 'worst roll', R['coupling_static_worst'])
 
 # ================================================================ statics: torque need over the arm's plane, payload capacity

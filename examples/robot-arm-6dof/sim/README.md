@@ -24,14 +24,12 @@ for lift-off, collisions on the CAD meshes, joint limits, payload capacity and t
 | Static check | Matches rcad's `summary.json` to 0.3 % (J2 14.36 against 14.40 N·m stretched out). |
 | Payload | Holds 1 kg in every pose using at most 59 % of the usable torque. The heaviest tool it can hold still is 2.2 kg (J3, stretched out); J5 caps it at 2.5 kg elsewhere. |
 | Cycle | Fastest stepper-safe pick-and-place: 5.9 s, tool up to 1.4 m/s. Six of the seven moves are limited by J2, whose 100:1 reduction runs its motor at 1430 rpm. 25 % faster stalls J1 and J2. |
-| Tool changer | With 3 × 20 N magnets the safety factor against a ball lifting off is 1.8 held level (as the README says), but 1.15 with the tool rolled to its worst angle, 1.36 through the cycle and 0.79 at 1.5× speed. It needs a latch or about twice the magnet pull. |
+| Tool changer | Two M4 lock screws at 0.5 N·m (about 625 N each) clamp the coupling: a ball would lift off only at 25× the load held level at the worst roll, 30× through the cycle, 18× at 1.5× speed. The magnets alone gave 1.15. At 0.5 N·m each ball presses 242 N into its Ø4 dowels, a Hertz pressure of 4.7 GPa, above the ~4.2 GPa where hardened steel dents; 0.2 N·m gives 3.6 GPa and still a factor of 11. |
 | Collisions | None along the cycle. 15 % of random poses inside the limits collide, mostly the forearm or wrist folding back into the turntable or base. |
 | Joint limits | J2 down to 31° below level (the shoulder hub's tail meets the turntable at 34°; it was 40° before the turntable went to 20 mm), J3 −145…146° (self-collision at −148/+149°), J5 −110…118° at any J4. J1, J4, J6 ±170° for cables. |
 | Reach | Tool face centre 512 mm from the J1 axis, 721 mm above the table. |
 
-The ball seat in the CAD is 0.5 mm off: the dowel axes sit at x = −0.5 but the balls are placed as if they sat
-at x = 0, so in reality a ball seats at 4.91 mm and the tool plate gap is 0.5 mm rather than 1 mm. Its contact
-normals sit 26° from the coupling axis.
+The ball contact normals sit 26° from the coupling axis.
 
 Not modelled: gearbox backlash and stiffness, link deflection (the FEA in rcad can do that), cable drag,
 friction beyond the efficiency figure. Motor resistance, inductance and rotor inertia are typical datasheet
