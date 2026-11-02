@@ -114,6 +114,8 @@ pub struct PcbUi {
     walk_path: Option<(P, P, Layer, Option<Vec<P>>)>,
     /// Counts board changes, so the walkaround grid is rebuilt after one.
     cache_gen: u64,
+    /// The issue last picked in a check list (view index, issue index), drawn bolder.
+    issue_shown: Option<(usize, usize)>,
     lib_search: String,
     /// The IPC-7351 footprint wizard's inputs while it is open.
     wizard: Option<crate::pcb_ipc::IpcSpec>,
@@ -161,6 +163,7 @@ impl Default for PcbUi {
             walk: None,
             walk_path: None,
             cache_gen: 0,
+            issue_shown: None,
             lib_search: String::new(),
             wizard: None,
             label_text: String::new(),
@@ -408,12 +411,20 @@ pub(crate) fn autoroute(app: &mut App) {
 }
 
 pub(crate) fn auto_place(app: &mut App) {
-    let mut n = 0;
-    edit(app, |p| n = crate::pcb_route::auto_place(p, false));
-    if n == 0 {
+    place_parts(app, false);
+}
+
+/// Place the parts that are off the board (`all`: every part again) and say what didn't fit.
+fn place_parts(app: &mut App, all: bool) {
+    let mut out = None;
+    edit(app, |p| out = Some(crate::pcb_route::auto_place(p, all)));
+    let Some(out) = out else { return };
+    if !out.left.is_empty() {
+        app.flash(format!("Placed {}; no room on the board for {}. Make the board bigger or move parts closer", out.placed, out.left.join(", ")), ToastKind::Error);
+    } else if out.placed == 0 {
         app.flash_info("Every part is already on the board (drag them, or use Place all to start over)", Some(Duration::from_secs(3)));
     } else {
-        app.flash_info(format!("Placed {n} parts on the board"), Some(Duration::from_secs(3)));
+        app.flash_info(format!("Placed {} parts on the board", out.placed), Some(Duration::from_secs(3)));
     }
     if app.pcb.view != View::Board {
         set_view(app, View::Board);
@@ -432,6 +443,7 @@ pub(crate) fn run_drc(app: &mut App) {
         app.flash_info(format!("Design rule check: {errors} errors, {} warnings (listed in the sidebar)", issues.len() - errors), Some(Duration::from_secs(4)));
     }
     app.pcb.issues = Some(issues);
+    app.pcb.issue_shown = None;
     if app.pcb.view != View::Board {
         set_view(app, View::Board);
     }
@@ -448,6 +460,7 @@ pub(crate) fn run_erc(app: &mut App) {
         app.flash_info(format!("Electrical rule check: {errors} errors, {} warnings (listed in the sidebar)", issues.len() - errors), Some(Duration::from_secs(4)));
     }
     app.pcb.erc = Some(issues);
+    app.pcb.issue_shown = None;
     if app.pcb.view != View::Schematic {
         set_view(app, View::Schematic);
     }
@@ -1534,9 +1547,7 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
     }
     ui.horizontal(|ui| {
         if ui.button("Place all").on_hover_text("Lay every part out on the board again").clicked() {
-            edit(app, |p| {
-                crate::pcb_route::auto_place(p, true);
-            });
+            place_parts(app, true);
         }
         if ui.button("Remove tracks").on_hover_text("Delete every track and via (Ctrl+Z brings them back)").clicked() {
             edit(app, |p| {
@@ -1681,13 +1692,15 @@ fn issues_ui(app: &mut App, ui: &mut Ui, issues: &[Issue]) {
     }
     for (k, is) in issues.iter().enumerate().take(200) {
         let col = if is.error { theme::error_soft() } else { theme::muted() };
-        let r = ui.add(egui::Label::new(RichText::new(format!("{} {}", if is.error { "●" } else { "○" }, is.message)).color(col).size(12.0)).sense(Sense::click()));
+        let text = RichText::new(format!("{} {}", if is.error { "●" } else { "○" }, is.message)).color(col).size(12.0);
+        let text = if app.pcb.issue_shown == Some((vi(app.pcb.view), k)) { text.strong().underline() } else { text };
+        let r = ui.add(egui::Label::new(text).sense(Sense::click()));
         if r.on_hover_text("Show it").clicked() {
-            let k = vi(app.pcb.view);
-            app.pcb.center[k] = is.at;
-            app.pcb.zoom[k] = app.pcb.zoom[k].max(12.0);
+            let v = vi(app.pcb.view);
+            app.pcb.center[v] = is.at;
+            app.pcb.zoom[v] = app.pcb.zoom[v].max(12.0);
+            app.pcb.issue_shown = Some((v, k));
         }
-        let _ = k;
     }
     if issues.len() > 200 {
         ui.label(format!("… and {} more", issues.len() - 200));
@@ -2570,6 +2583,16 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
             let c = xf.s(is.at);
             let col = if is.error { Color32::from_rgb(255, 80, 80) } else { Color32::from_rgb(255, 200, 60) };
             painter.circle_stroke(c, 7.0, Stroke::new(2.0, col));
+        }
+        // the one picked in the list: a bold ring and cross hairs, drawn last so it sits on top
+        if let Some(is) = app.pcb.issue_shown.filter(|x| x.0 == 1).and_then(|x| issues.get(x.1)) {
+            let c = xf.s(is.at);
+            let col = if is.error { Color32::from_rgb(255, 80, 80) } else { Color32::from_rgb(255, 200, 60) };
+            painter.circle_stroke(c, 13.0, Stroke::new(3.0, col));
+            for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
+                painter.line_segment([c - d * 20.0, c - d * 9.0], Stroke::new(2.0, col));
+                painter.line_segment([c + d * 9.0, c + d * 20.0], Stroke::new(2.0, col));
+            }
         }
     }
     let h = app.pcb.hover;

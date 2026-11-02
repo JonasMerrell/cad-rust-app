@@ -361,6 +361,8 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("class_width", "Tracks narrower than their net class"),
     ("via", "Via drill and annular ring"),
     ("hole_gap", "Holes too close to each other"),
+    ("hole", "Copper near a mounting hole, holes near or off the edge"),
+    ("pad_drill", "Footprint pad drills and annular rings"),
     ("edge", "Copper near or off the board edge"),
     ("keepout", "Copper, vias or parts in a keepout"),
     ("silk", "Silkscreen over exposed pads"),
@@ -728,6 +730,24 @@ fn poly_poly(p: &[P], q: &[P]) -> f64 {
         return 0.0;
     }
     edges(p).map(|(a, b)| poly_seg(q, a, b)).fold(f64::INFINITY, f64::min)
+}
+
+/// Whether the box `lo`..`hi` lies inside a closed polygon with at least `margin` to its edge:
+/// corners inside, and no edge of the polygon reaching into the box (a notch or cutout).
+pub fn rect_inside(poly: &[P], lo: P, hi: P, margin: f64) -> bool {
+    let corners = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]];
+    if !corners.iter().all(|c| inside(poly, *c)) {
+        return false;
+    }
+    // quick reject of edges whose box is clear of the grown rectangle
+    let (gl, gh) = ([lo[0] - margin, lo[1] - margin], [hi[0] + margin, hi[1] + margin]);
+    edges(poly).all(|(a, b)| {
+        if a[0].max(b[0]) < gl[0] || a[0].min(b[0]) > gh[0] || a[1].max(b[1]) < gl[1] || a[1].min(b[1]) > gh[1] {
+            return true;
+        }
+        let d = poly_seg(&corners, a, b);
+        if margin > 0.0 { d >= margin - 1e-9 } else { d > 1e-9 }
+    })
 }
 
 /// Distance from a point to a closed polygon's boundary.
@@ -1477,8 +1497,22 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     }
     let clr = |net: &str| rules_cache.get(net).map(|x| x.clearance).unwrap_or(r.clearance);
     let max_cl = rules_cache.values().map(|x| x.clearance).fold(r.clearance, f64::max);
-    // pads with no net are each their own net
-    let net_key = |i: usize| -> String { if its[i].net.is_empty() { format!("\u{0}{i}") } else { its[i].net.clone() } };
+    // pads with no net are each their own net; tracks and vias with no net share a key with the
+    // net-less copper they touch, so a net-less polyline isn't a clearance error against itself
+    let mut free = Dsu::new(its.len());
+    for i in 0..its.len() {
+        if !its[i].net.is_empty() {
+            continue;
+        }
+        for j in i + 1..its.len() {
+            let wire = |k: usize| matches!(its[k].kind, ItemKind::Track(_) | ItemKind::Via(_));
+            if its[j].net.is_empty() && (wire(i) || wire(j)) && its[i].shares_layer(&its[j]) && its[i].cu.gap(&its[j].cu) <= EPS {
+                free.join(i, j);
+            }
+        }
+    }
+    let roots: Vec<usize> = (0..its.len()).map(|i| free.find(i)).collect();
+    let net_key = |i: usize| -> String { if its[i].net.is_empty() { format!("\u{0}{}", roots[i]) } else { its[i].net.clone() } };
     let bbs: Vec<(P, P)> = its.iter().map(|i| i.cu.bbox()).collect();
     for i in 0..its.len() {
         for j in i + 1..its.len() {
@@ -1550,6 +1584,35 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             let g = c - (drills[i].1 + drills[j].1) / 2.0;
             if g < r.hole_gap - 1e-4 {
                 out.push(Issue::new("hole_gap", drills[i].0, true, format!("Holes {:.3} mm apart (rule {} mm): {} and {}", g.max(0.0), r.hole_gap, drills[i].2, drills[j].2)));
+            }
+        }
+    }
+    // plated holes in footprints
+    for (pi, part) in pcb.parts.iter().enumerate() {
+        let mine: Vec<&WPad> = pads.iter().filter(|x| x.part == pi && x.drill > 0.0).collect();
+        if let Some(x) = mine.iter().find(|x| x.drill < r.min_drill - 1e-9) {
+            out.push(Issue::new("pad_drill", x.at, true, format!("{} pad drill {} mm is under the {} mm minimum", part.reference, x.drill, r.min_drill)));
+        }
+        if let Some(x) = mine.iter().find(|x| (x.size[0].min(x.size[1]) - x.drill) / 2.0 < r.min_annular - 1e-9) {
+            let ring = (x.size[0].min(x.size[1]) - x.drill) / 2.0;
+            out.push(Issue::new("pad_drill", x.at, true, format!("{} pad annular ring {:.3} mm is under {} mm", part.reference, ring, r.min_annular)));
+        }
+    }
+    // mounting holes: no copper of any layer near them, and inside the board
+    for h in &b.holes {
+        let hole = Cu::Seg { a: h.at, b: h.at, r: h.d / 2.0 };
+        for it in &its {
+            let (g, need) = (hole.gap(&it.cu), clr(&it.net));
+            if g < need - 1e-4 {
+                out.push(Issue::new("hole", h.at, true, format!("Clearance {:.3} mm < {} mm: mounting hole and {}", g.max(0.0), need, item_label(pcb, pads, it))));
+            }
+        }
+        if b.outline.len() >= 3 {
+            let near = outline_dist(&b.outline, h.at) - h.d / 2.0;
+            if !inside(&b.outline, h.at) {
+                out.push(Issue::new("hole", h.at, true, "Mounting hole is off the board".into()));
+            } else if near < r.edge - 1e-4 {
+                out.push(Issue::new("hole", h.at, true, format!("Mounting hole is {:.2} mm from the board edge (rule {} mm)", near.max(0.0), r.edge)));
             }
         }
     }
@@ -1683,7 +1746,7 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     }
     for (i, p) in pcb.parts.iter().enumerate() {
         let (lo, hi) = courts[i];
-        if b.outline.len() >= 3 && [lo, hi, [lo[0], hi[1]], [hi[0], lo[1]]].iter().any(|c| !inside(&b.outline, *c)) {
+        if b.outline.len() >= 3 && !rect_inside(&b.outline, lo, hi, 0.0) {
             out.push(Issue::new("outside", p.at, true, format!("{} is not inside the board", p.reference)));
         }
     }
@@ -2038,5 +2101,67 @@ pub(crate) mod tests {
         p.parts[1].at = [25.0, 20.0];
         let pads = p.pads(&nl);
         assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "body"));
+    }
+
+    #[test]
+    fn drc_checks_mounting_holes() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.message.contains("ounting hole")), "{issues:?}");
+        // a track straight through a hole, and a hole hard by the edge
+        p.board.tracks.push(Track { a: [30.0, 30.0], b: [40.0, 30.0], width: 0.25, layer: Layer::Bottom, net: "GND".into() });
+        p.board.holes.push(Hole { at: [35.0, 30.0], d: 3.2 });
+        p.board.holes.push(Hole { at: [1.0, 1.0], d: 3.2 });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.rule == "hole" && i.message.starts_with("Clearance") && i.message.contains("mounting hole and track")), "{issues:?}");
+        assert!(issues.iter().any(|i| i.message.starts_with("Mounting hole is 0.00 mm from the board edge")), "{issues:?}");
+    }
+
+    #[test]
+    fn netless_copper_is_not_a_clearance_error_with_itself() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        // a polyline and a via of no net, joined end to end
+        for s in [[[5.0, 35.0], [15.0, 35.0]], [[15.0, 35.0], [15.0, 30.0]]] {
+            p.board.tracks.push(Track { a: s[0], b: s[1], width: 0.25, layer: Layer::Top, net: String::new() });
+        }
+        p.board.vias.push(Via { at: [15.0, 30.0], d: 0.6, drill: 0.3, net: String::new() });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "clearance" && i.message.contains("no net")), "{issues:?}");
+        // a separate net-less track too close to it is still an error
+        p.board.tracks.push(Track { a: [10.0, 35.3], b: [10.0, 37.0], width: 0.25, layer: Layer::Top, net: String::new() });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.message.contains("track (no net) and track (no net)")), "{issues:?}");
+    }
+
+    #[test]
+    fn drc_checks_pad_drills() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "pad_drill"), "{issues:?}");
+        // the pin header has 1.0 mm drills in 1.7 mm pads
+        p.board.rules.min_drill = 1.2;
+        p.board.rules.min_annular = 0.5;
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.rule == "pad_drill" && i.message.starts_with("J1 pad drill 1 mm is under")), "{issues:?}");
+        assert!(issues.iter().any(|i| i.rule == "pad_drill" && i.message.starts_with("J1 pad annular ring 0.350 mm")), "{issues:?}");
+        p.board.rules.off.push("pad_drill".into());
+        assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "pad_drill"));
+    }
+
+    #[test]
+    fn rect_inside_sees_notches() {
+        let u = vec![[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [40.0, 40.0], [40.0, 3.0], [20.0, 3.0], [20.0, 40.0], [0.0, 40.0]];
+        // corners in both arms, across the cutout
+        assert!(!rect_inside(&u, [5.0, 18.0], [55.0, 22.0], 0.0));
+        assert!(rect_inside(&u, [5.0, 18.0], [15.0, 22.0], 0.0));
+        assert!(rect_inside(&u, [5.0, 18.0], [15.0, 22.0], 1.0));
+        assert!(!rect_inside(&u, [5.0, 18.0], [19.5, 22.0], 1.0));
+        assert!(!rect_inside(&u, [-1.0, 18.0], [15.0, 22.0], 0.0));
     }
 }

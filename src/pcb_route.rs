@@ -122,11 +122,15 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
         }
         air.sort_by(|a, b| pcb::dist(a.a, a.b).total_cmp(&pcb::dist(b.a, b.b)));
         let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
-        let mut grid = build(p, &nl, &base, &[], None);
+        let mut grid = build_in(p, &nl, &base, &[], None, region(p, &base));
         let ids: HashMap<String, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.clone(), i as i32)).collect();
         for a in &air {
             tried.push(key(a));
-            let net = ids.get(&a.net).copied().unwrap_or(WALL);
+            // a net the schematic doesn't have can't be told apart from walls: leave it
+            let Some(&net) = ids.get(&a.net) else {
+                out.failed.push(a.net.clone());
+                continue;
+            };
             let nr = p.net_rules(&nl, &a.net);
             let vmi = grid.find(nr.via_d / 2.0, nr.clearance, true);
             let mut path = None;
@@ -148,7 +152,7 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
                 out.failed.push(a.net.clone());
                 continue;
             };
-            let (tracks, vias) = to_copper(p, &pth, a.a, a.b, w, &nr, &a.net);
+            let (tracks, vias) = to_copper(&grid, &pth, a.a, a.b, w, &nr, &a.net);
             for t in &tracks {
                 grid.mark(&Cu::Seg { a: t.a, b: t.b, r: t.width / 2.0 }, Some(t.layer), net, nr.clearance);
             }
@@ -200,13 +204,107 @@ impl Grid {
     }
 }
 
+/// The part of the board worth a grid: the copper there is, with room around it for detours.
+/// A big board with a small cluster of parts then still gets fine cells.
+fn region(p: &Pcb, base: &[Item]) -> (P, P) {
+    let (blo, bhi) = p.board.bbox();
+    let (mut lo, mut hi) = ([f64::INFINITY; 2], [f64::NEG_INFINITY; 2]);
+    for it in base {
+        let (a, b) = it.cu.bbox();
+        lo = [lo[0].min(a[0]), lo[1].min(a[1])];
+        hi = [hi[0].max(b[0]), hi[1].max(b[1])];
+    }
+    let room = 10.0;
+    let lo = [(lo[0] - room).max(blo[0]), (lo[1] - room).max(blo[1])];
+    let hi = [(hi[0] + room).min(bhi[0]), (hi[1] + room).min(bhi[1])];
+    if lo[0] < hi[0] && lo[1] < hi[1] {
+        (lo, hi)
+    } else {
+        (blo, bhi)
+    }
+}
+
+/// Wall off the cells outside the outline or within `edge` (plus each map's half-width) of it.
+/// Rows are scanned for inside/outside, and each outline edge only visits the cells near it, so
+/// outlines with hundreds of vertices (arcs, imported shapes) stay cheap.
+fn edge_walls(grid: &mut Grid, outline: &[P], edge: f64) {
+    let (nx, ny, g, lo) = (grid.nx, grid.ny, grid.g, grid.lo);
+    let n = nx * ny;
+    let reach = edge + grid.maps.iter().map(|m| m.h).fold(0.0, f64::max) + g;
+    let mut d = vec![f64::INFINITY; n];
+    let m = outline.len();
+    for k in 0..m {
+        let (a, b) = (outline[k], outline[(k + 1) % m]);
+        let y0 = (((a[1].min(b[1]) - reach - lo[1]) / g).floor().max(0.0)) as usize;
+        let y1 = ((((a[1].max(b[1]) + reach - lo[1]) / g).ceil()).max(0.0) as usize).min(ny);
+        for y in y0..y1 {
+            let cy = lo[1] + (y as f64 + 0.5) * g;
+            // the part of the edge within reach of this row
+            let (t0, t1) = if (b[1] - a[1]).abs() < 1e-12 {
+                (0.0, 1.0)
+            } else {
+                let ta = (cy - reach - a[1]) / (b[1] - a[1]);
+                let tb = (cy + reach - a[1]) / (b[1] - a[1]);
+                (ta.min(tb).max(0.0), ta.max(tb).min(1.0))
+            };
+            if t0 > t1 {
+                continue;
+            }
+            let (xa, xb) = (a[0] + (b[0] - a[0]) * t0, a[0] + (b[0] - a[0]) * t1);
+            let x0 = (((xa.min(xb) - reach - lo[0]) / g).floor().max(0.0)) as usize;
+            let x1 = ((((xa.max(xb) + reach - lo[0]) / g).ceil()).max(0.0) as usize).min(nx);
+            for x in x0..x1 {
+                let c = [lo[0] + (x as f64 + 0.5) * g, cy];
+                let v = pcb::seg_point(a, b, c);
+                let i = y * nx + x;
+                if v < d[i] {
+                    d[i] = v;
+                }
+            }
+        }
+    }
+    let mut xs: Vec<f64> = vec![];
+    for y in 0..ny {
+        let cy = lo[1] + (y as f64 + 0.5) * g;
+        // crossings of the row, by the same rule as pcb::inside
+        xs.clear();
+        for k in 0..m {
+            let (a, b) = (outline[k], outline[(k + 1) % m]);
+            if (a[1] > cy) != (b[1] > cy) {
+                xs.push(a[0] + (cy - a[1]) / (b[1] - a[1]) * (b[0] - a[0]));
+            }
+        }
+        xs.sort_by(|a, b| a.total_cmp(b));
+        let mut passed = 0;
+        for x in 0..nx {
+            let cx = lo[0] + (x as f64 + 0.5) * g;
+            while passed < xs.len() && xs[passed] <= cx {
+                passed += 1;
+            }
+            let inside = (xs.len() - passed) % 2 == 1;
+            let i = y * nx + x;
+            for map in &mut grid.maps {
+                if !inside || d[i] < edge + map.h {
+                    map.m[0][i] = WALL;
+                    map.m[1][i] = WALL;
+                }
+            }
+        }
+    }
+}
+
 /// The routing grid: copper, holes, keepouts and the edge marked on a map per profile (and the
 /// `extra` ones); `alias` routes one net as another's (a pair's negative as its positive).
 fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], alias: Option<(&str, &str)>) -> Grid {
+    build_in(p, nl, base, extra, alias, p.board.bbox())
+}
+
+/// `build` over part of the board (the autorouter's copper `region`).
+fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], alias: Option<(&str, &str)>, area: (P, P)) -> Grid {
     let r = &p.board.rules;
-    let (lo, hi) = p.board.bbox();
+    let (lo, hi) = area;
     let size = [hi[0] - lo[0], hi[1] - lo[1]];
-    // 0.1 mm cells, coarser on big boards
+    // 0.1 mm cells, coarser on big areas
     let g = (((size[0] * size[1]) / 1.2e6).sqrt()).max(0.1);
     let nx = ((size[0] / g).ceil() as usize).max(1);
     let ny = ((size[1] / g).ceil() as usize).max(1);
@@ -230,19 +328,7 @@ fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], 
         add(h, c, via);
     }
     let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: [vec![FREE; n], vec![FREE; n]] }).collect() };
-    // the edge
-    for y in 0..ny {
-        for x in 0..nx {
-            let c = [lo[0] + (x as f64 + 0.5) * g, lo[1] + (y as f64 + 0.5) * g];
-            let d = if pcb::inside(&p.board.outline, c) { pcb::outline_dist(&p.board.outline, c) } else { -1.0 };
-            for map in &mut grid.maps {
-                if d < r.edge + map.h {
-                    map.m[0][y * nx + x] = WALL;
-                    map.m[1][y * nx + x] = WALL;
-                }
-            }
-        }
-    }
+    edge_walls(&mut grid, &p.board.outline, r.edge);
     let ids: HashMap<&str, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as i32)).collect();
     let mut cl: HashMap<&str, f64> = HashMap::new();
     for it in base {
@@ -365,10 +451,10 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
                 heap.push((Reverse(((g2 + h(x2, y2)) * 64.0) as u64), s2 as u32));
             }
         }
-        // a via to the other layer
+        // a via to the other layer (the via map keeps them out of surface mount pads, so the
+        // start and goal cells may have one: two ends in one cell on different layers need it)
         let here = y * nx + x;
-        let start_or_goal = (x == sx && y == sy) || (x == tx && y == ty);
-        if vmi.is_some() && !start_or_goal && free(via[0][here], net) && free(via[1][here], net) {
+        if vmi.is_some() && free(via[0][here], net) && free(via[1][here], net) {
             let s2 = st(x, y, 1 - l);
             let g2 = g0 + via_cost;
             if g2 < cost[s2] {
@@ -382,13 +468,8 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
 }
 
 /// Turn a cell path into tracks (straight runs merged) and vias.
-fn to_copper(p: &Pcb, path: &[(usize, usize, usize)], a: P, b: P, w: f64, nr: &pcb::NetRules, net: &str) -> (Vec<Track>, Vec<Via>) {
-    let (lo, g) = {
-        let (lo, hi) = p.board.bbox();
-        let size = [hi[0] - lo[0], hi[1] - lo[1]];
-        (lo, (((size[0] * size[1]) / 1.2e6).sqrt()).max(0.1))
-    };
-    let centre = |x: usize, y: usize| [lo[0] + (x as f64 + 0.5) * g, lo[1] + (y as f64 + 0.5) * g];
+fn to_copper(grid: &Grid, path: &[(usize, usize, usize)], a: P, b: P, w: f64, nr: &pcb::NetRules, net: &str) -> (Vec<Track>, Vec<Via>) {
+    let centre = |x: usize, y: usize| grid.centre(x, y);
     let layer = |l: usize| if l == 0 { Layer::Top } else { Layer::Bottom };
     let mut tracks = vec![];
     let mut vias = vec![];
@@ -623,14 +704,20 @@ impl Walk {
     }
 }
 
+/// What `auto_place` did: how many parts it put on the board, and which found no room.
+pub struct Placement {
+    pub placed: usize,
+    pub left: Vec<String>,
+}
+
 /// Put parts on the board: the biggest first in the middle, then each part next to the parts
 /// it shares the most nets with, at the free spot nearest them. `all` lays out every part again;
-/// otherwise only parts not on the board move. Returns how many were placed.
-pub fn auto_place(p: &mut Pcb, all: bool) -> usize {
+/// otherwise only parts not on the board move. Parts with no room are left beside the board.
+pub fn auto_place(p: &mut Pcb, all: bool) -> Placement {
     let (lo, hi) = p.board.bbox();
     let on_board = |p: &Pcb, i: usize| {
         let (a, b) = p.court_world(&p.parts[i]);
-        pcb::inside(&p.board.outline, a) && pcb::inside(&p.board.outline, b)
+        pcb::rect_inside(&p.board.outline, a, b, 0.0)
     };
     let mut todo: Vec<usize> = (0..p.parts.len()).filter(|&i| all || !on_board(p, i)).collect();
     let area = |p: &Pcb, i: usize| {
@@ -660,8 +747,10 @@ pub fn auto_place(p: &mut Pcb, all: bool) -> usize {
     taken.extend(p.board.holes.iter().map(|h| ([h.at[0] - h.d / 2.0 - 0.5, h.at[1] - h.d / 2.0 - 0.5], [h.at[0] + h.d / 2.0 + 0.5, h.at[1] + h.d / 2.0 + 0.5])));
     let margin = p.board.rules.edge + 0.7;
     let gap = 1.5;
+    let step = 0.5;
     let middle = [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0];
-    let mut count = 0;
+    let mut out = Placement { placed: 0, left: vec![] };
+    let mut off: Vec<usize> = vec![];
     while !todo.is_empty() {
         // the part most tied to what is placed, else the biggest
         let k = (0..todo.len())
@@ -682,48 +771,99 @@ pub fn auto_place(p: &mut Pcb, all: bool) -> usize {
             }
         }
         let target = if tw > 0.0 { [target[0] / tw, target[1] / tw] } else { middle };
-        let keep_rot = !all && on_board(p, i);
-        if !keep_rot {
+        let was_on = on_board(p, i);
+        let old = (p.parts[i].at, p.parts[i].rot);
+        if all || !was_on {
             p.parts[i].rot = 0.0;
         }
         let base_rot = p.parts[i].rot;
-        let mut best: Option<(f64, P, f64)> = None;
+        // spots on a lattice for both turns, tried nearest the target first (the first that fits is
+        // the best, so most parts test a handful of spots instead of the whole board)
+        let x0 = lo[0] + margin;
+        let y0 = lo[1] + margin;
+        let mut lat = vec![];
         for rot in [base_rot, base_rot + 90.0] {
             let mut q = p.parts[i].clone();
             q.rot = rot;
             q.at = [0.0, 0.0];
             let (a, b) = p.court_world(&q);
             let (w, h) = (b[0] - a[0], b[1] - a[1]);
-            let mut y = lo[1] + margin;
-            while y + h <= hi[1] - margin + 1e-9 {
-                let mut x = lo[0] + margin;
-                while x + w <= hi[0] - margin + 1e-9 {
-                    let (bl, tr) = ([x, y], [x + w, y + h]);
-                    let at = [x - a[0], y - a[1]];
-                    // turning costs a little, so parts stay square to each other when it doesn't help
-                    let score = pcb::dist(at, target) + if rot != base_rot { 0.5 } else { 0.0 };
-                    if best.is_none_or(|b| score < b.0) {
-                        let corners = [bl, tr, [bl[0], tr[1]], [tr[0], bl[1]]];
-                        let ok = corners.iter().all(|c| pcb::inside(&p.board.outline, *c) && pcb::outline_dist(&p.board.outline, *c) >= margin - 1e-9)
-                            && taken.iter().all(|(l, u)| bl[0] >= u[0] + gap || tr[0] <= l[0] - gap || bl[1] >= u[1] + gap || tr[1] <= l[1] - gap);
-                        if ok {
-                            best = Some((score, at, rot));
-                        }
-                    }
-                    x += 0.5;
+            let cols = ((hi[0] - margin - w - x0) / step + 1e-9).floor();
+            let rows = ((hi[1] - margin - h - y0) / step + 1e-9).floor();
+            let (cols, rows) = if cols >= 0.0 && rows >= 0.0 { (cols as usize + 1, rows as usize + 1) } else { (0, 0) };
+            lat.push((rot, a, w, h, cols, rows, vec![false; cols * rows]));
+        }
+        // turning costs a little, so parts stay square to each other when it doesn't help
+        let score = |lat: &(f64, P, f64, f64, usize, usize, Vec<bool>), ix: usize, iy: usize| -> f64 {
+            let at = [x0 + ix as f64 * step - lat.1[0], y0 + iy as f64 * step - lat.1[1]];
+            pcb::dist(at, target) + if lat.0 != base_rot { 0.5 } else { 0.0 }
+        };
+        let key = |s: f64| (s * 1e6) as u64;
+        let mut heap: BinaryHeap<Reverse<(u64, usize, usize, usize)>> = BinaryHeap::new();
+        for (r, l) in lat.iter_mut().enumerate() {
+            if l.4 == 0 {
+                continue;
+            }
+            let ix = ((target[0] + l.1[0] - x0) / step).round().clamp(0.0, (l.4 - 1) as f64) as usize;
+            let iy = ((target[1] + l.1[1] - y0) / step).round().clamp(0.0, (l.5 - 1) as f64) as usize;
+            l.6[iy * l.4 + ix] = true;
+            heap.push(Reverse((key(score(l, ix, iy)), r, ix, iy)));
+        }
+        let mut best: Option<(P, f64)> = None;
+        while let Some(Reverse((_, r, ix, iy))) = heap.pop() {
+            let l = &lat[r];
+            let (bl, tr) = ([x0 + ix as f64 * step, y0 + iy as f64 * step], [x0 + ix as f64 * step + l.2, y0 + iy as f64 * step + l.3]);
+            let clear = taken.iter().all(|(a, u)| bl[0] >= u[0] + gap || tr[0] <= a[0] - gap || bl[1] >= u[1] + gap || tr[1] <= a[1] - gap);
+            if clear && pcb::rect_inside(&p.board.outline, bl, tr, margin) {
+                best = Some(([bl[0] - l.1[0], bl[1] - l.1[1]], l.0));
+                break;
+            }
+            let (cols, rows) = (l.4, l.5);
+            let mut next = vec![];
+            if ix > 0 {
+                next.push((ix - 1, iy));
+            }
+            if ix + 1 < cols {
+                next.push((ix + 1, iy));
+            }
+            if iy > 0 {
+                next.push((ix, iy - 1));
+            }
+            if iy + 1 < rows {
+                next.push((ix, iy + 1));
+            }
+            for (x, y) in next {
+                if !lat[r].6[y * cols + x] {
+                    lat[r].6[y * cols + x] = true;
+                    let s = score(&lat[r], x, y);
+                    heap.push(Reverse((key(s), r, x, y)));
                 }
-                y += 0.5;
             }
         }
-        if let Some((_, s, rot)) = best {
-            p.parts[i].at = s;
-            p.parts[i].rot = rot.rem_euclid(360.0);
-            taken.push(p.court_world(&p.parts[i]));
-            count += 1;
+        match best {
+            Some((s, rot)) => {
+                p.parts[i].at = s;
+                p.parts[i].rot = rot.rem_euclid(360.0);
+                taken.push(p.court_world(&p.parts[i]));
+                out.placed += 1;
+                placed.push(i);
+            }
+            None => {
+                out.left.push(p.parts[i].reference.clone());
+                (p.parts[i].at, p.parts[i].rot) = old;
+                if all {
+                    // laid out again with no room: off the board, not on top of the new layout
+                    off.push(i);
+                }
+            }
         }
-        placed.push(i);
     }
-    count
+    for i in off {
+        let s = p.free_spot(&p.parts[i]);
+        p.parts[i].at = s;
+    }
+    out.left.sort_by(|a, b| pcb::natural(a, b));
+    out
 }
 
 #[cfg(test)]
@@ -773,7 +913,7 @@ mod tests {
         for part in &mut p.parts {
             part.at = [100.0, 100.0];
         }
-        assert_eq!(auto_place(&mut p, false), 3);
+        assert_eq!(auto_place(&mut p, false).placed, 3);
         let nl = p.netlist();
         let pads = p.pads(&nl);
         let issues = pcb::drc(&p, &nl, &pads, &[]);
@@ -816,5 +956,96 @@ mod tests {
         let w = Walk::new(&p, "GND", 0.25);
         let path = w.path([20.0, 5.0], [40.0, 5.0], Layer::Top).unwrap();
         assert!(path.len() >= 2);
+    }
+
+    #[test]
+    fn edge_walls_match_the_outline() {
+        // a round board with many vertices and an L: the fast walls agree with the plain test
+        let circle: Vec<P> = (0..400).map(|i| {
+            let a = std::f64::consts::TAU * i as f64 / 400.0;
+            [20.0 + 18.0 * a.cos(), 20.0 + 18.0 * a.sin()]
+        }).collect();
+        let l = vec![[0.0, 0.0], [40.0, 0.0], [40.0, 15.0], [15.0, 15.0], [15.0, 40.0], [0.0, 40.0]];
+        for outline in [circle, l] {
+            let (nx, ny, g) = (160, 160, 0.25);
+            let hs = [0.125, 0.25, 0.3];
+            let mut grid = Grid { lo: [0.0, 0.0], g, nx, ny, maps: hs.iter().map(|&h| Map { h, c: 0.2, via: false, m: [vec![FREE; nx * ny], vec![FREE; nx * ny]] }).collect() };
+            edge_walls(&mut grid, &outline, 0.3);
+            for y in 0..ny {
+                for x in 0..nx {
+                    let c = grid.centre(x, y);
+                    let d = if pcb::inside(&outline, c) { pcb::outline_dist(&outline, c) } else { -1.0 };
+                    for map in &grid.maps {
+                        assert_eq!(map.m[0][y * nx + x] == WALL, d < 0.3 + map.h, "cell {x} {y} h {}", map.h);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn a_big_board_still_gets_fine_cells() {
+        // the LED board's parts in the middle of a 220 x 160 mm board
+        let mut p = crate::pcb::tests::led_board();
+        p.board.outline = pcb::rect_outline(220.0, 160.0, 0.0);
+        for part in &mut p.parts {
+            part.at = pcb::add(part.at, [85.0, 60.0]);
+        }
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let base = pcb::items(&p, &nl, &pads, &[]);
+        let grid = build_in(&p, &nl, &base, &[], None, region(&p, &base));
+        assert!((grid.g - 0.1).abs() < 1e-9, "{}", grid.g);
+        let out = autoroute(&mut p, None);
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        let issues = pcb::drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().all(|i| !i.error), "{issues:?}");
+    }
+
+    #[test]
+    fn ends_in_one_cell_on_two_layers_get_a_via() {
+        let mut p = Pcb::new("empty");
+        p.board.outline = pcb::rect_outline(20.0, 20.0, 0.0);
+        let nl = p.netlist();
+        let grid = build(&p, &nl, &[], &[], None);
+        let (a, b) = ([10.03, 10.03], [10.07, 10.06]);
+        assert_eq!(grid.cell(a), grid.cell(b));
+        let (mi, vmi) = (grid.find(0.125, 0.2, false), grid.find(0.3, 0.2, true));
+        let path = search(&grid, mi, Some(vmi), 0, a, &[Layer::Top], b, &[Layer::Bottom], 4_000_000).expect("a path");
+        assert_eq!(path.first().map(|x| x.2), Some(0));
+        assert_eq!(path.last().map(|x| x.2), Some(1));
+        let nr = p.net_rules(&nl, "N");
+        let (tracks, vias) = to_copper(&grid, &path, a, b, 0.25, &nr, "N");
+        assert_eq!(vias.len(), 1);
+        assert!(tracks.iter().all(|t| t.layer == Layer::Bottom));
+    }
+
+    #[test]
+    fn auto_place_keeps_out_of_notches_and_reports_what_did_not_fit() {
+        // a U-shaped board whose bottom strip is too thin for a long header: it doesn't belong across the gap
+        let mut p = crate::pcb::tests::led_board();
+        p.board.outline = vec![[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [40.0, 40.0], [40.0, 3.0], [20.0, 3.0], [20.0, 40.0], [0.0, 40.0]];
+        p.parts[2].footprint = "PinHeader_1x20".into();
+        for part in &mut p.parts {
+            part.at = [100.0, 100.0];
+        }
+        let out = auto_place(&mut p, false);
+        assert_eq!(out.left, vec!["J1".to_string()]);
+        assert_eq!(out.placed, 2);
+        for part in &p.parts[..2] {
+            let (lo, hi) = p.court_world(part);
+            assert!(pcb::rect_inside(&p.board.outline, lo, hi, 0.0), "{} at {:?}", part.reference, part.at);
+        }
+        // laying everything out again on a board too small for the header moves it off the board
+        p.board.outline = pcb::rect_outline(30.0, 30.0, 0.0);
+        p.parts[2].at = [15.0, 15.0];
+        let out = auto_place(&mut p, true);
+        assert_eq!(out.left, vec!["J1".to_string()]);
+        let (lo, _) = p.court_world(&p.parts[2]);
+        assert!(lo[0] > 30.0, "{:?}", p.parts[2].at);
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = pcb::drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.message.contains("overlap")), "{issues:?}");
     }
 }

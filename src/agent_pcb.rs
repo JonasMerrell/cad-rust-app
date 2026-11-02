@@ -330,14 +330,14 @@ impl Session {
                 self.ws.pcbs[pi] = p;
                 let mut v = self.pcb_summary(pi);
                 if let Some(n) = placed {
-                    v["placed"] = json!(n);
+                    v["placed"] = json!(n.placed);
                     let off: Vec<String> = {
                         let p = &self.ws.pcbs[pi];
                         p.parts
                             .iter()
                             .filter(|x| {
                                 let (lo, hi) = p.court_world(x);
-                                !(pcb::inside(&p.board.outline, lo) && pcb::inside(&p.board.outline, hi))
+                                !pcb::rect_inside(&p.board.outline, lo, hi, 0.0)
                             })
                             .map(|x| x.reference.clone())
                             .collect()
