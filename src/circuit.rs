@@ -608,8 +608,138 @@ fn reg_model(part: &Part, pins: &[String]) -> Option<Result<Model, String>> {
     Some(Ok(Model::Reg(Reg { vset, vdo, iq, ro: 0.02 }, [r[0].clone(), r[1].clone(), r[2].clone()], desc)))
 }
 
-/// The model for a part, from its symbol and value.
+/// The model for a part: from its symbol and value, then with its own parameter overrides
+/// (`Part.sim`) applied, or left out when the part is excluded from simulation.
 pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
+    if part.no_sim {
+        return Ok(Model::Open("left out of the simulation".into()));
+    }
+    let mut m = base_model(part, setup)?;
+    if !part.sim.is_empty() {
+        let mut bad = vec![];
+        {
+            let mut ks = knobs(&mut m);
+            for (key, text) in &part.sim {
+                let Some(k) = ks.iter_mut().find(|k| k.key.eq_ignore_ascii_case(key)) else {
+                    bad.push(format!("{key} (not a parameter of this model)"));
+                    continue;
+                };
+                match parse_si_lenient(text) {
+                    Some(v) if v.is_finite() => *k.v = v,
+                    _ => bad.push(format!("{key} = {text} (not a number)")),
+                }
+            }
+        }
+        if !bad.is_empty() {
+            return Err(format!("{}: {}", part.reference, bad.join(", ")));
+        }
+        if let Model::R(r) | Model::Pot(r) = &m {
+            if *r <= 0.0 {
+                return Err(format!("{}: resistance must be positive", part.reference));
+            }
+        }
+    }
+    Ok(m)
+}
+
+/// One adjustable number of a simulation model.
+pub struct Knob<'a> {
+    pub key: &'static str,
+    pub label: &'static str,
+    pub unit: &'static str,
+    pub v: &'a mut f64,
+}
+
+fn knob<'a>(key: &'static str, label: &'static str, unit: &'static str, v: &'a mut f64) -> Knob<'a> {
+    Knob { key, label, unit, v }
+}
+
+/// The parameters of a model that a part can override.
+pub fn knobs(m: &mut Model) -> Vec<Knob<'_>> {
+    match m {
+        Model::R(r) => vec![knob("r", "Resistance", "Ω", r)],
+        Model::C(c) => vec![knob("c", "Capacitance", "F", c)],
+        Model::L(l) => vec![knob("l", "Inductance", "H", l)],
+        Model::Pot(r) => vec![knob("r", "Track resistance", "Ω", r)],
+        Model::D(d, rs, cj, _) => vec![
+            knob("is", "Saturation current", "A", &mut d.is),
+            knob("n", "Emission coefficient", "", &mut d.n),
+            knob("bv", "Breakdown voltage", "V", &mut d.bv),
+            knob("ibv", "Current at breakdown", "A", &mut d.ibv),
+            knob("rs", "Series resistance", "Ω", rs),
+            knob("cj", "Junction capacitance", "F", cj),
+        ],
+        Model::Q(b, _, caps, _) => {
+            let [cbe, cbc] = caps;
+            vec![
+                knob("is", "Saturation current", "A", &mut b.is),
+                knob("bf", "Forward beta (hFE)", "", &mut b.bf),
+                knob("br", "Reverse beta", "", &mut b.br),
+                knob("vaf", "Early voltage", "V", &mut b.vaf),
+                knob("nf", "Emission coefficient", "", &mut b.nf),
+                knob("cbe", "B-E capacitance", "F", cbe),
+                knob("cbc", "B-C capacitance", "F", cbc),
+            ]
+        }
+        Model::M(mm, _, caps, _) => {
+            let [cgs, cgd] = caps;
+            vec![
+                knob("vto", "Threshold voltage", "V", &mut mm.vto),
+                knob("kp", "Transconductance", "A/V²", &mut mm.kp),
+                knob("lambda", "Channel-length modulation", "1/V", &mut mm.lambda),
+                knob("cgs", "Gate-source capacitance", "F", cgs),
+                knob("cgd", "Gate-drain capacitance", "F", cgd),
+            ]
+        }
+        Model::OpAmp(o, _, _, _) => vec![
+            knob("a0", "Open-loop gain", "", &mut o.a0),
+            knob("gbw", "Gain-bandwidth", "Hz", &mut o.gbw),
+            knob("sr", "Slew rate", "V/s", &mut o.sr),
+            knob("hr_hi", "Headroom to V+", "V", &mut o.hr_hi),
+            knob("hr_lo", "Headroom to V−", "V", &mut o.hr_lo),
+            knob("ro", "Output resistance", "Ω", &mut o.ro),
+        ],
+        Model::Reg(r, _, _) => vec![
+            knob("vset", "Output (or reference) voltage", "V", &mut r.vset),
+            knob("vdo", "Dropout", "V", &mut r.vdo),
+            knob("iq", "Ground pin current", "A", &mut r.iq),
+            knob("ro", "Output resistance", "Ω", &mut r.ro),
+        ],
+        Model::Motor(mo) => vec![
+            knob("volts", "Rated voltage", "V", &mut mo.volts),
+            knob("rpm", "No-load speed (motor shaft)", "rpm", &mut mo.rpm),
+            knob("stall", "Stall current", "A", &mut mo.stall),
+            knob("gear", "Gear ratio", "", &mut mo.gear),
+        ],
+        Model::Servo(sv, _) => vec![knob("speed", "Speed", "°/s", &mut sv.speed)],
+        Model::Stepper(st, _) => vec![
+            knob("torque", "Holding torque", "N·m", &mut st.torque),
+            knob("amps", "Rated current", "A", &mut st.amps),
+            knob("ohms", "Winding resistance", "Ω", &mut st.ohms),
+            knob("henry", "Winding inductance", "H", &mut st.henry),
+            knob("step_deg", "Step angle", "°", &mut st.step_deg),
+            knob("rotor", "Rotor inertia", "kg·m²", &mut st.rotor),
+            knob("gear", "Gear ratio", "", &mut st.gear),
+        ],
+        Model::StepDriver(d, _) => vec![
+            knob("amps", "Current limit", "A", &mut d.amps),
+            knob("vmin", "VMOT minimum", "V", &mut d.vmin),
+            knob("vmax", "VMOT maximum", "V", &mut d.vmax),
+        ],
+        _ => vec![],
+    }
+}
+
+/// A part's model before its overrides, with its parameters as (key, label, unit, value), for the
+/// property editor. Err: why it has no model (its value doesn't parse, or its pins don't fit).
+pub fn model_params(part: &Part, setup: &SimSetup) -> Result<(String, Vec<(&'static str, &'static str, &'static str, f64)>), String> {
+    let mut m = base_model(part, setup)?;
+    let d = describe(&m);
+    Ok((d, knobs(&mut m).into_iter().map(|k| (k.key, k.label, k.unit, *k.v)).collect()))
+}
+
+/// The model for a part, from its symbol and value.
+fn base_model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
     let val = || parse_si(&part.value).ok_or_else(|| format!("{}: {} is not a value (e.g. 10k, 100n)", part.reference, part.value));
     let pins = part.footprint().pin_numbers();
     Ok(match part.symbol.as_str() {
@@ -1779,6 +1909,45 @@ mod tests {
         let r = out.parts.iter().find(|x| x.reference == "R1").unwrap();
         assert!((r.power - i * i * 1000.0).abs() < 1e-6);
         assert!((out.sources[0].2 - i).abs() < 1e-6);
+    }
+
+    #[test]
+    fn part_overrides_change_the_model() {
+        let mut p = Pcb::new("t");
+        p.add_part("U", Some("SOT-223"), Some("AMS1117-3.3"), [0.0, 0.0]).unwrap();
+        p.add_part("R", None, Some("100"), [30.0, 0.0]).unwrap();
+        crate::agent::pcb_connect(&mut p, "+5V", &[(0, "3".into())]);
+        crate::agent::pcb_connect(&mut p, "OUT", &[(0, "2".into()), (1, "1".into())]);
+        crate::agent::pcb_connect(&mut p, "GND", &[(0, "1".into()), (1, "2".into())]);
+        p.sim.sources = vec![Source { name: "VIN".into(), plus: "+5V".into(), wave: "5".into(), ..Default::default() }];
+        let op = |p: &Pcb| run(p, &Analysis { kind: Kind::Op, ..Default::default() }).map(|o| o.nets.iter().find(|n| n.0 == "OUT").unwrap().1);
+        assert!((op(&p).unwrap() - 3.3).abs() < 0.01);
+        // the regulator set to 2.5 V
+        p.parts[0].sim.insert("vset".into(), "2.5".into());
+        assert!((op(&p).unwrap() - 2.5).abs() < 0.01);
+        let (desc, params) = model_params(&p.parts[0], &p.sim).unwrap();
+        assert!(desc.contains("AMS1117"));
+        // the editor shows the model's own value, not the override
+        assert_eq!(params.iter().find(|x| x.0 == "vset").map(|x| x.3), Some(3.3));
+        // a bad key or number is an error, not silently ignored
+        p.parts[0].sim.insert("bogus".into(), "1".into());
+        assert!(model(&p.parts[0], &p.sim).unwrap_err().contains("bogus"));
+        p.parts[0].sim.clear();
+        p.parts[1].sim.insert("r".into(), "abc".into());
+        assert!(model(&p.parts[1], &p.sim).is_err());
+        p.parts[1].sim.insert("r".into(), "-5".into());
+        assert!(model(&p.parts[1], &p.sim).is_err());
+        p.parts[1].sim.clear();
+        // left out of the simulation: the output is open
+        p.parts[0].no_sim = true;
+        assert!(matches!(model(&p.parts[0], &p.sim), Ok(Model::Open(_))));
+        // a BJT's beta
+        let mut q = Part { symbol: "Q_NPN".into(), value: "2N3904".into(), footprint: "SOT-23".into(), ..Default::default() };
+        q.sim.insert("BF".into(), "123".into());
+        match model(&q, &SimSetup::default()).unwrap() {
+            Model::Q(b, _, _, _) => assert_eq!(b.bf, 123.0),
+            m => panic!("{m:?}"),
+        }
     }
 
     #[test]

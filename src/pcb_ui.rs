@@ -104,6 +104,9 @@ pub struct PcbUi {
     pin_text: String,
     pin_text_for: Option<u64>,
     pub sim: crate::circuit_ui::SimUi,
+    pub dk: crate::digikey_ui::DkUi,
+    /// The new field being added to the selected part (name, value).
+    field_new: (String, String),
     /// The PCB tab the history and selection belong to.
     tab: Option<usize>,
 }
@@ -140,6 +143,8 @@ impl Default for PcbUi {
             pin_text: String::new(),
             pin_text_for: None,
             sim: Default::default(),
+            dk: Default::default(),
+            field_new: Default::default(),
             tab: None,
         }
     }
@@ -294,10 +299,18 @@ pub fn fit(app: &mut App) {
 
 fn set_tool(app: &mut App, t: Tool) {
     app.pcb.tool = t;
+    app.pcb.dk.placing = None;
     app.pcb.wire.clear();
     app.pcb.route = None;
     app.pcb.zone_pts.clear();
     app.pcb.drag = None;
+}
+
+/// Start placing library symbol `key` on the schematic.
+pub(crate) fn start_place(app: &mut App, key: &str) {
+    set_tool(app, Tool::Place(key.to_string()));
+    app.pcb.place_rot = 0;
+    app.pcb.place_mirror = false;
 }
 
 // ---------------------------------------------------------------- commands
@@ -463,6 +476,7 @@ fn mirror_sel(app: &mut App) {
 
 pub fn hint(app: &App) -> String {
     match (&app.pcb.view, &app.pcb.tool) {
+        (_, Tool::Place(_)) if crate::digikey_ui::placing_name(app).is_some() => format!("Click to place {} · R rotates, X mirrors · Esc when done", crate::digikey_ui::placing_name(app).unwrap_or_default()),
         (_, Tool::Place(k)) => format!("Click to place {} · R rotates, X mirrors · Esc when done", pcb_lib::symbol_kind(k).map(|s| s.name).unwrap_or("the part")),
         (_, Tool::Wire) if app.pcb.wire.is_empty() => "Click a pin or wire end to start a wire · Esc stops".into(),
         (_, Tool::Wire) => "Click to add a corner, click a pin or wire to finish · / flips the corner · Esc or double-click ends".into(),
@@ -714,6 +728,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         if let Some(s) = app.pcb.sel {
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
         }
+        if app.pcb.view != View::Board || matches!(app.pcb.sel, Some(Sel::Part(_))) {
+            section(ui, "Digi-Key", |ui| crate::digikey_ui::section_ui(app, ui));
+        }
         if app.pcb.view == View::Board {
             section(ui, "Board", |ui| board_ui(app, ui));
             section(ui, "Layers", |ui| layers_ui(app, ui));
@@ -749,9 +766,7 @@ fn library_ui(app: &mut App, ui: &mut Ui) {
         let on = app.pcb.tool == Tool::Place(s.key.to_string());
         let r = ui.add_sized([ui.available_width(), 22.0], egui::Button::selectable(on, RichText::new(format!("{}  ·  {} {}", s.name, s.footprint, s.value)).size(12.5)));
         if r.on_hover_text(format!("Place a {} ({}); the footprint and value can be changed after", s.name.to_lowercase(), s.prefix)).clicked() {
-            set_tool(app, Tool::Place(s.key.to_string()));
-            app.pcb.place_rot = 0;
-            app.pcb.place_mirror = false;
+            start_place(app, s.key);
         }
     }
 }
@@ -764,6 +779,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
     match s {
         Sel::Part(i) if i < p.parts.len() => {
             let kind = pcb_lib::symbol_kind(&p.parts[i].symbol);
+            let sim_model = crate::circuit::model_params(&p.parts[i], &p.sim);
             ui.label(RichText::new(kind.map(|k| k.name).unwrap_or("Part")).strong());
             let part = &mut p.parts[i];
             row(ui, "Reference", |ui| {
@@ -771,6 +787,15 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             });
             row(ui, "Value", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.value).desired_width(120.0));
+            });
+            row(ui, "Type", |ui| {
+                egui::ComboBox::from_id_salt("pcb-sym").width(140.0).selected_text(kind.map(|k| k.name).unwrap_or(part.symbol.as_str()).to_string()).height(320.0).show_ui(ui, |ui| {
+                    for k in pcb_lib::SYMBOLS {
+                        ui.selectable_value(&mut part.symbol, k.key.to_string(), k.name);
+                    }
+                })
+                .response
+                .on_hover_text("The schematic symbol (and simulation model); its pins follow the footprint");
             });
             row(ui, "Footprint", |ui| {
                 egui::ComboBox::from_id_salt("pcb-fp").width(140.0).selected_text(part.footprint.clone()).height(320.0).show_ui(ui, |ui| {
@@ -784,10 +809,10 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                     }
                 });
             });
-            row(ui, "Part number", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut part.mpn).desired_width(120.0).hint_text("for the BOM"));
+            row(ui, "Package", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.package).desired_width(120.0).hint_text("supplier's name"));
             });
-            if matches!(part.symbol.as_str(), "U" | "J") {
+            if matches!(part.symbol.as_str(), "U" | "J") || !part.pin_names.is_empty() {
                 // pin names as one comma separated line, committed when the box loses focus
                 if app.pcb.pin_text_for != Some(part.id) {
                     app.pcb.pin_text = part.pin_names.join(", ");
@@ -815,6 +840,120 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                     ui.selectable_value(&mut part.bottom, false, "Top");
                     ui.selectable_value(&mut part.bottom, true, "Bottom");
                 });
+            } else {
+                row(ui, "Position", |ui| {
+                    // + 0.0 shows -0 as 0
+                    let mut x = [part.sch[0] + 0.0, part.sch[1] + 0.0];
+                    let a = ui.add(egui::DragValue::new(&mut x[0]).speed(GRID).suffix(" mm").max_decimals(2));
+                    let b = ui.add(egui::DragValue::new(&mut x[1]).speed(GRID).suffix(" mm").max_decimals(2));
+                    if a.changed() || b.changed() {
+                        part.sch = pcb::snap(x, GRID);
+                    }
+                });
+                row(ui, "Rotation", |ui| {
+                    for (q, t) in [(0u8, "0°"), (1, "90°"), (2, "180°"), (3, "270°")] {
+                        ui.selectable_value(&mut part.sch_rot, q, t);
+                    }
+                });
+                row(ui, "Mirror", |ui| {
+                    ui.checkbox(&mut part.sch_mirror, "");
+                });
+            }
+            ui.add_space(4.0);
+            ui.label(RichText::new("BOM").color(theme::muted()).size(11.0).strong());
+            row(ui, "MPN", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.mpn).desired_width(120.0).hint_text("manufacturer part no."));
+            });
+            row(ui, "Manufacturer", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.manufacturer).desired_width(120.0));
+            });
+            row(ui, "Description", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.description).desired_width(120.0));
+            });
+            row(ui, "Digi-Key", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.digikey).desired_width(120.0).hint_text("e.g. 311-10.0KCRCT-ND"));
+                if (!part.digikey.is_empty() || !part.mpn.is_empty()) && ui.small_button("↗").on_hover_text("Open on digikey.com").clicked() {
+                    crate::printing::open_url(&crate::digikey::product_url(part));
+                }
+            });
+            row(ui, "Datasheet", |ui| {
+                ui.add(egui::TextEdit::singleline(&mut part.datasheet).desired_width(120.0).hint_text("link"));
+                if part.datasheet.starts_with("http") && ui.small_button("↗").on_hover_text("Open the datasheet").clicked() {
+                    crate::printing::open_url(&part.datasheet);
+                }
+            });
+            let mut gone = None;
+            for (k, (name, val)) in part.fields.iter_mut().enumerate() {
+                ui.horizontal(|ui| {
+                    ui.add(egui::TextEdit::singleline(name).desired_width(92.0).text_color(theme::muted()));
+                    ui.add(egui::TextEdit::singleline(val).desired_width(100.0));
+                    if ui.small_button("×").on_hover_text("Remove this field").clicked() {
+                        gone = Some(k);
+                    }
+                });
+            }
+            if let Some(k) = gone {
+                part.fields.remove(k);
+            }
+            ui.horizontal(|ui| {
+                let (n, v) = &mut app.pcb.field_new;
+                ui.add(egui::TextEdit::singleline(n).desired_width(92.0).hint_text("New field"));
+                ui.add(egui::TextEdit::singleline(v).desired_width(100.0).hint_text("value"));
+                if ui.add_enabled(!n.trim().is_empty(), egui::Button::new("+").small()).on_hover_text("Add a BOM field (Tolerance, Voltage, LCSC …)").clicked() {
+                    part.fields.push((n.trim().to_string(), v.trim().to_string()));
+                    n.clear();
+                    v.clear();
+                }
+            });
+            ui.add_space(4.0);
+            ui.label(RichText::new("SIMULATION").color(theme::muted()).size(11.0).strong());
+            let mut on = !part.no_sim;
+            if ui.checkbox(&mut on, "Simulate this part").on_hover_text("Off: the part is left out of the circuit (its pins stay open)").changed() {
+                part.no_sim = !on;
+            }
+            match &sim_model {
+                Ok((desc, params)) => {
+                    ui.label(RichText::new(format!("Model: {desc}")).size(11.5));
+                    if !params.is_empty() {
+                        ui.label(RichText::new("Leave a box empty for the model's own value").color(theme::muted()).size(11.0));
+                    }
+                    for (key, label, unit, v) in params {
+                        row(ui, label, |ui| {
+                            let mut text = part.sim.get(*key).cloned().unwrap_or_default();
+                            let def = crate::circuit::si(*v, unit);
+                            let ok = text.is_empty() || crate::circuit::parse_si_lenient(&text).is_some();
+                            let r = ui.add(egui::TextEdit::singleline(&mut text).desired_width(86.0).hint_text(def.trim()).text_color_opt((!ok).then(theme::error))).on_hover_text(format!("{label} ({key}); the model gives {}", def.trim()));
+                            if r.changed() {
+                                if text.trim().is_empty() {
+                                    part.sim.remove(*key);
+                                } else {
+                                    part.sim.insert(key.to_string(), text);
+                                }
+                            }
+                            if !unit.is_empty() {
+                                ui.label(RichText::new(*unit).color(theme::muted()).size(11.0));
+                            }
+                        });
+                    }
+                    // overrides for keys this model doesn't have (after a type change)
+                    let stale: Vec<String> = part.sim.keys().filter(|k| !params.iter().any(|p| p.0 == k.as_str())).cloned().collect();
+                    if !stale.is_empty() {
+                        ui.horizontal_wrapped(|ui| {
+                            ui.label(RichText::new(format!("Not in this model: {}", stale.join(", "))).color(theme::error()).size(11.0));
+                            if ui.small_button("Remove").clicked() {
+                                for k in &stale {
+                                    part.sim.remove(k);
+                                }
+                            }
+                        });
+                    }
+                    if !part.sim.is_empty() && ui.small_button("Reset to the model's values").clicked() {
+                        part.sim.clear();
+                    }
+                }
+                Err(e) => {
+                    ui.label(RichText::new(e).color(theme::error()).size(11.5));
+                }
             }
         }
         Sel::Label(i) if i < p.labels.len() => {
@@ -1441,12 +1580,18 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
             if clicked {
                 if let Some(h) = hover {
                     let (rot, mir) = (app.pcb.place_rot, app.pcb.place_mirror);
+                    let dk = app.pcb.dk.placing.clone();
                     let mut err = None;
                     let mut new = None;
                     edit(app, |p| match p.add_part(&key, None, None, h) {
                         Ok(i) => {
                             p.parts[i].sch_rot = rot;
                             p.parts[i].sch_mirror = mir;
+                            if let Some(d) = &dk {
+                                crate::digikey_ui::fill_placed(&mut p.parts[i], d);
+                                let at = p.free_spot(&p.parts[i]);
+                                p.parts[i].at = at;
+                            }
                             new = Some(i);
                         }
                         Err(e) => err = Some(e),

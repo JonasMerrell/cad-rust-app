@@ -44,9 +44,31 @@ pub struct Part {
     /// Pin names for ICs and connectors, in pin order.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub pin_names: Vec<String>,
-    /// Manufacturer or supplier part number, for the BOM.
+    /// Manufacturer part number, for the BOM.
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub mpn: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manufacturer: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub description: String,
+    /// Datasheet link.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub datasheet: String,
+    /// Digi-Key part number (`311-10.0KCRCT-ND`).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digikey: String,
+    /// The supplier's package name (`0805 (2012 Metric)`), which picked the footprint.
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub package: String,
+    /// More fields for the BOM, in order (tolerance, voltage, power, LCSC number …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<(String, String)>,
+    /// Simulation model overrides, by parameter key (`bf` → `300`); see `circuit::knobs`.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub sim: std::collections::BTreeMap<String, String>,
+    /// Left out of the circuit simulation.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub no_sim: bool,
     /// Schematic position, quarter turns anticlockwise and mirror (about the vertical axis).
     pub sch: P,
     #[serde(default)]
