@@ -64,6 +64,54 @@ Disc profiles are the exact cycloid offset 0.08 mm inward for clearance. The scr
 discs only touch the ring pins (a few mm³ of tangent contact) and that the second disc's holes line up
 with the output pins.
 
+## Strength of the printed brackets
+
+`fea.json` runs a static FEA on the four L-shaped printed parts that carry the arm: the turntable/tower,
+the elbow housing, the forearm and the wrist link. Run it in the output folder after `parts.rhai`:
+
+    cd out && rcad run ../examples/robot-arm-6dof/fea.json
+
+Each part is held by the bolt holes of the joint it sits on. The bolt holes at its other end are tied
+rigidly to the centre of mass of everything it carries (from `fea_loads` in `summary.json`), loaded
+with twice that weight to cover acceleration and knocks, with the arm stretched out flat. rCAD has no
+PA-CF in its library, so the runs use Nylon (E 2.7 GPa). Stresses hardly depend on E. PA-CF is about
+2.5 times stiffer, so real deflections are smaller than these.
+
+| Part | Before: peak (MPa) | After: peak (MPa) | Where the peak is now |
+|---|---|---|---|
+| Turntable/tower | 160 principal, 2.8 mm sag at the tool | 24 von Mises, 0.4 mm | a J2 bolt hole |
+| Elbow housing | 20 principal | 12 | a J4 bolt hole |
+| Forearm | 13 principal | 9 | a J4 carrier bolt hole |
+| Wrist link | 8.5 principal | 8.5 | a J6 bolt hole (unchanged) |
+
+The turntable was the weak spot. The tower stood on a 10 mm plate about 30 mm away from the J1
+flange, so the whole arm's moment bent that plate. The fixes:
+
+- **Turntable/tower:** the plate is 20 mm thick (this limits J2 to about 30° below horizontal before
+  the shoulder hub's tail reaches it). Two gussets sit in front of the tower beside the J2 housing,
+  and a wedge runs along the tower root inside the belt bay.
+- **Elbow housing:** the side plate on the J3 carrier is 14 mm instead of 10, and the inside corners
+  are filleted at 6 mm.
+- **Forearm:** the cheek carrying J5 is 14 mm instead of 10.
+
+All the remaining peaks are at bolt holes, where the model holds the hole wall rigidly. That
+overstates the stress compared with a clamped flange. Everywhere else the parts stay under about
+5 MPa.
+
+PA-CF is around 90 MPa strong along the layers but only about 30 MPa across them. So the
+worst peak, 24 MPa at twice the load, is fine along the layers and about 1.25 across them. Print
+orientation:
+
+- **Turntable:** flat on its base, so the tower's layers stack upward and the bolt loads stay in
+  the plane of the layers.
+- **Elbow housing:** on the J4 end plate, so the side plate's bending runs along the layers.
+- **Forearm and wrist link:** lying on their big flat plate.
+
+Use 5–6 walls around the bolt holes and heat-set inserts, which spread the load into more plastic
+than a thread cut in the plastic.
+
+![Turntable FEA after the fixes](fea-turntable.png)
+
 ## Tool changer
 
 ![Arm side of the tool changer](tool-changer.png)
