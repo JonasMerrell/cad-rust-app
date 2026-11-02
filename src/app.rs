@@ -319,7 +319,9 @@ impl App {
         if picked.is_some() || t.elapsed() > Duration::from_millis(300) {
             return picked;
         }
-        let dir = self.path.as_ref().and_then(|p| p.parent().map(|d| d.to_path_buf())).filter(|d| d.is_dir());
+        // beside the document (a bare file name's folder is the empty path: the current one)
+        let dir = self.path.as_ref().and_then(|p| p.parent().map(|d| if d.as_os_str().is_empty() { std::path::PathBuf::from(".") } else { d.to_path_buf() })).filter(|d| d.is_dir());
+        let dir = dir.map(|d| std::fs::canonicalize(&d).unwrap_or(d));
         let dir = dir.or_else(|| std::env::var_os("HOME").map(std::path::PathBuf::from)).unwrap_or_else(|| ".".into());
         log::warn!("no file dialog available; saving into {}", dir.display());
         // never overwrite something without asking
