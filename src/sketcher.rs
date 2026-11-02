@@ -1846,7 +1846,8 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
     let sel: Vec<Sel> = app.sketch.as_ref().unwrap().sel.iter().copied().collect();
     let sk = app.sk().0.clone();
     let units = app.doc.units.scale();
-    let center = sel.iter().find_map(|s| if let Sel::Point(p) = s { Some(sk.pv(*p)) } else { None }).filter(|_| circular).unwrap_or(DVec2::ZERO);
+    let center_id = sel.iter().find_map(|s| if let Sel::Point(p) = s { Some(*p) } else { None }).filter(|_| circular);
+    let center = center_id.map(|p| sk.pv(p)).unwrap_or(DVec2::ZERO);
     let curves: Vec<Id> = sel.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).collect();
     if curves.is_empty() {
         app.flash("Select the curves to pattern", ToastKind::Info);
@@ -1854,13 +1855,14 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
     }
     let mut out = sk.clone();
     for k in 1..count.max(1) {
+        let step = if (a - 360.0).abs() < 1e-9 { a / count as f64 } else { a / (count.max(2) - 1) as f64 };
+        let deg = step * k as f64;
+        let off = DVec2::new(a, b) * units * k as f64;
         let xf = |p: DVec2| -> DVec2 {
             if circular {
-                let step = if (a - 360.0).abs() < 1e-9 { a / count as f64 } else { a / (count.max(2) - 1) as f64 };
-                let ang = (step * k as f64).to_radians();
-                center + DVec2::from_angle(ang).rotate(p - center)
+                center + DVec2::from_angle(deg.to_radians()).rotate(p - center)
             } else {
-                p + DVec2::new(a, b) * units * k as f64
+                p + off
             }
         };
         let mut map = std::collections::HashMap::new();
@@ -1876,7 +1878,12 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
                 Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| np(&mut out, *p)).collect(), closed },
                 Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().map(|p| xf(DVec2::from(*p)).into()).collect(), closed },
             };
-            out.add_curve(g, c.construction);
+            let linked = !matches!(g, Geom::Poly { .. });
+            let copy = out.add_curve(g, c.construction);
+            // keep the copy tied to the original, so resizing or moving it updates every copy
+            if linked {
+                out.constraints.push(Constraint::Pattern { a: *id, b: copy, center: center_id, angle: if circular { deg } else { 0.0 }, dx: if circular { 0.0 } else { off.x }, dy: if circular { 0.0 } else { off.y }, circular });
+            }
         }
     }
     app.sk_checkpoint();
