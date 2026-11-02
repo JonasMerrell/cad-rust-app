@@ -531,6 +531,7 @@ fn sources_ui(app: &mut App, ui: &mut Ui, pi: usize, nets: &[String]) {
         }
     } else {
         let mut del = None;
+        let stop = if p.sim.analysis.kind == Kind::Tran { p.sim.analysis.stop } else { 0.0 };
         for (k, s) in p.sim.sources.iter_mut().enumerate() {
             ui.push_id(k, |ui| {
                 ui.horizontal(|ui| {
@@ -546,15 +547,7 @@ fn sources_ui(app: &mut App, ui: &mut Ui, pi: usize, nets: &[String]) {
                     ui.label("−");
                     net_combo(ui, ("sm", k), &mut s.minus, nets, "ground");
                 });
-                ui.horizontal(|ui| {
-                    ui.add(egui::TextEdit::singleline(&mut s.wave).desired_width(150.0).hint_text("5 or PULSE(0 5 0 1u 1u 1m 2m)"))
-                        .on_hover_text("5, DC 5, PULSE(v1 v2 delay rise fall width period), SIN(offset amplitude frequency), PWL(t1 v1 t2 v2 …)");
-                    ui.label("AC");
-                    ui.add(egui::DragValue::new(&mut s.ac).speed(0.1));
-                });
-                if let Err(e) = crate::circuit_solve::Wave::parse(&s.wave) {
-                    ui.colored_label(theme::error(), RichText::new(e).size(11.0));
-                }
+                crate::circuit_wave_ui::editor(ui, k, s, stop);
                 ui.add_space(4.0);
             });
         }

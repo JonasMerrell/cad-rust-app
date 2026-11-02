@@ -33,8 +33,38 @@ pub enum Wave {
         td: f64,
         theta: f64,
     },
-    /// Piecewise linear (time, value) corners.
-    Pwl(Vec<(f64, f64)>),
+    /// Piecewise linear (time, value) corners, shifted by a delay `td`; with `rep` the part from
+    /// that time to the last corner repeats for ever (ngspice `PWL(…) R=… TD=…`).
+    Pwl { pts: Vec<(f64, f64)>, td: f64, rep: Option<f64> },
+    /// Any function of time, with the longest step to take through it (0: worked out from the
+    /// stop time).
+    Expr { e: std::sync::Arc<crate::circuit_wave::Expr>, dt: f64 },
+}
+
+/// A PWL list's local time for `t` (delay removed, repeats folded back).
+fn pwl_local(pts: &[(f64, f64)], td: f64, rep: Option<f64>, t: f64) -> f64 {
+    let tt = t - td;
+    if let (Some(r), Some(last)) = (rep, pts.last()) {
+        let per = last.0 - r;
+        if per > 0.0 && tt > last.0 {
+            return r + (tt - r).rem_euclid(per);
+        }
+    }
+    tt
+}
+
+fn pwl_at(pts: &[(f64, f64)], t: f64) -> f64 {
+    let Some(first) = pts.first() else { return 0.0 };
+    if t <= first.0 {
+        return first.1;
+    }
+    // the first corner at or after t
+    let k = pts.partition_point(|p| p.0 < t);
+    if k >= pts.len() {
+        return pts.last().unwrap().1;
+    }
+    let ((t0, v0), (t1, v1)) = (pts[k - 1], pts[k]);
+    if t1 > t0 { v0 + (v1 - v0) * (t - t0) / (t1 - t0) } else { v1 }
 }
 
 impl Wave {
@@ -67,19 +97,8 @@ impl Wave {
                     vo + va * (2.0 * std::f64::consts::PI * f * s).sin() * (-theta * s).exp()
                 }
             }
-            Wave::Pwl(pts) => {
-                let Some(first) = pts.first() else { return 0.0 };
-                if t <= first.0 {
-                    return first.1;
-                }
-                for w in pts.windows(2) {
-                    let ((t0, v0), (t1, v1)) = (w[0], w[1]);
-                    if t <= t1 {
-                        return if t1 > t0 { v0 + (v1 - v0) * (t - t0) / (t1 - t0) } else { v1 };
-                    }
-                }
-                pts.last().unwrap().1
-            }
+            Wave::Pwl { pts, td, rep } => pwl_at(pts, pwl_local(pts, *td, *rep, t)),
+            Wave::Expr { e, .. } => e.at(t),
         }
     }
 
@@ -114,7 +133,27 @@ impl Wave {
                     f64::INFINITY
                 }
             }
-            Wave::Pwl(pts) => pts.iter().map(|p| p.0).find(|b| *b > t + eps).unwrap_or(f64::INFINITY),
+            Wave::Pwl { pts, td, rep } => {
+                let after = |lt: f64| {
+                    let k = pts.partition_point(|p| p.0 <= lt + eps);
+                    pts.get(k).map(|p| p.0)
+                };
+                let lt = pwl_local(pts, *td, *rep, t);
+                if let Some(b) = after(lt) {
+                    // back to global time: the same shift as t's
+                    return t + (b - lt);
+                }
+                match (rep, pts.last()) {
+                    (Some(r), Some(last)) if last.0 > *r => {
+                        // the cycle starts again at r: its first corner after r
+                        let next = after(*r).unwrap_or(last.0);
+                        t + (last.0 - lt) + (next - r)
+                    }
+                    _ => f64::INFINITY,
+                }
+            }
+            // jumps in an expression are not known ahead: the step limit follows them
+            Wave::Expr { .. } => f64::INFINITY,
         }
     }
 
@@ -130,7 +169,17 @@ impl Wave {
                 }
                 m
             }
+            Wave::Expr { dt, .. } if *dt > 0.0 => *dt,
             _ => f64::INFINITY,
+        }
+    }
+
+    /// `max_step` for a run to `stop`: an expression with no step of its own gets one from how
+    /// fast it swings over the run.
+    pub fn max_step_to(&self, stop: f64) -> f64 {
+        match self {
+            Wave::Expr { e, dt } if *dt <= 0.0 => e.auto_step(stop),
+            _ => self.max_step(),
         }
     }
 
@@ -140,7 +189,9 @@ impl Wave {
             Wave::Dc(v) => v.abs(),
             Wave::Pulse { v1, v2, .. } => v1.abs().max(v2.abs()),
             Wave::Sin { vo, va, .. } => vo.abs() + va.abs(),
-            Wave::Pwl(p) => p.iter().map(|x| x.1.abs()).fold(0.0, f64::max),
+            Wave::Pwl { pts, .. } => pts.iter().map(|x| x.1.abs()).fold(0.0, f64::max),
+            // sampled over its first second
+            Wave::Expr { e, .. } => (0..=1000).map(|k| e.at(k as f64 * 1e-3).abs()).fold(0.0, f64::max),
         }
     }
 }
@@ -1202,7 +1253,7 @@ impl<'a> Sim<'a> {
         let mut hmax = if hmax > 0.0 { hmax.min(stop / 10.0) } else { stop / 500.0 };
         for e in &self.c.elems {
             if let Dev::V(w, _) | Dev::I(w, _) = &e.dev {
-                hmax = hmax.min(w.max_step());
+                hmax = hmax.min(w.max_step_to(stop));
             }
         }
         if let Some(e) = ext.as_deref() {

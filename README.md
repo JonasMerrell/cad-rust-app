@@ -179,6 +179,10 @@ The PCB tab's **Simulate** view runs the schematic as a SPICE-style circuit: a D
 transient from power-on and an AC sweep, with models for common resistors, capacitors, diodes, LEDs,
 transistors, MOSFETs, 555 timers, op amps and regulators taken from the part values.
 
+- **Sources:** DC, pulse and sine sources, or any signal: piecewise-linear points (drawn on the
+  source's preview, typed as `PWL(0 0 1m 5 2m 0) R=0` to repeat, or imported from a scope or
+  generator CSV) or an expression of time such as `2*sin(2*pi*50*t) + 0.2*noise(5k*t)` or
+  `t < 1m ? 0 : 3.3*sqr(1k*t)`.
 - **Firmware:** a Raspberry Pi Pico in the schematic runs its real firmware (UF2, ELF, HEX or BIN from
   the Pico SDK or Arduino-Pico) on an emulated RP2040: both cores, GPIO, timers, PWM, the ADC, the
   UARTs and the watchdog. It reads the circuit's voltages and drives its pins back into it, and the
@@ -309,6 +313,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/circuit_mcu.rs` | the Raspberry Pi Pico board in a circuit and its firmware running alongside the transient |
 | `src/circuit_mech.rs` | motors, steppers and their drivers, servos and sensors linked to assembly mates, and the mechanism running alongside the transient |
 | `src/mcu_cm0.rs` / `src/mcu_rp2040.rs` / `src/mcu_rom.rs` | the Cortex-M0+ core, the RP2040 (memory, peripherals, firmware files) and its boot ROM re-implemented |
+| `src/circuit_wave.rs` / `src/circuit_wave_ui.rs` | arbitrary source waveforms (expressions of t, CSV to PWL) and the source waveform editor |
 | `src/circuit_plot.rs` / `src/circuit_ui.rs` | waveform plots; the PCB tab's Simulate view |
 | `src/agent.rs` | headless tool interface: MCP server, `run` scripts, and the tools the Claude panel uses |
 | `src/agent_schema.rs` | the tools' argument schemas and the check that holds calls to them |

@@ -59,7 +59,8 @@ pub struct Source {
     pub plus: String,
     /// Empty: ground.
     pub minus: String,
-    /// `5`, `DC 5`, `PULSE(0 5 1m 1u 1u 4m 10m)`, `SIN(0 1 1k)`, `PWL(0 0 1m 5)`.
+    /// `5`, `DC 5`, `PULSE(0 5 1m 1u 1u 4m 10m)`, `SIN(0 1 1k)`, `PWL(0 0 1m 5) R=0`,
+    /// `2*sin(2*pi*50*t)` (or `EXPR(…) DT=10u`).
     pub wave: String,
     /// A current source (out of plus into the circuit) instead of a voltage source.
     pub current: bool,
@@ -258,13 +259,28 @@ fn volts_in(s: &str) -> Option<f64> {
 
 impl Wave {
     /// `5`, `DC 5`, `PULSE(v1 v2 delay rise fall width period)`, `SIN(offset amp freq delay damping)`,
-    /// `PWL(t1 v1 t2 v2 …)`; numbers take SI prefixes.
+    /// `PWL(t1 v1 t2 v2 …) R=repeat-from TD=delay`, `EXPR(expression of t) DT=max-step` or a bare
+    /// expression of t; numbers take SI prefixes.
     pub fn parse(s: &str) -> Result<Wave, String> {
         let t = s.trim();
         let up = t.to_ascii_uppercase();
         let args = |name: &str| -> Result<Vec<f64>, String> {
             let inner = t[name.len()..].trim().trim_start_matches('(').trim_end_matches(')');
             inner.split(|c: char| c.is_whitespace() || c == ',').filter(|x| !x.is_empty()).map(|x| parse_si(x).ok_or_else(|| format!("{x} is not a number"))).collect()
+        };
+        // an expression of t first: sin(2*pi*50*t) is not SIN(…), nor pulse(1k*t, 0.2) PULSE(…)
+        if !up.starts_with("EXPR")
+            && let Ok(e) = crate::circuit_wave::Expr::parse(t)
+            && e.uses_t()
+        {
+            return Ok(Wave::Expr { e: std::sync::Arc::new(e), dt: 0.0 });
+        }
+        let args = |name: &str| -> Result<Vec<f64>, String> {
+            args(name).map_err(|e| match crate::circuit_wave::Expr::parse(t) {
+                // looks like an expression after all (no spaces between numbers): say what is wrong with it
+                Err(x) if !t[name.len()..].trim().trim_start_matches('(').contains(' ') => format!("{e}, or as an expression: {x}"),
+                _ => e,
+            })
         };
         if up.starts_with("PULSE") {
             let a = args("PULSE")?;
@@ -286,8 +302,16 @@ impl Wave {
             }
             return Ok(Wave::Sin { vo: a[0], va: a[1], f: a[2], td: a.get(3).copied().unwrap_or(0.0), theta: a.get(4).copied().unwrap_or(0.0) });
         }
-        if up.starts_with("PWL") {
-            let a = args("PWL")?;
+        if up.starts_with("PWL") || up.starts_with("EXPR") {
+            let kw = if up.starts_with("PWL") { 3 } else { 4 };
+            let (inner, opts) = paren_body(&t[kw..]).ok_or_else(|| if kw == 3 { "PWL(t1 v1 t2 v2 …) R=repeat-from TD=delay".to_string() } else { "EXPR(5*sin(2*pi*1k*t)) DT=max-step".to_string() })?;
+            let opts = wave_opts(opts, if kw == 3 { &["R", "TD"] } else { &["DT"] })?;
+            let opt = |k: &str| opts.iter().find(|o| o.0 == k).map(|o| o.1);
+            if kw == 4 {
+                let e = crate::circuit_wave::Expr::parse(inner)?;
+                return Ok(Wave::Expr { e: std::sync::Arc::new(e), dt: opt("DT").unwrap_or(0.0).max(0.0) });
+            }
+            let a: Vec<f64> = inner.split(|c: char| c.is_whitespace() || c == ',').filter(|x| !x.is_empty()).map(|x| parse_si(x).ok_or_else(|| format!("{x} is not a number"))).collect::<Result<_, _>>()?;
             if a.len() < 2 || a.len() % 2 != 0 {
                 return Err("PWL(t1 v1 t2 v2 …): pairs of time and value".into());
             }
@@ -295,11 +319,61 @@ impl Wave {
             if pts.windows(2).any(|w| w[1].0 < w[0].0) {
                 return Err("PWL times must increase".into());
             }
-            return Ok(Wave::Pwl(pts));
+            let rep = opt("R");
+            if let Some(r) = rep {
+                let (t0, t1) = (pts[0].0, pts.last().unwrap().0);
+                if r < t0 || r >= t1 {
+                    return Err(format!("R={} must be a corner time from {} up to before the last one ({})", crate::circuit_wave::num(r), crate::circuit_wave::num(t0), crate::circuit_wave::num(t1)));
+                }
+                if !pts.iter().any(|p| p.0 == r) {
+                    return Err(format!("R={} must be one of the corner times", crate::circuit_wave::num(r)));
+                }
+            }
+            return Ok(Wave::Pwl { pts, td: opt("TD").unwrap_or(0.0), rep });
         }
         let v = if up.starts_with("DC") { &t[2..] } else { t };
-        parse_si(v).map(Wave::Dc).ok_or_else(|| format!("{t}: give a number (5, 3.3, 10m), DC 5, PULSE(…), SIN(…) or PWL(…)"))
+        // arithmetic first (parse_si would read 2*2.5 as 2), then a value like 4k7 or 5 V
+        match crate::circuit_wave::Expr::parse(v) {
+            Ok(e) => return Ok(Wave::Dc(e.at(0.0))),
+            Err(e) if v.contains(['(', ')', '*', '/', '^']) => return Err(format!("{t}: {e}")),
+            Err(_) => {}
+        }
+        parse_si(v).map(Wave::Dc).ok_or_else(|| format!("{t}: give a number (5, 3.3, 10m), DC 5, PULSE(…), SIN(…), PWL(…) or an expression of t like 2*sin(2*pi*50*t)"))
     }
+}
+
+/// The text inside the parentheses that open `s` (spaces allowed before them), and what follows the
+/// matching close.
+fn paren_body(s: &str) -> Option<(&str, &str)> {
+    let s = s.trim_start();
+    let rest = s.strip_prefix('(')?;
+    let mut depth = 1;
+    for (k, c) in rest.char_indices() {
+        match c {
+            '(' => depth += 1,
+            ')' => {
+                depth -= 1;
+                if depth == 0 {
+                    return Some((&rest[..k], &rest[k + 1..]));
+                }
+            }
+            _ => {}
+        }
+    }
+    None
+}
+
+/// `KEY=value` options after a wave's parentheses, keys from `allowed` (any case).
+fn wave_opts(s: &str, allowed: &[&'static str]) -> Result<Vec<(&'static str, f64)>, String> {
+    let mut out = vec![];
+    let s = s.replace(" =", "=").replace("= ", "=");
+    for w in s.split_whitespace() {
+        let (k, v) = w.split_once('=').ok_or_else(|| format!("{w}: options are {}", allowed.iter().map(|a| format!("{a}=…")).collect::<Vec<_>>().join(" ")))?;
+        let key = allowed.iter().find(|a| a.eq_ignore_ascii_case(k)).ok_or_else(|| format!("{k}: options are {}", allowed.iter().map(|a| format!("{a}=…")).collect::<Vec<_>>().join(" ")))?;
+        let v = parse_si(v).ok_or_else(|| format!("{v} is not a number"))?;
+        out.push((*key, v));
+    }
+    Ok(out)
 }
 
 // ---------------------------------------------------------------- models
@@ -1378,7 +1452,14 @@ pub fn auto_stop(b: &Built) -> f64 {
                     }
                 }
                 Wave::Sin { f, .. } if *f > 0.0 => per = per.max(1.0 / f),
-                Wave::Pwl(pts) => per = per.max(pts.last().map(|x| x.0).unwrap_or(0.0)),
+                Wave::Pwl { pts, td, rep } => {
+                    let end = td + pts.last().map(|x| x.0).unwrap_or(0.0);
+                    match rep {
+                        // the first pass and four repeats (the stop is five of `per`)
+                        Some(r) => per = per.max((end + 4.0 * (pts.last().map(|x| x.0).unwrap_or(0.0) - r)) / 5.0),
+                        None => per = per.max(end),
+                    }
+                }
                 _ => {}
             }
         }
@@ -1832,6 +1913,73 @@ mod tests {
         let w = Wave::parse("PWL(0 0 1m 5)").unwrap();
         assert!((w.at(0.5e-3) - 2.5).abs() < 1e-12);
         assert!(Wave::parse("PULSE(1)").is_err());
+    }
+
+    #[test]
+    fn arbitrary_waves_parse() {
+        // PWL repeating from 1m, after a 1m delay: 0..1m ramp 0→1, then 1m..3m triangle 1→0→1
+        let w = Wave::parse("PWL(0 0 1m 1 2m 0 3m 1) R=1m TD=1m").unwrap();
+        assert!((w.at(0.5e-3) - 0.0).abs() < 1e-12);
+        assert!((w.at(1.5e-3) - 0.5).abs() < 1e-12);
+        assert!((w.at(3e-3) - 0.0).abs() < 1e-12);
+        // second cycle of the repeat: 4m..6m local 1m..3m
+        assert!((w.at(5e-3) - 0.0).abs() < 1e-9, "{}", w.at(5e-3));
+        assert!((w.at(6.5e-3) - 0.5).abs() < 1e-9, "{}", w.at(6.5e-3));
+        // breakpoints: the corners shifted by the delay, then the repeated ones
+        assert!((w.next_break(0.0) - 1e-3).abs() < 1e-15);
+        assert!((w.next_break(2.5e-3) - 3e-3).abs() < 1e-15);
+        assert!((w.next_break(4e-3) - 5e-3).abs() < 1e-12, "{}", w.next_break(4e-3));
+        assert!((w.next_break(4.5e-3) - 5e-3).abs() < 1e-12);
+        assert!((w.next_break(6e-3) - 7e-3).abs() < 1e-12);
+        assert!(Wave::parse("PWL(0 0 1m 1) R=5m").is_err());
+        assert!(Wave::parse("PWL(0 0 1m 1) R=0.5m").is_err());
+        assert!(Wave::parse("PWL(0 0 1m 1) X=1").is_err());
+        // expressions, bare or in EXPR()
+        let e = Wave::parse("2*sin(2*pi*50*t)").unwrap();
+        assert!((e.at(5e-3) - 2.0).abs() < 1e-12);
+        let e = Wave::parse("EXPR(t < 1m ? 0 : 5) DT=10u").unwrap();
+        assert!(matches!(e, Wave::Expr { dt, .. } if (dt - 1e-5).abs() < 1e-18));
+        assert_eq!(e.at(2e-3), 5.0);
+        assert!((e.max_step() - 1e-5).abs() < 1e-18);
+        // a constant expression is DC
+        assert_eq!(Wave::parse("2*2.5").unwrap(), Wave::Dc(5.0));
+        assert!(Wave::parse("2*sin(t").unwrap_err().contains("expected"));
+        assert!(Wave::parse("VCC").is_err());
+        // what the UI writes back parses to the same points
+        let pts = vec![(0.0, 0.0), (1.5e-6, 3.3), (2e-3, -1.25)];
+        let txt = crate::circuit_wave::pwl_text(&pts, 0.0, Some(1.5e-6));
+        let Wave::Pwl { pts: back, td, rep } = Wave::parse(&txt).unwrap() else { panic!("{txt}") };
+        assert!(td == 0.0 && (rep.unwrap() - 1.5e-6).abs() < 1e-20 && back.len() == 3);
+        assert!(back.iter().zip(&pts).all(|(a, b)| (a.0 - b.0).abs() <= b.0 * 1e-12 && (a.1 - b.1).abs() < 1e-12), "{txt}");
+    }
+
+    #[test]
+    fn arbitrary_sources_drive_a_transient() {
+        // a 1 kHz sine from an expression into 1k/1u (corner 159 Hz): about 0.16 of the input
+        let p = rc_step("sin(2*pi*1k*t)");
+        let out = run(&p, &Analysis { kind: Kind::Tran, stop: 10e-3, ..Default::default() }).unwrap();
+        let vin = out.probe("V(IN)").unwrap();
+        let vout = out.probe("V(OUT)").unwrap();
+        let tail = |s: &Sig| out.x.iter().zip(&s.re).filter(|(t, _)| **t > 5e-3).map(|(_, v)| v.abs()).fold(0.0, f64::max);
+        assert!((tail(&vin) - 1.0).abs() < 0.02, "in {}", tail(&vin));
+        let g = tail(&vout);
+        assert!((g - 0.157).abs() < 0.01, "out {g}");
+        // enough points to follow the sine: about 40 a period
+        assert!(out.x.len() > 300, "{}", out.x.len());
+        // a repeating PWL square wave behaves like the PULSE one
+        let p = rc_step("PWL(0 0 1u 5 1m 5 1.001m 0 2m 0) R=0");
+        let b = build(&p).unwrap();
+        assert_eq!(auto_stop(&b), 1e-2);
+        let out = run(&p, &Analysis { kind: Kind::Tran, stop: 10e-3, ..Default::default() }).unwrap();
+        let vout = out.probe("V(OUT)").unwrap();
+        // at the end of a high half the RC (tau 1 ms) has charged to about 5 * 0.73
+        let at = |tq: f64| {
+            let k = out.x.partition_point(|t| *t < tq);
+            vout.re[k]
+        };
+        let hi = at(8.999e-3);
+        assert!(hi > 3.3 && hi < 4.0, "{hi}");
+        assert!(at(9.999e-3) < 1.7, "{}", at(9.999e-3));
     }
 
     fn blinker() -> Pcb {

@@ -41,6 +41,8 @@ mod circuit_mcu;
 mod circuit_mech;
 mod circuit_plot;
 mod circuit_solve;
+mod circuit_wave;
+mod circuit_wave_ui;
 mod circuit_ui;
 mod mcu_cm0;
 mod mcu_rom;
