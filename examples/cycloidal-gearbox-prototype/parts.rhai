@@ -27,6 +27,26 @@
 let out = if ARGS.len() > 0 { ARGS[0] + "/" } else { "" };
 let FILES = !(ARGS.len() > 1 && ARGS[1] == "quick");
 
+// ================================================================ FIT: printed-fit offsets (mm, on the DIAMETER)
+// Every printed hole and boss that mates with a bought part is drawn at nominal + its offset here, and the
+// tolerance coupon uses the same values, so print the coupon, adjust, regenerate, repeat. + makes a hole
+// bigger or a boss bigger. Leave the slicer's hole/contour compensation at 0 when you tune here.
+// Typical FDM starting points: holes print 0.1-0.3 small, bosses 0.05-0.15 big.
+let FIT = #{
+    seat_6814: 0.0,      // Ø90 housing bore for the output bearing (press)
+    boss_6814: 0.0,      // Ø70 carrier boss in the output bearing (press / snug)
+    seat_6805: 0.0,      // Ø37 disc bores for the cam bearings (press)
+    boss_6805: 0.0,      // Ø25 cam lobes in the cam bearings (light push)
+    shaft_d: 0.0,        // Ø5.1 D-bore of cam A / B on the motor shaft (snug, no play); also moves the flat
+    ring_pin: 0.0,       // Ø3 ring-pin grooves in the housing (pins slide in)
+    out_pin_press: 0.0,  // Ø6 output-pin holes in the carrier (press)
+    insert_m3: 0.0,      // Ø4.0 heat-set insert holes (housing, carrier)
+    clear_m3: 0.0,       // Ø3.4 M3 clearance holes (motor, cover, flange, stand, lever)
+    motor_pilot: 0.0,    // Ø22.5 housing hole for the motor's Ø22 boss
+    disc_gap: 0.0,       // added to the 0.08 radial gap between disc and ring pins (and the output-pin holes)
+};
+fn fr(d, k) { d / 2.0 + k / 2.0 }   // radius of a nominal diameter d with diameter offset k
+
 fn zcyl(x, y, z0, r, h) { cylinder(vec3(x, y, z0), vec3(0, 0, 1), r, h) }
 fn ring_holes(n, pcd, a0, z0, r, h) {
     let hs = [];
@@ -76,9 +96,9 @@ fn nema17(len) {
     let shaft = zcyl(0, 0, 0, 2.5, 22).cut([block(vec3(2.0, -3, 2), vec3(3, 3, 23))]);   // D-flat 0.5 deep
     fuse([body, zcyl(0, 0, 0, 11, 2), shaft]).unify()
 }
-// D-bore for a Ø5 motor shaft with a 0.5 mm flat on +X (bore 5.1, flat at x = 2.05)
-fn d_bore(z0, h) {
-    zcyl(0, 0, z0, 2.55, h).cut([block(vec3(2.05, -3, z0 - 1.0), vec3(3, 3, z0 + h + 1.0))])
+// D-bore for a Ø5 motor shaft with a 0.5 mm flat on +X (bore 5.1 + k, flat at x = 2.05 + k/2)
+fn d_bore(z0, h, k) {
+    zcyl(0, 0, z0, 2.55 + k / 2.0, h).cut([block(vec3(2.05 + k / 2.0, -3, z0 - 1.0), vec3(3, 3, z0 + h + 1.0))])
 }
 
 // ================================================================ the L50 spec (as in the arm)
@@ -103,22 +123,22 @@ let cover_pcd = s.bod / 2.0 + rr;   // Ø105
 // housing
 let hc = [zcyl(0, 0, s.tr, s.R + 0.3, z_ledge - s.tr),               // disc bore: the lobe tips reach R + 0.02 between the pins
           zcyl(0, 0, z_ledge - 0.5, s.bod / 2.0 - 1.5, LEDGE + 1.0),  // ledge inner edge Ø87
-          zcyl(0, 0, z_b0, s.bod / 2.0, s.bw + 1.0),                  // output bearing seat Ø90
-          zcyl(0, 0, -1, 11.25, s.tr + 2.0)];                         // motor pilot Ø22.5
+          zcyl(0, 0, z_b0, fr(s.bod, FIT.seat_6814), s.bw + 1.0),      // output bearing seat Ø90
+          zcyl(0, 0, -1, fr(22.5, FIT.motor_pilot), s.tr + 2.0)];                         // motor pilot Ø22.5
 for p in [[15.5, 15.5], [-15.5, 15.5], [15.5, -15.5], [-15.5, -15.5]] {
-    hc.push(zcyl(p[0], p[1], -1, 1.7, s.tr + 2.0));                     // M3 motor screws, from inside
+    hc.push(zcyl(p[0], p[1], -1, fr(3.4, FIT.clear_m3), s.tr + 2.0));                     // M3 motor screws, from inside
     hc.push(zcyl(p[0], p[1], s.tr - 3.5, 3.25, 4.0));                   // head counterbore Ø6.5 x 3.5
 }
-for i in 0..N { let a = 6.283185307179586 * i / N; hc.push(zcyl(s.R * cos(a), s.R * sin(a), PIN_Z0, s.Rr, z_ledge - PIN_Z0)); }
-hc += ring_holes(6, s.pcd_mount, 0, -1, 2.0, 7) + ring_holes(6, cover_pcd, 30, z_top - 7.0, 2.0, 8);   // M3 heat-set inserts
+for i in 0..N { let a = 6.283185307179586 * i / N; hc.push(zcyl(s.R * cos(a), s.R * sin(a), PIN_Z0, fr(2.0 * s.Rr, FIT.ring_pin), z_ledge - PIN_Z0)); }
+hc += ring_holes(6, s.pcd_mount, 0, -1, fr(4.0, FIT.insert_m3), 7) + ring_holes(6, cover_pcd, 30, z_top - 7.0, fr(4.0, FIT.insert_m3), 8);   // M3 heat-set inserts
 // two small witness notches on the rim at 0°, to line up with the flange mark when counting turns
 hc.push(block(vec3(rr - 1.0, -0.6, z_top - 4.0), vec3(rr + 1.0, 0.6, z_top + 1.0)));
 let housing = soft(zcyl(0, 0, 0, rr, z_top), 2.0).cut(hc);
 
 // discs: exact cycloid offset 0.08 mm inward; B is A turned half a lobe
-let prof = offset2d(face(wire(cyc_pts(s.R, s.Rr, E, N, 0.25), true)), -0.08)[0];
+let prof = offset2d(face(wire(cyc_pts(s.R, s.Rr, E, N, 0.25), true)), -(0.08 + FIT.disc_gap))[0];
 let blank = extrude(prof, vec3(0, 0, s.d));
-let dholes = [zcyl(0, 0, -1, s.ebod / 2.0, s.d + 2.0)] + ring_holes(s.nout, 2.0 * s.rh, 0, -1, s.rp + E, s.d + 2.0);
+let dholes = [zcyl(0, 0, -1, fr(s.ebod, FIT.seat_6805), s.d + 2.0)] + ring_holes(s.nout, 2.0 * s.rh, 0, -1, s.rp + E + FIT.disc_gap, s.d + 2.0);
 // B differs from A only by the lobe phase against the holes, and flipping A gives A again, so they
 // are marked: one Ø2 dimple on A's top face, two on B's (between the output holes, at 30°)
 fn dimples(n, d) { let ds = []; for i in 0..n { let a = (30.0 + 8.0 * i).to_radians(); ds.push(zcyl(25.0 * cos(a), 25.0 * sin(a), d - 0.8, 1.0, 1.0)); } ds }
@@ -126,20 +146,20 @@ let discA0 = blank.cut(dholes + dimples(1, s.d));                               
 let discB0 = blank.rotate(vec3(0, 0, 0), vec3(0, 0, 1), 180.0 / RATIO).cut(dholes + dimples(2, s.d));
 
 // cam A: collar + lobe +E; cam B: lobe -E. Both D-bored.
-let camA = fuse([zcyl(0, 0, 2.5, 8, z_d1 - 2.5), zcyl(E, 0, z_d1, s.ebid / 2.0, z_cam - z_d1)]).unify().cut([d_bore(0, 30)]);
-let camB = zcyl(-E, 0, z_cam, s.ebid / 2.0, z_d2 + s.d - z_cam).cut([d_bore(0, 30)]);
+let camA = fuse([zcyl(0, 0, 2.5, 8, z_d1 - 2.5), zcyl(E, 0, z_d1, fr(s.ebid, FIT.boss_6805), z_cam - z_d1)]).unify().cut([d_bore(0, 30, FIT.shaft_d)]);
+let camB = zcyl(-E, 0, z_cam, fr(s.ebid, FIT.boss_6805), z_d2 + s.d - z_cam).cut([d_bore(0, 30, FIT.shaft_d)]);
 
 // carrier: lip under the bearing inner race, plate in the bearing, output pins pressed in from below,
 // 6 M3 heat-set inserts in the top face for the flange
-let carrier = fuse([zcyl(0, 0, z_ledge, s.bid / 2.0 + 2.5, LEDGE), zcyl(0, 0, z_b0, s.bid / 2.0, s.bw)]).unify()
-    .cut([zcyl(0, 0, z_ledge - 1.0, 4, 20)] + ring_holes(s.nout, 2.0 * s.rh, 0, z_ledge - 1.0, s.rp, z_top - z_ledge + 2.0)
-         + ring_holes(6, s.flange_od - 12.0, 30, z_top - 7.0, 2.0, 8));
+let carrier = fuse([zcyl(0, 0, z_ledge, s.bid / 2.0 + 2.5, LEDGE), zcyl(0, 0, z_b0, fr(s.bid, FIT.boss_6814), s.bw)]).unify()
+    .cut([zcyl(0, 0, z_ledge - 1.0, 4, 20)] + ring_holes(s.nout, 2.0 * s.rh, 0, z_ledge - 1.0, fr(2.0 * s.rp, FIT.out_pin_press), z_top - z_ledge + 2.0)
+         + ring_holes(6, s.flange_od - 12.0, 30, z_top - 7.0, fr(4.0, FIT.insert_m3), 8));
 // output flange: clamps the bearing inner race against the carrier lip and spaces the load past the cover
 let flange = soft(zcyl(0, 0, z_top, s.flange_od / 2.0, 6), 0.8)
-    .cut([zcyl(0, 0, z_top - 1.0, 8, 8)] + ring_holes(6, s.flange_od - 12.0, 30, z_top - 1.0, 1.7, 8)
+    .cut([zcyl(0, 0, z_top - 1.0, 8, 8)] + ring_holes(6, s.flange_od - 12.0, 30, z_top - 1.0, fr(3.4, FIT.clear_m3), 8)
          + [block(vec3(s.flange_od / 2.0 - 1.5, -0.6, z_out - 1.0), vec3(s.flange_od / 2.0 + 1.0, 0.6, z_out + 1.0))]);
 // cover ring over the bearing outer race
-let cover = soft(ring(z_top, s.flange_od / 2.0 + 1.0, rr, 3), 1.0).cut(ring_holes(6, cover_pcd, 30, z_top - 1.0, 1.7, 5));
+let cover = soft(ring(z_top, s.flange_od / 2.0 + 1.0, rr, 3), 1.0).cut(ring_holes(6, cover_pcd, 30, z_top - 1.0, fr(3.4, FIT.clear_m3), 5));
 
 let pin_len = 20.0;  let opin_len = 30.0;
 let ring_pins = [];
@@ -179,7 +199,7 @@ for x in [-52.0, 44.0] {
 // motor hole: round with a 45° point on top so it prints standing up without support
 let mh = 28.5;
 let motor_hole = hull_xy(circle_pts(0, 0, mh, 64) + [[0, mh * 1.4142]], -PL - 1.0, PL + 2.0);
-let st_cuts = [motor_hole] + ring_holes(6, s.pcd_mount, 0, -PL - 1.0, 1.7, PL + 2.0) + ring_holes(6, s.pcd_mount, 0, -PL - 1.0, 3.25, 5.0);
+let st_cuts = [motor_hole] + ring_holes(6, s.pcd_mount, 0, -PL - 1.0, fr(3.4, FIT.clear_m3), PL + 2.0) + ring_holes(6, s.pcd_mount, 0, -PL - 1.0, 3.25, 5.0);
 for x in [-62.0, 62.0] { for z in [FZ0 + 15.0, FZ1 - 12.0] { st_cuts.push(cylinder(vec3(x, -H - 1.0, z), vec3(0, 1, 0), 3.0, FT + 2.0)); } }
 st_cuts.push(block(vec3(-12, -H - 1.0, -95), vec3(12, -H + FT + 1.0, -40)));   // cable slot under the motor
 let stand = fuse([soft(upright, 2.0), soft(foot, 2.0)] + gussets).unify().cut(st_cuts);
@@ -188,7 +208,7 @@ let stand = fuse([soft(upright, 2.0), soft(foot, 2.0)] + gussets).unify().cut(st
 let LT = 10.0;  let LZ = z_out;
 let arm2d = convex_hull(circle_pts(0, 0, s.flange_od / 2.0, 64) + circle_pts(205, 0, 10, 32));
 let lever = soft(extrude(face(wire(arm2d.map(|p| [p.x, p.y, LZ]), true)), vec3(0, 0, LT)), 1.5);
-let lv_cuts = [zcyl(0, 0, LZ - 1.0, 8, LT + 2.0)] + ring_holes(6, s.flange_od - 12.0, 30, LZ - 1.0, 1.7, LT + 2.0)
+let lv_cuts = [zcyl(0, 0, LZ - 1.0, 8, LT + 2.0)] + ring_holes(6, s.flange_od - 12.0, 30, LZ - 1.0, fr(3.4, FIT.clear_m3), LT + 2.0)
     + ring_holes(6, s.flange_od - 12.0, 30, LZ + LT - 5.0, 3.25, 6.0);
 for x in [50.0, 100.0, 150.0, 200.0] { lv_cuts.push(zcyl(x, 0, LZ - 1.0, 3.25, LT + 2.0)); }
 // lightening slots between the holes
@@ -202,12 +222,12 @@ lever = fuse([lever, pointer]).unify();
 //  Ø37 bore (6805 outer race, press)    Ø25 boss (6805 inner race, slide)   Ø5 D-bore (motor shaft)
 //  Ø3 hole (ring pin, slide)            Ø6 hole (output pin, press)         Ø4 hole (M3 heat-set insert)
 //  and a Ø90 bore / Ø70 boss ring pair for the 6814 output bearing
-let coupon = soft(block(vec3(0, 0, 0), vec3(96, 46, 6)), 1.0).cut([zcyl(23, 23, -1, s.ebod / 2.0, 10), d_bore(-1, 10).translate(vec3(60, 12, 0)),
-    zcyl(60, 32, -1, s.Rr, 10), zcyl(73, 32, -1, s.rp, 10), zcyl(87, 32, -1, 2.0, 10)]);
-let boss25 = zcyl(80, 12, 6, s.ebid / 2.0, 7).cut([zcyl(80, 12, 5, 9, 9)]);
+let coupon = soft(block(vec3(0, 0, 0), vec3(96, 46, 6)), 1.0).cut([zcyl(23, 23, -1, fr(s.ebod, FIT.seat_6805), 10), d_bore(-1, 10, FIT.shaft_d).translate(vec3(60, 12, 0)),
+    zcyl(60, 32, -1, fr(2.0 * s.Rr, FIT.ring_pin), 10), zcyl(73, 32, -1, fr(2.0 * s.rp, FIT.out_pin_press), 10), zcyl(87, 32, -1, fr(4.0, FIT.insert_m3), 10)]);
+let boss25 = zcyl(80, 12, 6, fr(s.ebid, FIT.boss_6805), 7).cut([zcyl(80, 12, 5, 9, 9)]);
 coupon = fuse([coupon, boss25]).unify();
-let coupon_big = fuse([ring(0, s.bod / 2.0, s.bod / 2.0 + 3.0, 6), zcyl(0, 0, 0, s.bod / 2.0 + 3.0, 1.6),
-                       ring(0, s.bid / 2.0 - 2.4, s.bid / 2.0, 8)]).unify()
+let coupon_big = fuse([ring(0, fr(s.bod, FIT.seat_6814), s.bod / 2.0 + 3.0, 6), zcyl(0, 0, 0, s.bod / 2.0 + 3.0, 1.6),
+                       ring(0, s.bid / 2.0 - 2.4, fr(s.bid, FIT.boss_6814), 8)]).unify()
     .cut([zcyl(0, 0, -1, s.bid / 2.0 - 2.4, 10)]);
 
 // ================================================================ assembly at input angle 0
@@ -320,7 +340,7 @@ render([#{shape: coupon, color: "#d6a83a"}, #{shape: coupon_big.translate(vec3(4
 
 let summary = #{
     ratio: RATIO, input_to_output: "opposite directions",
-    axis_height_mm: H, z_stack: #{disc_A: z_d1, disc_B: z_d2, ledge: z_ledge, bearing: z_b0, housing_top: z_top, output_face: z_out},
+    fit_offsets: FIT, axis_height_mm: H, z_stack: #{disc_A: z_d1, disc_B: z_d2, ledge: z_ledge, bearing: z_b0, housing_top: z_top, output_face: z_out},
     printed_mass_g: total_print_g, lever_mass_g: lm.mass, lever_self_torque_Nm: lever_self_Nm,
     torque: #{motor_holding_Nm: 0.65, usable_fraction: 0.6, gearbox_efficiency: 0.75, expected_output_Nm: 0.65 * 0.6 * RATIO * 0.75,
               arm_J2_needs_at_gearbox_Nm: 14.4 / 2.0 / 0.95},

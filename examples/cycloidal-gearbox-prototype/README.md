@@ -107,23 +107,34 @@ Use no supports anywhere. Dry PA-CF before printing.
 | Dial indicator or calipers | for backlash at the lever tip |
 | Luggage scale (optional) | for a direct torque reading at the lever |
 
-## Tune the fits first (tolerance coupon)
+## Tune the fits first (tolerance coupon and the FIT table)
 
-The gearbox needs eight fits to be right. Print the two coupons (about 30 min) in the same material and
-settings you'll use for the real parts. Then check each fit:
+The gearbox depends on eight fits, and every printer prints holes and bosses a little differently.
+Every printed hole or boss that mates with a bought part is drawn at its nominal size plus an offset
+from the `FIT` table at the top of `parts.rhai`. The offsets are on the diameter, and + makes the
+feature bigger. The coupon uses the same table, so it always shows what the real parts will be.
 
-| Feature on the coupon | Fit wanted | If wrong |
-|---|---|---|
-| Ø37 bore | 6805 presses in with a vise or a firm thumb press, no wobble | change the slicer's hole compensation (XY hole/contour compensation) |
-| Ø25 boss | 6805 slides on with a light push | outer-contour compensation |
-| Ø5 D-bore | motor shaft goes in snug with no rotational play | hole compensation |
-| Ø3 hole | 3 mm dowel slides in freely, no rattle | hole compensation |
-| Ø6 hole | 6 mm dowel presses in with a vise | hole compensation |
-| Ø4 holes | M3 insert goes in with the iron at 230–250 °C | — |
-| Ø90 ring | 6814 presses in | hole compensation |
-| Ø70 boss | 6814 presses on | outer-contour compensation |
+1. Print the two coupons in the material and settings you'll use for the real parts (about 30 min).
+   Keep the slicer's hole/contour compensation at 0.
+2. Check each fit and change its entry:
 
-Reprint until all eight are right, then print the gearbox with the same settings.
+   | Coupon feature | `FIT` key | Fit wanted |
+   |---|---|---|
+   | Ø37 bore | `seat_6805` | 6805 presses in with a vise or a firm thumb press, no wobble |
+   | Ø25 boss | `boss_6805` | 6805 slides on with a light push |
+   | Ø5 D-bore | `shaft_d` | motor shaft goes in snug with no rotational play |
+   | Ø3 hole | `ring_pin` | 3 mm dowel slides in freely, no rattle |
+   | Ø6 hole | `out_pin_press` | 6 mm dowel presses in with a vise |
+   | Ø4 holes | `insert_m3` | M3 insert goes in with the iron at 230–250 °C and holds |
+   | Ø90 ring | `seat_6814` | 6814 presses in |
+   | Ø70 boss | `boss_6814` | 6814 presses on |
+
+   For example, if the 6805 falls out of the Ø37 bore, try `seat_6805: -0.1`. If it won't go in,
+   try `0.15`. Typical FDM starting points: holes print 0.1–0.3 mm small and bosses 0.05–0.15 mm big.
+   `clear_m3` and `motor_pilot` cover the screw and motor-boss clearances. `disc_gap` adds to the
+   0.08 mm running gap between the discs and the pins, so raise it if the gearbox binds.
+3. Re-run the script, reprint the coupon, and repeat until all eight are right. Then print the
+   gearbox. `summary.json` records the offsets each set of files was made with (`fit_offsets`).
 
 ## Assembly
 
