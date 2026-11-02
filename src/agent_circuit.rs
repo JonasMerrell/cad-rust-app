@@ -430,7 +430,7 @@ pub fn tools() -> Vec<Value> {
         "name": {"type": "string", "description": "source name, for I(name) probes"},
         "plus": {"type": "string", "description": "net on the + terminal"},
         "minus": {"type": "string", "description": "net on the − terminal (default ground)"},
-        "wave": {"type": ["number", "string"], "description": "5, DC 5, PULSE(v1 v2 delay rise fall width period), SIN(offset amplitude freq delay damping) or PWL(t1 v1 t2 v2 …); SI prefixes (1m, 10u, 1k; M is mega)"},
+        "wave": {"type": ["number", "string"], "description": "5, DC 5, PULSE(v1 v2 delay rise fall width period), SIN(offset amplitude freq delay damping), PWL(t1 v1 t2 v2 …) with optional R=<corner time to repeat from> TD=<delay>, or any expression of t in seconds (2*sin(2*pi*50*t) + 0.2*noise(5k*t); EXPR(…) DT=<max step> to set the step). Expression functions: sin cos tan exp ln log10 sqrt abs sign min max pow mod frac floor ceil round limit(x,lo,hi) if(c,a,b) or c ? a : b, u(x) step, ramp(x), and unit-period shapes sqr(x) tri(x) saw(x) pulse(x,duty) noise(x[,seed]); constants pi, e. SI prefixes (1m, 10u, 1k; M is mega)"},
         "ac": {"type": "number", "description": "AC sweep magnitude (give the input 1)"},
         "current": {"type": "boolean", "description": "a current source (out of + into the circuit) instead of a voltage source"},
     }, "required": ["plus"], "additionalProperties": false});
