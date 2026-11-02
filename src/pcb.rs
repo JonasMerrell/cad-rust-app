@@ -45,6 +45,9 @@ pub struct Pcb {
     pub symbols: Vec<pcb_lib::LibSymbol>,
     #[serde(default)]
     pub next_id: u64,
+    /// A stable id that links the tab to its "<name> 3D" Part Studio (survives renames).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -789,6 +792,43 @@ impl Dsu {
 
 const EPS: f64 = 1e-3;
 
+/// A fresh id for a PCB tab.
+pub fn new_uid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    format!("{:x}{:04x}", t, N.fetch_add(1, Ordering::Relaxed) & 0xffff)
+}
+
+/// Give every PCB an id, and a new one to a PCB whose id another has too (a copy). Returns
+/// whether anything changed.
+pub fn ensure_uids(pcbs: &mut [Pcb]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut changed = false;
+    for p in pcbs.iter_mut() {
+        if p.uid.is_empty() || !seen.insert(p.uid.clone()) {
+            p.uid = new_uid();
+            seen.insert(p.uid.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `want`, or `want 2`, `want 3`, … : a name no other PCB tab (but `skip`) has.
+pub fn unique_name(pcbs: &[Pcb], want: &str, skip: Option<usize>) -> String {
+    let taken = |n: &str| pcbs.iter().enumerate().any(|(i, p)| Some(i) != skip && p.name == n);
+    if !taken(want) {
+        return want.to_string();
+    }
+    (2..).map(|k| format!("{want} {k}")).find(|n| !taken(n)).unwrap()
+}
+
+/// The name for a new PCB tab: the first free "PCB n".
+pub fn next_name(pcbs: &[Pcb]) -> String {
+    (1..).map(|k| format!("PCB {k}")).find(|n| !pcbs.iter().any(|p| p.name == *n)).unwrap()
+}
+
 /// A pin's connection point and the direction its line runs into the symbol.
 #[derive(Clone, Debug)]
 pub struct SchPin {
@@ -800,7 +840,7 @@ pub struct SchPin {
 
 impl Pcb {
     pub fn new(name: impl Into<String>) -> Pcb {
-        Pcb { name: name.into(), next_id: 1, ..Default::default() }
+        Pcb { name: name.into(), next_id: 1, uid: new_uid(), ..Default::default() }
     }
 
     pub fn part_index(&self, reference: &str) -> Option<usize> {
@@ -1742,6 +1782,25 @@ pub(crate) mod tests {
     use super::*;
 
     /// An LED with its resistor: two parts, wires, a supply and ground port.
+    #[test]
+    fn pcb_names_and_ids_stay_unique() {
+        let mut v = vec![Pcb::new("PCB 2"), Pcb::new("A")];
+        assert_eq!(next_name(&v), "PCB 1");
+        v.push(Pcb::new("PCB 1"));
+        assert_eq!(next_name(&v), "PCB 3");
+        assert_eq!(unique_name(&v, "A", None), "A 2");
+        assert_eq!(unique_name(&v, "A", Some(1)), "A", "its own name is free");
+        assert_ne!(v[0].uid, v[1].uid);
+        let mut copy = v[1].clone();
+        copy.name = "B".into();
+        v.push(copy);
+        v[0].uid.clear();
+        assert!(ensure_uids(&mut v));
+        assert!(!v[0].uid.is_empty());
+        assert_ne!(v[1].uid, v[3].uid, "a copy gets its own id");
+        assert!(!ensure_uids(&mut v));
+    }
+
     pub(crate) fn led_board() -> Pcb {
         let mut p = Pcb::new("LED");
         let r = p.add_part("R", None, Some("330"), [0.0, 0.0]).unwrap();

@@ -178,6 +178,31 @@ pub fn hlr(s: &Shape, dir: DVec3, up: DVec3, kind: i32) -> R<Shape> {
     take(ex::ex_hlr(&s.inner, dir.x, dir.y, dir.z, up.x, up.y, up.z, kind), "projection")
 }
 
+/// Write parts to STEP as one assembly named `name`, each part with its name and colour.
+pub fn write_step_named(name: &str, parts: &[(&Shape, String, Option<[u8; 3]>)], path: &str) -> R<()> {
+    let null = ex::ex_null_shape();
+    let mut l = ffi::top_tools::new_list_of_shape();
+    l.pin_mut().Append(&*null);
+    let mut parents = vec![-1];
+    let mut names = vec![name.to_string()];
+    let mut colors = vec![-1.0, -1.0, -1.0];
+    for (s, n, c) in parts {
+        l.pin_mut().Append(&*s.inner);
+        parents.push(0);
+        names.push(n.clone());
+        match c {
+            Some(c) => colors.extend(c.iter().map(|v| *v as f64 / 255.0)),
+            None => colors.extend([-1.0, -1.0, -1.0]),
+        }
+    }
+    if ex::ex_write_step_assembly(&l, &parents, &names, &colors, path) {
+        Ok(())
+    } else {
+        let e = ex::ex_last_error();
+        Err(if e.is_empty() { "STEP export failed".into() } else { e })
+    }
+}
+
 pub fn compound(shapes: &[&Shape]) -> R<Shape> {
     let l = list(shapes.iter().map(|s| &*s.inner));
     take(ex::ex_compound(&l), "compound")
