@@ -15,9 +15,10 @@ between layers than along them.
 | Walls | 2 × 0.45 mm | Wall loops × line width: the side shell. |
 | Top / bottom | 4 × 0.2 mm | Solid layers × layer height: the shell on faces within 45° of facing up or down. |
 | Build direction | +Z | The printer's Z in the Part Studio's axes. |
+| Layer bond | × 1 | Layer bond over the data sheet's Z strength: 0.5–0.8 for tall or fast prints, full part cooling or a cold enclosure. |
 
 The agent and scripts set the same with `print: {model, infill, pattern, walls, line_width, top_bottom,
-layer_height, build_dir}` on `create_simulation` / `edit_simulation` (`true` for the defaults, `null` for
+layer_height, build_dir, layer_bond}` on `create_simulation` / `edit_simulation` (`true` for the defaults, `null` for
 solid).
 
 ## How it is modelled
@@ -63,19 +64,33 @@ solid).
   the mass.
 - **Layered stiffness:** in-plane E_xy and ν, through-layer E_z, ν_zp = ν √(E_z/E_xy), interlayer shear
   modulus E_z / 2(1 + ν).
-- **Failure (factor of safety):** the larger of von Mises over the in-plane strength and
-  √((⟨σn⟩/Z)² + (τ/S)²) on the layer planes, with σn the tension across the layers (compression does not
-  count), τ the shear along them, Z the Z strength and S = Z/√3. Nodes in the shell use the shell's
-  strengths, nodes inside the infill's. The isotropic model uses von Mises against the Z strength.
+- **Failure (factor of safety):** the larger of two checks.
+  - *Bulk:* Raghava's pressure-modified von Mises, vm² + (C − T) I₁ = C T, with T the in-plane strength
+    and C = 1.3 T. Polymers yield later under compression than in tension (FDM parts 1.2–2× stronger in
+    compression, Ahn et al. 2002), and this gives exactly T in uniaxial tension, C in compression and
+    √(CT/3) in shear.
+  - *Layer bond:* √((⟨σn⟩/Z)² + (τ/(S + μ⟨−σn⟩))²) on the layer planes, with σn the stress across the
+    layers, τ the shear along them, Z the Z strength × layer bond, S = Z/√3 and μ = 0.25. Tension across
+    the layers counts, compression does not, but it raises the shear the bond carries (friction, as in
+    Puck's criterion for laminates).
+
+  Nodes in the shell use the shell's strengths, nodes inside the infill's. The isotropic model uses the
+  bulk check against the Z strength × layer bond.
+
+  Compared with alternatives: plain von Mises is unsafe for tension across the layers and too cautious in
+  compression; Tsai–Wu and Hashin need compressive and shear strengths the data sheets don't give, so
+  their extra terms would be guesses. The data-sheet Z value is the biggest uncertainty, and the layer
+  bond factor is where to put it.
 
 `examples/fea-printed.json` solves the same PLA bracket printed flat and printed on its side: on its
 side the bending runs along the layers, so it is about 20 % stiffer and its walls' factor of safety rises
-from 3.0 to 3.6.
+from 3.0 to 3.5.
 
 ## Limits
 
-- Linear elastic: no yielding, creep or fracture. The data-sheet values are best-case prints; upright
-  prints can be up to 50 % weaker than flat ones, and humid nylon loses most of its stiffness.
+- Linear elastic: no yielding, creep, fatigue or fracture. The data-sheet values are best-case prints:
+  real parts' layer bonds are often 50–80 % of them (set the layer bond), and humid nylon loses most of
+  its stiffness. Long-term loads creep: plan on 30–50 % of the short-term strength for months of load.
 - The layer plane is isotropic (±45° alternating rasters); single-direction rasters are stiffer along
   the road than across it.
 - Advanced mode treats printed parts as solid and isotropic.
@@ -105,5 +120,9 @@ from 3.0 to 3.6.
   doi:10.2507/32nd.daaam.proceedings.029.
 - J. J. Fekiač et al. (2025), Influence of infill geometry and density on the mechanical properties of
   3D-printed polylactic acid structure, J. Manuf. Mater. Process. 9(4) 134, doi:10.3390/jmmp9040134.
+- R. Raghava, R. M. Caddell, G. S. Y. Yeh (1973), The macroscopic
+  yield behaviour of polymers, J. Mater. Sci. 8 225–232, doi:10.1007/BF00550671.
+- A. Puck, H. Schürmann (1998), Failure analysis of FRP laminates by means of physically based
+  phenomenological models, Compos. Sci. Technol. 58 1045–1067, doi:10.1016/S0266-3538(96)00140-6.
 - L. J. Gibson, M. F. Ashby (1997), Cellular Solids: Structure and Properties, 2nd ed., Cambridge
   University Press.

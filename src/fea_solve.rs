@@ -64,25 +64,48 @@ impl Elastic {
             None => vm / self.yield_mpa.max(1e-12),
             Some(l) => {
                 let [xx, yy, zz, xy, yz, zx] = s.map(|v| v as f64);
+                let bulk = paraboloid(vm, xx + yy + zz, l.x, l.c * l.x);
+                if !l.interface {
+                    return bulk;
+                }
                 let b = DVec3::from(l.axis).normalize_or(DVec3::Z);
                 let t = DVec3::new(xx * b.x + xy * b.y + zx * b.z, xy * b.x + yy * b.y + yz * b.z, zx * b.x + yz * b.y + zz * b.z);
                 let sn = t.dot(b);
                 let tau = (t - b * sn).length();
-                let inter = ((sn.max(0.0) / l.z.max(1e-12)).powi(2) + (tau / l.s.max(1e-12)).powi(2)).sqrt();
-                (vm / l.x.max(1e-12)).max(inter)
+                // squeezing the layers together raises the shear they carry (friction on the bond plane)
+                let s_eff = l.s.max(1e-12) + FRICTION * (-sn).max(0.0);
+                let inter = ((sn.max(0.0) / l.z.max(1e-12)).powi(2) + (tau / s_eff).powi(2)).sqrt();
+                bulk.max(inter)
             }
         }
     }
 }
 
-/// Strengths (MPa) of a layered material: `x` in the layer plane (von Mises), `z` across the layers in
-/// tension and `s` in shear along the layer planes; `axis` is the build direction.
+/// Friction coefficient of a printed layer interface under compression (Puck's inclination parameter
+/// for matrix shear is 0.2-0.3).
+pub const FRICTION: f64 = 0.25;
+
+/// Raghava's pressure-modified von Mises criterion for polymers, as the factor the stress must be divided
+/// by to just reach it: exactly σ/T in uniaxial tension and σ/C in compression. `i1` is the trace of the
+/// stress, `t` and `c` the tensile and compressive strengths.
+pub fn paraboloid(vm: f64, i1: f64, t: f64, c: f64) -> f64 {
+    let (t, c) = (t.max(1e-12), c.max(t.max(1e-12)));
+    let b = (c - t) * i1;
+    (b + (b * b + 4.0 * c * t * vm * vm).sqrt()) / (2.0 * c * t)
+}
+
+/// Strengths (MPa) of a printed material: `x` the tensile strength of the bulk (judged with Raghava's
+/// pressure-modified von Mises, `c` × stronger in compression); with `interface`, the layer bond too:
+/// `z` across the layers in tension and `s` in shear along the layer planes; `axis` is the build
+/// direction.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct Layer {
     pub axis: [f64; 3],
     pub x: f64,
+    pub c: f64,
     pub z: f64,
     pub s: f64,
+    pub interface: bool,
 }
 
 /// What holds the part.
