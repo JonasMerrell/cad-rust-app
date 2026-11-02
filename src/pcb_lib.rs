@@ -817,16 +817,21 @@ pub fn symbol(key: &str, pins: &[String], names: &[String]) -> Symbol {
             let n = pins.len().max(1);
             let h = n as f64 * GRID;
             let top = ((n - 1) as f64 / 2.0).floor() * GRID;
+            // named pins get a body wide enough for the names (written where the contact marks would be)
+            let named = names.iter().any(|x| !x.trim().is_empty());
+            let right = if named { (-2.54 + 0.6 + names.iter().map(|x| text_width(x, 1.2)).fold(0.0, f64::max) + 0.8).max(0.0) } else { 0.0 };
             for (i, num) in pins.iter().enumerate() {
                 let y = top - i as f64 * GRID;
                 s.pins.push(pin(num, names.get(i).map(|x| x.as_str()).unwrap_or(""), [-5.08, y], [1.0, 0.0], 2.54));
-                s.g.push(G::Rect([-2.54, y - 0.3], [-1.6, y + 0.3]));
+                if !named {
+                    s.g.push(G::Rect([-2.54, y - 0.3], [-1.6, y + 0.3]));
+                }
             }
-            s.g.push(G::Rect([-2.54, top - h + GRID / 2.0], [0.0, top + GRID / 2.0]));
+            s.g.push(G::Rect([-2.54, top - h + GRID / 2.0], [right, top + GRID / 2.0]));
             s.pin_numbers = true;
             s.pin_names = !names.is_empty();
             s.ref_at = [-2.54, top + GRID];
-            s.value_at = [0.8, top - h + GRID / 2.0 + 0.3];
+            s.value_at = [right + 0.8, top - h + GRID / 2.0 + 0.3];
         }
         _ => {
             // a box with pins 1..n/2 down the left and the rest up the right (as on a DIP/SOIC)
@@ -1020,6 +1025,17 @@ mod tests {
         }
         assert_eq!(footprint("SOIC-8").unwrap().pads[7].num, "8");
         assert!(footprint("SOIC-7").is_none());
+    }
+
+    #[test]
+    fn connector_names_fit_in_the_body() {
+        let pins: Vec<String> = ["1", "2"].iter().map(|s| s.to_string()).collect();
+        let s = symbol("J", &pins, &["VCC".into(), "GND".into()]);
+        let right = s.g.iter().filter_map(|g| if let G::Rect(_, b) = g { Some(b[0]) } else { None }).fold(f64::MIN, f64::max);
+        // names start 0.6 inside the pin's inner end (-2.54)
+        assert!(right >= -2.54 + 0.6 + text_width("VCC", 1.2), "{right}");
+        // pins don't move with the names
+        assert_eq!(s.pins[0].at, symbol("J", &pins, &[]).pins[0].at);
     }
 
     #[test]

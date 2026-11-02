@@ -168,8 +168,10 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
         if v.zones {
             for (zi, z) in b.zones.iter().enumerate().filter(|(_, z)| z.layer == l) {
                 if let Some(f) = fills.get(zi) {
+                    // a darker shade than the tracks, so tracks on a pour stand out
+                    let dark = [(col[0] as f32 * 0.5) as u8, (col[1] as f32 * 0.5) as u8, (col[2] as f32 * 0.5) as u8];
                     for piece in f {
-                        out.push(d(a(col, (alpha as f32 * 0.55) as u8), Prim::Fill(piece.clone())));
+                        out.push(d(a(dark, (alpha as f32 * 0.75) as u8), Prim::Fill(piece.clone())));
                     }
                 }
                 for s in 0..z.outline.len() {
@@ -274,7 +276,22 @@ pub fn silk(out: &mut Vec<Draw>, part: &pcb::Part, rgba: [u8; 4]) {
         graphic(out, g, 0.15, rgba, &xf);
     }
     let (lo, hi) = fp.court;
-    text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35], 1.0, 1, 0.0, rgba, &xf);
+    // the reference sits above the courtyard and turns with the part, but never reads upside down
+    // (on the bottom, as seen from below): past a quarter turn it is turned half way round, about
+    // the middle of the line it fills
+    let h = 1.0;
+    if ref_flipped(part) {
+        text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35 + h], h, 1, 180.0, rgba, &xf);
+    } else {
+        text(out, &part.reference, [(lo[0] + hi[0]) / 2.0, hi[1] + 0.35], h, 1, 0.0, rgba, &xf);
+    }
+}
+
+/// Whether a part's reference is drawn turned half way round so that it reads upright: its
+/// direction as read (from above on the top, from below on the bottom) points left.
+fn ref_flipped(part: &pcb::Part) -> bool {
+    let a = (if part.bottom { -part.rot } else { part.rot }).rem_euclid(360.0);
+    a > 90.0 + 1e-6 && a <= 270.0 + 1e-6
 }
 
 /// The schematic as a display list.
@@ -319,12 +336,10 @@ pub fn schematic_scene(p: &Pcb, nl: &Netlist, highlight: Option<&str>) -> Vec<Dr
         text(&mut out, &part.reference, r_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
         text(&mut out, &part.value, v_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
     }
-    let hl_wire = |w: &pcb::Wire| -> bool {
-        // a wire is highlighted when it touches a highlighted pin's point through the net
-        highlight.is_some() && hl_pins.iter().any(|(pi, num)| pins.iter().any(|x| x.part == *pi && &x.num == num && pcb::seg_point(w.a, w.b, x.at) < 1e-3))
-    };
-    for w in &p.wires {
-        let hl = hl_wire(w);
+    let hl_net = highlight.and_then(|h| nl.by_name(h));
+    for (k, w) in p.wires.iter().enumerate() {
+        // every wire of the highlighted net
+        let hl = hl_net.is_some() && nl.wire_net.get(k).copied().flatten() == hl_net;
         out.push(d(a(if hl { [230, 120, 0] } else { colors::WIRE }, 255), Prim::Seg { a: w.a, b: w.b, w: if hl { 0.4 } else { 0.25 } }));
     }
     // junction dots where three or more wire ends or pins meet a wire
@@ -441,8 +456,11 @@ pub fn png(list: &[Draw], area: (P, P), width: u32, bg: [u8; 3]) -> Result<Vec<u
     use tiny_skia::{FillRule, LineCap, Paint, PathBuilder, Pixmap, Stroke, Transform};
     let (lo, hi) = area;
     let size = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
-    let k = width as f64 / size[0];
-    let height = ((size[1] * k).round() as u32).clamp(1, 8000);
+    // a tall area is scaled down to fit the height limit (and the image gets narrower), never cut off
+    const MAX_H: f64 = 8000.0;
+    let k = (width as f64 / size[0]).min(MAX_H / size[1]);
+    let width = ((size[0] * k).round() as u32).clamp(1, width.max(1));
+    let height = ((size[1] * k).round() as u32).clamp(1, MAX_H as u32);
     let mut pm = Pixmap::new(width, height).ok_or("bad image size")?;
     pm.fill(tiny_skia::Color::from_rgba8(bg[0], bg[1], bg[2], 255));
     let at = |q: P| (((q[0] - lo[0]) * k) as f32, ((hi[1] - q[1]) * k) as f32);
@@ -664,8 +682,11 @@ fn edge_layer(p: &Pcb) -> String {
 }
 
 fn excellon(holes: &[(P, f64)], plated: bool) -> String {
+    // tools by diameter as written (to the micron), so two sizes that print alike are one tool
+    let um = |d: f64| (d * 1000.0).round() / 1000.0;
+    let holes: Vec<(P, f64)> = holes.iter().map(|(at, d)| (*at, um(*d))).collect();
     let mut sizes: Vec<f64> = vec![];
-    for (_, dia) in holes {
+    for (_, dia) in &holes {
         if !sizes.iter().any(|s| (s - dia).abs() < 1e-6) {
             sizes.push(*dia);
         }
@@ -884,6 +905,12 @@ pub fn export(p: &Pcb, path: &std::path::Path) -> Result<Vec<String>, String> {
 const BOARD_DEF: &str = "PCB board";
 /// The value naming which PCB part (by id) a footprint feature is.
 const PART_KEY: &str = "pcb_part";
+/// The Board feature's value naming the PCB tab (its uid) the Part Studio was made from.
+const PCB_KEY: &str = "pcb_uid";
+/// The colour the PCB gave a body ("r,g,b"), so a colour the user picked later is kept.
+const COLOR_KEY: &str = "pcb_color";
+/// Thinner boards than this aren't made (a zero-height extrude hangs the kernel).
+const MIN_THICKNESS: f64 = 0.1;
 
 fn fp_def_name(fp: &str) -> String {
     format!("PCB footprint {fp}")
@@ -895,19 +922,27 @@ fn num(v: f64) -> String {
     if s == "-0" { "0".into() } else { s }
 }
 
+fn rgb_text(c: [u8; 3]) -> String {
+    format!("{},{},{}", c[0], c[1], c[2])
+}
+
 fn board_script(p: &Pcb) -> String {
     let nl = p.netlist();
     let pads = p.pads(&nl);
     let pts: Vec<String> = p.board.outline.iter().map(|q| format!("[{}, {}]", num(q[0]), num(q[1]))).collect();
-    let mut holes: Vec<String> = pads.iter().filter(|x| x.drill > 0.0).map(|x| format!("[{}, {}, {}]", num(x.at[0]), num(x.at[1]), num(x.drill / 2.0))).collect();
-    holes.extend(p.board.holes.iter().map(|h| format!("[{}, {}, {}]", num(h.at[0]), num(h.at[1]), num(h.d / 2.0))));
+    let hole = |at: P, d: f64| format!("[{}, {}, {}]", num(at[0]), num(at[1]), num(d / 2.0));
+    let mut holes: Vec<String> = pads.iter().filter(|x| x.drill > 0.0).map(|x| hole(x.at, x.drill)).collect();
+    holes.extend(p.board.vias.iter().filter(|v| v.drill > 0.0).map(|v| hole(v.at, v.drill)));
+    holes.extend(p.board.holes.iter().filter(|h| h.d > 0.0).map(|h| hole(h.at, h.d)));
+    // the name goes in a comment: no line breaks or other control characters
+    let name: String = p.name.chars().map(|c| if c.is_control() { ' ' } else if c == '"' { '\'' } else { c }).collect();
     format!(
-        "// The board of PCB tab \"{}\", made by its \"3D board\" button: outline, plated and mounting holes.\n\
+        "// The board of PCB tab \"{}\", made by its \"3D board\" button: outline, plated and mounting holes, vias.\n\
          let OUTLINE = [{}];\nlet HOLES = [{}];\n\
          let b = extrude(polygon(OUTLINE), vec3(0, 0, thickness));\n\
          let cuts = [];\nfor h in HOLES {{ cuts.push(cylinder(vec3(h[0], h[1], -1), vec3(0, 0, 1), h[2], thickness + 2)); }}\n\
          if cuts.len() > 0 {{ b = b.cut(cuts); }}\nb\n",
-        p.name.replace('"', "'"),
+        name,
         pts.join(", "),
         holes.join(", ")
     )
@@ -931,18 +966,66 @@ fn footprint_script(fp: &pcb_lib::Footprint) -> String {
     s
 }
 
+/// The PCB tab a Part Studio's board was made from (its uid), if it has one.
+fn studio_pcb_uid(doc: &crate::doc::Document) -> Option<Option<String>> {
+    use crate::doc::Op;
+    doc.features.iter().find_map(|f| match &f.op {
+        Op::Custom { name, values, .. } if name == BOARD_DEF => Some(values.get(PCB_KEY).cloned()),
+        _ => None,
+    })
+}
+
+/// The Part Studio made from PCB tab `pi` by "3D board": the one whose board names the tab's
+/// uid, or (documents from before the uids) the one named "<name> 3D" whose board names no tab.
+pub fn studio_of(ws: &crate::workspace::Workspace, pi: usize) -> Option<usize> {
+    let p = ws.pcbs.get(pi)?;
+    if !p.uid.is_empty() {
+        if let Some(i) = ws.studios.iter().position(|s| studio_pcb_uid(&s.doc) == Some(Some(p.uid.clone()))) {
+            return Some(i);
+        }
+    }
+    let name = format!("{} 3D", p.name);
+    ws.studios.iter().position(|s| s.name == name && !matches!(studio_pcb_uid(&s.doc), Some(Some(_))))
+}
+
 /// Make or update the "<name> 3D" Part Studio: the board and a body for every part. Features
-/// are kept by name, so assemblies that use the parts keep them. Returns the studio's index.
+/// are kept by part, so assemblies that use the parts keep them. Returns the studio's index.
 pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usize, String> {
     use crate::doc::{BoolOp, Op, PartProps};
     use crate::script::{CustomDef, ParamDef};
-    let p = ws.pcbs.get(pi).ok_or("no such PCB tab")?.clone();
-    let name = format!("{} 3D", p.name);
-    let si = match ws.studios.iter().position(|s| s.name == name) {
-        Some(i) => i,
+    if pi >= ws.pcbs.len() {
+        return Err("no such PCB tab".into());
+    }
+    let t = ws.pcbs[pi].board.thickness;
+    if !(t >= MIN_THICKNESS && t.is_finite()) {
+        return Err(format!("The board is {t} mm thick: give it a thickness of at least {MIN_THICKNESS} mm first"));
+    }
+    if ws.pcbs[pi].board.outline.len() < 3 {
+        return Err("The board outline needs three points or more".into());
+    }
+    // (documents from before the uids, and copies, get their own)
+    crate::pcb::ensure_uids(&mut ws.pcbs);
+    let found = studio_of(ws, pi);
+    let p = ws.pcbs[pi].clone();
+    let want = format!("{} 3D", p.name);
+    let si = match found {
+        Some(i) => {
+            // the studio follows a renamed PCB tab, unless the user named it something else
+            let ours = ws.studios[i].name.ends_with(" 3D");
+            if ours && ws.studios[i].name != want && !ws.studios.iter().any(|s| s.name == want) {
+                ws.studios[i].name = want.clone();
+            }
+            i
+        }
         None => {
             let units = ws.studios.first().map(|s| s.doc.units).unwrap_or_default();
-            ws.studios.push(crate::workspace::Studio { name: name.clone(), doc: crate::doc::Document { units, ..Default::default() } });
+            let mut name = want.clone();
+            let mut k = 2;
+            while ws.studios.iter().any(|s| s.name == name) {
+                name = format!("{want} {k}");
+                k += 1;
+            }
+            ws.studios.push(crate::workspace::Studio { name, doc: crate::doc::Document { units, ..Default::default() } });
             ws.studios.len() - 1
         }
     };
@@ -961,13 +1044,19 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
     };
     // a part's feature is found by the part's id (kept in its values; the kernel only reads the
     // definition's parameters), or in documents made before that by its title
-    let mut upsert = |doc: &mut crate::doc::Document, title: &str, def: &str, values: std::collections::BTreeMap<String, String>, color: [u8; 3]| {
+    let mut upsert = |doc: &mut crate::doc::Document, title: &str, def: &str, mut values: std::collections::BTreeMap<String, String>, color: [u8; 3]| {
         let key = values.get(PART_KEY).cloned();
         let free = |f: &crate::doc::Feature| ours(&f.op) && !kept.contains(&f.id);
         let existing = key
             .as_ref()
             .and_then(|k| doc.features.iter().position(|f| free(f) && part_of(&f.op).as_ref() == Some(k)))
             .or_else(|| doc.features.iter().position(|f| free(f) && f.name == title && part_of(&f.op).is_none()));
+        // the colour the PCB gave the body last time: a colour still equal to it follows the PCB
+        let old_color = existing.and_then(|i| match &doc.features[i].op {
+            Op::Custom { values, .. } => values.get(COLOR_KEY).cloned(),
+            _ => None,
+        });
+        values.insert(COLOR_KEY.to_string(), rgb_text(color));
         let op = Op::Custom { name: def.into(), values, refs: vec![], select: String::new(), op: BoolOp::New };
         let fid = match existing {
             Some(i) => {
@@ -981,10 +1070,19 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
         let key = crate::doc::body_key((fid, 0));
         let props = doc.parts.entry(key).or_insert_with(PartProps::default);
         props.name = Some(title.to_string());
-        props.color.get_or_insert(color);
+        let ours = match (props.color, old_color) {
+            (None, _) => true,
+            (Some(c), Some(o)) => rgb_text(c) == o,
+            // documents from before: the colour may be the user's, keep it
+            (Some(_), None) => false,
+        };
+        if ours {
+            props.color = Some(color);
+        }
     };
     let mut v = std::collections::BTreeMap::new();
     v.insert("thickness".to_string(), num(p.board.thickness));
+    v.insert(PCB_KEY.to_string(), p.uid.clone());
     let mask = p.board.mask_rgb();
     upsert(doc, "Board", BOARD_DEF, v, mask);
     for part in &p.parts {
@@ -1098,6 +1196,148 @@ mod tests {
         to_studio(&mut ws, 0).unwrap();
         assert_eq!(ws.studios[si].doc.features.len(), n);
         assert_eq!(fid(&ws, "R1 470"), Some(r1));
+    }
+
+    #[test]
+    fn tall_png_is_scaled_not_cut_off() {
+        // a dot at the bottom of a 10 x 120 mm area, asked for 4000 px wide
+        let list = vec![d([255, 0, 0, 255], Prim::Circle { c: [5.0, 2.0], r: 1.0, w: 0.0, fill: true })];
+        let bytes = png(&list, ([0.0, 0.0], [10.0, 120.0]), 4000, [0, 0, 0]).unwrap();
+        let pm = tiny_skia::Pixmap::decode_png(&bytes).unwrap();
+        assert_eq!(pm.height(), 8000);
+        assert!((pm.width() as i64 - 667).abs() <= 1, "{}", pm.width());
+        let k = 8000.0 / 120.0;
+        let px = pm.pixel((5.0 * k) as u32, (8000.0 - 2.0 * k) as u32).unwrap();
+        assert!(px.red() > 200, "the dot is in the image");
+        // a wide area keeps the asked width
+        let pm = tiny_skia::Pixmap::decode_png(&png(&list, ([0.0, 0.0], [100.0, 20.0]), 1000, [0, 0, 0]).unwrap()).unwrap();
+        assert_eq!((pm.width(), pm.height()), (1000, 200));
+    }
+
+    #[test]
+    fn references_read_upright() {
+        let part = |rot: f64, bottom: bool| pcb::Part { reference: "R1".into(), footprint: "R_0805".into(), at: [20.0, 20.0], rot, bottom, ..Default::default() };
+        // top: read from above, so 0 and 90 stand, 180 and 270 turn; bottom: read from below
+        for (rot, bottom, flipped) in [(0.0, false, false), (90.0, false, false), (180.0, false, true), (270.0, false, true), (-90.0, false, true), (45.0, false, false), (135.0, false, true)] {
+            assert_eq!(ref_flipped(&part(rot, bottom)), flipped, "rot {rot} bottom {bottom}");
+        }
+        for (rot, flipped) in [(0.0, false), (90.0, true), (180.0, true), (270.0, false)] {
+            assert_eq!(ref_flipped(&part(rot, true)), flipped, "rot {rot} bottom");
+        }
+        // at 180 on top the text still sits outside the courtyard (now below the part, as the
+        // courtyard's top edge turned), and its strokes run left to right
+        let p = part(180.0, false);
+        let fp = p.footprint();
+        let mut graphics = vec![];
+        for g in &fp.silk {
+            graphic(&mut graphics, g, 0.15, [0; 4], &|q| p.xf(q));
+        }
+        let mut list = vec![];
+        silk(&mut list, &p, [0; 4]);
+        let text = &list[graphics.len()..];
+        assert!(!text.is_empty());
+        let (lo, hi) = extent(text);
+        let court_lo_y = p.at[1] - fp.court.1[1];
+        assert!(hi[1] <= court_lo_y + 1e-6 && lo[1] < court_lo_y - 0.5, "{lo:?} {hi:?} {court_lo_y}");
+        // the "R" comes before the "1": its strokes are left of the last ones
+        let x = |d: &Draw| match &d.prim {
+            Prim::Seg { a, .. } => a[0],
+            _ => unreachable!(),
+        };
+        assert!(x(&text[0]) < x(&text[text.len() - 1]), "{} {}", x(&text[0]), x(&text[text.len() - 1]));
+    }
+
+    #[test]
+    fn drill_tools_merge_sizes_that_print_alike() {
+        let s = excellon(&[([1.0, 1.0], 0.8), ([2.0, 2.0], 0.8004), ([3.0, 3.0], 1.0)], true);
+        assert!(s.contains("T1C0.800\nT2C1.000\n%"), "{s}");
+        assert!(!s.contains("T3"), "{s}");
+        // no plated holes: the PTH file is still written (upload checkers want one), with no tools
+        let mut p = Pcb::new("smd");
+        p.parts.push(pcb::Part { reference: "R1".into(), footprint: "R_0805".into(), at: [10.0, 10.0], ..Default::default() });
+        let files = gerbers(&p);
+        let pth = &files.iter().find(|f| f.0 == "smd-PTH.drl").expect("a PTH drill file").1;
+        assert!(!pth.contains("T1"), "{pth}");
+    }
+
+    #[test]
+    fn studio_follows_its_pcb_by_id() {
+        let mut ws = crate::workspace::Workspace::default();
+        ws.pcbs.push(crate::pcb::tests::led_board());
+        let mut twin = crate::pcb::tests::led_board();
+        twin.uid = crate::pcb::new_uid();
+        twin.parts.truncate(1);
+        ws.pcbs.push(twin);
+        // two tabs with one name get a Part Studio each, and don't take each other's parts
+        let a = to_studio(&mut ws, 0).unwrap();
+        let b = to_studio(&mut ws, 1).unwrap();
+        assert_ne!(a, b);
+        let n = |ws: &crate::workspace::Workspace, s: usize| ws.studios[s].doc.features.len();
+        let na = n(&ws, a);
+        assert_eq!(to_studio(&mut ws, 0).unwrap(), a);
+        assert_eq!(n(&ws, a), na);
+        assert_eq!(n(&ws, b), 2, "the board and its one part");
+        // a renamed tab updates (and renames) its studio instead of making another
+        let count = ws.studios.len();
+        ws.pcbs[0].name = "Renamed".into();
+        assert_eq!(to_studio(&mut ws, 0).unwrap(), a);
+        assert_eq!(ws.studios.len(), count);
+        assert_eq!(ws.studios[a].name, "Renamed 3D");
+        // a studio from before the ids is found by its name and claimed
+        let mut old = crate::workspace::Workspace::default();
+        let mut p = crate::pcb::tests::led_board();
+        p.uid.clear();
+        old.pcbs.push(p);
+        let s = to_studio(&mut old, 0).unwrap();
+        for f in &mut old.studios[s].doc.features {
+            if let crate::doc::Op::Custom { values, .. } = &mut f.op {
+                values.remove(PCB_KEY);
+            }
+        }
+        old.pcbs[0].uid = crate::pcb::new_uid();
+        assert_eq!(to_studio(&mut old, 0).unwrap(), s);
+        assert_eq!(old.studios.len(), 2, "Part Studio 1 and the board's");
+    }
+
+    #[test]
+    fn studio_colours_follow_the_pcb_unless_changed() {
+        let mut ws = crate::workspace::Workspace::default();
+        ws.pcbs.push(crate::pcb::tests::led_board());
+        let si = to_studio(&mut ws, 0).unwrap();
+        let color = |ws: &crate::workspace::Workspace, name: &str| {
+            let d = &ws.studios[si].doc;
+            let f = d.features.iter().find(|f| f.name == name).unwrap();
+            d.parts.get(&crate::doc::body_key((f.id, 0))).and_then(|p| p.color)
+        };
+        assert_eq!(color(&ws, "Board"), Some(ws.pcbs[0].board.mask_rgb()));
+        ws.pcbs[0].board.color = "black".into();
+        to_studio(&mut ws, 0).unwrap();
+        assert_eq!(color(&ws, "Board"), Some(ws.pcbs[0].board.mask_rgb()), "a new mask colour shows");
+        // a colour the user gave the part stays
+        let fid = ws.studios[si].doc.features.iter().find(|f| f.name == "Board").unwrap().id;
+        ws.studios[si].doc.parts.get_mut(&crate::doc::body_key((fid, 0))).unwrap().color = Some([1, 2, 3]);
+        ws.pcbs[0].board.color = "blue".into();
+        to_studio(&mut ws, 0).unwrap();
+        assert_eq!(color(&ws, "Board"), Some([1, 2, 3]));
+    }
+
+    #[test]
+    fn board_script_drills_vias_and_guards_thickness() {
+        let mut p = crate::pcb::tests::led_board();
+        p.board.vias.push(pcb::Via { at: [7.0, 8.0], d: 0.6, drill: 0.3, net: String::new() });
+        p.board.holes.push(pcb::Hole { at: [1.0, 1.0], d: 0.0 });
+        p.name = "a\nlet x = ;\"b".into();
+        let s = board_script(&p);
+        assert!(s.contains("[7, 8, 0.15]"), "{s}");
+        assert!(!s.contains("[1, 1, 0]"), "a zero hole isn't cut");
+        assert_eq!(s.lines().next().unwrap().matches("let x").count(), 1, "the name stays in the comment: {s}");
+        assert!(s.lines().nth(1).unwrap().starts_with("let OUTLINE"));
+        let mut ws = crate::workspace::Workspace::default();
+        p.board.thickness = 0.0;
+        ws.pcbs.push(p);
+        let n = ws.studios.len();
+        assert!(to_studio(&mut ws, 0).is_err(), "a board of no thickness isn't built (the kernel would hang)");
+        assert_eq!(ws.studios.len(), n);
     }
 
     #[test]

@@ -233,8 +233,12 @@ impl Session {
     pub(super) fn pcb_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
         let v = match name {
             "create_pcb" => {
-                let n = self.ws.pcbs.len() + 1;
-                let mut p = Pcb::new(a.get("name").and_then(|v| v.as_str()).map(String::from).unwrap_or(format!("PCB {n}")));
+                // names are unique: each PCB tab has its own "<name> 3D" Part Studio
+                let name = match a.get("name").and_then(|v| v.as_str()).map(clean_name).filter(|n| !n.is_empty()) {
+                    Some(n) => pcb::unique_name(&self.ws.pcbs, &n, None),
+                    None => pcb::next_name(&self.ws.pcbs),
+                };
+                let mut p = Pcb::new(name);
                 apply_board(&mut p, a)?;
                 self.ws.pcbs.push(p);
                 let pi = self.ws.pcbs.len() - 1;
@@ -264,7 +268,7 @@ impl Session {
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 json!({"pcb": pi, "added": added})
             }
@@ -277,7 +281,7 @@ impl Session {
                     connect(&mut p, net, &pins);
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let nl = self.ws.pcbs[pi].netlist();
                 json!({"pcb": pi, "nets": nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", self.ws.pcbs[pi].parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>()})
@@ -285,8 +289,8 @@ impl Session {
             "pcb_edit" => {
                 let pi = self.pcb_idx(a)?;
                 let mut p = self.ws.pcbs[pi].clone();
-                if let Some(n) = a.get("name").and_then(|v| v.as_str()) {
-                    p.name = n.to_string();
+                if let Some(n) = a.get("name").and_then(|v| v.as_str()).map(clean_name).filter(|n| !n.is_empty()) {
+                    p.name = pcb::unique_name(&self.ws.pcbs, &n, Some(pi));
                 }
                 apply_board(&mut p, a)?;
                 for (k, x) in a.get("parts").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
@@ -323,7 +327,11 @@ impl Session {
                         .iter()
                         .map(|x| {
                             let at = x.get("at").and_then(pt).ok_or("holes: each {at: [x, y], d}")?;
-                            Ok(pcb::Hole { at, d: x.get("d").and_then(|v| v.as_f64()).unwrap_or(3.2) })
+                            let d = x.get("d").and_then(|v| v.as_f64()).unwrap_or(3.2);
+                            if !(d > 0.0 && d <= 50.0) {
+                                return Err(format!("holes: d is the hole diameter in mm, more than 0, not {d}"));
+                            }
+                            Ok(pcb::Hole { at, d })
                         })
                         .collect::<R<_>>()?;
                 }
@@ -400,18 +408,18 @@ impl Session {
                     Some(o) => return Err(format!("auto_place is unplaced or all, not {o}")),
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let mut v = self.pcb_summary(pi);
                 if let Some(n) = placed {
-                    v["placed"] = json!(n);
+                    v["placed"] = json!(n.placed);
                     let off: Vec<String> = {
                         let p = &self.ws.pcbs[pi];
                         p.parts
                             .iter()
                             .filter(|x| {
                                 let (lo, hi) = p.court_world(x);
-                                !(pcb::inside(&p.board.outline, lo) && pcb::inside(&p.board.outline, hi))
+                                !pcb::rect_inside(&p.board.outline, lo, hi, 0.0)
                             })
                             .map(|x| x.reference.clone())
                             .collect()
@@ -493,7 +501,7 @@ impl Session {
                     v["tuned"] = json!(tuned);
                 }
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let s = self.pcb_summary(pi);
                 for (k, x) in s.as_object().unwrap() {
@@ -686,7 +694,7 @@ impl Session {
                     }
                 };
                 let nl = p.netlist();
-                p.retag_copper(&nl);
+                p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
                 let x = &self.ws.pcbs[pi].parts[i];
                 json!({"pcb": pi, "reference": x.reference, "symbol": x.symbol, "value": x.value, "footprint": x.footprint, "mpn": x.mpn, "manufacturer": x.manufacturer, "digikey": x.digikey, "datasheet": x.datasheet, "changed": changed, "pins": pins_json(&self.ws.pcbs[pi], i)})
@@ -808,6 +816,11 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
     Ok(())
 }
 
+/// A tab name on one line, without control characters.
+fn clean_name(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+}
+
 fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
     let b = &mut p.board;
     if let Some(o) = a.get("outline") {
@@ -820,12 +833,17 @@ fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
         let size = b.size();
         let w = a.get("width").and_then(|v| v.as_f64()).unwrap_or(size[0]);
         let h = a.get("height").and_then(|v| v.as_f64()).unwrap_or(size[1]);
-        if w <= 0.0 || h <= 0.0 {
+        if !(w > 0.0 && h > 0.0) {
             return Err("width and height must be positive".into());
         }
-        b.outline = pcb::rect_outline(w, h, a.get("corner_radius").and_then(|v| v.as_f64()).unwrap_or(0.0));
+        // keeps the board where it is, and its corners unless given; whole-board pours follow
+        let r = a.get("corner_radius").and_then(|v| v.as_f64()).or_else(|| b.rect_radius()).unwrap_or(0.0);
+        b.resize(w, h, r);
     }
     if let Some(t) = a.get("thickness").and_then(|v| v.as_f64()) {
+        if !(0.2..=5.0).contains(&t) {
+            return Err(format!("thickness: {t} mm; boards are 0.2 to 5 mm thick (1.6 is usual)"));
+        }
         b.thickness = t;
     }
     b.stackup = crate::pcb_trace::stack(b);
@@ -1005,6 +1023,16 @@ pub fn tools() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_values_are_checked() {
+        let mut p = Pcb::new("t");
+        assert!(apply_board(&mut p, &json!({"thickness": 0})).is_err());
+        assert!(apply_board(&mut p, &json!({"thickness": -1.6})).is_err());
+        assert!(apply_board(&mut p, &json!({"thickness": 1.0})).is_ok());
+        assert_eq!(p.board.thickness, 1.0);
+        assert_eq!(clean_name(" a\nb "), "a b");
+    }
 
     #[test]
     fn connect_makes_the_nets() {

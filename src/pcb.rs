@@ -45,6 +45,9 @@ pub struct Pcb {
     pub symbols: Vec<pcb_lib::LibSymbol>,
     #[serde(default)]
     pub next_id: u64,
+    /// A stable id that links the tab to its "<name> 3D" Part Studio (survives renames).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub uid: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -360,6 +363,8 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("class_width", "Tracks narrower than their net class"),
     ("via", "Via drill and annular ring"),
     ("hole_gap", "Holes too close to each other"),
+    ("hole", "Copper near a mounting hole, holes near or off the edge"),
+    ("pad_drill", "Footprint pad drills and annular rings"),
     ("edge", "Copper near or off the board edge"),
     ("keepout", "Copper, vias or parts in a keepout"),
     ("silk", "Silkscreen over exposed pads"),
@@ -382,6 +387,7 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("erc_undriven", "Inputs nothing drives"),
     ("erc_nc", "No-connect marks on connected pins"),
     ("erc_labels", "Labels and wire ends that join nothing"),
+    ("erc_names", "Nets that carry two different label names"),
     ("erc_refs", "Duplicate references"),
     ("erc_footprint", "Unknown footprints"),
 ];
@@ -475,14 +481,28 @@ impl Default for Board {
 
 /// A w × h board outline from the origin, with corners rounded to `r`.
 pub fn rect_outline(w: f64, h: f64, r: f64) -> Vec<P> {
-    let r = r.clamp(0.0, w.min(h) / 2.0);
+    let r = r.clamp(0.0, (w.min(h) / 2.0).max(0.0));
+    rect_outline_n(w, h, r, arc_steps(r))
+}
+
+/// Steps per quarter circle so the chords stay within 0.01 mm of a corner of radius `r` (at least 6).
+fn arc_steps(r: f64) -> usize {
+    if r <= 0.01 {
+        return 6;
+    }
+    let step = 2.0 * (1.0 - 0.01 / r).clamp(-1.0, 1.0).acos();
+    ((std::f64::consts::FRAC_PI_2 / step).ceil() as usize).clamp(6, 45)
+}
+
+fn rect_outline_n(w: f64, h: f64, r: f64, n: usize) -> Vec<P> {
+    let r = r.clamp(0.0, (w.min(h) / 2.0).max(0.0));
     if r < 1e-6 {
         return vec![[0.0, 0.0], [w, 0.0], [w, h], [0.0, h]];
     }
     let mut v = vec![];
     for (c, a0) in [([w - r, r], -90.0), ([w - r, h - r], 0.0), ([r, h - r], 90.0), ([r, r], 180.0)] {
-        for i in 0..=6 {
-            let a = (a0 + 15.0 * i as f64).to_radians();
+        for i in 0..=n {
+            let a = (a0 + 90.0 * i as f64 / n as f64).to_radians();
             v.push([c[0] + r * a.cos(), c[1] + r * a.sin()]);
         }
     }
@@ -492,6 +512,26 @@ pub fn rect_outline(w: f64, h: f64, r: f64) -> Vec<P> {
 impl Board {
     pub fn bbox(&self) -> (P, P) {
         bbox(&self.outline)
+    }
+    /// The corner radius when the outline is a rounded rectangle made by `rect_outline` (also the
+    /// older outlines with 6 steps per corner); None for a custom outline.
+    pub fn rect_radius(&self) -> Option<f64> {
+        let (lo, hi) = self.bbox();
+        let (w, h) = (hi[0] - lo[0], hi[1] - lo[1]);
+        let r = if self.outline.len() > 4 { (hi[0] - self.outline[0][0]).max(0.0) } else { 0.0 };
+        let same = |m: Vec<P>| m.len() == self.outline.len() && m.iter().zip(&self.outline).all(|(m, o)| dist(add(*m, lo), *o) < 1e-6);
+        (same(rect_outline(w, h, r)) || same(rect_outline_n(w, h, r, 6))).then_some(r)
+    }
+    /// Make the outline a w × h rectangle with corner radius r, keeping its lower left corner;
+    /// pours that covered the whole board follow it.
+    pub fn resize(&mut self, w: f64, h: f64, r: f64) {
+        let (lo, _) = self.bbox();
+        let old = std::mem::replace(&mut self.outline, rect_outline(w, h, r).into_iter().map(|q| add(q, lo)).collect());
+        for z in &mut self.zones {
+            if z.outline == old {
+                z.outline = self.outline.clone();
+            }
+        }
     }
     pub fn size(&self) -> P {
         let (lo, hi) = self.bbox();
@@ -735,6 +775,24 @@ fn poly_poly(p: &[P], q: &[P]) -> f64 {
     edges(p).map(|(a, b)| poly_seg(q, a, b)).fold(f64::INFINITY, f64::min)
 }
 
+/// Whether the box `lo`..`hi` lies inside a closed polygon with at least `margin` to its edge:
+/// corners inside, and no edge of the polygon reaching into the box (a notch or cutout).
+pub fn rect_inside(poly: &[P], lo: P, hi: P, margin: f64) -> bool {
+    let corners = [lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]];
+    if !corners.iter().all(|c| inside(poly, *c)) {
+        return false;
+    }
+    // quick reject of edges whose box is clear of the grown rectangle
+    let (gl, gh) = ([lo[0] - margin, lo[1] - margin], [hi[0] + margin, hi[1] + margin]);
+    edges(poly).all(|(a, b)| {
+        if a[0].max(b[0]) < gl[0] || a[0].min(b[0]) > gh[0] || a[1].max(b[1]) < gl[1] || a[1].min(b[1]) > gh[1] {
+            return true;
+        }
+        let d = poly_seg(&corners, a, b);
+        if margin > 0.0 { d >= margin - 1e-9 } else { d > 1e-9 }
+    })
+}
+
 /// Distance from a point to a closed polygon's boundary.
 pub fn outline_dist(poly: &[P], p: P) -> f64 {
     edges(poly).map(|(a, b)| seg_point(a, b, p)).fold(f64::INFINITY, f64::min)
@@ -755,6 +813,10 @@ pub struct Net {
 pub struct Netlist {
     pub nets: Vec<Net>,
     pub pin_net: HashMap<(usize, String), usize>,
+    /// Each schematic wire's net (None for wires that reach no pin).
+    pub wire_net: Vec<Option<usize>>,
+    /// Labels whose text differs from the name their net got: (net name, label text, label position).
+    pub label_conflicts: Vec<(String, String, P)>,
 }
 
 impl Netlist {
@@ -789,6 +851,43 @@ impl Dsu {
 
 const EPS: f64 = 1e-3;
 
+/// A fresh id for a PCB tab.
+pub fn new_uid() -> String {
+    use std::sync::atomic::{AtomicU64, Ordering};
+    static N: AtomicU64 = AtomicU64::new(0);
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos() as u64).unwrap_or(0);
+    format!("{:x}{:04x}", t, N.fetch_add(1, Ordering::Relaxed) & 0xffff)
+}
+
+/// Give every PCB an id, and a new one to a PCB whose id another has too (a copy). Returns
+/// whether anything changed.
+pub fn ensure_uids(pcbs: &mut [Pcb]) -> bool {
+    let mut seen = std::collections::HashSet::new();
+    let mut changed = false;
+    for p in pcbs.iter_mut() {
+        if p.uid.is_empty() || !seen.insert(p.uid.clone()) {
+            p.uid = new_uid();
+            seen.insert(p.uid.clone());
+            changed = true;
+        }
+    }
+    changed
+}
+
+/// `want`, or `want 2`, `want 3`, … : a name no other PCB tab (but `skip`) has.
+pub fn unique_name(pcbs: &[Pcb], want: &str, skip: Option<usize>) -> String {
+    let taken = |n: &str| pcbs.iter().enumerate().any(|(i, p)| Some(i) != skip && p.name == n);
+    if !taken(want) {
+        return want.to_string();
+    }
+    (2..).map(|k| format!("{want} {k}")).find(|n| !taken(n)).unwrap()
+}
+
+/// The name for a new PCB tab: the first free "PCB n".
+pub fn next_name(pcbs: &[Pcb]) -> String {
+    (1..).map(|k| format!("PCB {k}")).find(|n| !pcbs.iter().any(|p| p.name == *n)).unwrap()
+}
+
 /// A pin's connection point and the direction its line runs into the symbol.
 #[derive(Clone, Debug)]
 pub struct SchPin {
@@ -800,7 +899,7 @@ pub struct SchPin {
 
 impl Pcb {
     pub fn new(name: impl Into<String>) -> Pcb {
-        Pcb { name: name.into(), next_id: 1, ..Default::default() }
+        Pcb { name: name.into(), next_id: 1, uid: new_uid(), ..Default::default() }
     }
 
     pub fn part_index(&self, reference: &str) -> Option<usize> {
@@ -810,7 +909,7 @@ impl Pcb {
     /// Next free reference for a prefix (R1, R2, …).
     pub fn next_reference(&self, prefix: &str) -> String {
         let mut n = 1;
-        while self.parts.iter().any(|p| p.reference == format!("{prefix}{n}")) {
+        while self.part_index(&format!("{prefix}{n}")).is_some() {
             n += 1;
         }
         format!("{prefix}{n}")
@@ -973,7 +1072,194 @@ impl Pcb {
                 out.pin_net.insert(p.clone(), ni);
             }
         }
+        // a group's net, found through any of its pins
+        let mut root_net: HashMap<usize, usize> = HashMap::new();
+        for (k, p) in pins.iter().enumerate() {
+            if let Some(&ni) = out.pin_net.get(&(p.part, p.num.clone())) {
+                root_net.insert(d.find(nw + k), ni);
+            }
+        }
+        out.wire_net = (0..nw).map(|i| root_net.get(&d.find(i)).copied()).collect();
+        for (k, l) in self.labels.iter().enumerate() {
+            let t = l.text.trim();
+            if let Some(&ni) = root_net.get(&d.find(nw + np + k)) {
+                if !t.is_empty() && out.nets[ni].name != t && !out.label_conflicts.iter().any(|c| c.0 == out.nets[ni].name && c.1 == t) {
+                    out.label_conflicts.push((out.nets[ni].name.clone(), t.to_string(), l.at));
+                }
+            }
+        }
         out
+    }
+
+    /// Keep part `i`'s connections after its pins moved (turned, mirrored, new pin names, footprint
+    /// or type); `before` is the part as it was. Pins are matched by number. A stub (a wire from
+    /// the pin to an end that touches nothing but labels) turns with its pin, labels and all; other
+    /// wires keep their far end and are redrawn to the pin's new spot clear of other pins. Labels
+    /// right on a pin follow it. Ends on pins that are gone stay where they are. Returns whether
+    /// every pin is still joined to the same pins as before (false: a crowded spot made a new or
+    /// lost connection, and the caller had better not make the change).
+    pub fn carry_to_pins(&mut self, i: usize, before: &Part) -> bool {
+        let groups = |p: &Pcb| {
+            let mut g: Vec<Vec<(usize, String)>> = p.netlist().nets.into_iter().map(|n| n.pins).filter(|v| v.len() > 1).collect();
+            g.sort();
+            g
+        };
+        if i >= self.parts.len() {
+            return true;
+        }
+        let mut was = self.clone();
+        was.parts[i] = before.clone();
+        let old: Vec<SchPin> = was.sch_pins().into_iter().filter(|x| x.part == i).collect();
+        let new: Vec<SchPin> = self.sch_pins().into_iter().filter(|x| x.part == i).collect();
+        let moves: Vec<(&SchPin, &SchPin)> = old.iter().filter(|o| o.part == i).filter_map(|o| new.iter().find(|n| n.num == o.num).map(|n| (o, n))).filter(|(o, n)| dist(o.at, n.at) > 1e-9 || dist(o.inner, n.inner) > 1e-9).collect();
+        if moves.is_empty() {
+            return true;
+        }
+        let near = |a: P, b: P| dist(a, b) < 1e-6;
+        let unit = |v: P| {
+            let l = v[0].hypot(v[1]).max(1e-12);
+            [v[0] / l, v[1] / l]
+        };
+        // quarter turns of a net label that reads away from a pin pointing `d`
+        let rot_of = |d: P| -> u8 {
+            if d[0] > 0.5 { 0 } else if d[1] > 0.5 { 1 } else if d[0] < -0.5 { 2 } else { 3 }
+        };
+        let others_at = |p: &Pcb, q: P, skip: usize| p.wires.iter().enumerate().any(|(k, w)| k != skip && seg_point(w.a, w.b, q) < EPS) || p.sch_pins().iter().any(|x| near(x.at, q));
+        // work from the state before: every decision looks at where things were
+        let snapshot = self.clone();
+        // the joins as they were
+        let want = groups(&was);
+        let mut redraw: Vec<(usize, P, P)> = vec![];
+        let mut moved_labels: Vec<bool> = vec![false; self.labels.len()];
+        for (k, w) in snapshot.wires.iter().enumerate() {
+            let ends = [(w.a, w.b, false), (w.b, w.a, true)];
+            let Some(&(pin_end, far, b_is_pin)) = ends.iter().find(|e| moves.iter().any(|m| near(m.0.at, e.0))) else { continue };
+            let (o, n) = *moves.iter().find(|m| near(m.0.at, pin_end)).unwrap();
+            let far_on_pin = moves.iter().find(|m| near(m.0.at, far));
+            if let Some((_, n2)) = far_on_pin {
+                // a wire between two of this part's pins: both ends follow
+                self.wires[k] = if b_is_pin { Wire { a: n2.at, b: n.at } } else { Wire { a: n.at, b: n2.at } };
+                continue;
+            }
+            if !others_at(&snapshot, far, k) {
+                // a stub: turn it the way the pin turned
+                let (d0, d1) = (unit(sub(o.at, o.inner)), unit(sub(n.at, n.inner)));
+                let v = sub(far, o.at);
+                let (c, s) = (d0[0] * d1[0] + d0[1] * d1[1], d0[0] * d1[1] - d0[1] * d1[0]);
+                let nf = snap(add(n.at, [v[0] * c - v[1] * s, v[0] * s + v[1] * c]), 1e-6);
+                self.wires[k] = if b_is_pin { Wire { a: nf, b: n.at } } else { Wire { a: n.at, b: nf } };
+                for (li, l) in snapshot.labels.iter().enumerate() {
+                    if near(l.at, far) && !moved_labels[li] {
+                        moved_labels[li] = true;
+                        self.labels[li].at = nf;
+                        if l.kind == LabelKind::Net && l.rot % 4 == rot_of(d0) {
+                            self.labels[li].rot = rot_of(d1);
+                        }
+                    }
+                }
+                continue;
+            }
+            redraw.push((k, far, n.at));
+        }
+        // no-connect marks stay on their pins
+        for q in &mut self.no_connects {
+            if let Some((_, n)) = moves.iter().find(|m| near(m.0.at, *q)) {
+                *q = n.at;
+            }
+        }
+        for (li, l) in snapshot.labels.iter().enumerate() {
+            if let Some((_, n)) = moves.iter().find(|m| near(m.0.at, l.at)) {
+                if !moved_labels[li] {
+                    self.labels[li].at = n.at;
+                }
+            }
+        }
+        // wires that go on elsewhere keep their far end and are redrawn to the pin
+        let mut add_wires = vec![];
+        let mut drop = vec![];
+        for (k, far, to) in redraw {
+            let path = self.wire_path(far, to, false, Some(k));
+            drop.push(k);
+            for s in path.windows(2) {
+                add_wires.push(Wire { a: s[0], b: s[1] });
+            }
+        }
+        let mut k = 0;
+        self.wires.retain(|_| {
+            k += 1;
+            !drop.contains(&(k - 1))
+        });
+        self.wires.extend(add_wires);
+        self.wires.retain(|w| dist(w.a, w.b) > 1e-9);
+        // a pin that lands in the middle of a wire going past would join it: that wire steps aside
+        let landed: Vec<P> = moves.iter().map(|m| m.1.at).collect();
+        let crossing: Vec<usize> = (0..self.wires.len())
+            .filter(|&k| {
+                let w = &self.wires[k];
+                landed.iter().any(|q| seg_point(w.a, w.b, *q) < EPS && !near(w.a, *q) && !near(w.b, *q))
+            })
+            .collect();
+        for &k in crossing.iter().rev() {
+            let w = self.wires[k].clone();
+            let path = self.wire_path(w.a, w.b, false, Some(k));
+            self.wires.remove(k);
+            for s in path.windows(2) {
+                self.wires.push(Wire { a: s[0], b: s[1] });
+            }
+        }
+        groups(self) == want
+    }
+
+    /// A schematic wire from a to b: the orthogonal path (preferred corner first) that touches no
+    /// pin, label or wire end except at its own ends and puts no corner on another wire, since all of
+    /// those would join it. When both corners would, a three-segment detour a grid step or more
+    /// aside; failing that, the preferred corner. `skip` is a wire being replaced.
+    pub fn wire_path(&self, a: P, b: P, vfirst: bool, skip: Option<usize>) -> Vec<P> {
+        let away = |q: &P| dist(*q, a) > 1e-6 && dist(*q, b) > 1e-6;
+        let mut dots: Vec<P> = self.sch_pins().into_iter().map(|x| x.at).collect();
+        dots.extend(self.labels.iter().map(|l| l.at));
+        // a wire over a no-connect mark would contradict it
+        dots.extend(self.no_connects.iter().copied());
+        let wires: Vec<&Wire> = self.wires.iter().enumerate().filter(|(k, _)| Some(*k) != skip).map(|(_, w)| w).collect();
+        dots.extend(wires.iter().flat_map(|w| [w.a, w.b]));
+        dots.retain(away);
+        let clear = |path: &[P]| {
+            path.windows(2).all(|s| dots.iter().all(|q| seg_point(s[0], s[1], *q) > EPS))
+                && path[1..path.len() - 1].iter().all(|c| wires.iter().all(|w| seg_point(w.a, w.b, *c) > EPS))
+        };
+        let corner = |vf: bool| if vf { vec![a, [a[0], b[1]], b] } else { vec![a, [b[0], a[1]], b] };
+        let g = pcb_lib::GRID;
+        let mut tries = vec![corner(vfirst), corner(!vfirst)];
+        for k in 1..=8 {
+            for side in [1.0, -1.0] {
+                let d = side * k as f64 * g;
+                // out sideways from a or b, across, and back in
+                tries.push(vec![a, [a[0] + d, a[1]], [a[0] + d, b[1]], b]);
+                tries.push(vec![a, [a[0], a[1] + d], [b[0], a[1] + d], b]);
+                tries.push(vec![a, [b[0] + d, a[1]], [b[0] + d, b[1]], b]);
+                tries.push(vec![a, [a[0], b[1] + d], [b[0], b[1] + d], b]);
+            }
+        }
+        let tidy = |v: Vec<P>| -> Vec<P> {
+            let mut out: Vec<P> = vec![];
+            for q in v {
+                if out.last().is_none_or(|l| dist(*l, q) > 1e-9) {
+                    out.push(q);
+                }
+            }
+            // drop corners that sit on a straight run
+            let mut k = 1;
+            while k + 1 < out.len() {
+                if seg_point(out[k - 1], out[k + 1], out[k]) < 1e-9 && dist(out[k - 1], out[k + 1]) > 1e-9 {
+                    out.remove(k);
+                } else {
+                    k += 1;
+                }
+            }
+            out
+        };
+        let first = tidy(tries[0].clone());
+        tries.into_iter().map(tidy).find(|t| t.len() >= 2 && clear(t)).unwrap_or(first)
     }
 
     /// Every pad on the board with its net.
@@ -1002,18 +1288,54 @@ impl Pcb {
     /// name changed, a relabelled net) the name of the one net whose pads it touches. Copper that
     /// touches no pad, or pads of several nets, keeps its name. Returns whether anything changed.
     pub fn retag_copper(&mut self, nl: &Netlist) -> bool {
+        self.retag_copper_from(nl, None)
+    }
+
+    /// Each net's pins by part id, to follow nets across an edit (`retag_copper_from`).
+    pub fn net_pins(&self, nl: &Netlist) -> NetPins {
+        nl.nets.iter().map(|n| (n.name.clone(), n.pins.iter().filter_map(|(i, num)| self.parts.get(*i).map(|p| (p.id, num.clone()))).collect())).collect()
+    }
+
+    /// `retag_copper` after an edit from `before`: copper (pours too) of a net that was renamed
+    /// takes the new name of the net most of its old pins are now on.
+    pub fn retag_copper_since(&mut self, before: &Pcb, nl: &Netlist) -> bool {
+        let prev = before.net_pins(&before.netlist());
+        self.retag_copper_from(nl, Some(&prev))
+    }
+
+    /// `retag_copper`, first following the nets' pins from `prev` (names before the edit).
+    pub fn retag_copper_from(&mut self, nl: &Netlist, prev: Option<&NetPins>) -> bool {
         let known = |n: &str| n.is_empty() || nl.by_name(n).is_some();
         let b = &self.board;
-        let mut stale: Vec<String> = b.tracks.iter().map(|t| &t.net).chain(b.vias.iter().map(|v| &v.net)).filter(|n| !known(n)).cloned().collect();
+        let mut stale: Vec<String> = b.tracks.iter().map(|t| &t.net).chain(b.vias.iter().map(|v| &v.net)).chain(b.zones.iter().map(|z| &z.net)).filter(|n| !known(n)).cloned().collect();
         stale.sort();
         stale.dedup();
         if stale.is_empty() {
             return false;
         }
+        let mut map: HashMap<String, String> = HashMap::new();
+        // the net the old pins are on now
+        if let Some(prev) = prev {
+            for s in &stale {
+                let Some(pins) = prev.get(s) else { continue };
+                let mut count: HashMap<usize, usize> = HashMap::new();
+                for (id, num) in pins {
+                    let Some(i) = self.parts.iter().position(|p| p.id == *id) else { continue };
+                    if let Some(&n) = nl.pin_net.get(&(i, num.clone())) {
+                        *count.entry(n).or_default() += 1;
+                    }
+                }
+                if let Some((&n, &k)) = count.iter().max_by_key(|(n, k)| (**k, std::cmp::Reverse(**n))) {
+                    if 2 * k > pins.len() {
+                        map.insert(s.clone(), nl.nets[n].name.clone());
+                    }
+                }
+            }
+        }
         let pads = self.pads(nl);
         let its = items(self, nl, &pads, &[]);
-        let mut map: HashMap<String, String> = HashMap::new();
-        for s in stale {
+        let rest: Vec<String> = stale.into_iter().filter(|s| !map.contains_key(s)).collect();
+        for s in rest {
             let mut nets: Vec<usize> = vec![];
             for it in its.iter().filter(|it| it.net == s && matches!(it.kind, ItemKind::Track(_) | ItemKind::Via(_))) {
                 for pad in its.iter().filter(|x| matches!(x.kind, ItemKind::Pad(_))) {
@@ -1054,6 +1376,9 @@ impl Pcb {
         r
     }
 }
+
+/// Each net's pins as (part id, pin number), by net name.
+pub type NetPins = HashMap<String, Vec<(u64, String)>>;
 
 /// Snap to a grid.
 pub fn snap(p: P, g: f64) -> P {
@@ -1293,10 +1618,14 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
     let base_items = items(pcb, nl, pads, &[]);
     let mut cl_cache: HashMap<String, f64> = HashMap::new();
     let mut clear = |net: &str| -> f64 { *cl_cache.entry(net.to_string()).or_insert_with(|| pcb.net_rules(nl, net).clearance) };
-    let mut fills: Vec<Fill> = vec![];
-    for (zi, z) in b.zones.iter().enumerate() {
+    // smaller pours are filled first and larger ones keep clear of them, so a pour drawn inside
+    // another net's pour gets its copper (equal sizes: the earlier one wins)
+    let mut order: Vec<usize> = (0..b.zones.len()).collect();
+    order.sort_by(|&x, &y| zone_area(&b.zones[x]).total_cmp(&zone_area(&b.zones[y])).then(x.cmp(&y)));
+    let mut fills: Vec<Fill> = vec![vec![]; b.zones.len()];
+    for (oi, &zi) in order.iter().enumerate() {
+        let z = &b.zones[zi];
         if z.outline.len() < 3 {
-            fills.push(vec![]);
             continue;
         }
         let zc = if z.clearance > 0.0 { z.clearance } else { clear(&z.net) };
@@ -1318,7 +1647,8 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
         for k in b.keepouts.iter().filter(|k| k.pours && k.on(Some(z.layer)) && k.outline.len() >= 3) {
             obstacles.push(ccw(k.outline.clone()));
         }
-        for (k, other) in b.zones.iter().enumerate().take(zi) {
+        for &k in &order[..oi] {
+            let other = &b.zones[k];
             if other.layer == z.layer && other.net != z.net {
                 for piece in &fills[k] {
                     let grown = crate::cam_paths::offset(&vec![piece.clone()], zc);
@@ -1355,7 +1685,7 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
         // keep pieces that reach a pad, via or track of the net
         let own: Vec<&Item> = base_items.iter().filter(|it| it.net == z.net && !z.net.is_empty() && it.layer.is_none_or(|l| l == z.layer)).collect();
         area.retain(|piece| own.iter().any(|it| probe(&it.cu).iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))));
-        fills.push(area);
+        fills[zi] = area;
     }
     fills
 }
@@ -1371,6 +1701,10 @@ fn probe(cu: &Cu) -> Vec<P> {
             v
         }
     }
+}
+
+fn zone_area(z: &Zone) -> f64 {
+    if z.outline.len() < 3 { 0.0 } else { crate::cam_paths::area(&z.outline).abs() }
 }
 
 // ---------------------------------------------------------------- design rule check
@@ -1448,8 +1782,22 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     }
     let clr = |net: &str| rules_cache.get(net).map(|x| x.clearance).unwrap_or(r.clearance);
     let max_cl = rules_cache.values().map(|x| x.clearance).fold(r.clearance, f64::max);
-    // pads with no net are each their own net
-    let net_key = |i: usize| -> String { if its[i].net.is_empty() { format!("\u{0}{i}") } else { its[i].net.clone() } };
+    // pads with no net are each their own net; tracks and vias with no net share a key with the
+    // net-less copper they touch, so a net-less polyline isn't a clearance error against itself
+    let mut free = Dsu::new(its.len());
+    for i in 0..its.len() {
+        if !its[i].net.is_empty() {
+            continue;
+        }
+        for j in i + 1..its.len() {
+            let wire = |k: usize| matches!(its[k].kind, ItemKind::Track(_) | ItemKind::Via(_));
+            if its[j].net.is_empty() && (wire(i) || wire(j)) && its[i].shares_layer(&its[j]) && its[i].cu.gap(&its[j].cu) <= EPS {
+                free.join(i, j);
+            }
+        }
+    }
+    let roots: Vec<usize> = (0..its.len()).map(|i| free.find(i)).collect();
+    let net_key = |i: usize| -> String { if its[i].net.is_empty() { format!("\u{0}{}", roots[i]) } else { its[i].net.clone() } };
     let bbs: Vec<(P, P)> = its.iter().map(|i| i.cu.bbox()).collect();
     for i in 0..its.len() {
         for j in i + 1..its.len() {
@@ -1521,6 +1869,35 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             let g = c - (drills[i].1 + drills[j].1) / 2.0;
             if g < r.hole_gap - 1e-4 {
                 out.push(Issue::new("hole_gap", drills[i].0, true, format!("Holes {:.3} mm apart (rule {} mm): {} and {}", g.max(0.0), r.hole_gap, drills[i].2, drills[j].2)));
+            }
+        }
+    }
+    // plated holes in footprints
+    for (pi, part) in pcb.parts.iter().enumerate() {
+        let mine: Vec<&WPad> = pads.iter().filter(|x| x.part == pi && x.drill > 0.0).collect();
+        if let Some(x) = mine.iter().find(|x| x.drill < r.min_drill - 1e-9) {
+            out.push(Issue::new("pad_drill", x.at, true, format!("{} pad drill {} mm is under the {} mm minimum", part.reference, x.drill, r.min_drill)));
+        }
+        if let Some(x) = mine.iter().find(|x| (x.size[0].min(x.size[1]) - x.drill) / 2.0 < r.min_annular - 1e-9) {
+            let ring = (x.size[0].min(x.size[1]) - x.drill) / 2.0;
+            out.push(Issue::new("pad_drill", x.at, true, format!("{} pad annular ring {:.3} mm is under {} mm", part.reference, ring, r.min_annular)));
+        }
+    }
+    // mounting holes: no copper of any layer near them, and inside the board
+    for h in &b.holes {
+        let hole = Cu::Seg { a: h.at, b: h.at, r: h.d / 2.0 };
+        for it in &its {
+            let (g, need) = (hole.gap(&it.cu), clr(&it.net));
+            if g < need - 1e-4 {
+                out.push(Issue::new("hole", h.at, true, format!("Clearance {:.3} mm < {} mm: mounting hole and {}", g.max(0.0), need, item_label(pcb, pads, it))));
+            }
+        }
+        if b.outline.len() >= 3 {
+            let near = outline_dist(&b.outline, h.at) - h.d / 2.0;
+            if !inside(&b.outline, h.at) {
+                out.push(Issue::new("hole", h.at, true, "Mounting hole is off the board".into()));
+            } else if near < r.edge - 1e-4 {
+                out.push(Issue::new("hole", h.at, true, format!("Mounting hole is {:.2} mm from the board edge (rule {} mm)", near.max(0.0), r.edge)));
             }
         }
     }
@@ -1654,7 +2031,7 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     }
     for (i, p) in pcb.parts.iter().enumerate() {
         let (lo, hi) = courts[i];
-        if b.outline.len() >= 3 && [lo, hi, [lo[0], hi[1]], [hi[0], lo[1]]].iter().any(|c| !inside(&b.outline, *c)) {
+        if b.outline.len() >= 3 && !rect_inside(&b.outline, lo, hi, 0.0) {
             out.push(Issue::new("outside", p.at, true, format!("{} is not inside the board", p.reference)));
         }
     }
@@ -1710,21 +2087,38 @@ fn closest_mid(t: &Track) -> P {
 
 /// Which net a point on a layer belongs to: a pad, track or via under it.
 pub fn net_at(pcb: &Pcb, nl: &Netlist, pads: &[WPad], at: P, layer: Layer) -> Option<(String, P)> {
+    copper_at(pcb, nl, pads, at, layer, 0.0).map(|c| (c.net, c.at))
+}
+
+/// Copper found under a point by `copper_at`.
+#[derive(Clone, Debug, PartialEq)]
+pub struct CopperHit {
+    pub net: String,
+    /// Where a track would join it: a pad or via centre, a track end or the nearest point on a track.
+    pub at: P,
+    /// The copper's layer; None for plated holes and vias.
+    pub layer: Option<Layer>,
+    /// It is a pad (not a track or via).
+    pub pad: bool,
+}
+
+/// The pad, via or track on `layer` within `tol` of a point (pads first, then vias, then tracks).
+pub fn copper_at(pcb: &Pcb, nl: &Netlist, pads: &[WPad], at: P, layer: Layer, tol: f64) -> Option<CopperHit> {
     for p in pads {
-        if p.on(layer) && p.cu().contains(at) {
-            return Some((p.net.map(|n| nl.nets[n].name.clone()).unwrap_or_default(), p.at));
+        if p.on(layer) && p.cu().gap(&Cu::Seg { a: at, b: at, r: 0.0 }) <= tol + 1e-6 {
+            return Some(CopperHit { net: p.net.map(|n| nl.nets[n].name.clone()).unwrap_or_default(), at: p.at, layer: p.layer, pad: true });
         }
     }
     for v in &pcb.board.vias {
-        if dist(v.at, at) <= v.d / 2.0 {
-            return Some((v.net.clone(), v.at));
+        if dist(v.at, at) <= v.d / 2.0 + tol {
+            return Some(CopperHit { net: v.net.clone(), at: v.at, layer: None, pad: false });
         }
     }
     for t in &pcb.board.tracks {
-        if t.layer == layer && seg_point(t.a, t.b, at) <= t.width / 2.0 {
+        if t.layer == layer && seg_point(t.a, t.b, at) <= t.width / 2.0 + tol {
             let end = if dist(t.a, at) < dist(t.b, at) { t.a } else { t.b };
-            let snap_to = if dist(end, at) < t.width * 2.0 { end } else { closest_on(t.a, t.b, at) };
-            return Some((t.net.clone(), snap_to));
+            let snap_to = if dist(end, at) < t.width * 2.0 + tol { end } else { closest_on(t.a, t.b, at) };
+            return Some(CopperHit { net: t.net.clone(), at: snap_to, layer: Some(t.layer), pad: false });
         }
     }
     None
@@ -1742,6 +2136,25 @@ pub(crate) mod tests {
     use super::*;
 
     /// An LED with its resistor: two parts, wires, a supply and ground port.
+    #[test]
+    fn pcb_names_and_ids_stay_unique() {
+        let mut v = vec![Pcb::new("PCB 2"), Pcb::new("A")];
+        assert_eq!(next_name(&v), "PCB 1");
+        v.push(Pcb::new("PCB 1"));
+        assert_eq!(next_name(&v), "PCB 3");
+        assert_eq!(unique_name(&v, "A", None), "A 2");
+        assert_eq!(unique_name(&v, "A", Some(1)), "A", "its own name is free");
+        assert_ne!(v[0].uid, v[1].uid);
+        let mut copy = v[1].clone();
+        copy.name = "B".into();
+        v.push(copy);
+        v[0].uid.clear();
+        assert!(ensure_uids(&mut v));
+        assert!(!v[0].uid.is_empty());
+        assert_ne!(v[1].uid, v[3].uid, "a copy gets its own id");
+        assert!(!ensure_uids(&mut v));
+    }
+
     pub(crate) fn led_board() -> Pcb {
         let mut p = Pcb::new("LED");
         let r = p.add_part("R", None, Some("330"), [0.0, 0.0]).unwrap();
@@ -1843,6 +2256,93 @@ pub(crate) mod tests {
         let pads = p.pads(&nl);
         let issues = drc(&p, &nl, &pads, &[]);
         assert!(!issues.iter().any(|i| i.message.starts_with("Short") && (i.message.contains("VCC") || i.message.contains("+5V"))), "{issues:?}");
+    }
+
+    #[test]
+    fn turned_and_mirrored_symbols_keep_their_connections() {
+        let mut p = led_board();
+        let u = p.add_part("U", Some("SOIC-8"), Some("NE555"), [40.64, 0.0]).unwrap();
+        let pins = p.sch_pins();
+        for (k, sp) in pins.iter().filter(|x| x.part == u).enumerate() {
+            // a stub out of each pin with a label at its end, as pcb_connect draws them
+            let d = sub(sp.at, sp.inner);
+            let end = add(sp.at, [d[0].signum() * 2.54, d[1].signum() * 2.54]);
+            p.wires.push(Wire { a: sp.at, b: end });
+            p.labels.push(Label { at: end, text: format!("U{k}"), kind: LabelKind::Net, rot: 0 });
+        }
+        let names = |p: &Pcb| -> Vec<(String, Vec<(usize, String)>)> { p.netlist().nets.into_iter().map(|n| (n.name, n.pins)).collect() };
+        let want = names(&p);
+        // the 555's box is symmetric: mirrored, its pins land on the other side's wires
+        // a no-connect mark on pin 5 (its stub taken away) stays on pin 5
+        let pin5 = |p: &Pcb| p.sch_pins().into_iter().find(|x| x.part == u && x.num == "5").unwrap().at;
+        let at5 = pin5(&p);
+        let mut q = p.clone();
+        q.wires.retain(|w| dist(w.a, at5) > 1e-6 && dist(w.b, at5) > 1e-6);
+        q.no_connects.push(at5);
+        let old = q.parts[u].clone();
+        q.parts[u].sch_mirror = true;
+        q.carry_to_pins(u, &old);
+        assert_eq!(q.no_connects, vec![pin5(&q)]);
+        let old = p.parts[u].clone();
+        p.parts[u].sch_mirror = true;
+        assert!(p.carry_to_pins(u, &old));
+        assert_eq!(names(&p), want);
+        // half a turn of the LED would reverse it on its own wires
+        for r in 1..4 {
+            let mut q = p.clone();
+            let old = q.parts[1].clone();
+            q.parts[1].sch_rot = r;
+            assert!(q.carry_to_pins(1, &old), "turned {r}");
+            assert_eq!(names(&q), want, "turned {r}");
+        }
+        // and turn by turn, where a pin can land on the wire an earlier turn drew
+        // (a turn that would make or lose a join says so, and the editor leaves the part as it was)
+        let mut q = p.clone();
+        for r in 1..=4 {
+            let keep = q.clone();
+            let old = q.parts[1].clone();
+            q.parts[1].sch_rot = r % 4;
+            if !q.carry_to_pins(1, &old) {
+                q = keep;
+            }
+            assert_eq!(names(&q), want, "turn {r}");
+        }
+        // a longer pin name widens the box and moves the pins out; the wires follow
+        let old = p.parts[u].clone();
+        p.parts[u].pin_names = vec!["GND".into(), "TRIGGER_INPUT".into()];
+        assert!(p.carry_to_pins(u, &old));
+        assert_eq!(names(&p), want);
+    }
+
+    #[test]
+    fn a_turn_onto_another_pin_is_reported() {
+        let mut p = Pcb::new("t");
+        let r1 = p.add_part("R", None, None, [0.0, 0.0]).unwrap();
+        // R2's pin 1 sits where R1's pin 1 goes on a quarter turn
+        p.add_part("R", None, None, [-5.08, -5.08]).unwrap();
+        let old = p.parts[r1].clone();
+        p.parts[r1].sch_rot = 1;
+        assert!(!p.carry_to_pins(r1, &old));
+    }
+
+    #[test]
+    fn wires_know_their_net_and_odd_labels_are_flagged() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let mid = nl.by_name("Net-(D1-2)").unwrap();
+        assert_eq!(nl.wire_net, vec![Some(mid), Some(mid)]);
+        assert!(nl.label_conflicts.is_empty(), "{:?}", nl.label_conflicts);
+        // a second name on the supply
+        let at = p.labels[0].at;
+        p.labels.push(Label { at, text: "VDD".into(), kind: LabelKind::Net, rot: 0 });
+        let nl = p.netlist();
+        assert_eq!(nl.label_conflicts.len(), 1);
+        assert_eq!((nl.label_conflicts[0].0.as_str(), nl.label_conflicts[0].1.as_str()), ("VCC", "VDD"));
+        assert!(crate::pcb_erc::erc(&p, &nl).iter().any(|i| i.rule == "erc_names" && i.message.contains("also labelled VDD")));
+        assert!(CHECKS.iter().any(|c| c.0 == "erc_names"));
+        // references are unique without regard to case (the ERC flags duplicates)
+        p.parts[0].reference = "d1".into();
+        assert_eq!(p.next_reference("D"), "D2");
     }
 
     #[test]
@@ -1992,5 +2492,157 @@ pub(crate) mod tests {
         p.parts[1].at = [25.0, 20.0];
         let pads = p.pads(&nl);
         assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "body"));
+    }
+
+    #[test]
+    fn drc_checks_mounting_holes() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.message.contains("ounting hole")), "{issues:?}");
+        // a track straight through a hole, and a hole hard by the edge
+        p.board.tracks.push(Track { a: [30.0, 30.0], b: [40.0, 30.0], width: 0.25, layer: Layer::Bottom, net: "GND".into() });
+        p.board.holes.push(Hole { at: [35.0, 30.0], d: 3.2 });
+        p.board.holes.push(Hole { at: [1.0, 1.0], d: 3.2 });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.rule == "hole" && i.message.starts_with("Clearance") && i.message.contains("mounting hole and track")), "{issues:?}");
+        assert!(issues.iter().any(|i| i.message.starts_with("Mounting hole is 0.00 mm from the board edge")), "{issues:?}");
+    }
+
+    #[test]
+    fn netless_copper_is_not_a_clearance_error_with_itself() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        // a polyline and a via of no net, joined end to end
+        for s in [[[5.0, 35.0], [15.0, 35.0]], [[15.0, 35.0], [15.0, 30.0]]] {
+            p.board.tracks.push(Track { a: s[0], b: s[1], width: 0.25, layer: Layer::Top, net: String::new() });
+        }
+        p.board.vias.push(Via { at: [15.0, 30.0], d: 0.6, drill: 0.3, net: String::new() });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "clearance" && i.message.contains("no net")), "{issues:?}");
+        // a separate net-less track too close to it is still an error
+        p.board.tracks.push(Track { a: [10.0, 35.3], b: [10.0, 37.0], width: 0.25, layer: Layer::Top, net: String::new() });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.message.contains("track (no net) and track (no net)")), "{issues:?}");
+    }
+
+    #[test]
+    fn drc_checks_pad_drills() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "pad_drill"), "{issues:?}");
+        // the pin header has 1.0 mm drills in 1.7 mm pads
+        p.board.rules.min_drill = 1.2;
+        p.board.rules.min_annular = 0.5;
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.rule == "pad_drill" && i.message.starts_with("J1 pad drill 1 mm is under")), "{issues:?}");
+        assert!(issues.iter().any(|i| i.rule == "pad_drill" && i.message.starts_with("J1 pad annular ring 0.350 mm")), "{issues:?}");
+        p.board.rules.off.push("pad_drill".into());
+        assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "pad_drill"));
+    }
+
+    #[test]
+    fn rect_inside_sees_notches() {
+        let u = vec![[0.0, 0.0], [60.0, 0.0], [60.0, 40.0], [40.0, 40.0], [40.0, 3.0], [20.0, 3.0], [20.0, 40.0], [0.0, 40.0]];
+        // corners in both arms, across the cutout
+        assert!(!rect_inside(&u, [5.0, 18.0], [55.0, 22.0], 0.0));
+        assert!(rect_inside(&u, [5.0, 18.0], [15.0, 22.0], 0.0));
+        assert!(rect_inside(&u, [5.0, 18.0], [15.0, 22.0], 1.0));
+        assert!(!rect_inside(&u, [5.0, 18.0], [19.5, 22.0], 1.0));
+        assert!(!rect_inside(&u, [-1.0, 18.0], [15.0, 22.0], 0.0));
+    }
+
+    #[test]
+    fn renamed_net_keeps_a_pour_without_tracks() {
+        let mut p = led_board();
+        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Bottom, outline: p.board.outline.clone(), ..Default::default() });
+        let before = p.clone();
+        for l in &mut p.labels {
+            if l.text == "GND" {
+                l.text = "0V".into();
+            }
+        }
+        let nl = p.netlist();
+        // nothing on the board says which net the pour was: the old pins do
+        assert!(!p.clone().retag_copper(&nl));
+        assert!(p.retag_copper_since(&before, &nl));
+        assert_eq!(p.board.zones[0].net, "0V");
+        let pads = p.pads(&nl);
+        assert!(!fill_zones(&p, &nl, &pads)[0].is_empty());
+        // an unnamed net renamed by a new reference, followed through the part ids
+        let mut q = led_board();
+        q.board.zones.push(Zone { net: "Net-(D1-2)".into(), layer: Layer::Top, outline: q.board.outline.clone(), ..Default::default() });
+        let before = q.clone();
+        q.parts[1].reference = "D7".into();
+        let nl = q.netlist();
+        let prev = before.net_pins(&before.netlist());
+        assert!(q.retag_copper_from(&nl, Some(&prev)));
+        assert_eq!(q.board.zones[0].net, "Net-(D7-2)");
+    }
+
+    #[test]
+    fn inner_pour_of_another_net_gets_its_copper() {
+        let mut p = led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let vcc = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap().at;
+        // GND over the whole board first, then a small VCC pour around the VCC pad
+        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Top, outline: p.board.outline.clone(), ..Default::default() });
+        let sq = |c: P, r: f64| vec![[c[0] - r, c[1] - r], [c[0] + r, c[1] - r], [c[0] + r, c[1] + r], [c[0] - r, c[1] + r]];
+        p.board.zones.push(Zone { net: "VCC".into(), layer: Layer::Top, outline: sq(vcc, 2.0), ..Default::default() });
+        let fills = fill_zones(&p, &nl, &pads);
+        assert!(!fills[1].is_empty(), "the inner pour is filled");
+        assert!(!fills[0].is_empty());
+        // the ground pour keeps clear of it
+        let probe = [vcc[0] + 1.8, vcc[1] + 1.8];
+        assert!(fills[1].iter().any(|piece| inside(&piece[0], probe)));
+        assert!(!fills[0].iter().any(|piece| inside(&piece[0], probe) && !piece[1..].iter().any(|h| inside(h, probe))));
+    }
+
+    #[test]
+    fn rounded_outline_resizes_in_place() {
+        // big corners get more steps, small ones keep 6
+        assert_eq!(rect_outline(40.0, 30.0, 0.5).len(), 4 * 7);
+        let big = rect_outline(60.0, 30.0, 15.0);
+        assert!(big.len() > 4 * 7);
+        for w in big.windows(2) {
+            let mid = [(w[0][0] + w[1][0]) / 2.0, (w[0][1] + w[1][1]) / 2.0];
+            let c = [if mid[0] < 30.0 { 15.0 } else { 45.0 }, 15.0];
+            if (dist(w[0], c) - 15.0).abs() < 1e-6 && (dist(w[1], c) - 15.0).abs() < 1e-6 {
+                assert!(15.0 - dist(mid, c) < 0.011);
+            }
+        }
+        let mut b = Board::default();
+        b.outline = rect_outline_n(40.0, 30.0, 10.0, 6).into_iter().map(|q| add(q, [5.0, 7.0])).collect();
+        assert_eq!(b.rect_radius(), Some(10.0), "older outlines are still rounded rectangles");
+        b.zones.push(Zone { net: "GND".into(), layer: Layer::Bottom, outline: b.outline.clone(), ..Default::default() });
+        b.zones.push(Zone { net: "GND".into(), layer: Layer::Top, outline: vec![[6.0, 8.0], [9.0, 8.0], [9.0, 11.0]], ..Default::default() });
+        b.resize(60.0, 30.0, 10.0);
+        assert_eq!(b.bbox(), ([5.0, 7.0], [65.0, 37.0]));
+        assert!((b.rect_radius().unwrap() - 10.0).abs() < 1e-9);
+        assert_eq!(b.zones[0].outline, b.outline);
+        assert_eq!(b.zones[1].outline.len(), 3);
+        b.outline = vec![[0.0, 0.0], [10.0, 0.0], [5.0, 8.0]];
+        assert_eq!(b.rect_radius(), None);
+    }
+
+    #[test]
+    fn copper_at_picks_within_tolerance_and_tells_the_layer() {
+        let mut p = led_board();
+        p.board.tracks.push(Track { a: [10.0, 5.0], b: [10.0, 10.0], width: 0.25, layer: Layer::Bottom, net: "GND".into() });
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let near = [10.2, 7.0];
+        assert!(copper_at(&p, &nl, &pads, near, Layer::Bottom, 0.0).is_none());
+        let hit = copper_at(&p, &nl, &pads, near, Layer::Bottom, 0.1).unwrap();
+        assert_eq!((hit.net.as_str(), hit.layer, hit.pad), ("GND", Some(Layer::Bottom), false));
+        assert!(copper_at(&p, &nl, &pads, near, Layer::Top, 0.1).is_none());
+        let pad = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap();
+        let hit = copper_at(&p, &nl, &pads, pad.at, Layer::Top, 0.0).unwrap();
+        assert_eq!((hit.net.as_str(), hit.at, hit.layer, hit.pad), ("VCC", pad.at, Some(Layer::Top), true));
     }
 }
