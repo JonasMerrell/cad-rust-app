@@ -10,12 +10,14 @@ use crate::pcb_lib::P;
 
 const FREE: i32 = -1;
 const WALL: i32 = -2;
-/// The map vias are checked on (half-width via_d / 2).
-const VIA_MAP: usize = 2;
 
-/// Per layer, which cells something of half-width `h` may use: FREE, WALL, or only one net's.
+/// Per layer, which cells something of half-width `h` that keeps `c` from other nets may use:
+/// FREE, WALL, or only one net's. There is a map for each track width and via size the net
+/// classes use.
 struct Map {
     h: f64,
+    c: f64,
+    via: bool,
     m: [Vec<i32>; 2],
 }
 
@@ -44,15 +46,18 @@ impl Grid {
         (x >= 0.0 && y >= 0.0 && (x as usize) < self.nx && (y as usize) < self.ny).then_some((x as usize, y as usize))
     }
 
-    /// Mark the cells within `extra` (plus each map's half-width and the clearance) of a piece of copper.
+    /// Mark the cells within each map's half-width plus the clearance (the larger of the copper's
+    /// and the map's; none for a keepout) of a piece of copper.
     fn mark(&mut self, cu: &Cu, layer: Option<Layer>, net: i32, clearance: f64) {
-        self.mark_maps(0..self.maps.len(), cu, layer, net, clearance);
+        let all: Vec<usize> = (0..self.maps.len()).collect();
+        self.mark_maps(&all, cu, layer, net, Some(clearance));
     }
 
-    fn mark_maps(&mut self, maps: std::ops::Range<usize>, cu: &Cu, layer: Option<Layer>, net: i32, clearance: f64) {
+    fn mark_maps(&mut self, maps: &[usize], cu: &Cu, layer: Option<Layer>, net: i32, clearance: Option<f64>) {
         let (lo, hi) = cu.bbox();
-        for mi in maps {
-            let r = clearance + self.maps[mi].h + self.g * 0.5;
+        for &mi in maps {
+            let c = clearance.map(|c| c.max(self.maps[mi].c)).unwrap_or(0.0);
+            let r = c + self.maps[mi].h + self.g * 0.5;
             let x0 = (((lo[0] - r - self.lo[0]) / self.g).floor().max(0.0)) as usize;
             let y0 = (((lo[1] - r - self.lo[1]) / self.g).floor().max(0.0)) as usize;
             let x1 = (((hi[0] + r - self.lo[0]) / self.g).ceil() as usize).min(self.nx);
@@ -117,18 +122,25 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
         }
         air.sort_by(|a, b| pcb::dist(a.a, a.b).total_cmp(&pcb::dist(b.a, b.b)));
         let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
-        let mut grid = build(p, &base);
+        let mut grid = build(p, &nl, &base);
         let ids: HashMap<String, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.clone(), i as i32)).collect();
         for a in &air {
             tried.push(key(a));
             let net = ids.get(&a.net).copied().unwrap_or(WALL);
-            let w = p.track_width(&nl, &a.net);
+            let nr = p.net_rules(&nl, &a.net);
+            let vmi = grid.find(nr.via_d / 2.0, nr.clearance, true);
             let mut path = None;
-            for mi in [if w > p.board.rules.track + 1e-9 { 1 } else { 0 }, 0] {
+            // the net's width, then the board's narrower signal width when that doesn't fit
+            let mut widths = vec![nr.track];
+            if p.board.rules.track < nr.track - 1e-9 {
+                widths.push(p.board.rules.track);
+            }
+            for w in widths {
+                let mi = grid.find(w / 2.0, nr.clearance, false);
                 let la = layers_at(p, &pads, a.a, &a.net);
                 let lb = layers_at(p, &pads, a.b, &a.net);
-                if let Some(pth) = search(&grid, mi, net, a.a, &la, a.b, &lb) {
-                    path = Some((pth, if mi == 1 { p.board.rules.power_track } else { p.board.rules.track }));
+                if let Some(pth) = search(&grid, mi, vmi, net, a.a, &la, a.b, &lb) {
+                    path = Some((pth, w));
                     break;
                 }
             }
@@ -136,12 +148,12 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
                 out.failed.push(a.net.clone());
                 continue;
             };
-            let (tracks, vias) = to_copper(p, &pth, a.a, a.b, w, &a.net);
+            let (tracks, vias) = to_copper(p, &pth, a.a, a.b, w, &nr, &a.net);
             for t in &tracks {
-                grid.mark(&Cu::Seg { a: t.a, b: t.b, r: t.width / 2.0 }, Some(t.layer), net, p.board.rules.clearance);
+                grid.mark(&Cu::Seg { a: t.a, b: t.b, r: t.width / 2.0 }, Some(t.layer), net, nr.clearance);
             }
             for v in &vias {
-                grid.mark(&Cu::Seg { a: v.at, b: v.at, r: v.d / 2.0 }, None, net, p.board.rules.clearance);
+                grid.mark(&Cu::Seg { a: v.at, b: v.at, r: v.d / 2.0 }, None, net, nr.clearance);
             }
             out.routed += 1;
             out.tracks += tracks.len();
@@ -172,7 +184,23 @@ fn layers_at(p: &Pcb, pads: &[WPad], at: P, net: &str) -> Vec<Layer> {
     v
 }
 
-fn build(p: &Pcb, base: &[Item]) -> Grid {
+impl Grid {
+    /// The map for a half-width and clearance (the closest one made).
+    fn find(&self, h: f64, c: f64, via: bool) -> usize {
+        let mut best = 0;
+        let mut d = f64::INFINITY;
+        for (i, m) in self.maps.iter().enumerate() {
+            let e = (m.h - h).abs() + (m.c - c).abs() + if m.via != via { 1e3 } else { 0.0 };
+            if e < d {
+                d = e;
+                best = i;
+            }
+        }
+        best
+    }
+}
+
+fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item]) -> Grid {
     let r = &p.board.rules;
     let (lo, hi) = p.board.bbox();
     let size = [hi[0] - lo[0], hi[1] - lo[1]];
@@ -181,8 +209,22 @@ fn build(p: &Pcb, base: &[Item]) -> Grid {
     let nx = ((size[0] / g).ceil() as usize).max(1);
     let ny = ((size[1] / g).ceil() as usize).max(1);
     let n = nx * ny;
-    let hs = [r.track / 2.0, r.power_track / 2.0, r.via_d / 2.0];
-    let mut grid = Grid { lo, g, nx, ny, maps: hs.iter().map(|&h| Map { h, m: [vec![FREE; n], vec![FREE; n]] }).collect() };
+    // a map for every (half-width, clearance) the nets route with, tracks and vias apart
+    let mut profiles: Vec<(f64, f64, bool)> = vec![];
+    let mut add = |h: f64, c: f64, via: bool| {
+        if !profiles.iter().any(|x| (x.0 - h).abs() < 1e-6 && (x.1 - c).abs() < 1e-6 && x.2 == via) {
+            profiles.push((h, c, via));
+        }
+    };
+    add(r.track / 2.0, r.clearance, false);
+    add(r.via_d / 2.0, r.clearance, true);
+    for net in &nl.nets {
+        let nr = p.net_rules(nl, &net.name);
+        add(nr.track / 2.0, nr.clearance, false);
+        add(r.track.min(nr.track) / 2.0, nr.clearance, false);
+        add(nr.via_d / 2.0, nr.clearance, true);
+    }
+    let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: [vec![FREE; n], vec![FREE; n]] }).collect() };
     // the edge
     for y in 0..ny {
         for x in 0..nx {
@@ -196,18 +238,31 @@ fn build(p: &Pcb, base: &[Item]) -> Grid {
             }
         }
     }
-    let nl = p.netlist();
     let ids: HashMap<&str, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as i32)).collect();
+    let mut cl: HashMap<&str, f64> = HashMap::new();
     for it in base {
         let net = if it.net.is_empty() { WALL } else { ids.get(it.net.as_str()).copied().unwrap_or(WALL) };
-        grid.mark(&it.cu, it.layer, net, r.clearance);
+        let c = *cl.entry(it.net.as_str()).or_insert_with(|| p.net_rules(nl, &it.net).clearance);
+        grid.mark(&it.cu, it.layer, net, c);
     }
     for h in &p.board.holes {
         grid.mark(&Cu::Seg { a: h.at, b: h.at, r: h.d / 2.0 }, None, WALL, r.clearance);
     }
+    let vias: Vec<usize> = (0..grid.maps.len()).filter(|&i| grid.maps[i].via).collect();
+    let tracks: Vec<usize> = (0..grid.maps.len()).filter(|&i| !grid.maps[i].via).collect();
     // no vias in surface mount pads, even of their own net (solder would wick down the hole)
     for it in base.iter().filter(|it| matches!(it.kind, pcb::ItemKind::Pad(_)) && it.layer.is_some()) {
-        grid.mark_maps(VIA_MAP..VIA_MAP + 1, &it.cu, it.layer, WALL, r.clearance);
+        grid.mark_maps(&vias, &it.cu, it.layer, WALL, Some(r.clearance));
+    }
+    // keepouts
+    for k in p.board.keepouts.iter().filter(|k| k.outline.len() >= 3) {
+        let area = Cu::Poly(k.outline.clone());
+        if k.tracks {
+            grid.mark_maps(&tracks, &area, k.layer, WALL, None);
+        }
+        if k.vias {
+            grid.mark_maps(&vias, &area, None, WALL, None);
+        }
     }
     grid
 }
@@ -215,7 +270,7 @@ fn build(p: &Pcb, base: &[Item]) -> Grid {
 const DIRS: [(i32, i32); 8] = [(1, 0), (1, 1), (0, 1), (-1, 1), (-1, 0), (-1, -1), (0, -1), (1, -1)];
 
 /// A* from `a` to `b` on map `mi` (track width) for `net`; returns cells (x, y, layer).
-fn search(grid: &Grid, mi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Layer]) -> Option<Vec<(usize, usize, usize)>> {
+fn search(grid: &Grid, mi: usize, vmi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Layer]) -> Option<Vec<(usize, usize, usize)>> {
     let (nx, ny) = (grid.nx, grid.ny);
     let (sx, sy) = grid.cell(a)?;
     let (tx, ty) = grid.cell(b)?;
@@ -230,7 +285,7 @@ fn search(grid: &Grid, mi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Laye
     };
     let via_cost = (1.2 / grid.g) as f32 + 4.0;
     let track = &grid.maps[mi].m;
-    let via = &grid.maps[VIA_MAP].m;
+    let via = &grid.maps[vmi].m;
     // the start and end cells sit on the net's own copper
     for l in la {
         let s = st(sx, sy, li(*l));
@@ -318,7 +373,7 @@ fn search(grid: &Grid, mi: usize, net: i32, a: P, la: &[Layer], b: P, lb: &[Laye
 }
 
 /// Turn a cell path into tracks (straight runs merged) and vias.
-fn to_copper(p: &Pcb, path: &[(usize, usize, usize)], a: P, b: P, w: f64, net: &str) -> (Vec<Track>, Vec<Via>) {
+fn to_copper(p: &Pcb, path: &[(usize, usize, usize)], a: P, b: P, w: f64, nr: &pcb::NetRules, net: &str) -> (Vec<Track>, Vec<Via>) {
     let (lo, g) = {
         let (lo, hi) = p.board.bbox();
         let size = [hi[0] - lo[0], hi[1] - lo[1]];
@@ -335,7 +390,7 @@ fn to_copper(p: &Pcb, path: &[(usize, usize, usize)], a: P, b: P, w: f64, net: &
         if l != cur {
             let at = *run.last().unwrap();
             push_run(&mut tracks, &run, w, layer(cur), net);
-            vias.push(Via { at, d: p.board.rules.via_d, drill: p.board.rules.via_drill, net: net.into() });
+            vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net: net.into() });
             run = vec![at];
             cur = l;
         }

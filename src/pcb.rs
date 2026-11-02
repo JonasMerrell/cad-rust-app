@@ -25,6 +25,12 @@ pub struct Pcb {
     pub labels: Vec<Label>,
     #[serde(default)]
     pub board: Board,
+    /// No-connect marks on the schematic (pins left open on purpose).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub no_connects: Vec<P>,
+    /// Pin electrical types set by hand ("U1.3": "output"), over the ones the library gives.
+    #[serde(default, skip_serializing_if = "std::collections::BTreeMap::is_empty")]
+    pub pin_types: std::collections::BTreeMap<String, crate::pcb_erc::PinType>,
     /// Circuit simulation: sources, ground, analysis.
     #[serde(default, skip_serializing_if = "crate::circuit::SimSetup::is_empty")]
     pub sim: crate::circuit::SimSetup,
@@ -153,12 +159,117 @@ pub struct Via {
     pub net: String,
 }
 
+/// How a pour joins the pads of its own net.
+#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq)]
+#[serde(rename_all = "snake_case")]
+pub enum PadConnect {
+    /// Thermal reliefs on through-hole pads (so they solder), solid on surface mount pads.
+    #[default]
+    ThtRelief,
+    /// Thermal reliefs on every pad.
+    Relief,
+    /// Solid copper to every pad.
+    Solid,
+}
+
 /// A copper pour: the outline is filled with copper of its net, kept clear of other nets.
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
 pub struct Zone {
     pub net: String,
     pub layer: Layer,
     pub outline: Vec<P>,
+    #[serde(default, skip_serializing_if = "is_default")]
+    pub pads: PadConnect,
+    /// Gap to other nets' copper; 0 takes the net's clearance.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub clearance: f64,
+    /// Thermal relief: the gap round the pad and the spoke width; 0 takes the defaults (0.3 mm,
+    /// and the net's track width).
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub relief_gap: f64,
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub spoke: f64,
+}
+
+fn is_zero(v: &f64) -> bool {
+    *v == 0.0
+}
+
+fn is_default<T: Default + PartialEq>(v: &T) -> bool {
+    *v == T::default()
+}
+
+fn yes() -> bool {
+    true
+}
+
+/// An area things are kept out of (Altium's keepouts and room rules).
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Keepout {
+    pub outline: Vec<P>,
+    /// The copper layer it applies to; None for both.
+    #[serde(default)]
+    pub layer: Option<Layer>,
+    #[serde(default = "yes")]
+    pub tracks: bool,
+    #[serde(default = "yes")]
+    pub vias: bool,
+    #[serde(default = "yes")]
+    pub pours: bool,
+    /// Parts may not be placed in it.
+    #[serde(default)]
+    pub parts: bool,
+}
+
+impl Default for Keepout {
+    fn default() -> Self {
+        Keepout { outline: vec![], layer: None, tracks: true, vias: true, pours: true, parts: false }
+    }
+}
+
+impl Keepout {
+    pub fn on(&self, l: Option<Layer>) -> bool {
+        match (self.layer, l) {
+            (Some(a), Some(b)) => a == b,
+            _ => true,
+        }
+    }
+}
+
+/// Nets that share routing rules (Altium's net classes): their own clearance, track width and via.
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct NetClass {
+    pub name: String,
+    /// Net names in the class; a trailing `*` matches every net that starts with the rest.
+    pub nets: Vec<String>,
+    /// 0 for any of these takes the board's rule.
+    pub clearance: f64,
+    pub track: f64,
+    pub via_d: f64,
+    pub via_drill: f64,
+    /// Targets for the trace calculator: the current the nets carry (A) and their impedance (Ω);
+    /// 0 for none.
+    pub current: f64,
+    pub impedance: f64,
+}
+
+/// The rules a net is routed and checked with.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NetRules {
+    pub clearance: f64,
+    pub track: f64,
+    pub via_d: f64,
+    pub via_drill: f64,
+}
+
+/// Whether a net name matches a pattern (`M1_*` is a prefix match), ignoring case.
+pub fn net_matches(pat: &str, net: &str) -> bool {
+    let pat = pat.trim();
+    match pat.strip_suffix('*') {
+        Some(pre) => net.to_ascii_uppercase().starts_with(&pre.to_ascii_uppercase()),
+        None => !pat.is_empty() && net.eq_ignore_ascii_case(pat),
+    }
 }
 
 /// An unplated mounting hole.
@@ -186,21 +297,94 @@ pub struct Rules {
     /// More nets that get the power track width, by name (`M1_*` ends in a prefix match): motor
     /// phases, heater and LED strip outputs.
     pub power_nets: Vec<String>,
+    /// Net classes, the first that names a net wins.
+    pub classes: Vec<NetClass>,
+    /// Hole edge to hole edge (pads, vias, mounting holes).
+    pub hole_gap: f64,
+    /// Silkscreen to exposed pad copper.
+    pub silk_gap: f64,
+    /// Tallest part allowed above (and below) the board, 0 for no limit.
+    pub max_height: f64,
+    /// Gap kept between parts' 3D bodies.
+    pub body_gap: f64,
+    /// Checks turned off, by id (see `CHECKS`).
+    pub off: Vec<String>,
 }
+
+/// The design rule and electrical rule checks, by id, with what each looks for.
+pub const CHECKS: &[(&str, &str)] = &[
+    ("clearance", "Copper closer to another net than its clearance"),
+    ("short", "Copper of two nets touching"),
+    ("width", "Tracks under the minimum width"),
+    ("class_width", "Tracks narrower than their net class"),
+    ("via", "Via drill and annular ring"),
+    ("hole_gap", "Holes too close to each other"),
+    ("edge", "Copper near or off the board edge"),
+    ("keepout", "Copper, vias or parts in a keepout"),
+    ("silk", "Silkscreen over exposed pads"),
+    ("overlap", "Courtyards that overlap"),
+    ("body", "3D bodies that collide"),
+    ("height", "Parts taller than the height limit"),
+    ("outside", "Parts not inside the board"),
+    ("antenna", "Track ends that connect to nothing"),
+    ("thermal", "Thermal reliefs with fewer than two spokes"),
+    ("unrouted", "Connections not routed yet"),
+    ("erc_unconnected", "Pins left unconnected (no no-connect mark)"),
+    ("erc_single", "Nets with one pin"),
+    ("erc_drivers", "Outputs driving each other"),
+    ("erc_power", "Power pins with no supply"),
+    ("erc_undriven", "Inputs nothing drives"),
+    ("erc_nc", "No-connect marks on connected pins"),
+    ("erc_labels", "Labels and wire ends that join nothing"),
+    ("erc_refs", "Duplicate references"),
+    ("erc_footprint", "Unknown footprints"),
+];
 
 impl Rules {
     pub fn is_power_net(&self, net: &str) -> bool {
-        self.power_nets.iter().any(|p| match p.strip_suffix('*') {
-            Some(pre) => net.to_ascii_uppercase().starts_with(&pre.to_ascii_uppercase()),
-            None => net.eq_ignore_ascii_case(p),
-        })
+        self.power_nets.iter().any(|p| net_matches(p, net))
+    }
+    /// The class a net is in.
+    pub fn class_of(&self, net: &str) -> Option<&NetClass> {
+        if net.is_empty() {
+            return None;
+        }
+        self.classes.iter().find(|c| c.nets.iter().any(|p| net_matches(p, net)))
+    }
+    /// The rules for a net; `power` when the schematic names it with a power or ground port.
+    pub fn for_net(&self, net: &str, power: bool) -> NetRules {
+        let power = power || self.is_power_net(net);
+        let base = NetRules { clearance: self.clearance, track: if power { self.power_track } else { self.track }, via_d: self.via_d, via_drill: self.via_drill };
+        let Some(c) = self.class_of(net) else { return base };
+        let or = |v: f64, d: f64| if v > 0.0 { v } else { d };
+        NetRules { clearance: or(c.clearance, base.clearance), track: or(c.track, base.track), via_d: or(c.via_d, base.via_d), via_drill: or(c.via_drill, base.via_drill) }
+    }
+    pub fn checks(&self, id: &str) -> bool {
+        !self.off.iter().any(|o| o == id)
     }
 }
 
 impl Default for Rules {
     fn default() -> Self {
         // what common low-cost fabs make without extra charge
-        Rules { clearance: 0.2, track: 0.25, power_track: 0.5, via_d: 0.6, via_drill: 0.3, edge: 0.3, min_track: 0.15, min_drill: 0.3, min_annular: 0.13, power_nets: vec![] }
+        Rules {
+            clearance: 0.2,
+            track: 0.25,
+            power_track: 0.5,
+            via_d: 0.6,
+            via_drill: 0.3,
+            edge: 0.3,
+            min_track: 0.15,
+            min_drill: 0.3,
+            min_annular: 0.13,
+            power_nets: vec![],
+            classes: vec![],
+            hole_gap: 0.25,
+            silk_gap: 0.0,
+            max_height: 0.0,
+            body_gap: 0.0,
+            off: vec![],
+        }
     }
 }
 
@@ -218,6 +402,8 @@ pub struct Board {
     pub zones: Vec<Zone>,
     #[serde(default)]
     pub holes: Vec<Hole>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub keepouts: Vec<Keepout>,
     #[serde(default)]
     pub rules: Rules,
     /// Solder mask colour name (green, black, blue, red, white, purple), for previews.
@@ -231,7 +417,7 @@ fn thickness() -> f64 {
 
 impl Default for Board {
     fn default() -> Self {
-        Board { outline: rect_outline(50.0, 40.0, 0.0), thickness: 1.6, tracks: vec![], vias: vec![], zones: vec![], holes: vec![], rules: Rules::default(), color: String::new() }
+        Board { outline: rect_outline(50.0, 40.0, 0.0), thickness: 1.6, tracks: vec![], vias: vec![], zones: vec![], holes: vec![], keepouts: vec![], rules: Rules::default(), color: String::new() }
     }
 }
 
@@ -805,10 +991,12 @@ impl Pcb {
 
     /// The width a new track on `net` gets.
     pub fn track_width(&self, nl: &Netlist, net: &str) -> f64 {
-        match nl.by_name(net) {
-            Some(n) if nl.nets[n].power || self.board.rules.is_power_net(net) => self.board.rules.power_track,
-            _ => self.board.rules.track,
-        }
+        self.net_rules(nl, net).track
+    }
+    /// The rules for a net: its class's, or the board's.
+    pub fn net_rules(&self, nl: &Netlist, net: &str) -> NetRules {
+        let power = nl.by_name(net).is_some_and(|n| nl.nets[n].power);
+        self.board.rules.for_net(net, power)
     }
 }
 
@@ -910,11 +1098,7 @@ fn touching(a: &Item, b: &Item, fills: &[Fill]) -> bool {
     let in_fill = |f: &Item, o: &Item| -> bool {
         let ItemKind::Fill(z, k) = f.kind else { return false };
         let Some(piece) = fills.get(z).and_then(|x| x.get(k)) else { return false };
-        let probe = match &o.cu {
-            Cu::Seg { a, b, .. } => vec![*a, *b],
-            Cu::Poly(p) => p.clone(),
-        };
-        probe.iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))
+        probe(&o.cu).iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))
     };
     match (a.kind, b.kind) {
         (ItemKind::Fill(..), ItemKind::Fill(..)) => false,
@@ -1018,21 +1202,50 @@ fn overlay(a: &Shapes, b: &Shapes, rule: i_overlay::core::overlay_rule::OverlayR
     fa.overlay(&fb, rule, FillRule::NonZero)
 }
 
-/// Fill every zone: its outline inside the board, less other nets' copper grown by the clearance
-/// and less holes; pieces that don't touch their own net's copper are dropped.
+/// Whether a zone joins a pad with a thermal relief.
+pub fn relieved(z: &Zone, pad: &WPad) -> bool {
+    match z.pads {
+        PadConnect::Solid => false,
+        PadConnect::Relief => true,
+        PadConnect::ThtRelief => pad.drill > 0.0,
+    }
+}
+
+/// A zone's thermal relief gap and spoke width for its net.
+pub fn relief_sizes(pcb: &Pcb, nl: &Netlist, z: &Zone) -> (f64, f64) {
+    let r = pcb.net_rules(nl, &z.net);
+    let gap = if z.relief_gap > 0.0 { z.relief_gap } else { r.clearance.max(0.3) };
+    let spoke = if z.spoke > 0.0 { z.spoke } else { r.track.max(pcb.board.rules.min_track) };
+    (gap, spoke)
+}
+
+/// The four spokes of a pad's thermal relief, out to `reach` past its edge, along the pad's axes.
+pub fn spokes(pad: &WPad, reach: f64, w: f64) -> Vec<Contour> {
+    let (hx, hy) = (pad.size[0] / 2.0 + reach, pad.size[1] / 2.0 + reach);
+    let (s, c) = pad.rot.to_radians().sin_cos();
+    let dir = |d: P| [d[0] * c - d[1] * s, d[0] * s + d[1] * c];
+    [[hx, 0.0], [-hx, 0.0], [0.0, hy], [0.0, -hy]].iter().map(|e| { let e = dir(*e); capsule(pad.at, add(pad.at, e), w / 2.0) }).collect()
+}
+
+/// Fill every zone: its outline inside the board, less other nets' copper grown by the clearance,
+/// less holes and keepouts; pads of its own net are joined solid or with thermal reliefs. Pieces
+/// that don't touch their own net's copper are dropped.
 pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
     use i_overlay::core::overlay_rule::OverlayRule;
     let b = &pcb.board;
     let r = &b.rules;
     let board = crate::cam_paths::offset(&vec![vec![ccw(b.outline.clone())]], -r.edge);
     let base_items = items(pcb, nl, pads, &[]);
+    let mut cl_cache: HashMap<String, f64> = HashMap::new();
+    let mut clear = |net: &str| -> f64 { *cl_cache.entry(net.to_string()).or_insert_with(|| pcb.net_rules(nl, net).clearance) };
     let mut fills: Vec<Fill> = vec![];
     for (zi, z) in b.zones.iter().enumerate() {
         if z.outline.len() < 3 {
             fills.push(vec![]);
             continue;
         }
-        let mut area = overlay(&vec![vec![ccw(z.outline.clone())]], &board, OverlayRule::Intersect);
+        let zc = if z.clearance > 0.0 { z.clearance } else { clear(&z.net) };
+        let area0 = overlay(&vec![vec![ccw(z.outline.clone())]], &board, OverlayRule::Intersect);
         // keep clear of other nets, and of earlier zones on the same layer
         let mut obstacles: Vec<Contour> = vec![];
         for it in &base_items {
@@ -1040,40 +1253,69 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
                 continue;
             }
             if it.net != z.net || it.net.is_empty() {
-                obstacles.push(it.cu.polygon(r.clearance));
+                let c = if it.net.is_empty() { zc } else { zc.max(clear(&it.net)) };
+                obstacles.push(it.cu.polygon(c));
             }
         }
         for h in &b.holes {
-            obstacles.push(capsule(h.at, h.at, h.d / 2.0 + r.clearance));
+            obstacles.push(capsule(h.at, h.at, h.d / 2.0 + zc));
+        }
+        for k in b.keepouts.iter().filter(|k| k.pours && k.on(Some(z.layer)) && k.outline.len() >= 3) {
+            obstacles.push(ccw(k.outline.clone()));
         }
         for (k, other) in b.zones.iter().enumerate().take(zi) {
             if other.layer == z.layer && other.net != z.net {
                 for piece in &fills[k] {
-                    let grown = crate::cam_paths::offset(&vec![piece.clone()], r.clearance);
+                    let grown = crate::cam_paths::offset(&vec![piece.clone()], zc);
                     obstacles.extend(grown.into_iter().flatten());
                 }
             }
         }
-        if !obstacles.is_empty() {
-            area = overlay(&area, &vec![obstacles], OverlayRule::Difference);
+        // thermal reliefs: a ring cleared round the pad, then spokes across it
+        let (gap, spoke) = relief_sizes(pcb, nl, z);
+        let mut reliefs: Vec<&WPad> = vec![];
+        if !z.net.is_empty() {
+            for p in pads.iter().filter(|p| p.on(z.layer) && p.net.is_some_and(|n| nl.nets[n].name == z.net) && relieved(z, p)) {
+                obstacles.push(p.cu().polygon(gap));
+                reliefs.push(p);
+            }
         }
-        // drop slivers narrower than the minimum track
+        let mut area = if obstacles.is_empty() { area0.clone() } else { overlay(&area0, &vec![obstacles.clone()], OverlayRule::Difference) };
+        // drop slivers narrower than the minimum track (before the spokes, which may be that thin)
         let h = r.min_track / 2.0;
         area = crate::cam_paths::offset(&crate::cam_paths::offset(&area, -h), h);
+        if !reliefs.is_empty() {
+            let mut sp: Vec<Contour> = vec![];
+            for p in &reliefs {
+                sp.extend(spokes(p, gap + spoke, spoke));
+            }
+            // spokes may not cross other nets' clearance
+            let others: Vec<Contour> = obstacles.iter().take(obstacles.len() - reliefs.len()).cloned().collect();
+            let mut sp: Shapes = overlay(&vec![sp], &area0, OverlayRule::Intersect);
+            if !others.is_empty() {
+                sp = overlay(&sp, &vec![others], OverlayRule::Difference);
+            }
+            area = overlay(&area, &sp, OverlayRule::Union);
+        }
         // keep pieces that reach a pad, via or track of the net
         let own: Vec<&Item> = base_items.iter().filter(|it| it.net == z.net && !z.net.is_empty() && it.layer.is_none_or(|l| l == z.layer)).collect();
-        area.retain(|piece| {
-            own.iter().any(|it| {
-                let probe = match &it.cu {
-                    Cu::Seg { a, b, .. } => vec![*a, *b],
-                    Cu::Poly(p) => p.clone(),
-                };
-                probe.iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))
-            })
-        });
+        area.retain(|piece| own.iter().any(|it| probe(&it.cu).iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))));
         fills.push(area);
     }
     fills
+}
+
+/// Points of a piece of copper that a pour covering it covers: its ends or corners and its centre
+/// (a relieved pad's corners sit in the relief gap, its centre under the spokes).
+fn probe(cu: &Cu) -> Vec<P> {
+    match cu {
+        Cu::Seg { a, b, .. } => vec![*a, *b],
+        Cu::Poly(p) => {
+            let mut v = p.clone();
+            v.push(centre(cu));
+            v
+        }
+    }
 }
 
 // ---------------------------------------------------------------- design rule check
@@ -1084,6 +1326,14 @@ pub struct Issue {
     pub message: String,
     /// Errors stop a board from being made right; warnings are worth a look.
     pub error: bool,
+    /// The check that found it (an id in `CHECKS`).
+    pub rule: &'static str,
+}
+
+impl Issue {
+    pub fn new(rule: &'static str, at: P, error: bool, message: String) -> Issue {
+        Issue { at, message, error, rule }
+    }
 }
 
 fn item_label(pcb: &Pcb, pads: &[WPad], it: &Item) -> String {
@@ -1100,13 +1350,49 @@ fn centre(cu: &Cu) -> P {
     [(a[0] + b[0]) / 2.0, (a[1] + b[1]) / 2.0]
 }
 
-/// Check the board against its rules: clearances, shorts, widths, drills, the board edge,
-/// overlapping parts and unrouted connections.
+/// A part's 3D bodies in board space: the footprint in plan, and its height range with z = 0 on
+/// the board's bottom face (a top part sits on z = thickness, a bottom part hangs below 0).
+pub fn bodies(pcb: &Pcb, part: &Part) -> Vec<(Cu, f64, f64)> {
+    let t = pcb.board.thickness;
+    let z = |lo: f64, hi: f64| if part.bottom { (-hi, -lo) } else { (t + lo, t + hi) };
+    part.footprint()
+        .body
+        .iter()
+        .map(|b| match b {
+            pcb_lib::Solid::Box { lo, hi } => {
+                let c = [[lo[0], lo[1]], [hi[0], lo[1]], [hi[0], hi[1]], [lo[0], hi[1]]].map(|q| part.xf(q));
+                let (z0, z1) = z(lo[2], hi[2]);
+                (Cu::Poly(c.to_vec()), z0, z1)
+            }
+            pcb_lib::Solid::Cyl { c, r, z0, h } => {
+                let at = part.xf(*c);
+                let (a, b) = z(*z0, z0 + h);
+                (Cu::Seg { a: at, b: at, r: *r }, a, b)
+            }
+        })
+        .collect()
+}
+
+/// How far a part reaches above its side of the board (its tallest body).
+pub fn part_height(pcb: &Pcb, part: &Part) -> f64 {
+    let t = pcb.board.thickness;
+    bodies(pcb, part).iter().map(|(_, z0, z1)| if part.bottom { -z0 } else { z1 - t }).fold(0.0, f64::max)
+}
+
+/// Check the board against its rules: clearances (per net class), shorts, widths, drills, hole
+/// spacing, the board edge, keepouts, silkscreen, overlapping courtyards and 3D bodies, heights,
+/// dangling tracks, starved thermals and unrouted connections. Checks in `rules.off` are skipped.
 pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue> {
     let b = &pcb.board;
     let r = &b.rules;
     let its = items(pcb, nl, pads, &[]);
     let mut out = vec![];
+    let mut rules_cache: HashMap<&str, NetRules> = HashMap::new();
+    for it in &its {
+        rules_cache.entry(it.net.as_str()).or_insert_with(|| pcb.net_rules(nl, &it.net));
+    }
+    let clr = |net: &str| rules_cache.get(net).map(|x| x.clearance).unwrap_or(r.clearance);
+    let max_cl = rules_cache.values().map(|x| x.clearance).fold(r.clearance, f64::max);
     // pads with no net are each their own net
     let net_key = |i: usize| -> String { if its[i].net.is_empty() { format!("\u{0}{i}") } else { its[i].net.clone() } };
     let bbs: Vec<(P, P)> = its.iter().map(|i| i.cu.bbox()).collect();
@@ -1123,34 +1409,64 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             }
             let (la, ha) = bbs[i];
             let (lb, hb) = bbs[j];
-            let m = r.clearance;
+            let m = max_cl;
             if la[0] > hb[0] + m || lb[0] > ha[0] + m || la[1] > hb[1] + m || lb[1] > ha[1] + m {
                 continue;
             }
+            // a footprint's own pads are as far apart as the part makes them: only the board rule
+            let same_part = matches!((its[i].kind, its[j].kind), (ItemKind::Pad(a), ItemKind::Pad(b)) if pads[a].part == pads[b].part);
+            let need = if same_part { r.clearance } else { clr(&its[i].net).max(clr(&its[j].net)) };
             let g = its[i].cu.gap(&its[j].cu);
-            if g < r.clearance - 1e-4 {
+            if g < need - 1e-4 {
                 let (a, bb) = (item_label(pcb, pads, &its[i]), item_label(pcb, pads, &its[j]));
                 let at = if its[i].cu.contains(centre(&its[j].cu)) { centre(&its[j].cu) } else { centre(&its[i].cu) };
-                let message = if g <= 1e-6 && !its[i].net.is_empty() && !its[j].net.is_empty() {
-                    format!("Short: {a} touches {bb}")
+                if g <= 1e-6 && !its[i].net.is_empty() && !its[j].net.is_empty() {
+                    out.push(Issue::new("short", at, true, format!("Short: {a} touches {bb}")));
                 } else {
-                    format!("Clearance {:.3} mm < {} mm: {a} and {bb}", g.max(0.0), r.clearance)
-                };
-                out.push(Issue { at, message, error: true });
+                    out.push(Issue::new("clearance", at, true, format!("Clearance {:.3} mm < {} mm: {a} and {bb}", g.max(0.0), need)));
+                }
             }
         }
     }
     for t in &b.tracks {
         if t.width < r.min_track - 1e-9 {
-            out.push(Issue { at: t.a, message: format!("Track {} mm wide is under the {} mm minimum", t.width, r.min_track), error: true });
+            out.push(Issue::new("width", t.a, true, format!("Track {} mm wide is under the {} mm minimum", t.width, r.min_track)));
+        } else if let Some(c) = r.class_of(&t.net) {
+            let want = pcb.net_rules(nl, &t.net).track;
+            if t.width < want - 1e-6 {
+                out.push(Issue::new("class_width", closest_mid(t), false, format!("Track on {} is {} mm wide; net class {} wants {} mm", t.net, t.width, c.name, want)));
+            }
         }
     }
     for v in &b.vias {
         if v.drill < r.min_drill - 1e-9 {
-            out.push(Issue { at: v.at, message: format!("Via drill {} mm is under the {} mm minimum", v.drill, r.min_drill), error: true });
+            out.push(Issue::new("via", v.at, true, format!("Via drill {} mm is under the {} mm minimum", v.drill, r.min_drill)));
         }
         if (v.d - v.drill) / 2.0 < r.min_annular - 1e-9 {
-            out.push(Issue { at: v.at, message: format!("Via annular ring {:.3} mm is under {} mm", (v.d - v.drill) / 2.0, r.min_annular), error: true });
+            out.push(Issue::new("via", v.at, true, format!("Via annular ring {:.3} mm is under {} mm", (v.d - v.drill) / 2.0, r.min_annular)));
+        }
+    }
+    // holes too close together
+    let mut drills: Vec<(P, f64, String)> = vec![];
+    for p in pads.iter().filter(|p| p.drill > 0.0) {
+        drills.push((p.at, p.drill, format!("{} pad {}", pcb.parts[p.part].reference, p.num)));
+    }
+    for v in &b.vias {
+        drills.push((v.at, v.drill, format!("via ({})", if v.net.is_empty() { "no net" } else { &v.net })));
+    }
+    for h in &b.holes {
+        drills.push((h.at, h.d, "mounting hole".into()));
+    }
+    for i in 0..drills.len() {
+        for j in i + 1..drills.len() {
+            let c = dist(drills[i].0, drills[j].0);
+            if c < 1e-6 {
+                continue;
+            }
+            let g = c - (drills[i].1 + drills[j].1) / 2.0;
+            if g < r.hole_gap - 1e-4 {
+                out.push(Issue::new("hole_gap", drills[i].0, true, format!("Holes {:.3} mm apart (rule {} mm): {} and {}", g.max(0.0), r.hole_gap, drills[i].2, drills[j].2)));
+            }
         }
     }
     // copper near or past the edge
@@ -1170,9 +1486,66 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
                 Cu::Poly(p) => edges(&b.outline).map(|(c, d)| poly_seg(p, c, d)).fold(f64::INFINITY, f64::min),
             };
             if outside {
-                out.push(Issue { at: centre(&it.cu), message: format!("{} is off the board", item_label(pcb, pads, it)), error: true });
+                out.push(Issue::new("edge", centre(&it.cu), true, format!("{} is off the board", item_label(pcb, pads, it))));
             } else if near < r.edge - 1e-4 {
-                out.push(Issue { at: centre(&it.cu), message: format!("{} is {:.2} mm from the board edge (rule {} mm)", item_label(pcb, pads, it), near.max(0.0), r.edge), error: true });
+                out.push(Issue::new("edge", centre(&it.cu), true, format!("{} is {:.2} mm from the board edge (rule {} mm)", item_label(pcb, pads, it), near.max(0.0), r.edge)));
+            }
+        }
+    }
+    // keepouts
+    for (ki, k) in b.keepouts.iter().enumerate() {
+        if k.outline.len() < 3 {
+            continue;
+        }
+        let area = Cu::Poly(k.outline.clone());
+        let name = format!("keepout {}", ki + 1);
+        for it in &its {
+            let hit = match it.kind {
+                ItemKind::Track(_) => k.tracks && k.on(it.layer),
+                ItemKind::Via(_) => k.vias,
+                _ => false,
+            };
+            if hit && it.cu.gap(&area) <= 1e-6 {
+                out.push(Issue::new("keepout", centre(&it.cu), true, format!("{} is in {name}", item_label(pcb, pads, it))));
+            }
+        }
+        if k.parts {
+            for p in &pcb.parts {
+                if k.on(Some(p.side())) {
+                    let (lo, hi) = pcb.court_world(p);
+                    let court = Cu::Poly(vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]);
+                    if court.gap(&area) <= 1e-6 {
+                        out.push(Issue::new("keepout", p.at, true, format!("{} is in {name}", p.reference)));
+                    }
+                }
+            }
+        }
+    }
+    // silkscreen over exposed copper (the mask opens 0.05 mm round each pad)
+    if r.checks("silk") {
+        for (pi, part) in pcb.parts.iter().enumerate() {
+            let mut list = vec![];
+            crate::pcb_export::silk(&mut list, part, [0; 4]);
+            let side = part.side();
+            let mut hits: Vec<String> = vec![];
+            let mut at = part.at;
+            for d in &list {
+                let crate::pcb_export::Prim::Seg { a, b: bb, w } = d.prim else { continue };
+                let seg = Cu::Seg { a, b: bb, r: w / 2.0 };
+                for pad in pads.iter().filter(|x| x.on(side)) {
+                    let who = format!("{} pad {}", pcb.parts[pad.part].reference, pad.num);
+                    if !hits.contains(&who) && seg.gap(&pad.cu()) < r.silk_gap + 0.05 - 1e-6 {
+                        if hits.is_empty() {
+                            at = pad.at;
+                        }
+                        hits.push(who);
+                    }
+                }
+            }
+            if !hits.is_empty() {
+                let more = if hits.len() > 3 { format!(" and {} more", hits.len() - 3) } else { String::new() };
+                hits.truncate(3);
+                out.push(Issue::new("silk", at, false, format!("{} silkscreen is over {}{more}", pcb.parts[pi].reference, hits.join(", "))));
             }
         }
     }
@@ -1187,22 +1560,94 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
             let (a, b2) = (courts[i], courts[j]);
             if a.0[0] < b2.1[0] - 0.05 && b2.0[0] < a.1[0] - 0.05 && a.0[1] < b2.1[1] - 0.05 && b2.0[1] < a.1[1] - 0.05 {
                 let at = [(a.0[0].max(b2.0[0]) + a.1[0].min(b2.1[0])) / 2.0, (a.0[1].max(b2.0[1]) + a.1[1].min(b2.1[1])) / 2.0];
-                out.push(Issue { at, message: format!("{} and {} overlap", pcb.parts[i].reference, pcb.parts[j].reference), error: false });
+                out.push(Issue::new("overlap", at, false, format!("{} and {} overlap", pcb.parts[i].reference, pcb.parts[j].reference)));
+            }
+        }
+    }
+    // 3D bodies that collide (a through-hole part's leads with a bottom part, two tall parts)
+    if r.checks("body") {
+        let bs: Vec<Vec<(Cu, f64, f64)>> = pcb.parts.iter().map(|p| bodies(pcb, p)).collect();
+        for i in 0..bs.len() {
+            for j in i + 1..bs.len() {
+                let mut hit: Option<(P, f64)> = None;
+                for (ca, a0, a1) in &bs[i] {
+                    for (cb, b0, b1) in &bs[j] {
+                        let zgap = (b0 - a1).max(a0 - b1);
+                        let g = ca.gap(cb);
+                        // with no gap rule, bodies must overlap (in plan and in height) to collide
+                        let near = if r.body_gap > 0.0 { g < r.body_gap - 1e-6 && zgap < r.body_gap - 1e-6 } else { g <= 1e-9 && zgap < -1e-6 };
+                        if near {
+                            let at = if ca.contains(centre(cb)) { centre(cb) } else { centre(ca) };
+                            hit = Some((at, g.max(0.0)));
+                        }
+                    }
+                }
+                if let Some((at, g)) = hit {
+                    let msg = if g <= 0.0 { format!("{} and {} collide in 3D", pcb.parts[i].reference, pcb.parts[j].reference) } else { format!("{} and {} bodies are {:.2} mm apart (rule {} mm)", pcb.parts[i].reference, pcb.parts[j].reference, g, r.body_gap) };
+                    out.push(Issue::new("body", at, true, msg));
+                }
+            }
+        }
+    }
+    if r.max_height > 0.0 {
+        for p in &pcb.parts {
+            let h = part_height(pcb, p);
+            if h > r.max_height + 1e-6 {
+                out.push(Issue::new("height", p.at, true, format!("{} is {:.1} mm tall; the limit is {} mm", p.reference, h, r.max_height)));
             }
         }
     }
     for (i, p) in pcb.parts.iter().enumerate() {
         let (lo, hi) = courts[i];
         if b.outline.len() >= 3 && [lo, hi, [lo[0], hi[1]], [hi[0], lo[1]]].iter().any(|c| !inside(&b.outline, *c)) {
-            out.push(Issue { at: p.at, message: format!("{} is not inside the board", p.reference), error: true });
+            out.push(Issue::new("outside", p.at, true, format!("{} is not inside the board", p.reference)));
         }
     }
     let all = items(pcb, nl, pads, fills);
+    // track ends that touch nothing (antennas)
+    if r.checks("antenna") {
+        for (ti, t) in b.tracks.iter().enumerate() {
+            for end in [t.a, t.b] {
+                let tip = Item { kind: ItemKind::Track(ti), cu: Cu::Seg { a: end, b: end, r: t.width / 2.0 }, layer: Some(t.layer), net: t.net.clone() };
+                let joined = all.iter().any(|o| o.kind != ItemKind::Track(ti) && (o.net == t.net || o.net.is_empty() || t.net.is_empty()) && touching(&tip, o, fills));
+                if !joined {
+                    out.push(Issue::new("antenna", end, false, format!("Track on {} ends on nothing", if t.net.is_empty() { "no net" } else { &t.net })));
+                }
+            }
+        }
+    }
+    // thermal reliefs that too few spokes reach
+    if r.checks("thermal") {
+        for (zi, z) in b.zones.iter().enumerate() {
+            let Some(fill) = fills.get(zi) else { continue };
+            if fill.is_empty() {
+                continue;
+            }
+            let (gap, spoke) = relief_sizes(pcb, nl, z);
+            for p in pads.iter().filter(|p| p.on(z.layer) && p.net.is_some_and(|n| nl.nets[n].name == z.net) && relieved(z, p)) {
+                let (s, c) = p.rot.to_radians().sin_cos();
+                let tips = [[p.size[0] / 2.0, 0.0], [-p.size[0] / 2.0, 0.0], [0.0, p.size[1] / 2.0], [0.0, -p.size[1] / 2.0]].map(|e| {
+                    let l = (e[0].hypot(e[1])).max(1e-9);
+                    let e = [e[0] * (1.0 + (gap + spoke * 0.75) / l), e[1] * (1.0 + (gap + spoke * 0.75) / l)];
+                    add(p.at, [e[0] * c - e[1] * s, e[0] * s + e[1] * c])
+                });
+                let n = tips.iter().filter(|q| fill.iter().any(|piece| inside(&piece[0], **q) && !piece[1..].iter().any(|h| inside(h, **q)))).count();
+                if n < 2 {
+                    out.push(Issue::new("thermal", p.at, false, format!("{} pad {}: only {n} of 4 thermal spokes reach the {} pour", pcb.parts[p.part].reference, p.num, z.net)));
+                }
+            }
+        }
+    }
     let air = ratsnest(&all, pads, fills);
     for a in &air {
-        out.push(Issue { at: [(a.a[0] + a.b[0]) / 2.0, (a.a[1] + a.b[1]) / 2.0], message: format!("Unrouted: {}", a.net), error: true });
+        out.push(Issue::new("unrouted", [(a.a[0] + a.b[0]) / 2.0, (a.a[1] + a.b[1]) / 2.0], true, format!("Unrouted: {}", a.net)));
     }
+    out.retain(|i| r.checks(i.rule));
     out
+}
+
+fn closest_mid(t: &Track) -> P {
+    [(t.a[0] + t.b[0]) / 2.0, (t.a[1] + t.b[1]) / 2.0]
 }
 
 /// Which net a point on a layer belongs to: a pad, track or via under it.
@@ -1327,7 +1772,7 @@ pub(crate) mod tests {
         // and a relabelled supply carries its tracks and pours along
         let vcc_pad = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap().at;
         p.board.tracks.push(Track { a: vcc_pad, b: [vcc_pad[0], vcc_pad[1] - 3.0], width: 0.5, layer: Layer::Top, net: "VCC".into() });
-        p.board.zones.push(Zone { net: "VCC".into(), layer: Layer::Bottom, outline: p.board.outline.clone() });
+        p.board.zones.push(Zone { net: "VCC".into(), layer: Layer::Bottom, outline: p.board.outline.clone(), ..Default::default() });
         for l in &mut p.labels {
             if l.text == "VCC" {
                 l.text = "+5V".into();
@@ -1373,7 +1818,7 @@ pub(crate) mod tests {
     #[test]
     fn ground_pour_connects_ground_pads() {
         let mut p = led_board();
-        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Top, outline: p.board.outline.clone() });
+        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Top, outline: p.board.outline.clone(), ..Default::default() });
         let nl = p.netlist();
         let pads = p.pads(&nl);
         let fills = fill_zones(&p, &nl, &pads);
@@ -1384,5 +1829,110 @@ pub(crate) mod tests {
         // the pour keeps clear of VCC pads
         let vcc = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap();
         assert!(fills[0].iter().all(|piece| !inside(&piece[0], vcc.at) || piece[1..].iter().any(|h| inside(h, vcc.at))));
+    }
+
+    fn in_fill(fill: &Fill, q: P) -> bool {
+        fill.iter().any(|piece| inside(&piece[0], q) && !piece[1..].iter().any(|h| inside(h, q)))
+    }
+
+    #[test]
+    fn thermal_reliefs_join_through_hole_pads() {
+        let mut p = led_board();
+        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Top, outline: p.board.outline.clone(), ..Default::default() });
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let j2 = pads.iter().find(|x| x.part == 2 && x.num == "2").unwrap().clone();
+        let fills = fill_zones(&p, &nl, &pads);
+        let r = j2.size[0].max(j2.size[1]) / 2.0;
+        // the gap round the pad is clear on the diagonal, a spoke crosses it straight out
+        let diag = add(j2.at, [(r + 0.15) * 0.7072, (r + 0.15) * 0.7072]);
+        assert!(!in_fill(&fills[0], diag), "relief gap is filled");
+        assert!(in_fill(&fills[0], add(j2.at, [j2.size[0] / 2.0 + 0.15, 0.0])), "no spoke");
+        let its = items(&p, &nl, &pads, &fills);
+        assert!(!ratsnest(&its, &pads, &fills).iter().any(|a| a.net == "GND"));
+        let issues = drc(&p, &nl, &pads, &fills);
+        assert!(!issues.iter().any(|i| i.rule == "thermal"), "{issues:?}");
+        // a solid pour covers the gap
+        p.board.zones[0].pads = PadConnect::Solid;
+        let fills = fill_zones(&p, &nl, &pads);
+        assert!(in_fill(&fills[0], diag));
+    }
+
+    #[test]
+    fn net_classes_set_clearance_width_and_vias() {
+        let mut p = led_board();
+        p.board.rules.classes.push(NetClass { name: "HV".into(), nets: vec!["VCC".into()], clearance: 1.0, track: 0.8, via_d: 0.9, via_drill: 0.4, ..Default::default() });
+        let nl = p.netlist();
+        let r = p.net_rules(&nl, "VCC");
+        assert_eq!((r.clearance, r.track, r.via_d, r.via_drill), (1.0, 0.8, 0.9, 0.4));
+        assert_eq!(p.track_width(&nl, "GND"), p.board.rules.power_track);
+        assert_eq!(p.track_width(&nl, "Net-(D1-2)"), p.board.rules.track);
+        // a GND track 0.5 mm from a VCC pad breaks the class clearance, not the board's
+        let pads = p.pads(&nl);
+        let vcc = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap();
+        let (lo, hi) = vcc.cu().bbox();
+        let y = hi[1] + 0.5 + 0.125;
+        p.board.tracks.push(Track { a: [lo[0] - 2.0, y], b: [hi[0] + 2.0, y], width: 0.25, layer: Layer::Top, net: "GND".into() });
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().any(|i| i.rule == "clearance" && i.message.contains("< 1 mm")), "{issues:?}");
+        // and the autorouter gives VCC its width and vias
+        p.board.tracks.clear();
+        crate::pcb_route::autoroute(&mut p, None);
+        assert!(p.board.tracks.iter().any(|t| t.net == "VCC"));
+        assert!(p.board.tracks.iter().filter(|t| t.net == "VCC").all(|t| (t.width - 0.8).abs() < 1e-9 || (t.width - p.board.rules.track).abs() < 1e-9));
+        assert!(p.board.vias.iter().filter(|v| v.net == "VCC").all(|v| v.d == 0.9));
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "clearance" || i.rule == "short"), "{issues:?}");
+    }
+
+    #[test]
+    fn keepouts_hold_tracks_and_pours_out() {
+        let mut p = led_board();
+        let ko = vec![[30.0, 5.0], [40.0, 5.0], [40.0, 15.0], [30.0, 15.0]];
+        p.board.keepouts.push(Keepout { outline: ko, ..Default::default() });
+        p.board.zones.push(Zone { net: "GND".into(), layer: Layer::Bottom, outline: p.board.outline.clone(), ..Default::default() });
+        p.board.tracks.push(Track { a: [28.0, 10.0], b: [42.0, 10.0], width: 0.25, layer: Layer::Top, net: "GND".into() });
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let fills = fill_zones(&p, &nl, &pads);
+        assert!(!in_fill(&fills[0], [35.0, 10.0]));
+        assert!(in_fill(&fills[0], [35.0, 30.0]));
+        let issues = drc(&p, &nl, &pads, &fills);
+        assert!(issues.iter().any(|i| i.rule == "keepout"), "{issues:?}");
+        // a keepout on the bottom only lets top tracks through
+        p.board.keepouts[0].layer = Some(Layer::Bottom);
+        let issues = drc(&p, &nl, &pads, &fills);
+        assert!(!issues.iter().any(|i| i.rule == "keepout"), "{issues:?}");
+    }
+
+    #[test]
+    fn holes_bodies_heights_and_antennas() {
+        let mut p = led_board();
+        p.board.holes.push(Hole { at: [40.0, 30.0], d: 3.2 });
+        p.board.holes.push(Hole { at: [43.3, 30.0], d: 3.2 });
+        // the LED on top of the resistor
+        p.parts[1].at = [15.3, 20.0];
+        // a track from the resistor's VCC pad to nowhere
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let r1 = pads.iter().find(|x| x.part == 0 && x.num == "1").unwrap().at;
+        p.board.tracks.push(Track { a: r1, b: [r1[0], r1[1] + 6.0], width: 0.25, layer: Layer::Top, net: "VCC".into() });
+        p.board.rules.max_height = 2.0;
+        let issues = drc(&p, &nl, &pads, &[]);
+        let has = |rule: &str| issues.iter().any(|i| i.rule == rule);
+        assert!(has("hole_gap"), "{issues:?}");
+        assert!(issues.iter().any(|i| i.rule == "body" && i.message.contains("R1") && i.message.contains("D1")), "{issues:?}");
+        assert!(issues.iter().any(|i| i.rule == "height" && i.message.starts_with("J1")), "{issues:?}");
+        assert_eq!(issues.iter().filter(|i| i.rule == "antenna").count(), 1, "{issues:?}");
+        // checks can be turned off
+        p.board.rules.off = vec!["antenna".into(), "unrouted".into()];
+        let issues = drc(&p, &nl, &pads, &[]);
+        assert!(!issues.iter().any(|i| i.rule == "antenna" || i.rule == "unrouted"));
+        // apart again, the bodies are clear
+        p.parts[1].at = [25.0, 20.0];
+        let pads = p.pads(&nl);
+        assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "body"));
     }
 }

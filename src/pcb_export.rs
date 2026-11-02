@@ -212,6 +212,52 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
         let (q, r) = (b.outline[s], b.outline[(s + 1) % b.outline.len()]);
         out.push(d(a(colors::EDGE, 255), Prim::Seg { a: id(q), b: id(r), w: 0.15 }));
     }
+    // keepouts: a dashed red outline with hatching
+    for k in b.keepouts.iter().filter(|k| k.outline.len() >= 3) {
+        let shown = match k.layer {
+            Some(Layer::Top) => v.top,
+            Some(Layer::Bottom) => v.bottom,
+            None => v.top || v.bottom,
+        };
+        if !shown {
+            continue;
+        }
+        let col = [220, 60, 200];
+        let n = k.outline.len();
+        for s in 0..n {
+            let (q, r) = (k.outline[s], k.outline[(s + 1) % n]);
+            let len = pcb::dist(q, r);
+            let steps = (len / 0.8).ceil().max(1.0) as usize;
+            for i in (0..steps).step_by(2) {
+                let t0 = i as f64 / steps as f64;
+                let t1 = ((i + 1) as f64 / steps as f64).min(1.0);
+                let at = |t: f64| [q[0] + (r[0] - q[0]) * t, q[1] + (r[1] - q[1]) * t];
+                out.push(d(a(col, 230), Prim::Seg { a: at(t0), b: at(t1), w: 0.15 }));
+            }
+        }
+        // 45° hatching clipped to the outline (by scanline crossings)
+        let (lo, hi) = pcb::bbox(&k.outline);
+        let mut c = lo[0] - (hi[1] - lo[1]);
+        while c < hi[0] {
+            // the line y = x - c, i.e. points (c + y, y)
+            let mut xs: Vec<f64> = vec![];
+            for s in 0..n {
+                let (q, r) = (k.outline[s], k.outline[(s + 1) % n]);
+                let (fq, fr) = (q[0] - q[1] - c, r[0] - r[1] - c);
+                if (fq > 0.0) != (fr > 0.0) {
+                    let t = fq / (fq - fr);
+                    xs.push(q[1] + (r[1] - q[1]) * t);
+                }
+            }
+            xs.sort_by(f64::total_cmp);
+            for pair in xs.chunks(2) {
+                if let [y0, y1] = pair {
+                    out.push(d(a(col, 90), Prim::Seg { a: [c + y0, *y0], b: [c + y1, *y1], w: 0.0 }));
+                }
+            }
+            c += 1.0;
+        }
+    }
     if v.air {
         for w in air {
             out.push(d(a(colors::AIR, 220), Prim::Seg { a: w.a, b: w.b, w: 0.0 }));
@@ -288,9 +334,15 @@ pub fn schematic_scene(p: &Pcb, nl: &Netlist, highlight: Option<&str>) -> Vec<Dr
     for l in &p.labels {
         label(&mut out, l);
     }
+    // no-connect marks: a blue cross
+    for q in &p.no_connects {
+        let r = 0.7;
+        out.push(d([30, 60, 200, 255], Prim::Seg { a: [q[0] - r, q[1] - r], b: [q[0] + r, q[1] + r], w: 0.25 }));
+        out.push(d([30, 60, 200, 255], Prim::Seg { a: [q[0] - r, q[1] + r], b: [q[0] + r, q[1] - r], w: 0.25 }));
+    }
     // pins with nothing on them get a small open circle
     for sp in &pins {
-        if nl.net_of(sp.part, &sp.num).is_none() {
+        if nl.net_of(sp.part, &sp.num).is_none() && !p.no_connects.iter().any(|q| pcb::dist(*q, sp.at) < 1e-3) {
             out.push(d(a(colors::PIN, 160), Prim::Circle { c: sp.at, r: 0.3, w: 0.12, fill: false }));
         }
     }
@@ -971,7 +1023,7 @@ mod tests {
     fn gerbers_have_the_layers() {
         let mut p = crate::pcb::tests::led_board();
         crate::pcb_route::autoroute(&mut p, None);
-        p.board.zones.push(pcb::Zone { net: "GND".into(), layer: Layer::Bottom, outline: p.board.outline.clone() });
+        p.board.zones.push(pcb::Zone { net: "GND".into(), layer: Layer::Bottom, outline: p.board.outline.clone(), ..Default::default() });
         p.board.holes.push(pcb::Hole { at: [3.0, 3.0], d: 3.2 });
         let files = gerbers(&p);
         let names: Vec<&str> = files.iter().map(|f| f.0.as_str()).collect();
@@ -1006,8 +1058,8 @@ mod tests {
         // a VCC ring round a bigger-than-the-ring GND pour, on one layer
         let mut p = Pcb::new("nest");
         let sq = |a: f64, b: f64| vec![[a, a], [b, a], [b, b], [a, b]];
-        p.board.zones.push(pcb::Zone { net: "GND".into(), layer: Layer::Top, outline: sq(5.0, 45.0) });
-        p.board.zones.push(pcb::Zone { net: "VCC".into(), layer: Layer::Top, outline: sq(0.0, 50.0) });
+        p.board.zones.push(pcb::Zone { net: "GND".into(), layer: Layer::Top, outline: sq(5.0, 45.0), ..Default::default() });
+        p.board.zones.push(pcb::Zone { net: "VCC".into(), layer: Layer::Top, outline: sq(0.0, 50.0), ..Default::default() });
         let mut hole = sq(4.0, 46.0);
         hole.reverse();
         let fills: Vec<Fill> = vec![vec![vec![sq(5.0, 45.0)]], vec![vec![sq(0.5, 49.5), hole]]];

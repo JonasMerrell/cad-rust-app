@@ -224,9 +224,57 @@ impl Session {
                                 Some(o) => pcb::ccw(pts(o, "zones outline")?),
                                 None => p.board.outline.clone(),
                             };
-                            Ok(Zone { net, layer: layer(x.get("layer"))?.unwrap_or(Layer::Bottom), outline })
+                            let pads = match x.get("pads").and_then(|v| v.as_str()) {
+                                None | Some("tht_relief") => pcb::PadConnect::ThtRelief,
+                                Some("relief") => pcb::PadConnect::Relief,
+                                Some("solid") => pcb::PadConnect::Solid,
+                                Some(o) => return Err(format!("zones pads is tht_relief, relief or solid, not {o}")),
+                            };
+                            let f = |k: &str| x.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0).max(0.0);
+                            Ok(Zone { net, layer: layer(x.get("layer"))?.unwrap_or(Layer::Bottom), outline, pads, clearance: f("clearance"), relief_gap: f("relief_gap"), spoke: f("spoke") })
                         })
                         .collect::<R<_>>()?;
+                }
+                if let Some(k) = a.get("keepouts").and_then(|v| v.as_array()) {
+                    p.board.keepouts = k
+                        .iter()
+                        .map(|x| {
+                            let outline = pcb::ccw(pts(x.get("outline").ok_or("keepouts: each {outline, layer?, tracks?, vias?, pours?, parts?}")?, "keepouts outline")?);
+                            if outline.len() < 3 {
+                                return Err("keepouts outline: at least 3 points".to_string());
+                            }
+                            let b = |k: &str, d: bool| x.get(k).and_then(|v| v.as_bool()).unwrap_or(d);
+                            Ok(pcb::Keepout { outline, layer: layer(x.get("layer"))?, tracks: b("tracks", true), vias: b("vias", true), pours: b("pours", true), parts: b("parts", false) })
+                        })
+                        .collect::<R<_>>()?;
+                }
+                if let Some(n) = a.get("no_connects").and_then(|v| v.as_array()) {
+                    let pins = p.sch_pins();
+                    p.no_connects = n
+                        .iter()
+                        .map(|x| match x.as_str() {
+                            Some(r) => {
+                                let (i, num) = pin_ref(&p, r)?;
+                                pins.iter().find(|s| s.part == i && s.num == num).map(|s| s.at).ok_or_else(|| format!("no_connects: {r} has no schematic pin"))
+                            }
+                            None => pt(x).ok_or_else(|| "no_connects: each a pin (U1.5) or [x, y]".to_string()),
+                        })
+                        .collect::<R<_>>()?;
+                }
+                if let Some(t) = a.get("pin_types").and_then(|v| v.as_object()) {
+                    for (k, v) in t {
+                        let (i, num) = pin_ref(&p, k)?;
+                        let key = format!("{}.{num}", p.parts[i].reference);
+                        match v.as_str() {
+                            Some("auto") | None => {
+                                p.pin_types.remove(&key);
+                            }
+                            Some(_) => {
+                                let ty: crate::pcb_erc::PinType = serde_json::from_value(v.clone()).map_err(|_| format!("pin_types {k}: one of passive, input, output, bidir, power_in, power_out, open_collector, no_connect, auto"))?;
+                                p.pin_types.insert(key, ty);
+                            }
+                        }
+                    }
                 }
                 if a.get("clear_routing").and_then(|v| v.as_bool()) == Some(true) {
                     p.board.tracks.clear();
@@ -286,7 +334,8 @@ impl Session {
                 for (k, x) in a.get("vias").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
                     let at = x.get("at").and_then(pt).ok_or_else(|| format!("vias[{k}]: give at [x, y]"))?;
                     let net = x.get("net").and_then(|v| v.as_str()).map(String::from).or_else(|| pcb::net_at(&p, &nl, &pads, at, Layer::Top).map(|x| x.0)).unwrap_or_default();
-                    p.board.vias.push(Via { at, d: p.board.rules.via_d, drill: p.board.rules.via_drill, net });
+                    let nr = p.net_rules(&nl, &net);
+                    p.board.vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net });
                 }
                 let auto = a.get("auto").and_then(|v| v.as_bool()).unwrap_or(a.get("tracks").is_none() && a.get("vias").is_none());
                 let mut v = json!({});
@@ -345,8 +394,10 @@ impl Session {
                 let pads = p.pads(&nl);
                 let fills = pcb::fill_zones(p, &nl, &pads);
                 let issues = pcb::drc(p, &nl, &pads, &fills);
-                let errors = issues.iter().filter(|i| i.error).count();
-                json!({"pcb": pi, "ok": errors == 0, "errors": errors, "warnings": issues.len() - errors, "issues": issues.iter().take(100).map(|i| json!({"at": r2(i.at), "message": i.message, "error": i.error})).collect::<Vec<_>>()})
+                let erc = crate::pcb_erc::erc(p, &nl);
+                let errors = issues.iter().chain(&erc).filter(|i| i.error).count();
+                let list = |v: &[pcb::Issue]| v.iter().take(100).map(|i| json!({"at": r2(i.at), "message": i.message, "error": i.error, "rule": i.rule})).collect::<Vec<_>>();
+                json!({"pcb": pi, "ok": errors == 0, "errors": errors, "warnings": issues.len() + erc.len() - errors, "issues": list(&issues), "erc": list(&erc)})
             }
             "render_pcb" => {
                 let pi = self.pcb_idx(a)?;
@@ -628,6 +679,21 @@ pub fn tools() -> Vec<Value> {
             "min_drill": num("smallest allowed drill (0.3)"),
             "min_annular": num("smallest allowed annular ring (0.13)"),
             "power_nets": {"type": "array", "items": {"type": "string"}, "description": "more nets that get the power track width, by name (M1_* matches a prefix): motor phases and other high-current outputs"},
+            "classes": {"type": "array", "items": {"type": "object", "properties": {
+                "name": {"type": "string", "description": "class name, e.g. Power, HV, USB"},
+                "nets": {"type": "array", "items": {"type": "string"}, "description": "net names (M1_* matches a prefix)"},
+                "clearance": num("clearance to other nets, 0 = board rule"),
+                "track": num("track width, 0 = board rule"),
+                "via_d": num("via diameter, 0 = board rule"),
+                "via_drill": num("via drill, 0 = board rule"),
+                "current": num("current the nets carry, A (0 = none)"),
+                "impedance": num("target impedance, ohm (0 = none)"),
+            }, "required": ["name", "nets"], "additionalProperties": false}, "description": "net classes (replaces the list): the first class naming a net sets its clearance, width and via for routing and the check"},
+            "hole_gap": num("hole edge to hole edge (0.25)"),
+            "silk_gap": num("silkscreen to exposed pad copper (0)"),
+            "max_height": num("tallest part allowed above/below the board, 0 = no limit"),
+            "body_gap": num("gap kept between parts' 3D bodies (0)"),
+            "off": {"type": "array", "items": {"type": "string", "enum": pcb::CHECKS.iter().map(|c| c.0).collect::<Vec<_>>()}, "description": "checks to turn off"},
         }, "additionalProperties": false, "description": "design rules, mm; only the ones given change"},
     });
     let part_fields = |extra: Value| {
@@ -662,7 +728,10 @@ pub fn tools() -> Vec<Value> {
     edit["wires"] = json!({"type": "array", "items": pts("polyline"), "description": "schematic wires to add, each a polyline [[x, y], …] (pins connect where a wire passes through their end point)"});
     edit["labels"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("label position, mm"), "text": {"type": "string", "description": "net name"}, "kind": {"type": "string", "enum": ["net", "power", "ground"], "description": "default net"}}, "required": ["at", "text"], "additionalProperties": false}, "description": "schematic labels to add [{at: [x, y], text, kind: net | power | ground}]; labels with the same text are one net"});
     edit["holes"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("hole centre, mm"), "d": num("diameter mm (default 3.2)")}, "required": ["at"], "additionalProperties": false}, "description": "replace the mounting holes: [{at: [x, y], d (default 3.2)}]"});
-    edit["zones"] = json!({"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net name"}, "layer": layer.clone(), "outline": pts("pour outline, default the whole board")}, "required": ["net"], "additionalProperties": false}, "description": "replace the copper pours: [{net, layer: top | bottom (default bottom), outline (default the whole board)}]; a GND pour on the bottom is a good default"});
+    edit["zones"] = json!({"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net name"}, "layer": layer.clone(), "outline": pts("pour outline, default the whole board"), "pads": {"type": "string", "enum": ["tht_relief", "relief", "solid"], "description": "how the pour joins its net's pads: thermal reliefs on through-hole pads (default), on all pads, or solid"}, "clearance": num("gap to other nets, 0 = the net's clearance"), "relief_gap": num("thermal relief gap, 0 = 0.3 mm"), "spoke": num("thermal spoke width, 0 = the net's track")}, "required": ["net"], "additionalProperties": false}, "description": "replace the copper pours: [{net, layer: top | bottom (default bottom), outline (default the whole board), pads}]; a GND pour on the bottom is a good default"});
+    edit["keepouts"] = json!({"type": "array", "items": {"type": "object", "properties": {"outline": pts("keepout outline"), "layer": layer.clone(), "tracks": {"type": "boolean", "description": "no tracks (default true)"}, "vias": {"type": "boolean", "description": "no vias (default true)"}, "pours": {"type": "boolean", "description": "no pour copper (default true)"}, "parts": {"type": "boolean", "description": "no parts (default false)"}}, "required": ["outline"], "additionalProperties": false}, "description": "replace the keepout areas (antenna clearance, mounting hardware, enclosure ribs); layer omitted = both"});
+    edit["no_connects"] = json!({"type": "array", "items": {"type": "string", "description": "a pin, REF.PIN"}, "description": "replace the schematic no-connect marks: pins left open on purpose, so the electrical rule check doesn't flag them"});
+    edit["pin_types"] = json!({"type": "object", "additionalProperties": {"type": "string", "enum": ["passive", "input", "output", "bidir", "power_in", "power_out", "open_collector", "no_connect", "auto"]}, "description": "set pins' electrical types for the rule check: {\"U1.3\": \"output\"}; auto goes back to the library's"});
     edit["clear_routing"] = json!({"type": "boolean", "description": "delete every track and via first"});
     edit["auto_place"] = json!({"type": "string", "enum": ["unplaced", "all"], "description": "lay parts out on the board in rows, biggest first: unplaced = only parts not on the board yet"});
     let create = board;
@@ -673,7 +742,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_edit", "description": "Change a PCB tab: board size/outline/thickness/colour/rules, parts (place them with at/rot/side, change value or footprint, delete), schematic wires and labels, mounting holes, copper pours (zones), clear_routing, auto_place.", "inputSchema": obj(edit, &["pcb"])}),
         json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}}), &["pcb"])}),
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
-        json!({"name": "check_pcb", "description": "Design rule check: clearance violations and shorts between nets, track widths, via drills and rings, copper near or off the board edge, overlapping parts, parts off the board, unrouted connections. ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
+        json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
         json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}}), &["pcb", "path"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
@@ -702,5 +771,26 @@ mod tests {
         assert!(vcc.power);
         assert!(nl.by_name("GND").is_some());
         assert!(pin_ref(&p, "U1.9").is_err());
+    }
+
+    #[test]
+    fn the_555_example_checks_clean() {
+        let steps: Vec<Value> = serde_json::from_str(include_str!("../examples/pcb-555.json")).unwrap();
+        let mut s = Session::new();
+        // the board steps (the rest need the modelling kernel)
+        for st in steps.iter().take_while(|st| st["tool"] != "check_pcb").filter(|st| st["tool"].as_str().is_some_and(|t| t.contains("pcb"))) {
+            s.call(st["tool"].as_str().unwrap(), &st["args"]).unwrap();
+        }
+        let (v, _) = s.call("check_pcb", &json!({"pcb": 0})).unwrap();
+        assert_eq!(v["ok"], true, "{v:#}");
+        assert!(v["erc"].as_array().unwrap().iter().all(|i| i["error"] == false), "{v:#}");
+        // net classes and pour settings go through pcb_edit
+        let (v, _) = s.call("pcb_edit", &json!({"pcb": 0, "rules": {"classes": [{"name": "Power", "nets": ["VCC", "GND"], "track": 0.6}], "off": ["silk"]}, "zones": [{"net": "GND", "layer": "bottom", "pads": "relief"}], "keepouts": [{"outline": [[0, 0], [5, 0], [5, 5], [0, 5]], "layer": "top"}], "no_connects": [], "pin_types": {"U1.DIS": "open_collector"}})).unwrap();
+        let _ = v;
+        let p = &s.ws.pcbs[0];
+        assert_eq!(p.track_width(&p.netlist(), "VCC"), 0.6);
+        assert_eq!(p.board.zones[0].pads, pcb::PadConnect::Relief);
+        assert_eq!(p.board.keepouts.len(), 1);
+        assert_eq!(p.pin_types.get("U1.7"), Some(&crate::pcb_erc::PinType::OpenCollector));
     }
 }
