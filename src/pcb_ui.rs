@@ -2099,11 +2099,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     if !app.pcb.fitted[k] || app.pcb.zoom[k] <= 0.0 {
         let p = &app.ws.pcbs[pi];
         let (lo, hi) = if board {
+            // everything drawn: the outline and every part with its silkscreen, on the board or not
+            let c = &app.pcb.cache;
             let mut pts: Vec<P> = p.board.outline.clone();
-            for part in &p.parts {
-                let (a, b) = p.court_world(part);
-                pts.extend([a, b]);
-            }
+            let (a, b) = pcb_export::extent(&pcb_export::board_scene(p, &c.nl, &c.pads, &c.fills, &[], &BoardView::default()));
+            pts.extend([a, b]);
             pcb::bbox(&pts)
         } else if p.parts.is_empty() {
             ([-60.0, -40.0], [60.0, 40.0])
