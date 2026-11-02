@@ -151,8 +151,12 @@ impl Session {
     pub(super) fn pcb_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
         let v = match name {
             "create_pcb" => {
-                let n = self.ws.pcbs.len() + 1;
-                let mut p = Pcb::new(a.get("name").and_then(|v| v.as_str()).map(String::from).unwrap_or(format!("PCB {n}")));
+                // names are unique: each PCB tab has its own "<name> 3D" Part Studio
+                let name = match a.get("name").and_then(|v| v.as_str()).map(clean_name).filter(|n| !n.is_empty()) {
+                    Some(n) => pcb::unique_name(&self.ws.pcbs, &n, None),
+                    None => pcb::next_name(&self.ws.pcbs),
+                };
+                let mut p = Pcb::new(name);
                 apply_board(&mut p, a)?;
                 self.ws.pcbs.push(p);
                 let pi = self.ws.pcbs.len() - 1;
@@ -203,8 +207,8 @@ impl Session {
             "pcb_edit" => {
                 let pi = self.pcb_idx(a)?;
                 let mut p = self.ws.pcbs[pi].clone();
-                if let Some(n) = a.get("name").and_then(|v| v.as_str()) {
-                    p.name = n.to_string();
+                if let Some(n) = a.get("name").and_then(|v| v.as_str()).map(clean_name).filter(|n| !n.is_empty()) {
+                    p.name = pcb::unique_name(&self.ws.pcbs, &n, Some(pi));
                 }
                 apply_board(&mut p, a)?;
                 for (k, x) in a.get("parts").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
@@ -241,7 +245,11 @@ impl Session {
                         .iter()
                         .map(|x| {
                             let at = x.get("at").and_then(pt).ok_or("holes: each {at: [x, y], d}")?;
-                            Ok(pcb::Hole { at, d: x.get("d").and_then(|v| v.as_f64()).unwrap_or(3.2) })
+                            let d = x.get("d").and_then(|v| v.as_f64()).unwrap_or(3.2);
+                            if !(d > 0.0 && d <= 50.0) {
+                                return Err(format!("holes: d is the hole diameter in mm, more than 0, not {d}"));
+                            }
+                            Ok(pcb::Hole { at, d })
                         })
                         .collect::<R<_>>()?;
                 }
@@ -725,6 +733,11 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
     Ok(())
 }
 
+/// A tab name on one line, without control characters.
+fn clean_name(s: &str) -> String {
+    s.chars().map(|c| if c.is_control() { ' ' } else { c }).collect::<String>().trim().to_string()
+}
+
 fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
     let b = &mut p.board;
     if let Some(o) = a.get("outline") {
@@ -743,6 +756,9 @@ fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
         b.outline = pcb::rect_outline(w, h, a.get("corner_radius").and_then(|v| v.as_f64()).unwrap_or(0.0));
     }
     if let Some(t) = a.get("thickness").and_then(|v| v.as_f64()) {
+        if !(0.2..=5.0).contains(&t) {
+            return Err(format!("thickness: {t} mm; boards are 0.2 to 5 mm thick (1.6 is usual)"));
+        }
         b.thickness = t;
     }
     if let Some(c) = a.get("color").and_then(|v| v.as_str()) {
@@ -897,6 +913,16 @@ pub fn tools() -> Vec<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn board_values_are_checked() {
+        let mut p = Pcb::new("t");
+        assert!(apply_board(&mut p, &json!({"thickness": 0})).is_err());
+        assert!(apply_board(&mut p, &json!({"thickness": -1.6})).is_err());
+        assert!(apply_board(&mut p, &json!({"thickness": 1.0})).is_ok());
+        assert_eq!(p.board.thickness, 1.0);
+        assert_eq!(clean_name(" a\nb "), "a b");
+    }
 
     #[test]
     fn connect_makes_the_nets() {

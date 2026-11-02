@@ -660,6 +660,8 @@ impl App {
 
     pub fn load_workspace(&mut self, ws: crate::workspace::Workspace) {
         self.ws = ws;
+        // (documents from before the PCB ids: each tab gets one, linking it to its 3D studio)
+        crate::pcb::ensure_uids(&mut self.ws.pcbs);
         if self.ws.studios.is_empty() {
             self.ws.studios.push(crate::workspace::Studio { name: "Part Studio 1".into(), doc: Document::default() });
         }
@@ -710,6 +712,9 @@ impl App {
             self.checkpoint();
         }
         ws.active = self.tab;
+        crate::pcb::ensure_uids(&mut ws.pcbs);
+        // the PCB the editor's undo history belongs to, to find it again in Claude's document
+        let pcb_before = crate::pcb_ui::history_pcb(self);
         self.ws = ws;
         if cur >= self.ws.studios.len() {
             self.cur_studio = 0;
@@ -725,10 +730,9 @@ impl App {
             self.dwg = Default::default();
             self.cam = Default::default();
             self.fea = Default::default();
-            self.pcb = Default::default();
-        } else {
-            self.pcb.external_change();
         }
+        // Claude's change to the PCB is one undo step there; the history stays while its tab does
+        crate::pcb_ui::ws_replaced(self, pcb_before, true);
         self.picks.clear();
         if self.result.bodies.is_empty() {
             // frame the first parts Claude makes
@@ -3126,7 +3130,8 @@ impl App {
                                 }
                             }
                             Tab::Sim(i) => self.ws.sims[i].name = text,
-                            Tab::Pcb(i) => self.ws.pcbs[i].name = text,
+                            // (PCB names stay unique: each has its own "<name> 3D" Part Studio)
+                            Tab::Pcb(i) => self.ws.pcbs[i].name = crate::pcb::unique_name(&self.ws.pcbs, &text, Some(i)),
                         }
                         self.ws_mark();
                     }
@@ -3190,7 +3195,7 @@ impl App {
             }
             "new-pcb" => {
                 let n = self.ws.pcbs.len() + 1;
-                self.ws.pcbs.push(crate::pcb::Pcb::new(format!("PCB {n}")));
+                self.ws.pcbs.push(crate::pcb::Pcb::new(crate::pcb::next_name(&self.ws.pcbs)));
                 self.pcb = Default::default();
                 self.switch_tab(Tab::Pcb(n - 1));
             }
@@ -3229,7 +3234,9 @@ impl App {
                     }
                     Tab::Pcb(i) => {
                         let mut s = self.ws.pcbs[i].clone();
-                        s.name = format!("{} copy", s.name);
+                        s.name = crate::pcb::unique_name(&self.ws.pcbs, &format!("{} copy", s.name), None);
+                        // a copy is another board, with its own 3D Part Studio
+                        s.uid = crate::pcb::new_uid();
                         self.ws.pcbs.push(s);
                     }
                 }
