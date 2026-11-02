@@ -648,7 +648,8 @@ impl<'a> Model<'a> {
                 for ((face, _), r) in faces.iter().zip(profiles) {
                     let fs = Shape::from(face);
                     let fs = if mode == "symmetric" { occ::rotate(&fs, o, dir, start)? } else { fs };
-                    let tool = occ::revolve(&fs, o, dir, a.to_radians())?;
+                    // an invalid result (a profile crossing the axis) is an error, not a broken part
+                    let tool = occ::checked(occ::revolve(&fs, o, dir, a.to_radians())?, "the revolve", " (does the profile cross the axis?)")?;
                     if let (Ref::Region { sketch, .. }, Some(s)) = (r, naming::surf_of(face)) {
                         self.name_revolve(fid, &tool, o, dir, *sketch, s.at, start);
                     }
@@ -2011,22 +2012,51 @@ fn merge_lines(segs: &[Seg]) -> Vec<Seg> {
 }
 
 pub fn seg_edges(segs: &[Seg], fr: &Frame) -> R<Vec<Edge>> {
-    let segs = merge_lines(&merge_arcs(segs));
+    use std::f64::consts::TAU;
+    let full = |s: &Seg| matches!(s, Seg::Arc { t0, t1, .. } if (t1 - t0).abs() > TAU - 1e-6);
+    // a zero-radius arc is a sharp corner
+    let segs: Vec<Seg> = merge_lines(&merge_arcs(segs)).into_iter().filter(|s| !matches!(s, Seg::Arc { r, .. } if *r < 1e-7)).collect();
+    // Where one segment ends and the next starts. An arc's ends come from its centre, radius and
+    // angles, which can sit a little off the sketch points it was drawn to (the solver stops
+    // within its tolerance): far enough apart for OCCT to see a gap, which made an invalid face
+    // (a revolve came out as bare cylinders). Close such small gaps on a shared joint.
+    let n = segs.len();
+    let mut start: Vec<DVec2> = segs.iter().map(|s| s.start()).collect();
+    let mut end: Vec<DVec2> = segs.iter().map(|s| s.end()).collect();
+    let chain = segs.iter().all(|s| !full(s));
+    if chain && n > 1 {
+        let closed = (end[n - 1] - start[0]).length() < 1e-4;
+        for i in 0..n {
+            if i + 1 == n && !closed {
+                break;
+            }
+            let j = (i + 1) % n;
+            if (end[i] - start[j]).length() < 1e-4 {
+                let m = (end[i] + start[j]) * 0.5;
+                end[i] = m;
+                start[j] = m;
+            }
+        }
+    }
+    let w = |p: DVec2| fr.to_world(p);
     let mut edges = vec![];
-    for s in &segs {
+    for (i, s) in segs.iter().enumerate() {
+        let (a, b) = (start[i], end[i]);
         match s {
-            Seg::Line { a, b } => edges.push(Edge::segment(fr.to_world(*a), fr.to_world(*b))),
-            Seg::Arc { c, r, t0, t1 } if (t1 - t0).abs() > std::f64::consts::TAU - 1e-6 => {
+            Seg::Line { .. } => edges.push(Edge::segment(w(a), w(b))),
+            Seg::Arc { c, r, t0, t1 } if full(s) => {
                 // full circle; its direction follows the axis
                 let n = if t1 > t0 { fr.normal() } else { -fr.normal() };
-                edges.push(Edge::circle(fr.to_world(*c), n, *r));
+                edges.push(Edge::circle(w(*c), n, *r));
             }
-            // a zero-radius arc is a sharp corner
-            Seg::Arc { r, .. } if *r < 1e-7 => {}
-            Seg::Arc { .. } => edges.push(Edge::arc(fr.to_world(s.start()), fr.to_world(s.mid()), fr.to_world(s.end()))),
+            Seg::Arc { .. } => edges.push(Edge::arc(w(a), w(s.mid()), w(b))),
             Seg::Poly { pts, closed } => {
-                let w: Vec<DVec3> = pts.iter().map(|p| fr.to_world(*p)).collect();
-                edges.push(occ::spline_edge(&w, *closed)?);
+                let mut p: Vec<DVec3> = pts.iter().map(|p| w(*p)).collect();
+                if !*closed && p.len() >= 2 {
+                    let k = p.len() - 1;
+                    (p[0], p[k]) = (w(a), w(b));
+                }
+                edges.push(occ::spline_edge(&p, *closed)?);
             }
         }
     }
@@ -4554,5 +4584,39 @@ mod sweep_pattern_tests {
         let r = rebuild(&doc, &[], |_| {});
         let err = r.features.iter().find(|f| f.id == p).and_then(|f| f.error.clone()).unwrap_or_default();
         assert!(err.contains("comes after it") && err.contains("move Pattern below Extrude"), "{err}");
+    }
+}
+
+#[cfg(test)]
+mod revolve_tests {
+    use super::*;
+    use crate::doc::Document;
+
+    /// Jonas's camp chair foot: a cup profile (tube, waist and dome arcs, an edge on the axis)
+    /// revolved fully about a construction line. It came out as two plain cylinders.
+    #[test]
+    fn revolved_cup_keeps_its_curved_faces() {
+        let doc = Document::from_json(include_str!("../tests/revolve-cup.json")).unwrap();
+        let r = rebuild(&doc, &[], |_| {});
+        for f in &r.features {
+            assert!(f.error.is_none(), "{:?}", f.error);
+        }
+        assert_eq!(r.bodies.len(), 1);
+        let b = &r.bodies[0];
+        // Pappus: 2π times the first moment of the profile about the axis (x = 0)
+        let Some(Op::Sketch { sketch, .. }) = doc.features.first().map(|f| &f.op) else { panic!() };
+        let reg = crate::regions::find_regions(sketch).into_iter().find(|g| g.contains(DVec2::new(7.96, 8.33))).unwrap();
+        let moment: f64 = reg.tris.iter().map(|t| ((t[1] - t[0]).perp_dot(t[2] - t[0]) / 2.0).abs() * (t[0].x + t[1].x + t[2].x) / 3.0).sum();
+        let want = std::f64::consts::TAU * moment;
+        assert!((b.volume - want).abs() < 0.01 * want, "volume {} vs {want}", b.volume);
+        // every face is drawn: the triangles cover the whole surface area
+        let mut tri_area = 0.0;
+        for t in b.indices.chunks(3) {
+            let p = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+            tri_area += (p(t[1]) - p(t[0])).cross(p(t[2]) - p(t[0])).length() / 2.0;
+        }
+        assert!((tri_area - b.area).abs() < 0.02 * b.area, "triangles cover {tri_area} of {}", b.area);
+        let faced: std::collections::HashSet<u32> = b.tri_face.iter().copied().collect();
+        assert_eq!(faced.len(), b.faces.len(), "faces without triangles");
     }
 }

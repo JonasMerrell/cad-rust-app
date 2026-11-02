@@ -207,6 +207,24 @@ pub enum Constraint {
         q: Id,
         m: Id,
     },
+    /// Curve `b` is a pattern copy of curve `a`: each point of `b` is the matching point of `a`
+    /// turned `angle` degrees about point `center` (the origin when there is none), or moved by
+    /// (`dx`, `dy`) for a linear pattern, with the same radii. Resizing or moving the original
+    /// moves every copy with it.
+    Pattern {
+        a: Id,
+        b: Id,
+        #[serde(default)]
+        center: Option<Id>,
+        #[serde(default)]
+        angle: f64,
+        #[serde(default)]
+        dx: f64,
+        #[serde(default)]
+        dy: f64,
+        #[serde(default)]
+        circular: bool,
+    },
 }
 
 impl Constraint {
@@ -255,6 +273,8 @@ impl Constraint {
             Fix { p, .. } => vec![p],
             Symmetric { a, b, l } => vec![a, b, l],
             EqualDistance { p, l, q, m } => vec![p, l, q, m],
+            // the copy first, so its glyph sits on the copy
+            Pattern { a, b, center, .. } => [b, a].into_iter().chain(center).collect(),
             HorizontalPts { a, b }
             | VerticalPts { a, b }
             | Parallel { a, b }
@@ -281,6 +301,8 @@ impl Constraint {
             Midpoint { .. } => "midpoint",
             Fix { .. } => "fix",
             Symmetric { .. } => "mirrorSketch",
+            Pattern { circular: true, .. } => "circularPattern",
+            Pattern { .. } => "linearPattern",
             _ => "dimension",
         }
     }
@@ -476,6 +498,7 @@ impl Sketch {
                     sub(p);
                     sub(q)
                 }
+                Pattern { center: Some(c), .. } => sub(c),
                 _ => {}
             }
         }
@@ -789,6 +812,21 @@ enum Res {
         a: usize,
         b: usize,
     },
+    /// `q` is `p` turned by (cos, sin) about point `c` (the origin when `None`)
+    Rotated {
+        p: usize,
+        q: usize,
+        c: Option<usize>,
+        cos: f64,
+        sin: f64,
+    },
+    /// `q` - `p` = (dx, dy)
+    Translated {
+        p: usize,
+        q: usize,
+        dx: f64,
+        dy: f64,
+    },
 }
 
 #[derive(Clone, Copy)]
@@ -907,6 +945,16 @@ impl Res {
                 out.push(d.perp_dot(m - p2(x, a)) / l);
                 out.push(d.dot(p2(x, q) - p2(x, p)) / l);
             }
+            Res::Rotated { p, q, c, cos, sin } => {
+                let o = c.map(|c| p2(x, c)).unwrap_or(DVec2::ZERO);
+                let w = o + DVec2::new(cos, sin).rotate(p2(x, p) - o);
+                out.push(x[q] - w.x);
+                out.push(x[q + 1] - w.y);
+            }
+            Res::Translated { p, q, dx, dy } => {
+                out.push(x[q] - x[p] - dx);
+                out.push(x[q + 1] - x[p + 1] - dy);
+            }
         }
     }
 
@@ -931,6 +979,8 @@ impl Res {
             Res::EqualDist { p, a, b, q, c, d } => [pt(p), pt(a), pt(b), pt(q), pt(c), pt(d)].concat(),
             Res::PerpAt { p, c, q, .. } => [pt(p), pt(c), pt(q)].concat(),
             Res::CollinearAt { p, c1, c2, .. } => [pt(p), pt(c1), pt(c2)].concat(),
+            Res::Rotated { p, q, c, .. } => [pt(p).to_vec(), pt(q).to_vec(), c.map(|c| pt(c).to_vec()).unwrap_or_default()].concat(),
+            Res::Translated { p, q, .. } => [pt(p), pt(q)].concat(),
         };
         v.sort_unstable();
         v.dedup();
@@ -1127,6 +1177,28 @@ impl System {
                         let (a, b) = line(*l)?;
                         let (c, d) = line(*m)?;
                         vec![Res::EqualDist { p: pi(*p)?, a, b, q: pi(*q)?, c, d }]
+                    }
+                    Pattern { a, b, center, angle, dx, dy, circular } => {
+                        let (ga, gb) = (curve(*a)?, curve(*b)?);
+                        let (pa, pb) = (Sketch::curve_points(&ga), Sketch::curve_points(&gb));
+                        if pa.is_empty() || pa.len() != pb.len() || std::mem::discriminant(&ga) != std::mem::discriminant(&gb) {
+                            return None;
+                        }
+                        let c = match center {
+                            Some(c) if *circular => Some(pi(*c)?),
+                            _ => None,
+                        };
+                        let (sin, cos) = angle.to_radians().sin_cos();
+                        let mut v = vec![];
+                        for (p, q) in pa.iter().zip(&pb) {
+                            let (p, q) = (pi(*p)?, pi(*q)?);
+                            v.push(if *circular { Res::Rotated { p, q, c, cos, sin } } else { Res::Translated { p, q, dx: *dx, dy: *dy } });
+                        }
+                        // circles and ellipses keep their radius as a parameter
+                        if let (Some(&ra), Some(&rb)) = (ridx.get(a), ridx.get(b)) {
+                            v.push(Res::EqualR(RIdx::Param(ra), RIdx::Param(rb)));
+                        }
+                        v
                     }
                 })
             })();
@@ -1487,6 +1559,52 @@ mod tests {
         assert_eq!(st.dof, 0);
         assert!((s.pv(p[2]) - DVec2::new(40.0, 20.0)).length() < 1e-6);
         assert_eq!(st.fixed_curves.len(), 4);
+    }
+
+    #[test]
+    fn pattern_copies_follow_the_original() {
+        let vars = crate::expr::Vars::default();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let o = s.add_point(DVec2::ZERO);
+        s.constraints.push(Constraint::Fix { p: o, x: 0.0, y: 0.0 });
+        let c = s.add_point(DVec2::new(20.0, 0.0));
+        let orig = s.add_curve(Geom::Circle { c, r: 3.0 }, false);
+        // three copies at 90, 180, 270 degrees about o
+        let mut copies = vec![];
+        for k in 1..4 {
+            let deg = 90.0 * k as f64;
+            let cc = s.add_point(DVec2::from_angle((deg as f64).to_radians()) * 20.0);
+            let id = s.add_curve(Geom::Circle { c: cc, r: 3.0 }, false);
+            s.constraints.push(Constraint::Pattern { a: orig, b: id, center: Some(o), angle: deg, dx: 0.0, dy: 0.0, circular: true });
+            copies.push((id, cc, deg));
+        }
+        // a linear copy of the original too
+        let lc = s.add_point(DVec2::new(30.0, 5.0));
+        let lin = s.add_curve(Geom::Circle { c: lc, r: 3.0 }, false);
+        s.constraints.push(Constraint::Pattern { a: orig, b: lin, center: None, angle: 0.0, dx: 10.0, dy: 5.0, circular: false });
+        s.constraints.push(Constraint::Diameter { c: orig, dim: Dim::new("10", [0.0; 2]) });
+        s.constraints.push(Constraint::Distance { a: o, b: c, dim: Dim::new("25", [0.0; 2]) });
+        s.constraints.push(Constraint::HorizontalPts { a: o, b: c });
+        let st = s.solve(&env, &[]);
+        assert!(st.ok);
+        assert_eq!(st.dof, 0);
+        let r = |id: Id| match s.curve(id).unwrap().geom {
+            Geom::Circle { r, .. } => r,
+            _ => unreachable!(),
+        };
+        for (id, cc, deg) in copies {
+            assert!((r(id) - 5.0).abs() < 1e-6, "copy radius {}", r(id));
+            assert!((s.pv(cc) - DVec2::from_angle(deg.to_radians()) * 25.0).length() < 1e-6);
+        }
+        assert!((r(lin) - 5.0).abs() < 1e-6);
+        assert!((s.pv(lc) - DVec2::new(35.0, 5.0)).length() < 1e-6);
+        // deleting a copy drops its link and leaves the rest
+        s.delete(&[lin].into(), &HashSet::new());
+        assert_eq!(s.constraints.iter().filter(|k| matches!(k, Constraint::Pattern { .. })).count(), 3);
+        // and the link round-trips through the file format
+        let back: Sketch = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
+        assert_eq!(back.constraints.len(), s.constraints.len());
     }
 
     #[test]
