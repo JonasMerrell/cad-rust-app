@@ -57,6 +57,8 @@ struct Drag {
     orig: P,
     /// Wire ends attached to the part's pins: (wire, end b?, original point).
     ends: Vec<(usize, bool, P)>,
+    /// The PCB before the drag, for its undo step.
+    before: Pcb,
 }
 
 struct Route {
@@ -98,6 +100,8 @@ pub struct PcbUi {
     undo: Vec<Pcb>,
     redo: Vec<Pcb>,
     last_ck: Option<Instant>,
+    /// Counts the undo steps recorded (the sidebar records an edit unless one was made for it).
+    steps: u64,
     dirty: bool,
     pub(crate) cache: Cache,
     pub issues: Option<Vec<Issue>>,
@@ -110,6 +114,8 @@ pub struct PcbUi {
     walk_path: Option<(P, P, Layer, Option<Vec<P>>)>,
     /// Counts board changes, so the walkaround grid is rebuilt after one.
     cache_gen: u64,
+    /// The issue last picked in a check list (view index, issue index), drawn bolder.
+    issue_shown: Option<(usize, usize)>,
     lib_search: String,
     /// The IPC-7351 footprint wizard's inputs while it is open.
     wizard: Option<crate::pcb_ipc::IpcSpec>,
@@ -150,6 +156,7 @@ impl Default for PcbUi {
             undo: vec![],
             redo: vec![],
             last_ck: None,
+            steps: 0,
             dirty: true,
             cache: Cache::default(),
             issues: None,
@@ -158,6 +165,7 @@ impl Default for PcbUi {
             walk: None,
             walk_path: None,
             cache_gen: 0,
+            issue_shown: None,
             lib_search: String::new(),
             wizard: None,
             label_text: String::new(),
@@ -199,14 +207,9 @@ impl PcbUi {
         self.tab = Some(i);
     }
 
-    /// The PCBs were changed from outside the editor (Claude): rebuild the derived data and drop
-    /// selections that may point at moved or deleted items.
-    pub fn external_change(&mut self) {
-        self.forget_selection();
-    }
-
     fn forget_selection(&mut self) {
         self.dirty = true;
+        self.pin_text_for = None;
         self.sel = None;
         self.drag = None;
         self.route = None;
@@ -238,6 +241,10 @@ pub fn redo(app: &mut App) {
 
 fn after_history(app: &mut App) {
     app.pcb.dirty = true;
+    // the next edit is a step of its own, and text boxes show the restored values
+    app.pcb.last_ck = None;
+    app.pcb.pin_text_for = None;
+    app.pcb.zone_pts.clear();
     app.pcb.sel = None;
     app.pcb.drag = None;
     app.pcb.route = None;
@@ -263,6 +270,7 @@ fn record(app: &mut App, before: Pcb) {
             app.pcb.undo.remove(0);
         }
         app.pcb.redo.clear();
+        app.pcb.steps += 1;
     }
     app.pcb.last_ck = Some(now);
     app.pcb.dirty = true;
@@ -278,6 +286,50 @@ pub(crate) fn edit(app: &mut App, f: impl FnOnce(&mut Pcb)) {
     if app.ws.pcbs[i] != before {
         app.pcb.last_ck = None;
         record(app, before);
+        app.pcb.last_ck = None;
+    }
+}
+
+/// A drag of a part, label or hole ended: one undo step if it moved anything.
+fn finish_drag(app: &mut App) {
+    let Some(d) = app.pcb.drag.take() else { return };
+    app.pcb.dirty = true;
+    let Some(i) = index(app) else { return };
+    if app.ws.pcbs[i] != d.before {
+        app.pcb.last_ck = None;
+        record(app, d.before);
+        app.pcb.last_ck = None;
+    }
+}
+
+/// The PCB the editor's undo history belongs to (taken before the workspace is replaced).
+pub(crate) fn history_pcb(app: &App) -> Option<Pcb> {
+    app.pcb.tab.and_then(|t| app.ws.pcbs.get(t).cloned())
+}
+
+/// The workspace was replaced (Claude's edit, undoing a tab operation): the editor keeps its
+/// history, view and zoom while the PCB `before` (from `history_pcb`) is still there, following it
+/// to its new index; with `record_change` a change to it becomes one undo step.
+pub(crate) fn ws_replaced(app: &mut App, before: Option<Pcb>, record_change: bool) {
+    app.pcb.forget_selection();
+    app.pcb.cache.pcb = None;
+    let Some(before) = before else { return };
+    let Some(j) = app.ws.pcbs.iter().position(|p| !before.uid.is_empty() && p.uid == before.uid) else {
+        app.pcb.undo.clear();
+        app.pcb.redo.clear();
+        app.pcb.last_ck = None;
+        app.pcb.tab = None;
+        app.pcb.fitted = [false; 2];
+        return;
+    };
+    app.pcb.tab = Some(j);
+    if record_change && app.ws.pcbs[j] != before {
+        app.pcb.undo.push(before);
+        if app.pcb.undo.len() > 200 {
+            app.pcb.undo.remove(0);
+        }
+        app.pcb.redo.clear();
+        app.pcb.steps += 1;
         app.pcb.last_ck = None;
     }
 }
@@ -333,7 +385,7 @@ fn set_tool(app: &mut App, t: Tool) {
     app.pcb.wire.clear();
     app.pcb.route = None;
     app.pcb.zone_pts.clear();
-    app.pcb.drag = None;
+    finish_drag(app);
 }
 
 /// Start placing library symbol `key` on the schematic.
@@ -363,12 +415,20 @@ pub(crate) fn autoroute(app: &mut App) {
 }
 
 pub(crate) fn auto_place(app: &mut App) {
-    let mut n = 0;
-    edit(app, |p| n = crate::pcb_route::auto_place(p, false));
-    if n == 0 {
+    place_parts(app, false);
+}
+
+/// Place the parts that are off the board (`all`: every part again) and say what didn't fit.
+fn place_parts(app: &mut App, all: bool) {
+    let mut out = None;
+    edit(app, |p| out = Some(crate::pcb_route::auto_place(p, all)));
+    let Some(out) = out else { return };
+    if !out.left.is_empty() {
+        app.flash(format!("Placed {}; no room on the board for {}. Make the board bigger or move parts closer", out.placed, out.left.join(", ")), ToastKind::Error);
+    } else if out.placed == 0 {
         app.flash_info("Every part is already on the board (drag them, or use Place all to start over)", Some(Duration::from_secs(3)));
     } else {
-        app.flash_info(format!("Placed {n} parts on the board"), Some(Duration::from_secs(3)));
+        app.flash_info(format!("Placed {} parts on the board", out.placed), Some(Duration::from_secs(3)));
     }
     if app.pcb.view != View::Board {
         set_view(app, View::Board);
@@ -387,6 +447,7 @@ pub(crate) fn run_drc(app: &mut App) {
         app.flash_info(format!("Design rule check: {errors} errors, {} warnings (listed in the sidebar)", issues.len() - errors), Some(Duration::from_secs(4)));
     }
     app.pcb.issues = Some(issues);
+    app.pcb.issue_shown = None;
     if app.pcb.view != View::Board {
         set_view(app, View::Board);
     }
@@ -403,6 +464,7 @@ pub(crate) fn run_erc(app: &mut App) {
         app.flash_info(format!("Electrical rule check: {errors} errors, {} warnings (listed in the sidebar)", issues.len() - errors), Some(Duration::from_secs(4)));
     }
     app.pcb.erc = Some(issues);
+    app.pcb.issue_shown = None;
     if app.pcb.view != View::Schematic {
         set_view(app, View::Schematic);
     }
@@ -447,6 +509,8 @@ pub(crate) fn to_3d(app: &mut App) {
     let Some(i) = index(app) else { return };
     app.sync_ws();
     let n = app.ws.studios.len();
+    // the studio as it was, for its undo history
+    let old = pcb_export::studio_of(&app.ws, i).map(|s| (s, app.ws.studios[s].doc.clone()));
     match pcb_export::to_studio(&mut app.ws, i) {
         Ok(si) => {
             if si == app.cur_studio {
@@ -455,6 +519,15 @@ pub(crate) fn to_3d(app: &mut App) {
                 app.changed();
             } else {
                 app.studio_results.remove(&si);
+                // one undo step in that studio's parked history
+                if let Some((_, doc)) = old.filter(|(s, _)| *s == si) {
+                    let (u, r) = app.studio_undo.entry(si).or_default();
+                    u.push(doc);
+                    if u.len() > 200 {
+                        u.remove(0);
+                    }
+                    r.clear();
+                }
             }
             app.switch_tab(Tab::Studio(si));
             app.changed();
@@ -804,6 +877,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     };
     refresh(app);
     let before = app.ws.pcbs[i].clone();
+    let steps = app.pcb.steps;
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if app.pcb.view == View::Simulate {
             crate::circuit_ui::sidebar(app, ui);
@@ -843,8 +917,12 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     });
     crate::pcb_trace_ui::window(app, ui.ctx());
     // edits made through edit() have their own undo step
-    if app.ws.pcbs[i] != before && app.pcb.drag.is_none() && app.pcb.undo.last() != Some(&before) {
-        record(app, before);
+    if app.ws.pcbs[i] != before && app.pcb.drag.is_none() {
+        if app.pcb.steps == steps {
+            record(app, before);
+        } else {
+            app.pcb.dirty = true;
+        }
     }
 }
 
@@ -1483,9 +1561,7 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
     }
     ui.horizontal(|ui| {
         if ui.button("Place all").on_hover_text("Lay every part out on the board again").clicked() {
-            edit(app, |p| {
-                crate::pcb_route::auto_place(p, true);
-            });
+            place_parts(app, true);
         }
         if ui.button("Remove tracks").on_hover_text("Delete every track and via (Ctrl+Z brings them back)").clicked() {
             edit(app, |p| {
@@ -1630,13 +1706,15 @@ fn issues_ui(app: &mut App, ui: &mut Ui, issues: &[Issue]) {
     }
     for (k, is) in issues.iter().enumerate().take(200) {
         let col = if is.error { theme::error_soft() } else { theme::muted() };
-        let r = ui.add(egui::Label::new(RichText::new(format!("{} {}", if is.error { "●" } else { "○" }, is.message)).color(col).size(12.0)).sense(Sense::click()));
+        let text = RichText::new(format!("{} {}", if is.error { "●" } else { "○" }, is.message)).color(col).size(12.0);
+        let text = if app.pcb.issue_shown == Some((vi(app.pcb.view), k)) { text.strong().underline() } else { text };
+        let r = ui.add(egui::Label::new(text).sense(Sense::click()));
         if r.on_hover_text("Show it").clicked() {
-            let k = vi(app.pcb.view);
-            app.pcb.center[k] = is.at;
-            app.pcb.zoom[k] = app.pcb.zoom[k].max(12.0);
+            let v = vi(app.pcb.view);
+            app.pcb.center[v] = is.at;
+            app.pcb.zoom[v] = app.pcb.zoom[v].max(12.0);
+            app.pcb.issue_shown = Some((v, k));
         }
-        let _ = k;
     }
     if issues.len() > 200 {
         ui.label(format!("… and {} more", issues.len() - 200));
@@ -1669,8 +1747,14 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
         ("Board view", "pcbBoard", |a| set_view(a, View::Board)),
         ("Simulate circuit", "pcbSim", |a| set_view(a, View::Simulate)),
         ("Run circuit simulation", "play", crate::circuit_ui::run),
-        ("Wire", "pcbWire", |a| set_tool(a, Tool::Wire)),
-        ("Net label", "pcbLabel", |a| set_tool(a, Tool::Label(LabelKind::Net))),
+        ("Wire", "pcbWire", |a| {
+            set_view(a, View::Schematic);
+            set_tool(a, Tool::Wire)
+        }),
+        ("Net label", "pcbLabel", |a| {
+            set_view(a, View::Schematic);
+            set_tool(a, Tool::Label(LabelKind::Net))
+        }),
         ("Route tracks", "pcbRoute", |a| {
             set_view(a, View::Board);
             set_tool(a, Tool::Route)
@@ -2188,16 +2272,12 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                                 ends.push((k, true, w.b));
                             }
                         }
-                        app.pcb.drag = Some(Drag { from: at, orig: p.parts[i].sch, ends });
-                        let before = p.clone();
-                        app.pcb.last_ck = None;
-                        record(app, before);
+                        // (the undo step is recorded when the drag ends, if it moved anything)
+                        app.pcb.drag = Some(Drag { from: at, orig: p.parts[i].sch, ends, before: p.clone() });
                     } else if let Some(Sel::Label(i)) = sch_hit(p, at, tol) {
                         app.pcb.sel = Some(Sel::Label(i));
-                        app.pcb.drag = Some(Drag { from: at, orig: p.labels[i].at, ends: vec![] });
-                        let before = p.clone();
-                        app.pcb.last_ck = None;
-                        record(app, before);
+                        // (the undo step is recorded when the drag ends, if it moved anything)
+                        app.pcb.drag = Some(Drag { from: at, orig: p.labels[i].at, ends: vec![], before: p.clone() });
                     }
                 }
             }
@@ -2226,8 +2306,7 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                 app.pcb.dirty = true;
             }
             if resp.drag_stopped() {
-                app.pcb.drag = None;
-                app.pcb.dirty = true;
+                finish_drag(app);
             }
             if clicked {
                 app.pcb.sel = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol));
@@ -2375,17 +2454,13 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                     match board_hit(p, at, tol, app.pcb.layer) {
                         Some(Sel::Part(i)) => {
                             app.pcb.sel = Some(Sel::Part(i));
-                            app.pcb.drag = Some(Drag { from: at, orig: p.parts[i].at, ends: vec![] });
-                            let before = p.clone();
-                            app.pcb.last_ck = None;
-                            record(app, before);
+                            // (the undo step is recorded when the drag ends, if it moved anything)
+                            app.pcb.drag = Some(Drag { from: at, orig: p.parts[i].at, ends: vec![], before: p.clone() });
                         }
                         Some(Sel::Hole(i)) => {
                             app.pcb.sel = Some(Sel::Hole(i));
-                            app.pcb.drag = Some(Drag { from: at, orig: p.board.holes[i].at, ends: vec![] });
-                            let before = p.clone();
-                            app.pcb.last_ck = None;
-                            record(app, before);
+                            // (the undo step is recorded when the drag ends, if it moved anything)
+                            app.pcb.drag = Some(Drag { from: at, orig: p.board.holes[i].at, ends: vec![], before: p.clone() });
                         }
                         _ => {}
                     }
@@ -2402,8 +2477,7 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                 app.pcb.dirty = true;
             }
             if resp.drag_stopped() {
-                app.pcb.drag = None;
-                app.pcb.dirty = true;
+                finish_drag(app);
             }
             if clicked {
                 let p = &app.ws.pcbs[pi];
@@ -2524,6 +2598,16 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
             let c = xf.s(is.at);
             let col = if is.error { Color32::from_rgb(255, 80, 80) } else { Color32::from_rgb(255, 200, 60) };
             painter.circle_stroke(c, 7.0, Stroke::new(2.0, col));
+        }
+        // the one picked in the list: a bold ring and cross hairs, drawn last so it sits on top
+        if let Some(is) = app.pcb.issue_shown.filter(|x| x.0 == 1).and_then(|x| issues.get(x.1)) {
+            let c = xf.s(is.at);
+            let col = if is.error { Color32::from_rgb(255, 80, 80) } else { Color32::from_rgb(255, 200, 60) };
+            painter.circle_stroke(c, 13.0, Stroke::new(3.0, col));
+            for d in [egui::vec2(1.0, 0.0), egui::vec2(0.0, 1.0)] {
+                painter.line_segment([c - d * 20.0, c - d * 9.0], Stroke::new(2.0, col));
+                painter.line_segment([c + d * 9.0, c + d * 20.0], Stroke::new(2.0, col));
+            }
         }
     }
     let h = app.pcb.hover;
