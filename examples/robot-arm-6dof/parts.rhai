@@ -343,7 +343,8 @@ let caps = #{
 // Arm side: Ø84 x 12 on the J6 carrier. Kinematic coupling: three V-grooves made of pairs of Ø4 dowels
 // (at 90°, 210°, 330°) take three Ø8 balls on the tool, which locate it. Two M4 screws in the tool plate
 // (at 0° and 180°, on Ø72, outside the tool body so a hex key reaches them) go into M4 heat-set inserts
-// and clamp it; three Ø10x3 N52 magnets only hold the tool in place while the screws go in. An 8-pin
+// and clamp it (0.2 N·m: more overloads the ball-on-dowel contact; balls and dowels must be hardened);
+// three Ø10x3 N52 magnets only hold the tool in place while the screws go in. An 8-pin
 // 2.54 mm spring-loaded pogo connector in the middle meets gold pads on the tool's PCB.
 // Pins: 24V, 24V, GND, GND, CAN-H, CAN-L, TOOL_DETECT (tool ties it to GND), spare.
 fn xcyl(x0, y, z, r, h) { cylinder(vec3(x0, y, z), vec3(1, 0, 0), r, h) }

@@ -122,10 +122,15 @@ than a thread cut in the plastic.
   without overlapping.
 - **Locking:** two M4×16 socket head screws in the tool plate, at 0° and 180° on Ø72, go into M4
   heat-set inserts in the arm side. They sit outside the tool body, so a 3 mm hex key reaches them
-  from the tool side. Do them up snug, about 0.5 N·m. That gives roughly 1.2 kN of clamp, which
-  takes about 35 N·m to pry the tool off, against about 1 N·m from 1 kg at twice gravity. That works out to a
-  safety factor in the 30s, where the magnets alone gave about 1.15. Don't crank them: the ball pockets
-  and inserts are in printed PA-CF.
+  from the tool side. **Tighten to 0.2 N·m, no more** (a torque screwdriver, or a gentle two-finger
+  turn on a short hex key). That's about 250 N per screw (nut factor 0.2). The simulation check puts the
+  lift-off safety factor at about 11 against the worst tool roll, where the magnets alone gave 1.15.
+  The limit is the contact between each ball and its two dowels, not the screws. At 0.5 N·m each ball
+  pushes about 240 N into a Ø4 dowel, about 4.7 GPa of Hertz pressure, which dents even hardened steel.
+  At 0.2 N·m it's about 3.6 GPa, under the roughly 4.2 GPa that hardened steel takes.
+- **Hardened balls and dowels:** use hardened steel for both, so grade G10–G25 chrome steel bearing balls
+  (about 60 HRC) and hardened, ground dowel pins (h6 or m6, about 58–62 HRC). Mild-steel pins or
+  unhardened balls will brinell at these contact stresses, and then the coupling loses its repeatability.
 - **Magnets:** three Ø10×3 N52 magnets on each side still pull the tool onto the balls and hold it
   while you start the screws, so you don't need a third hand. They no longer carry the load.
 - **Pogo pins:** an 8-pin, 2.54 mm spring-loaded connector in the middle meets gold pads on a small PCB in
@@ -157,7 +162,7 @@ The controller board sits inside the base housing under the J1 motor.
 ## Mechanical parts (not counted in the $200)
 
 Bearings: 2× 6814, 6812, 6810, 2× 6808, 4× 6805, 2× 6804, 6× 6803, 2× 608. Dowel pins for the ring pins and
-output pins (sizes in `summary.json`), 6× Ø4×12 dowels and 3× Ø8 balls for the coupling, 6 magnets, 2 M4×16 screws and 2 M4 heat-set inserts for the tool lock, a GT2
+output pins (sizes in `summary.json`), 6× Ø4×12 hardened dowels and 3× Ø8 hardened bearing balls for the coupling, 6 magnets, 2 M4×16 screws and 2 M4 heat-set inserts for the tool lock, a GT2
 20T and 40T pulley with a 6 mm belt, 40×40×2 tube, 8 mm plate, M3/M4 screws and M3 heat-set inserts.
 
 ## Not done yet
