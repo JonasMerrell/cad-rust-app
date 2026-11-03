@@ -29,6 +29,34 @@ const HIDDEN_TOOLS: &[&str] = &["new_document", "open_document", "save_document"
 const MAX_STEPS: usize = 80;
 /// Longest tool result text sent back (describe and list_geometry can be large).
 const MAX_RESULT: usize = 60_000;
+/// Model round trips one delegated task may take.
+const WORKER_STEPS: usize = 40;
+/// The models a planner hands tool work to, by the name the delegate tool takes.
+pub const WORKERS: &[(&str, &str, &str)] = &[("sonnet", "claude-sonnet-5-5", "Sonnet"), ("haiku", "claude-haiku-5-5", "Haiku")];
+/// Tools that only look at the document, which the planner keeps; everything that changes the
+/// document goes through a worker.
+const PLANNER_TOOLS: &[&str] = &[
+    "describe",
+    "sketch_info",
+    "feature_defaults",
+    "list_geometry",
+    "render",
+    "mass_properties",
+    "stock_size",
+    "printability",
+    "ray_cast",
+    "classify_points",
+    "assembly_info",
+    "render_assembly",
+    "drawing_info",
+    "render_drawing",
+    "list_standard_parts",
+    "cam_info",
+    "render_cam",
+    "pcb_info",
+    "render_pcb",
+    "render_simulation",
+];
 
 // ---------------------------------------------------------------- settings
 
@@ -50,11 +78,13 @@ pub struct Settings {
     pub api_key: String,
     pub model: String,
     pub effort: String,
+    /// The chosen model plans and hands the tool work to Sonnet or Haiku, which costs less.
+    pub delegate: bool,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into() }
+        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into(), delegate: true }
     }
 }
 
@@ -70,6 +100,12 @@ impl Settings {
 
     pub fn key_from_env(&self) -> bool {
         self.api_key.trim().is_empty() && self.key().is_some()
+    }
+
+    /// Whether requests are planned by the chosen model and carried out by cheaper ones: only
+    /// when the chosen model is not already one of the workers.
+    pub fn delegates(&self) -> bool {
+        self.delegate && !WORKERS.iter().any(|w| w.1 == self.model)
     }
 }
 
@@ -195,8 +231,7 @@ struct Reply {
 }
 
 /// One streamed Messages API call. Returns the assembled message.
-fn stream_message(agent: &ureq::Agent, cred: &Cred, body: &Value, betas: &[&str], stop: &AtomicBool, on: &mut dyn FnMut(Delta)) -> Result<Reply, Failure> {
-    let base = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| API_URL.into());
+fn stream_message(agent: &ureq::Agent, base: &str, cred: &Cred, body: &Value, betas: &[&str], stop: &AtomicBool, on: &mut dyn FnMut(Delta)) -> Result<Reply, Failure> {
     let mut req = agent.post(&format!("{}/v1/messages", base.trim_end_matches('/'))).set("content-type", "application/json").set("anthropic-version", API_VERSION);
     let mut betas = betas.to_vec();
     req = match cred {
@@ -413,6 +448,26 @@ struct Chat {
     /// Claude Code: the conversation to resume, and where its MCP server reaches us.
     cc_session: Option<String>,
     bridge: Option<Bridge>,
+    /// Whether the conversation so far was planned and delegated: the tools differ, so a change
+    /// of that setting starts a new conversation.
+    planned: Option<bool>,
+    /// Where requests go: the API, or `ANTHROPIC_BASE_URL` (a proxy, or a mock in tests).
+    base: String,
+    /// Tokens each model used in this turn: input (all of it), of that read from the cache, output.
+    usage: Vec<(String, u64, u64, u64)>,
+}
+
+/// One model working through a conversation with tools until it stops calling them.
+struct Run<'a> {
+    model: &'a str,
+    effort: &'a str,
+    system: Value,
+    tools: Value,
+    max_steps: usize,
+    /// The planner: it only looks, and delegates the rest.
+    planner: bool,
+    /// A delegated task: its text goes to the panel folded away, as the worker's notes.
+    worker: bool,
 }
 
 /// Tool-result images kept in the conversation: past `MAX_IMAGES`, all but the newest
@@ -479,7 +534,15 @@ impl Chat {
             .map(|t| json!({"name": t["name"], "description": t["description"], "input_schema": t["inputSchema"], "eager_input_streaming": true}))
             .collect();
         let http = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(600)).try_proxy_from_env(true).build();
-        Chat { session: None, seen: String::new(), seen_studio: 0, messages: vec![], tools: Value::Array(tools), http, stop, cc_session: None, bridge: None }
+        let base = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| API_URL.into());
+        Chat { session: None, seen: String::new(), seen_studio: 0, messages: vec![], tools: Value::Array(tools), http, stop, cc_session: None, bridge: None, planned: None, base, usage: vec![] }
+    }
+
+    /// The planner's tools: the ones that look, and delegate.
+    fn planner_tools(&self) -> Value {
+        let mut t: Vec<Value> = self.tools.as_array().into_iter().flatten().filter(|t| PLANNER_TOOLS.contains(&t["name"].as_str().unwrap_or(""))).cloned().collect();
+        t.push(delegate_tool());
+        Value::Array(t)
     }
 
     fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
@@ -496,6 +559,12 @@ impl Chat {
             self.seen_studio = cur;
         }
         let prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
+        if self.planned.is_some_and(|p| p != settings.delegates()) && (!self.messages.is_empty() || self.cc_session.is_some()) {
+            self.messages.clear();
+            self.cc_session = None;
+            send(FromWorker::Notice("Planning with cheaper models was switched, so Claude starts a new conversation (the document stays as it is).".into()));
+        }
+        self.planned = Some(settings.delegates());
         let Some(cred) = cred else { return self.claude_code_turn(&prompt, settings, stop, send) };
         prune_images(&mut self.messages);
         let user = json!({"type": "text", "text": prompt});
@@ -521,36 +590,65 @@ impl Chat {
     }
 
     fn api_turn(&mut self, cred: &Cred, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), Failure> {
+        let delegates = settings.delegates();
+        let run = if delegates {
+            Run { model: &settings.model, effort: &settings.effort, system: json!([{"type": "text", "text": planner_text()}]), tools: self.planner_tools(), max_steps: MAX_STEPS, planner: true, worker: false }
+        } else {
+            Run { model: &settings.model, effort: &settings.effort, system: system_prompt(), tools: self.tools.clone(), max_steps: MAX_STEPS, planner: false, worker: false }
+        };
+        self.usage.clear();
+        let mut messages = std::mem::take(&mut self.messages);
+        let r = self.run_loop(&mut messages, &run, cred, stop, send);
+        self.messages = messages;
+        if delegates && self.usage.len() > 1 {
+            send(FromWorker::Notice(usage_line(&self.usage)));
+        }
+        match r {
+            Ok(true) => Ok(()),
+            Ok(false) => {
+                send(FromWorker::Notice(format!("Stopped after {MAX_STEPS} steps; say \"continue\" to go on.")));
+                Ok(())
+            }
+            Err(f) => Err(f),
+        }
+    }
+
+    /// Let one model work on `messages` until it replies without calling a tool (true) or runs
+    /// out of steps (false).
+    fn run_loop(&mut self, messages: &mut Vec<Value>, run: &Run, cred: &Cred, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<bool, Failure> {
         let mut betas = vec![];
         let mut body = json!({
-            "model": settings.model,
+            "model": run.model,
             "max_tokens": 64000,
             "stream": true,
-            "system": system_prompt(),
-            "tools": self.tools,
+            "system": run.system,
+            "tools": run.tools,
             "thinking": {"type": "adaptive", "display": "summarized"},
-            "output_config": {"effort": settings.effort},
+            "output_config": {"effort": run.effort},
             "cache_control": {"type": "ephemeral"},
         });
-        if settings.model != "claude-haiku-5-5" {
+        if run.model != "claude-haiku-5-5" {
             // a safety classifier's false positive is answered by another model instead of a refusal
             body["fallbacks"] = json!("default");
             betas.push("server-side-fallback-2026-07-01");
         }
 
-        for _ in 0..MAX_STEPS {
+        for _ in 0..run.max_steps {
             if stop.load(Ordering::Relaxed) {
                 return Err(fail("Stopped"));
             }
-            body["messages"] = Value::Array(self.messages.clone());
+            body["messages"] = Value::Array(messages.clone());
             let mut tries = 0;
             let reply = loop {
                 let mut on = |d: Delta| match d {
+                    Delta::Text(t) if run.worker => send(FromWorker::Thinking(t.into())),
                     Delta::Text(t) => send(FromWorker::Text(t.into())),
+                    // a worker's thinking stays out of the panel: its notes are enough
+                    Delta::Thinking(_) if run.worker => {}
                     Delta::Thinking(t) => send(FromWorker::Thinking(t.into())),
                 };
                 send(FromWorker::Attempt);
-                match stream_message(&self.http, cred, &body, &betas, stop, &mut on) {
+                match stream_message(&self.http, &self.base, cred, &body, &betas, stop, &mut on) {
                     Ok(m) => break m,
                     Err(Failure { message, retry: Some(wait), .. }) if tries < 3 && !stop.load(Ordering::Relaxed) => {
                         tries += 1;
@@ -566,6 +664,7 @@ impl Chat {
                 }
             };
             let msg = reply.msg;
+            self.count_usage(run.model, &msg["usage"]);
             let stop_reason = msg["stop_reason"].as_str().unwrap_or("").to_string();
             if stop_reason == "refusal" {
                 let cat = msg["stop_details"]["category"].as_str().map(|c| format!(" ({c})")).unwrap_or_default();
@@ -573,30 +672,70 @@ impl Chat {
             }
             let content = msg["content"].as_array().cloned().unwrap_or_default();
             if content.is_empty() {
-                return Ok(());
+                return Ok(true);
             }
             // the reply goes back unchanged, thinking blocks and all
-            self.messages.push(json!({"role": "assistant", "content": content}));
+            messages.push(json!({"role": "assistant", "content": content}));
             let calls: Vec<Value> = content.iter().filter(|b| b["type"] == "tool_use").cloned().collect();
             if calls.is_empty() {
                 if stop_reason == "max_tokens" {
                     send(FromWorker::Notice("The reply hit the length limit.".into()));
                 }
-                return Ok(());
+                return Ok(true);
             }
-            let results = self.run_tools(&calls, &reply.bad_inputs, stop, send);
-            self.messages.push(json!({"role": "user", "content": results}));
+            let results = self.run_tools(&calls, &reply.bad_inputs, run.planner.then_some(cred), stop, send);
+            messages.push(json!({"role": "user", "content": results}));
             if stop_reason == "max_tokens" {
                 send(FromWorker::Notice("The reply hit the length limit.".into()));
-                return Ok(());
+                return Ok(true);
             }
         }
-        send(FromWorker::Notice(format!("Stopped after {MAX_STEPS} steps; say \"continue\" to go on.")));
-        Ok(())
+        Ok(false)
+    }
+
+    fn count_usage(&mut self, model: &str, u: &Value) {
+        let n = |k: &str| u[k].as_u64().unwrap_or(0);
+        let cached = n("cache_read_input_tokens");
+        let input = n("input_tokens") + n("cache_creation_input_tokens") + cached;
+        match self.usage.iter_mut().find(|e| e.0 == model) {
+            Some(e) => {
+                e.1 += input;
+                e.2 += cached;
+                e.3 += n("output_tokens");
+            }
+            None => self.usage.push((model.to_string(), input, cached, n("output_tokens"))),
+        }
+    }
+
+    /// Hand a task the planner wrote to a worker model, which carries it out on the document with
+    /// every tool. Its report and its last render go back to the planner.
+    fn delegate(&mut self, input: &Value, cred: &Cred, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> (String, Option<Vec<u8>>, bool) {
+        let task = input["task"].as_str().unwrap_or("").trim().to_string();
+        let &(_, model, label) = WORKERS.iter().find(|w| Some(w.0) == input["model"].as_str()).unwrap_or(&WORKERS[0]);
+        let effort = input["effort"].as_str().filter(|e| EFFORTS.contains(e)).unwrap_or("medium");
+        send(FromWorker::ToolStart { name: format!("delegate to {label}"), detail: short(&task, 600) });
+        if task.is_empty() {
+            send(FromWorker::ToolDone { ok: false, summary: "no task".into(), image: None });
+            return ("delegate needs a task: say exactly what to do.".into(), None, true);
+        }
+        let run = Run { model, effort, system: json!([{"type": "text", "text": worker_text()}]), tools: self.tools.clone(), max_steps: WORKER_STEPS, planner: false, worker: true };
+        let mut messages = vec![json!({"role": "user", "content": [{"type": "text", "text": task}]})];
+        let r = self.run_loop(&mut messages, &run, cred, stop, send);
+        let report = last_text(&messages);
+        let image = last_image(&messages);
+        let (text, ok) = match r {
+            Ok(true) => (format!("{label} finished. Its report:\n{}", if report.is_empty() { "(no report)" } else { &report }), true),
+            Ok(false) => (format!("{label} ran out of steps ({WORKER_STEPS}) before finishing. Its last notes:\n{report}\nCheck the document (describe) before going on."), false),
+            Err(f) => (format!("{label} stopped with an error: {}. Changes it made before that stay; check the document (describe) before going on.", f.message), false),
+        };
+        let summary = report.lines().find(|l| !l.trim().is_empty()).map(|l| short(l.trim(), 140)).unwrap_or_else(|| if ok { "done".into() } else { "failed".into() });
+        send(FromWorker::ToolDone { ok, summary, image: None });
+        (text, image, !ok)
     }
 
     /// Run Claude's tool calls on the session, sending changed documents to the editor.
-    fn run_tools(&mut self, calls: &[Value], bad_inputs: &[String], stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Vec<Value> {
+    /// `planner` is set for a planner's calls, which may delegate.
+    fn run_tools(&mut self, calls: &[Value], bad_inputs: &[String], planner: Option<&Cred>, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Vec<Value> {
         let mut results = vec![];
         for c in calls {
             let id = c["id"].clone();
@@ -609,6 +748,12 @@ impl Chat {
                 send(FromWorker::ToolStart { name: name.into(), detail: "(input cut off)".into() });
                 send(FromWorker::ToolDone { ok: false, summary: "invalid input".into(), image: None });
                 ("The tool input was not valid JSON (it may have been cut off); send the call again.".to_string(), None, true)
+            } else if let (Some(cred), "delegate") = (planner, name) {
+                self.delegate(&c["input"], cred, stop, send)
+            } else if planner.is_some() && !PLANNER_TOOLS.contains(&name) {
+                send(FromWorker::ToolStart { name: name.into(), detail: short(&c["input"].to_string(), 160) });
+                send(FromWorker::ToolDone { ok: false, summary: "delegate this".into(), image: None });
+                (format!("{name} changes the document: hand it to a worker with delegate."), None, true)
             } else {
                 self.run_tool(name, &c["input"], send)
             };
@@ -780,6 +925,73 @@ fn summarize(v: &Value) -> String {
     if out.is_empty() { "done".into() } else { out.join(", ") }
 }
 
+/// The text of the last assistant message.
+fn last_text(messages: &[Value]) -> String {
+    let Some(m) = messages.iter().rev().find(|m| m["role"] == "assistant") else { return String::new() };
+    m["content"].as_array().into_iter().flatten().filter(|b| b["type"] == "text").filter_map(|b| b["text"].as_str()).collect::<Vec<_>>().join("\n").trim().to_string()
+}
+
+/// The newest image a tool returned in `messages`, as PNG bytes.
+fn last_image(messages: &[Value]) -> Option<Vec<u8>> {
+    let images = messages.iter().filter(|m| m["role"] == "user").flat_map(|m| m["content"].as_array().into_iter().flatten()).flat_map(|b| b["content"].as_array().into_iter().flatten());
+    let data = images.filter(|c| c["type"] == "image").last()?["source"]["data"].as_str()?;
+    base64::engine::general_purpose::STANDARD.decode(data).ok()
+}
+
+/// Tokens per model in a planned turn, for the chat panel.
+fn usage_line(usage: &[(String, u64, u64, u64)]) -> String {
+    let k = |n: u64| if n >= 1000 { format!("{:.1}k", n as f64 / 1000.0) } else { n.to_string() };
+    let parts: Vec<String> = usage
+        .iter()
+        .map(|(m, input, cached, output)| {
+            let name = MODELS.iter().find(|x| x.0 == m).map(|x| x.1.trim_start_matches("Claude ")).unwrap_or(m);
+            format!("{name} {} in ({} cached), {} out", k(*input), k(*cached), k(*output))
+        })
+        .collect();
+    format!("Tokens: {}", parts.join(" · "))
+}
+
+fn delegate_tool() -> Value {
+    json!({
+        "name": "delegate",
+        "description": "Hand one task to a worker model that carries it out on the open document with all of rCAD's tools (sketches, features, variables, assemblies, drawings, CAM, simulation, PCB, exports) and reports back. The worker sees only the task text, not this conversation, so spell out everything: exact values and variable names, sketch planes, feature kinds and params, the refs and ids you looked up, names to give things, and what to check. Returns the worker's report and its last render.",
+        "input_schema": {
+            "type": "object",
+            "properties": {
+                "task": {"type": "string", "description": "The complete, specific instructions."},
+                "model": {"type": "string", "enum": ["sonnet", "haiku"], "description": "haiku for simple, fully specified steps (set variables, one feature with given refs, an export); sonnet for work that needs judgement (a multi-feature part, fixing errors, assemblies, CAM). Default sonnet."},
+                "effort": {"type": "string", "enum": ["low", "medium", "high"], "description": "How hard the worker thinks. Default medium."}
+            },
+            "required": ["task"]
+        },
+        "eager_input_streaming": true
+    })
+}
+
+/// The planner's instructions: the usual ones, plus how to delegate.
+fn planner_text() -> String {
+    format!(
+        "{}\n\nCost-saving mode: you are the planner. You can look at the document (describe, list_geometry, the info tools and renders) but not change it. \
+The delegate tool hands a task to a cheaper model (Sonnet or Haiku) that has every editing tool. Work out the design yourself, then delegate it as specific tasks: \
+exact parameters, variable names and values, sketch planes, dimensions, feature kinds and params, refs you looked up, names, and what to check when done. \
+The worker sees only your task text, so include everything it needs. Use haiku for simple, fully specified steps and sonnet for work that needs judgement. \
+Prefer a few substantial tasks to many tiny ones, and give independent parts of the work as separate tasks. \
+Check each report and render (look again yourself when it matters) and delegate fixes. Finish with the short reply to the user.",
+        system_text()
+    )
+}
+
+/// A worker's instructions.
+fn worker_text() -> String {
+    format!(
+        "{}\n\nYou are carrying out one task that the planning model gave you, on the document the user has open. \
+Do the task as specified, with the values and names it gives; where it leaves something open, choose sensibly. Don't do more than it asks. \
+Render to check geometry changes and fix errors you caused. End with a short report for the planner (the user doesn't see it directly): \
+what you made or changed with its ids (sketches, features, variables, parts), refs the planner will need, problems you couldn't fix, and what you assumed.",
+        system_text()
+    )
+}
+
 fn system_prompt() -> Value {
     json!([{"type": "text", "text": system_text()}])
 }
@@ -885,6 +1097,32 @@ fn claude_command() -> std::process::Command {
     c
 }
 
+/// Claude Code subagents for the planner: the same worker instructions on Sonnet and Haiku. They
+/// inherit the cad tools.
+fn claude_code_agents() -> Value {
+    let mut agents = serde_json::Map::new();
+    for &(short, model, label) in WORKERS {
+        let when = if short == "haiku" { "simple, fully specified steps (set variables, one feature with given refs, an export)" } else { "work that needs judgement (a multi-feature part, fixing errors, assemblies, CAM)" };
+        agents.insert(
+            format!("cad-{short}"),
+            json!({
+                "description": format!("{label}: carries out one fully specified rCAD task on the open document with the mcp__cad tools and reports back. Use it for {when}."),
+                "prompt": format!("{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on).", worker_text()),
+                "model": model,
+            }),
+        );
+    }
+    Value::Object(agents)
+}
+
+fn claude_code_planner_text() -> String {
+    format!(
+        "{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on). Use the cad tools yourself only to look (describe, list_geometry, the info tools and renders); \
+hand every change to the document to the cad-sonnet or cad-haiku agent with the Agent tool, one agent at a time since they share the document.",
+        planner_text()
+    )
+}
+
 /// `claude --version`, to check Claude Code is installed.
 pub fn claude_code_version() -> Result<String, String> {
     let out = claude_command().arg("--version").output().map_err(|e| {
@@ -924,12 +1162,17 @@ impl Chat {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge", addr, "--token", token]}}});
         let mut cmd = claude_command();
-        cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", "", "--allowedTools", "mcp__cad", "--permission-mode", "dontAsk"])
+        let delegates = settings.delegates();
+        let (builtin, allowed) = if delegates { ("Agent", "mcp__cad,Agent") } else { ("", "mcp__cad") };
+        cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", builtin, "--allowedTools", allowed, "--permission-mode", "dontAsk"])
             .arg("--mcp-config")
             .arg(mcp.to_string())
             .arg("--append-system-prompt")
-            .arg(format!("{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on).", system_text()))
+            .arg(if delegates { claude_code_planner_text() } else { format!("{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on).", system_text()) })
             .args(["--model", &settings.model, "--effort", &settings.effort]);
+        if delegates {
+            cmd.arg("--agents").arg(claude_code_agents().to_string());
+        }
         if let Some(id) = &self.cc_session {
             cmd.args(["--resume", id]);
         }
@@ -1142,6 +1385,145 @@ mod tests {
         m[0]["content"].as_array_mut().unwrap().push(json!({"type": "text", "text": "refused"}));
         rewind(&mut m, &mark);
         assert_eq!(m, vec![first]);
+    }
+
+    /// A mock Messages API: answers each request from `script`, by model and by how many
+    /// requests that model has had, and keeps every request body.
+    fn mock_api(script: fn(&str, usize) -> Vec<Value>) -> (String, Arc<std::sync::Mutex<Vec<Value>>>) {
+        use std::io::{Read, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let seen = Arc::new(std::sync::Mutex::new(vec![]));
+        let log = seen.clone();
+        std::thread::spawn(move || {
+            for mut conn in listener.incoming().flatten() {
+                let mut buf = vec![];
+                let mut chunk = [0u8; 65536];
+                let body = loop {
+                    let n = conn.read(&mut chunk).unwrap();
+                    buf.extend_from_slice(&chunk[..n]);
+                    let text = String::from_utf8_lossy(&buf).to_string();
+                    if let Some(h) = text.find("\r\n\r\n") {
+                        let len = text[..h].lines().find_map(|l| l.to_ascii_lowercase().strip_prefix("content-length:").map(|v| v.trim().parse::<usize>().unwrap())).unwrap_or(0);
+                        if buf.len() >= h + 4 + len {
+                            break serde_json::from_slice::<Value>(&buf[h + 4..h + 4 + len]).unwrap();
+                        }
+                    }
+                };
+                let model = body["model"].as_str().unwrap_or("").to_string();
+                let n = {
+                    let mut l = log.lock().unwrap();
+                    l.push(body);
+                    l.iter().filter(|b| b["model"] == model.as_str()).count() - 1
+                };
+                let events = script(&model, n);
+                let _ = write!(conn, "HTTP/1.1 200 OK\r\ncontent-type: text/event-stream\r\nconnection: close\r\n\r\n{}", sse(&events));
+            }
+        });
+        (base, seen)
+    }
+
+    fn mock_reply(text: &str, tool: Option<(&str, Value)>, usage: (u64, u64)) -> Vec<Value> {
+        let mut ev = vec![json!({"type": "message_start", "message": {"role": "assistant", "content": [], "usage": {"input_tokens": usage.0, "cache_read_input_tokens": 10}}})];
+        ev.push(json!({"type": "content_block_start", "index": 0, "content_block": {"type": "text", "text": ""}}));
+        ev.push(json!({"type": "content_block_delta", "index": 0, "delta": {"type": "text_delta", "text": text}}));
+        ev.push(json!({"type": "content_block_stop", "index": 0}));
+        if let Some((name, input)) = &tool {
+            ev.push(json!({"type": "content_block_start", "index": 1, "content_block": {"type": "tool_use", "id": format!("t-{name}"), "name": name, "input": {}}}));
+            ev.push(json!({"type": "content_block_delta", "index": 1, "delta": {"type": "input_json_delta", "partial_json": input.to_string()}}));
+            ev.push(json!({"type": "content_block_stop", "index": 1}));
+        }
+        let stop = if tool.is_some() { "tool_use" } else { "end_turn" };
+        ev.push(json!({"type": "message_delta", "delta": {"stop_reason": stop}, "usage": {"output_tokens": usage.1}}));
+        ev.push(json!({"type": "message_stop"}));
+        ev
+    }
+
+    fn tool_names(body: &Value) -> Vec<String> {
+        body["tools"].as_array().unwrap().iter().map(|t| t["name"].as_str().unwrap().to_string()).collect()
+    }
+
+    /// The planner looks but can't edit; it hands the task to Haiku, whose report comes back.
+    #[test]
+    fn the_planner_delegates_edits_to_a_worker() {
+        let (base, seen) = mock_api(|model, n| match (model, n) {
+            ("claude-opus-5-5", 0) => mock_reply("Setting the width.", Some(("set_variable", json!({"name": "w", "expr": "40"}))), (2000, 50)),
+            ("claude-opus-5-5", 1) => mock_reply("Delegating.", Some(("delegate", json!({"task": "Create the variable w = 40.", "model": "haiku", "effort": "low"}))), (2100, 60)),
+            ("claude-opus-5-5", _) => mock_reply("Added w = 40 mm.", None, (2500, 20)),
+            // (tools that rebuild need the kernel worker process, which a test binary can't start)
+            ("claude-haiku-5-5", 0) => mock_reply("", Some(("describe", json!({}))), (9000, 40)),
+            ("claude-haiku-5-5", _) => mock_reply("Created variable w = 40.", None, (9100, 15)),
+            _ => panic!("unexpected model {model}"),
+        });
+        let mut chat = Chat::new(Arc::new(AtomicBool::new(false)));
+        chat.base = base;
+        chat.http = ureq::AgentBuilder::new().build();
+        chat.session = Some(crate::agent::Session::new());
+        chat.messages.push(json!({"role": "user", "content": [{"type": "text", "text": "add a width variable of 40"}]}));
+        let settings = Settings { model: "claude-opus-5-5".into(), ..Settings::default() };
+        assert!(settings.delegates());
+        let events = std::sync::Mutex::new(vec![]);
+        let send = |e: FromWorker| {
+            let line = match e {
+                FromWorker::Text(t) => format!("text {t}"),
+                FromWorker::Thinking(t) => format!("notes {t}"),
+                FromWorker::ToolStart { name, .. } => format!("start {name}"),
+                FromWorker::ToolDone { ok, summary, .. } => format!("done {ok} {summary}"),
+                FromWorker::Notice(t) => format!("notice {t}"),
+                _ => return,
+            };
+            events.lock().unwrap().push(line);
+        };
+        chat.api_turn(&Cred::Key("k".into()), &settings, &AtomicBool::new(false), &send).unwrap();
+
+        let reqs = seen.lock().unwrap().clone();
+        let models: Vec<&str> = reqs.iter().map(|b| b["model"].as_str().unwrap()).collect();
+        assert_eq!(models, ["claude-opus-5-5", "claude-opus-5-5", "claude-haiku-5-5", "claude-haiku-5-5", "claude-opus-5-5"]);
+        // the planner only has the looking tools and delegate; the worker has every tool but delegate
+        let planner = tool_names(&reqs[0]);
+        assert!(planner.contains(&"delegate".to_string()) && planner.contains(&"describe".to_string()) && planner.contains(&"render".to_string()));
+        assert!(!planner.contains(&"set_variable".to_string()) && !planner.contains(&"add_feature".to_string()));
+        let worker = tool_names(&reqs[2]);
+        assert!(worker.contains(&"set_variable".to_string()) && !worker.contains(&"delegate".to_string()));
+        assert_eq!(reqs[2]["output_config"]["effort"], "low");
+        assert_eq!(reqs[2]["messages"].as_array().unwrap().len(), 1, "the worker starts from the task alone");
+        assert_eq!(reqs[2]["messages"][0]["content"][0]["text"], "Create the variable w = 40.");
+        // the planner's own edit was refused; the worker's report came back
+        let r1 = reqs[1]["messages"].to_string();
+        assert!(r1.contains("hand it to a worker with delegate"), "{r1}");
+        let r4 = &reqs[4]["messages"].as_array().unwrap();
+        let result = r4.last().unwrap()["content"][0].to_string();
+        assert!(result.contains("Haiku finished") && result.contains("Created variable w = 40."), "{result}");
+        // the worker's tool ran on the document
+        let r3 = reqs[3]["messages"].as_array().unwrap().last().unwrap().to_string();
+        assert!(r3.contains("tool_result") && r3.contains("part_studios"), "{r3}");
+        assert_eq!(chat.messages.len(), 6);
+
+        let ev = events.lock().unwrap().clone();
+        assert!(ev.contains(&"start delegate to Haiku".to_string()), "{ev:?}");
+        assert!(ev.contains(&"done true Created variable w = 40.".to_string()), "{ev:?}");
+        // the worker's text is folded away as notes, the planner's shows as the reply
+        assert!(ev.contains(&"notes Created variable w = 40.".to_string()) && ev.contains(&"text Added w = 40 mm.".to_string()), "{ev:?}");
+        let usage = ev.iter().find(|e| e.starts_with("notice Tokens:")).unwrap_or_else(|| panic!("{ev:?}"));
+        assert!(usage.contains("Opus 5.5 6.6k in (30 cached), 130 out") && usage.contains("Haiku 5.5 18.1k in (20 cached), 55 out"), "{usage}");
+    }
+
+    #[test]
+    fn only_bigger_models_delegate() {
+        let mut s = Settings::default();
+        assert!(s.delegates());
+        s.model = "claude-sonnet-5-5".into();
+        assert!(!s.delegates());
+        s.model = "claude-fable-5-1".into();
+        assert!(s.delegates());
+        s.delegate = false;
+        assert!(!s.delegates());
+        // settings saved before the option existed turn it on
+        let old: Settings = serde_json::from_str(r#"{"auth":"api_key","api_key":"","model":"claude-opus-5-5","effort":"high"}"#).unwrap();
+        assert!(old.delegate);
+        let agents = claude_code_agents();
+        assert_eq!(agents["cad-haiku"]["model"], "claude-haiku-5-5");
+        assert_eq!(agents["cad-sonnet"]["model"], "claude-sonnet-5-5");
     }
 
     #[test]

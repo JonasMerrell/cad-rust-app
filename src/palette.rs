@@ -225,6 +225,8 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd("Insert from GrabCAD…", "Assembly", "import", None, "download step zip model library", Action::Run(crate::stdparts_ui::open_grabcad)));
             let label = if app.isolation.is_some() { "Exit isolate" } else { "Isolate selected instances" };
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
+            v.push(cmd("Hide / show selected instances", "View", "eyeOff", Some("H"), "hide show visibility eye parts", Action::Run(crate::asm_ui::toggle_hide_selected)));
+            v.push(cmd("Show all instances", "View", "eye", Some("Shift+H"), "unhide show hidden visibility eye parts", Action::Run(crate::asm_ui::show_all)));
         }
         Tab::Sim(_) => {
             v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
