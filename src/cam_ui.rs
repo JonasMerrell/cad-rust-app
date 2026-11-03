@@ -2709,7 +2709,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             ui.horizontal(|ui| {
                 let total = app.cam.sim.as_ref().map(|s| s.total()).unwrap_or(0);
                 let icon = if app.cam.playing { "pause" } else { "camSim" };
-                if ui.add(egui::Button::image(icons::image(icon, 16.0).tint(theme::text()))).clicked() {
+                if ui.add(egui::Button::image(icons::image(icon, 16.0).tint(theme::text()))).on_hover_text(if app.cam.playing { "Pause" } else { "Play the simulation" }).clicked() {
                     app.cam.playing = !app.cam.playing;
                     if app.cam.playing && app.cam.sim.as_ref().map(|s| s.done >= s.total()).unwrap_or(false) {
                         app.cam.sim_target = 0;
