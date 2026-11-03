@@ -336,12 +336,10 @@ pub fn schematic_scene(p: &Pcb, nl: &Netlist, highlight: Option<&str>) -> Vec<Dr
         text(&mut out, &part.reference, r_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
         text(&mut out, &part.value, v_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
     }
-    let hl_wire = |w: &pcb::Wire| -> bool {
-        // a wire is highlighted when it touches a highlighted pin's point through the net
-        highlight.is_some() && hl_pins.iter().any(|(pi, num)| pins.iter().any(|x| x.part == *pi && &x.num == num && pcb::seg_point(w.a, w.b, x.at) < 1e-3))
-    };
-    for w in &p.wires {
-        let hl = hl_wire(w);
+    let hl_net = highlight.and_then(|h| nl.by_name(h));
+    for (k, w) in p.wires.iter().enumerate() {
+        // every wire of the highlighted net
+        let hl = hl_net.is_some() && nl.wire_net.get(k).copied().flatten() == hl_net;
         out.push(d(a(if hl { [230, 120, 0] } else { colors::WIRE }, 255), Prim::Seg { a: w.a, b: w.b, w: if hl { 0.4 } else { 0.25 } }));
     }
     // junction dots where three or more wire ends or pins meet a wire
