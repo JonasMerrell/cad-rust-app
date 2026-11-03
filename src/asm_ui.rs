@@ -466,6 +466,10 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "measure", "Measure", "Measure distance or angle between two picks", false, measuring, true).clicked() {
             app.asm.measure = if measuring { None } else { Some(vec![]) };
         }
+        let tip = "Isolate: show only the selected instances (I); again, or Esc, shows the rest";
+        if app.tool_button(ui, "isolate", "Isolate", tip, false, app.isolation.is_some(), app.isolation.is_some() || !app.asm.sel.is_empty()).clicked() {
+            toggle_isolate(app);
+        }
     });
 }
 
@@ -535,6 +539,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             mate_cancel(app);
         } else if app.asm.measure.is_some() {
             app.asm.measure = None;
+        } else if app.asm.sel.is_empty() && app.asm.sel_mate.is_none() && app.isolation.is_some() {
+            // a second Esc (nothing left to clear) ends the isolation
+            app.end_isolation();
         } else {
             app.asm.sel.clear();
             app.asm.sel_mate = None;
@@ -562,13 +569,55 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if pressed(egui::Key::F) {
         fit(app);
     }
+    if pressed(egui::Key::I) && app.asm.dialog.is_none() {
+        toggle_isolate(app);
+    }
+}
+
+/// In sight in the viewport: not hidden, or kept by the isolation.
+pub fn shown(app: &App, x: &Instance) -> bool {
+    match isolated(app) {
+        Some(keep) => keep.contains(&x.id),
+        None => !x.hidden,
+    }
+}
+
+/// The instances isolated in this assembly, if isolating.
+pub fn isolated(app: &App) -> Option<&[u64]> {
+    app.isolation.as_ref().filter(|i| i.tab == app.tab && matches!(app.tab, crate::workspace::Tab::Assembly(_))).map(|i| &i.instances[..])
+}
+
+/// Show only these instances until the isolation ends (Esc, I, or Exit isolate).
+pub fn isolate(app: &mut App, ids: Vec<u64>) {
+    if ids.is_empty() {
+        app.flash("Select the instances to isolate", ToastKind::Info);
+        return;
+    }
+    app.asm.sel.retain(|x| ids.contains(x));
+    if app.asm.hover.is_some_and(|h| !ids.contains(&h.inst)) {
+        app.asm.hover = None;
+    }
+    app.isolation = Some(crate::app::Isolation { tab: app.tab, bodies: vec![], instances: ids });
+    app.asm.scene_dirty = true;
+}
+
+/// Isolate the selected instances, or end the isolation if one is on.
+pub fn toggle_isolate(app: &mut App) {
+    if app.isolation.is_some() {
+        app.end_isolation();
+    } else {
+        let ids = app.asm.sel.clone();
+        isolate(app, ids);
+    }
 }
 
 pub fn fit(app: &mut App) {
     let Some(a) = asm(app) else { return };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
-    for x in &a.instances {
+    // isolating frames just the isolated instances
+    let only = isolated(app);
+    for x in a.instances.iter().filter(|x| only.is_none_or(|k| k.contains(&x.id))) {
         if let Some((l, h)) = world_bbox(app, x) {
             lo = lo.min(l);
             hi = hi.max(h);
@@ -706,13 +755,14 @@ fn instances(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new("Use Insert to add parts").color(theme::muted()).size(12.0));
         return;
     }
-    let rows: Vec<(u64, String, bool, bool)> = a.instances.iter().map(|x| (x.id, x.name.clone(), x.fixed, x.hidden)).collect();
+    let rows: Vec<(u64, String, bool, bool, bool)> = a.instances.iter().map(|x| (x.id, x.name.clone(), x.fixed, x.hidden, !shown(app, x))).collect();
     let mut toggle_hide = None;
-    for (id, name, fixed, hidden) in rows {
+    let mut iso: Option<Option<Vec<u64>>> = None;
+    for (id, name, fixed, hidden, out_of_sight) in rows {
         let picked = app.asm.sel.contains(&id);
         let label = if fixed { format!("📌 {name}") } else { name };
         let r = ui.add(
-            egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if hidden { theme::muted() } else { theme::text() }))
+            egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() }))
                 .min_size(egui::vec2(ui.available_width(), 20.0)),
         );
         if r.clicked() {
@@ -728,7 +778,23 @@ fn instances(app: &mut App, ui: &mut Ui) {
                 toggle_hide = Some(id);
                 ui.close();
             }
+            // the selected instances when this row is one of them, else just this one
+            let these = if app.asm.sel.contains(&id) { app.asm.sel.clone() } else { vec![id] };
+            let label = if these.len() > 1 { format!("Isolate {} instances", these.len()) } else { "Isolate".to_string() };
+            if ui.button(label).on_hover_text("Show only this, until Esc, I or Exit isolate").clicked() {
+                iso = Some(Some(these));
+                ui.close();
+            }
+            if app.isolation.is_some() && ui.button("Exit isolate").clicked() {
+                iso = Some(None);
+                ui.close();
+            }
         });
+    }
+    match iso {
+        Some(Some(ids)) => isolate(app, ids),
+        Some(None) => app.end_isolation(),
+        None => {}
     }
     if let Some(id) = toggle_hide {
         if let Some(a) = asm_mut(app) {
@@ -981,7 +1047,7 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let cam = &app.camera;
     // edges first: the nearest one on screen that no part hides
     let mut near: Vec<(f32, DVec3, Hit)> = vec![];
-    for x in a.instances.iter().filter(|x| !x.hidden) {
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
       for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
         let Some(part) = part else { continue };
         let m = part.mesh;
@@ -1009,7 +1075,7 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let (o, d) = cam.ray(s);
     let (o, d) = (o.as_dvec3(), d.as_dvec3());
     let mut best: Option<(f64, Hit)> = None;
-    for x in a.instances.iter().filter(|x| !x.hidden) {
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
       for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
         let Some(part) = part else { continue };
         let m = part.mesh;
@@ -1038,7 +1104,7 @@ fn occluded(app: &App, a: &Assembly, p: DVec3) -> bool {
     let depth = (p - o).dot(d);
     // the faces that end at the edge meet the ray at its own depth: a few pixels of slack
     let slack = cam.wpp() as f64 * 3.0;
-    for x in a.instances.iter().filter(|x| !x.hidden) {
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
         for part in parts_of(app, x).into_iter().flatten() {
             let m = part.mesh;
             let pose = display_pose(app, a, x).compose(&part.local);
@@ -1106,7 +1172,7 @@ fn build_scene(app: &App) -> SceneData {
         app.asm.dialog.as_ref().and_then(|d| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.iter().chain(m.b.iter()).copied().collect()).unwrap_or_default();
     let mate_insts: Vec<u64> =
         app.asm.sel_mate.and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
-    for x in a.instances.iter().filter(|x| !x.hidden) {
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
       for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
         let Some(part) = part else { continue };
         let m = part.mesh;
@@ -1330,6 +1396,11 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     ui.painter().add(eframe::egui_wgpu::Callback::new_paint_callback(rect, cb));
     let painter = ui.painter_at(rect);
     crate::viewport::view_cube(app, ui, rect);
+    if let Some(n) = isolated(app).map(|k| k.len()) {
+        if crate::viewport::isolation_banner(ui, rect, &format!("Isolated: {n} instance{}", if n == 1 { "" } else { "s" })) {
+            app.end_isolation();
+        }
+    }
     if let (Some(h), Some(p)) = (app.asm.hover, resp.hover_pos()) {
         if let Some(x) = asm(app).and_then(|a| a.instance(h.inst)) {
             let what = if h.edge.is_some() { "edge" } else { "face" };
@@ -1362,7 +1433,7 @@ fn check_interference(app: &mut App) {
     let Some(a) = asm(app) else { return };
     let mut items: Vec<(usize, crate::doc::BodyId, [f64; 12])> = vec![];
     let mut ids = vec![];
-    for x in a.instances.iter().filter(|x| !x.hidden) {
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
         for l in assembly::leaves(&app.ws.assemblies, x) {
             let p = x.pose.compose(&l.pose);
             let m = p.m();

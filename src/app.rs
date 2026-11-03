@@ -175,6 +175,8 @@ pub struct App {
     pub was_narrow: Option<bool>,
     /// Model-check problem being pointed at in the viewport.
     pub issue_focus: Option<[f64; 3]>,
+    /// Isolate: only some parts (or assembly instances) are shown until it ends. View state only.
+    pub isolation: Option<Isolation>,
     /// Sidebar width (shared by all tabs) and the tab it was last drawn for.
     pub side_w: f32,
     pub side_tab: Option<crate::workspace::Tab>,
@@ -273,6 +275,7 @@ impl App {
             awaiting_sketch_plane: false,
             was_narrow: None,
             issue_focus: None,
+            isolation: None,
             side_w: 300.0,
             side_tab: None,
             print: crate::printing::load(),
@@ -662,6 +665,7 @@ impl App {
             self.ws.studios.push(crate::workspace::Studio { name: "Part Studio 1".into(), doc: Document::default() });
         }
         self.cur_studio = 0;
+        self.isolation = None;
         self.doc = self.ws.studios[0].doc.clone();
         self.result = RebuildResult::default();
         self.studio_results.clear();
@@ -1203,7 +1207,7 @@ impl App {
         }
         // visible sketches only (hidden ones are usually inside a part already)
         let editing = self.sketch.as_ref().map(|s| s.feature);
-        for f in self.doc.features.iter().filter(|f| !f.hidden || Some(f.id) == editing) {
+        for f in self.doc.features.iter().filter(|f| !self.feature_hidden(f) || Some(f.id) == editing) {
             if let Op::Sketch { sketch, frame, .. } = &f.op {
                 if let Some((a, b)) = sketch.bounds() {
                     for p in [a, b, glam::DVec2::new(a.x, b.y), glam::DVec2::new(b.x, a.y)] {
@@ -1216,6 +1220,10 @@ impl App {
         }
         if !lo.x.is_finite() {
             return (glam::DVec3::ZERO, glam::DVec3::splat(60.0));
+        }
+        if self.isolated_parts().is_some() {
+            // just the isolated parts, not the origin (which is out of sight)
+            return (lo, hi);
         }
         (lo.min(glam::DVec3::ZERO), hi.max(glam::DVec3::ZERO))
     }
@@ -1302,6 +1310,9 @@ impl App {
                 self.dialog_cancel();
             } else if self.measure.is_some() {
                 self.measure = None;
+            } else if self.picks.is_empty() && self.isolation.is_some() {
+                // a second Esc (nothing left to clear) ends the isolation
+                self.end_isolation();
             } else {
                 self.picks.clear();
                 self.issue_focus = None;
@@ -1330,6 +1341,9 @@ impl App {
         }
         if pressed(Key::M) {
             self.toggle_measure();
+        }
+        if pressed(Key::I) && self.dialog.is_none() {
+            self.toggle_isolate();
         }
         if pressed(Key::N) {
             self.view_normal_to_selection();
@@ -1739,6 +1753,9 @@ impl App {
             }
             if self.tool_button(ui, "measure", "Measure", "Measure (M)", false, self.measure.is_some(), true).clicked() {
                 self.toggle_measure();
+            }
+            if self.tool_button(ui, "isolate", "Isolate", ISOLATE_TIP, false, self.isolation.is_some(), true).clicked() {
+                self.toggle_isolate();
             }
             self.section_ui(ui);
         });
@@ -2163,6 +2180,7 @@ impl App {
     }
 
     pub fn show_all_parts(&mut self) {
+        self.end_isolation();
         if self.doc.parts.values().any(|p| p.hidden) {
             self.checkpoint();
             for p in self.doc.parts.values_mut() {
@@ -2205,12 +2223,77 @@ impl App {
         }
     }
 
+    /// Origin or an origin plane out of sight: hidden, or isolating parts.
     pub fn default_hidden(&self, name: &str) -> bool {
-        self.doc.hidden_defaults.iter().any(|h| h == name)
+        self.isolated_parts().is_some() || self.doc.hidden_defaults.iter().any(|h| h == name)
     }
 
+    /// A sketch, plane or helix out of sight: hidden, or isolating parts (the sketch being edited still shows).
+    pub fn feature_hidden(&self, f: &doc::Feature) -> bool {
+        f.hidden || (self.isolated_parts().is_some() && self.sketch.as_ref().is_none_or(|s| s.feature != f.id))
+    }
+
+    /// Out of sight in the viewport: hidden, or left out of the isolated parts.
     pub fn part_hidden(&self, id: doc::BodyId) -> bool {
+        match self.isolated_parts() {
+            Some(keep) => !keep.contains(&id),
+            None => self.part_hidden_saved(id),
+        }
+    }
+
+    /// The part's own Hide/Show setting (saved in the document), whatever isolation does.
+    pub fn part_hidden_saved(&self, id: doc::BodyId) -> bool {
         self.doc.parts.get(&doc::body_key(id)).map(|p| p.hidden).unwrap_or(false)
+    }
+
+    /// The parts isolated in this Part Studio, if isolating.
+    pub fn isolated_parts(&self) -> Option<&[doc::BodyId]> {
+        self.isolation.as_ref().filter(|i| i.tab == self.tab && matches!(self.tab, crate::workspace::Tab::Studio(_))).map(|i| &i.bodies[..])
+    }
+
+    /// The parts the selection touches (faces, edges or whole parts), in order, once each.
+    pub fn selected_parts(&self) -> Vec<doc::BodyId> {
+        let mut out = vec![];
+        for r in &self.picks {
+            if let Some(b) = crate::viewport::body_of(self, r) {
+                if !out.contains(&b) {
+                    out.push(b);
+                }
+            }
+        }
+        out
+    }
+
+    /// Show only these parts until the isolation ends (Esc, I, or Exit isolate).
+    pub fn isolate_parts(&mut self, ids: Vec<doc::BodyId>) {
+        if ids.is_empty() {
+            self.flash("Select the parts to isolate", ToastKind::Info);
+            return;
+        }
+        let keep: Vec<Ref> = self.picks.iter().filter(|r| crate::viewport::body_of(self, r).is_none_or(|b| ids.contains(&b))).cloned().collect();
+        self.picks = keep;
+        if self.hover.as_ref().and_then(|r| crate::viewport::body_of(self, r)).is_some_and(|b| !ids.contains(&b)) {
+            self.hover = None;
+        }
+        self.isolation = Some(Isolation { tab: self.tab, bodies: ids, instances: vec![] });
+        self.scene_dirty = true;
+    }
+
+    /// Isolate the selected parts, or end the isolation if one is on.
+    pub fn toggle_isolate(&mut self) {
+        if self.isolation.is_some() {
+            self.end_isolation();
+        } else {
+            let ids = self.selected_parts();
+            self.isolate_parts(ids);
+        }
+    }
+
+    pub fn end_isolation(&mut self) {
+        if self.isolation.take().is_some() {
+            self.scene_dirty = true;
+            self.asm.scene_dirty = true;
+        }
     }
 
     pub fn part_props(&self, id: doc::BodyId) -> doc::PartProps {
@@ -2287,11 +2370,13 @@ impl App {
                     continue;
                 }
             }
-            let hidden = self.part_hidden(id);
-            let resp = tree_row(ui, 1, "part", &name, picked, false, false, false, None);
+            let hidden = self.part_hidden_saved(id);
+            // left out of an isolation: greyed like a hidden part, but its eye keeps its own setting
+            let out_of_sight = self.part_hidden(id);
+            let resp = tree_row(ui, 1, "part", &name, picked, false, false, out_of_sight, None);
             // colour swatch
             let sw = egui::Rect::from_center_size(egui::pos2(resp.rect.right() - 12.0, resp.rect.center().y), egui::vec2(10.0, 10.0));
-            ui.painter().rect_filled(sw, 2.0, if hidden { self.part_color(id).gamma_multiply(0.3) } else { self.part_color(id) });
+            ui.painter().rect_filled(sw, 2.0, if out_of_sight { self.part_color(id).gamma_multiply(0.3) } else { self.part_color(id) });
             if eye_toggle(ui, &resp, resp.rect.right() - 32.0, hidden, ("part-eye", id)) {
                 self.set_part(id, |p| p.hidden = !p.hidden);
             }
@@ -2309,6 +2394,18 @@ impl App {
                 }
                 if ui.button(if hidden { "Show" } else { "Hide" }).clicked() {
                     self.set_part(id, |p| p.hidden = !p.hidden);
+                    ui.close();
+                }
+                // the selected parts when this row is one of them, else just this part
+                let sel = self.selected_parts();
+                let these = if sel.contains(&id) { sel } else { vec![id] };
+                let label = if these.len() > 1 { format!("Isolate {} parts", these.len()) } else { "Isolate".to_string() };
+                if ui.button(label).on_hover_text("Show only this, until Esc, I or Exit isolate").clicked() {
+                    self.isolate_parts(these);
+                    ui.close();
+                }
+                if self.isolation.is_some() && ui.button("Exit isolate").clicked() {
+                    self.end_isolation();
                     ui.close();
                 }
                 if ui.button("Show all parts").clicked() {
@@ -3431,6 +3528,10 @@ impl eframe::App for App {
             }
             return;
         }
+        // isolation belongs to the tab it was started in
+        if self.isolation.as_ref().is_some_and(|i| i.tab != self.tab) {
+            self.end_isolation();
+        }
         // while Claude changes the document the editor is locked (claude_ui), keys included
         if !self.claude.busy() {
             crate::palette::shortcut(self, &ctx);
@@ -3562,6 +3663,18 @@ fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
 }
 
 #[allow(clippy::too_many_arguments)]
+pub const ISOLATE_TIP: &str = "Isolate: show only the selected parts (I); again, or Esc, shows the rest";
+
+/// Isolate: what stays in sight. Not saved and not undone; it ends on leaving its tab.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Isolation {
+    pub tab: crate::workspace::Tab,
+    /// Part Studio parts kept in sight.
+    pub bodies: Vec<doc::BodyId>,
+    /// Assembly instance ids kept in sight.
+    pub instances: Vec<u64>,
+}
+
 /// Eye button on a tree row: shown while the row is hovered, or always when hidden.
 /// Returns true when clicked.
 fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl std::hash::Hash + std::fmt::Debug) -> bool {

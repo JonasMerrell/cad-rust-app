@@ -63,6 +63,8 @@ fn commands(app: &App) -> Vec<Cmd> {
                 v.push(cmd(crate::doc::kind_label(k), "Feature", k, crate::app::shortcut(k), "", Action::Feature(k)));
             }
             v.push(cmd("Measure", "View", "measure", Some("M"), "distance angle", Action::Run(|a| a.toggle_measure())));
+            let label = if app.isolation.is_some() { "Exit isolate" } else { "Isolate selected parts" };
+            v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo", Action::Run(|a| a.toggle_isolate())));
             v.push(cmd(
                 "X-ray",
                 "View",
@@ -221,6 +223,8 @@ fn commands(app: &App) -> Vec<Cmd> {
         Tab::Assembly(_) => {
             v.push(cmd("Standard parts…", "Assembly", "library", None, "screw bolt nut washer bearing pin dowel motor stepper nema extrusion iso din content library", Action::Run(crate::stdparts_ui::open_standard)));
             v.push(cmd("Insert from GrabCAD…", "Assembly", "import", None, "download step zip model library", Action::Run(crate::stdparts_ui::open_grabcad)));
+            let label = if app.isolation.is_some() { "Exit isolate" } else { "Isolate selected instances" };
+            v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
         }
         Tab::Sim(_) => {
             v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
