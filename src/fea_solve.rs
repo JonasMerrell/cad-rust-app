@@ -1549,4 +1549,34 @@ mod tests {
         let ringing: Vec<f64> = times.iter().map(|t| (t * 5000.0).sin().abs()).collect();
         assert_eq!(decay_time(&times, &ringing, 0.0), None);
     }
+
+    /// Timings and peak memory behind the Simulation tab's cost estimate. Run one size per process:
+    /// FEA_BENCH_H=4 cargo test --release fea_solve::tests::cost_bench -- --ignored --nocapture
+    #[test]
+    #[ignore]
+    fn cost_bench() {
+        let h: f64 = std::env::var("FEA_BENCH_H").ok().and_then(|v| v.parse().ok()).unwrap_or(4.0);
+        // FEA_BENCH_BOX="100 50 5" for a plate
+        let d: Vec<f64> = std::env::var("FEA_BENCH_BOX").unwrap_or("100 50 30".into()).split_whitespace().filter_map(|v| v.parse().ok()).collect();
+        let (t, f, b) = boxed(DVec3::ZERO, DVec3::new(d[0], d[1], d[2]), 0, 0);
+        let clock = std::time::Instant::now();
+        let m = mesh(&Surface::new(t, f, b), h, &Default::default(), &|| false).unwrap();
+        let t_mesh = clock.elapsed().as_secs_f64();
+        let p = cantilever(&m);
+        let clock = std::time::Instant::now();
+        let mut sys = assemble(&p, &|| false).unwrap();
+        let t_asm = clock.elapsed().as_secs_f64();
+        let clock = std::time::Instant::now();
+        let k = sys.k.clone();
+        let llt = sys.factor(&k).unwrap();
+        let t_fac = clock.elapsed().as_secs_f64();
+        let b = reduce(&sys, &p.force);
+        let clock = std::time::Instant::now();
+        for _ in 0..5 {
+            std::hint::black_box(solve(&llt, &b));
+        }
+        let t_sol = clock.elapsed().as_secs_f64() / 5.0;
+        let hwm = std::fs::read_to_string("/proc/self/status").unwrap().lines().find(|l| l.starts_with("VmHWM")).unwrap().to_string();
+        println!("BENCH h={h} nodes={} dof={} k_nnz={} mesh={t_mesh:.2}s assemble={t_asm:.2}s factor={t_fac:.2}s solve={t_sol:.3}s {hwm}", m.nodes.len(), sys.n, sys.k.len());
+    }
 }
