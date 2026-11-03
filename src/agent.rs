@@ -766,11 +766,13 @@ impl Session {
         let ty = it.get("type").and_then(|t| t.as_str()).ok_or("each item needs a type")?.to_string();
         let keys = SKETCH_ITEMS.iter().find(|x| x.0 == ty).map(|x| x.1).ok_or_else(|| format!("unknown sketch item {ty}{}", schema::did_you_mean(&ty, SKETCH_ITEMS.iter().map(|x| x.0))))?;
         for k in it.as_object().into_iter().flat_map(|o| o.keys()) {
-            if k != "type" && k != "construction" && !keys.contains(&k.as_str()) {
+            if k != "type" && k != "construction" && k != "dims" && !keys.contains(&k.as_str()) {
                 return Err(format!("{ty} takes {}; unknown key '{k}'{}", keys.join(", "), schema::did_you_mean(k, keys.iter().copied())));
             }
         }
         let construction = it.get("construction").and_then(|c| c.as_bool()).unwrap_or(false);
+        let (vars, _) = self.doc.var_values();
+        let units = self.doc.units;
         let p = |k: &str| -> R<DVec2> { pt2(it.get(k).ok_or(format!("{ty} needs {k}"))?) };
         let num = |k: &str| -> R<f64> { it.get(k).and_then(|v| v.as_f64()).filter(|v| v.is_finite()).ok_or(format!("{ty} needs a number {k}")) };
         // sizes are positive: a negative radius is a mistake, not a mirror image
@@ -854,6 +856,12 @@ impl Session {
             }
             _ => return Err(format!("unknown sketch item {ty}")),
         };
+        let mut out = out;
+        if let Some(d) = it.get("dims").filter(|d| !matches!(d, Value::Bool(false) | Value::Null)) {
+            let env = crate::expr::Env { vars: &vars, units };
+            let added = item_dims(sk, &ty, &out, d, &env)?;
+            out["dims"] = json!(added);
+        }
         Ok(out)
     }
 
@@ -1140,6 +1148,105 @@ fn check_values(op: &Op, doc: &Document) -> R<()> {
 }
 
 /// Sketch item types and the keys each takes (besides type and construction).
+/// The sizes `dims` can dimension on each sketch item, and the constraint each one becomes.
+const ITEM_DIMS: [(&str, &[&str]); 6] = [
+    ("line", &["length"]),
+    ("rect", &["width", "height"]),
+    ("center_rect", &["width", "height"]),
+    ("circle", &["diameter", "radius"]),
+    ("arc", &["radius"]),
+    ("polyline", &["lengths"]),
+];
+
+/// Driving dimensions for a sketch item just added (`out` is what `sketch_item` returned), so the
+/// item's sizes show up as editable dimensions in the editor. `dims: true` dimensions every size
+/// with its drawn value; an object gives expressions (`{"width": "w", "height": "h / 2"}`), and the
+/// geometry is resized to them when the sketch solves.
+fn item_dims(sk: &mut Sketch, ty: &str, out: &Value, d: &Value, env: &crate::expr::Env) -> R<Vec<String>> {
+    let allowed = ITEM_DIMS.iter().find(|x| x.0 == ty).map(|x| x.1).ok_or_else(|| format!("{ty} takes no dims (dims works on {})", ITEM_DIMS.iter().map(|x| x.0).collect::<Vec<_>>().join(", ")))?;
+    let id = |v: &Value| v.as_u64().map(|x| x as Id);
+    let lines: Vec<Id> = out.get("lines").and_then(|l| l.as_array()).map(|l| l.iter().filter_map(id).collect()).unwrap_or_default();
+    // the drawn size of each dimension, in mm
+    let len = |sk: &Sketch, l: Id| sk.measure(&Constraint::Length { l, dim: Dim::new("", [0.0; 2]) }).unwrap_or(0.0);
+    let mut wanted: Vec<(&str, Option<Value>)> = vec![];
+    match d {
+        Value::Bool(true) => wanted.push((allowed[0], None)),
+        Value::Object(o) => {
+            for (k, v) in o {
+                if !allowed.contains(&k.as_str()) {
+                    return Err(format!("{ty} dims takes {}; unknown key '{k}'{}", allowed.join(", "), schema::did_you_mean(k, allowed.iter().copied())));
+                }
+                wanted.push((allowed.iter().find(|a| **a == k).copied().unwrap_or(""), Some(v.clone())));
+            }
+            if ty == "circle" && o.contains_key("diameter") && o.contains_key("radius") {
+                return Err("circle dims: give diameter or radius, not both".into());
+            }
+        }
+        _ => return Err("dims: true, or an object of sizes (e.g. {\"width\": \"w\"})".into()),
+    }
+    if matches!(d, Value::Bool(true)) && matches!(ty, "rect" | "center_rect") {
+        wanted.push(("height", None));
+    }
+    // in the order the item lists them (width before height), not the object's key order
+    wanted.sort_by_key(|(k, _)| allowed.iter().position(|a| a == k));
+    let expr = |v: &Option<Value>, mm: f64| -> R<String> {
+        let e = match v {
+            None | Some(Value::Bool(true)) => crate::expr::trim(mm / env.units.scale(), 4),
+            Some(Value::String(s)) => s.clone(),
+            Some(Value::Number(n)) => n.to_string(),
+            Some(o) => return Err(format!("a dimension is a number or an expression, got {o}")),
+        };
+        let x = crate::expr::eval(&e, crate::expr::Kind::Length, env).map_err(|err| format!("{e}: {err}"))?;
+        if x <= 0.0 {
+            return Err(format!("{e}: a size must be more than 0 (got {x})"));
+        }
+        Ok(e)
+    };
+    let mut added = vec![];
+    for (k, v) in &wanted {
+        match (ty, *k) {
+            ("line", "length") => {
+                let l = id(&out["line"]).ok_or("no line")?;
+                let e = expr(v, len(sk, l))?;
+                sk.constraints.push(Constraint::Length { l, dim: Dim::new(e.clone(), [0.0; 2]) });
+                added.push(format!("length {e}"));
+            }
+            ("rect" | "center_rect", "width" | "height") => {
+                // lines[0] is the bottom edge, lines[1] the right one
+                let l = if *k == "width" { lines[0] } else { lines[1] };
+                let e = expr(v, len(sk, l))?;
+                sk.constraints.push(Constraint::Length { l, dim: Dim::new(e.clone(), [0.0; 2]) });
+                added.push(format!("{k} {e}"));
+            }
+            ("circle" | "arc", "diameter" | "radius") => {
+                let c = id(out.get("circle").or(out.get("arc")).unwrap_or(&Value::Null)).ok_or("no circle")?;
+                let r = sk.measure(&Constraint::Radius { c, dim: Dim::new("", [0.0; 2]) }).unwrap_or(0.0);
+                let dia = *k == "diameter";
+                let e = expr(v, if dia { 2.0 * r } else { r })?;
+                sk.constraints.push(if dia { Constraint::Diameter { c, dim: Dim::new(e.clone(), [0.0; 2]) } } else { Constraint::Radius { c, dim: Dim::new(e.clone(), [0.0; 2]) } });
+                added.push(format!("{k} {e}"));
+            }
+            ("polyline", "lengths") => {
+                let given: Vec<Option<Value>> = match v {
+                    None | Some(Value::Bool(true)) => vec![None; lines.len()],
+                    Some(Value::Array(a)) if a.len() == lines.len() => a.iter().map(|x| if x.is_null() { Some(Value::Bool(false)) } else { Some(x.clone()) }).collect(),
+                    _ => return Err(format!("polyline dims lengths: true, or a list of {} lengths (null skips one)", lines.len())),
+                };
+                for (l, g) in lines.iter().zip(given) {
+                    if g == Some(Value::Bool(false)) {
+                        continue;
+                    }
+                    let e = expr(&g, len(sk, *l))?;
+                    sk.constraints.push(Constraint::Length { l: *l, dim: Dim::new(e.clone(), [0.0; 2]) });
+                    added.push(format!("length {e}"));
+                }
+            }
+            _ => {}
+        }
+    }
+    Ok(added)
+}
+
 const SKETCH_ITEMS: [(&str, &[&str]); 13] = [
     ("point", &["at"]),
     ("line", &["from", "to"]),
@@ -1629,7 +1736,7 @@ pub(crate) fn tools() -> Value {
         {"name": "describe", "description": "Features (with their full params; imported files show only their size and a hash), variables, parts (name, volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},
         {"name": "create_sketch", "description": "New sketch on 'top' (XY), 'front' (XZ, normal -Y), 'right' (YZ), or a ref such as a planar face ref from list_geometry or {\"kind\":\"feature_plane\",\"feature\":id}. Returns sketch_id and the plane frame (sketch x/y axes in 3D).", "inputSchema": obj(json!({"plane": {}, "name": {"type": "string"}}), &[])},
-        {"name": "sketch_add", "description": "Add geometry to a sketch; coordinates are [x, y] in mm in the sketch plane. Item types: point{at}, line{from,to}, polyline{points,closed}, rect{corner1,corner2}, center_rect{center,corner}, circle{center,radius}, arc{center,start,end} (counter-clockwise), ellipse{center,major_end,minor_radius}, elliptical_arc{center,major_end,minor_radius,start_angle,end_angle} (degrees, from the major axis), spline{points,closed}, polygon{center,radius,sides}, text{at,text,height}. Any item may set construction:true. Points at the same position (within 1 µm), also across items and with existing points, are merged into one. Returns created ids and the sketch summary with regions.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "items": {"type": "array"}}), &["sketch_id", "items"])},
+        {"name": "sketch_add", "description": "Add geometry to a sketch; coordinates are [x, y] in mm in the sketch plane. Item types: point{at}, line{from,to}, polyline{points,closed}, rect{corner1,corner2}, center_rect{center,corner}, circle{center,radius}, arc{center,start,end} (counter-clockwise), ellipse{center,major_end,minor_radius}, elliptical_arc{center,major_end,minor_radius,start_angle,end_angle} (degrees, from the major axis), spline{points,closed}, polygon{center,radius,sides}, text{at,text,height}. Any item may set construction:true. dims makes the item's sizes driving dimensions the user can edit: true dimensions them as drawn, or give expressions (may use variables) that also resize it: line{length}, rect/center_rect{width,height}, circle{diameter or radius}, arc{radius}, polyline{lengths:[...]}; e.g. {type:'center_rect', center:[0,0], corner:[30,20], dims:{width:'w', height:'h'}}. Points at the same position (within 1 µm), also across items and with existing points, are merged into one. Returns created ids and the sketch summary with regions.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "items": {"type": "array"}}), &["sketch_id", "items"])},
         {"name": "sketch_constrain", "description": "Add constraints by point/curve ids. Types: coincident{a,b} (points, or point a on curve b), horizontal{l}, vertical{l}, horizontal_pts{a,b}, vertical_pts{a,b}, parallel{a,b}, perpendicular{a,b}, tangent{a,b}, equal{a,b}, midpoint{p,l}, symmetric{a,b,l}, fix{p,x,y}; dimensions take value (number or expression): distance{a,b}, axis_distance{a,b,axis:0|1}, point_line_distance{p,l}, length{l}, radius{c}, diameter{c}, radial_distance{a,b} (gap between concentric circles/arcs: radius of b minus radius of a), angle{a,b} (degrees); driven:true makes a dimension a reference that only measures. equal_distance{p,l,q,m}: point p as far from line l as point q from line m.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}, "constraints": {"type": "array"}}), &["sketch_id", "constraints"])},
         {"name": "sketch_info", "description": "Points, curves, degrees of freedom and closed regions (with ready-made region refs) of a sketch.", "inputSchema": obj(json!({"sketch_id": {"type": "integer"}}), &["sketch_id"])},
         {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, curvePattern {kind:'part'|'feature', bodies, path:[curve refs], count, align}, pointPattern {kind, bodies, points:[sketch_point refs], first point = where the original is}, mirror, boolean, split, transform, deleteBody, sheetMetal, heal {bodies, tolerance}, custom. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}. feature_defaults gives any kind's params and defaults; unknown param names are rejected. A feature that fails to build stays in the history (as in the editor) and the result has ok:false and new_errors; rollback:true undoes the call instead.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
@@ -1650,7 +1757,7 @@ pub(crate) fn tools() -> Value {
         {"name": "mass_properties", "description": "Exact mass properties of the active Part Studio's parts: volume, mass, centre of gravity and inertia tensor about the centre of gravity (g·mm²), from each part's material (set_part) or a material or density (g/cm³) for all; with several parts also their total. bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "material": {"type": "string"}, "density": {"type": "number"}}), &[])},
         {"name": "ray_cast", "description": "Cast rays from origins along direction through the active Part Studio's parts (or bodies): every surface crossing with its distance, point and part, nearest first.", "inputSchema": obj(json!({"origins": {"type": "array"}, "direction": {"type": "array"}, "bodies": {"type": "array"}}), &["origins", "direction"])},
         {"name": "classify_points", "description": "Whether each point is in, on (within tolerance) or out of the active Part Studio's parts (or bodies), and which part.", "inputSchema": obj(json!({"points": {"type": "array"}, "tolerance": {"type": "number"}, "bodies": {"type": "array"}}), &["points"])},
-        {"name": "define_custom_feature", "description": "Define (or replace) a scripted custom feature in the active Part Studio, then use it with add_feature kind 'custom', params {name, values: {param: expression}, refs: [point or face refs], op: new|add|remove|intersect}. The source is Rhai: parameters are variables (lengths mm, angles degrees, counts integers, bools); `points` and `normals` are arrays of [x,y,z] from refs. Shapes: cube(w,d,h), cube_centered(w,d,h), cylinder(r,h), cone(r1,r2,h), sphere(r), torus(R,r), prism([[x,y],...], h), revolve([[r,z],...], deg). Methods: .move(x,y,z), .rotate_x/y/z(deg), .rotate([ax,ay,az], deg), .mirror([nx,ny,nz]), .scale(f), .fillet(r), .chamfer(d), .place(point, normal), .volume(). a + b joins, a - b cuts, a & b intersects. Return a shape or an array of shapes. params: [{name, kind: length|angle|number|count|bool, default}]; selection: '' | 'points' | 'faces'.", "inputSchema": obj(json!({"name": {"type": "string"}, "params": {"type": "array"}, "selection": {"type": "string"}, "source": {"type": "string"}}), &["name", "source"])},
+        {"name": "define_custom_feature", "description": "Define (or replace) a scripted custom feature in the active Part Studio (it shows as one feature with its parameters; build ordinary geometry with sketches and native features so every step stays editable in the feature tree), then use it with add_feature kind 'custom', params {name, values: {param: expression}, refs: [point or face refs], op: new|add|remove|intersect}. The source is Rhai: parameters are variables (lengths mm, angles degrees, counts integers, bools); `points` and `normals` are arrays of [x,y,z] from refs. Shapes: cube(w,d,h), cube_centered(w,d,h), cylinder(r,h), cone(r1,r2,h), sphere(r), torus(R,r), prism([[x,y],...], h), revolve([[r,z],...], deg). Methods: .move(x,y,z), .rotate_x/y/z(deg), .rotate([ax,ay,az], deg), .mirror([nx,ny,nz]), .scale(f), .fillet(r), .chamfer(d), .place(point, normal), .volume(). a + b joins, a - b cuts, a & b intersects. Return a shape or an array of shapes. params: [{name, kind: length|angle|number|count|bool, default}]; selection: '' | 'points' | 'faces'.", "inputSchema": obj(json!({"name": {"type": "string"}, "params": {"type": "array"}, "selection": {"type": "string"}, "source": {"type": "string"}}), &["name", "source"])},
         {"name": "new_part_studio", "description": "Add another Part Studio to the document and make it active (sketches/features go there). Parts from different studios can be combined in assemblies; describe lists all studios, assemblies and drawings.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
         {"name": "switch_part_studio", "description": "Make another Part Studio (by index) the active one.", "inputSchema": obj(json!({"index": {"type": "integer"}}), &["index"])},
         {"name": "create_assembly", "description": "Add an Assembly tab. Returns its index.", "inputSchema": obj(json!({"name": {"type": "string"}}), &[])},
