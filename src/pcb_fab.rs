@@ -115,7 +115,8 @@ pub fn ipc356(p: &Pcb) -> String {
         let access = match pad.layer {
             None => 0,
             Some(Layer::Top) => 1,
-            Some(Layer::Bottom) => 2,
+            Some(Layer::Bottom) => x.p.board.copper_layers().len() as i32,
+            Some(Layer::In(k)) => k as i32 + 1,
         };
         let net = short(&net_name(&x, pad));
         let rot = ((pad.rot.rem_euclid(360.0)).round() as i64) % 360;
@@ -173,22 +174,45 @@ pub fn gbrjob(p: &Pcb, files: &[(String, String)]) -> String {
         "GeneralSpecs": {
             "ProjectId": {"Name": p.name, "GUID": "", "Revision": "1"},
             "Size": {"X": (size[0] * 1000.0).round() / 1000.0, "Y": (size[1] * 1000.0).round() / 1000.0},
-            "LayerNumber": 2,
+            "LayerNumber": p.board.copper_layers().len(),
             "BoardThickness": p.board.thickness,
         },
         "DesignRules": [{"Layers": "Outer", "PadToPad": p.board.rules.clearance, "PadToTrack": p.board.rules.clearance, "TrackToTrack": p.board.rules.clearance, "MinLineWidth": p.board.rules.min_track}],
         "FilesAttributes": layers,
-        "MaterialStackup": [
-            {"Type": "Legend", "Name": "Top Silkscreen"},
-            {"Type": "SolderMask", "Name": "Top Solder Mask", "Color": if p.board.color.is_empty() { "Green" } else { &p.board.color }},
-            {"Type": "Copper", "Name": "F.Cu", "Thickness": 0.035},
-            {"Type": "Dielectric", "Name": "Core", "Material": "FR4", "Thickness": (p.board.thickness - 0.07).max(0.1)},
-            {"Type": "Copper", "Name": "B.Cu", "Thickness": 0.035},
-            {"Type": "SolderMask", "Name": "Bottom Solder Mask"},
-            {"Type": "Legend", "Name": "Bottom Silkscreen"},
-        ],
+        "MaterialStackup": material_stackup(p),
     });
     serde_json::to_string_pretty(&job).unwrap_or_default()
+}
+
+/// The job file's material stack, top to bottom, from the board's stackup.
+fn material_stackup(p: &Pcb) -> Vec<serde_json::Value> {
+    use crate::pcb_trace::StackKind;
+    let color = if p.board.color.is_empty() { "Green".to_string() } else { p.board.color.clone() };
+    let st = &p.board.stackup;
+    let mut v = vec![serde_json::json!({"Type": "Legend", "Name": "Top Silkscreen"})];
+    if st.coppers().len() < 2 {
+        v.push(serde_json::json!({"Type": "SolderMask", "Name": "Top Solder Mask", "Color": color}));
+        v.push(serde_json::json!({"Type": "Copper", "Name": "F.Cu", "Thickness": 0.035}));
+        v.push(serde_json::json!({"Type": "Dielectric", "Name": "Core", "Material": "FR4", "Thickness": (p.board.thickness - 0.07).max(0.1)}));
+        v.push(serde_json::json!({"Type": "Copper", "Name": "B.Cu", "Thickness": 0.035}));
+        v.push(serde_json::json!({"Type": "SolderMask", "Name": "Bottom Solder Mask", "Color": color}));
+    } else {
+        let mut masks = 0;
+        for l in &st.layers {
+            let t = (l.thickness * 1e4).round() / 1e4;
+            v.push(match l.kind {
+                StackKind::Mask => {
+                    masks += 1;
+                    serde_json::json!({"Type": "SolderMask", "Name": if masks == 1 { "Top Solder Mask" } else { "Bottom Solder Mask" }, "Color": color, "Thickness": t})
+                }
+                StackKind::Copper => serde_json::json!({"Type": "Copper", "Name": l.name, "Thickness": t}),
+                StackKind::Core => serde_json::json!({"Type": "Dielectric", "Name": l.name, "Material": "FR4", "DielectricConstant": l.er, "Thickness": t}),
+                StackKind::Prepreg => serde_json::json!({"Type": "Dielectric", "Name": l.name, "Material": "FR4 prepreg", "DielectricConstant": l.er, "Thickness": t}),
+            });
+        }
+    }
+    v.push(serde_json::json!({"Type": "Legend", "Name": "Bottom Silkscreen"}));
+    v
 }
 
 // ---------------------------------------------------------------- drill drawing
@@ -559,23 +583,42 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
     let root = format!("odb/{job}");
     let step = format!("{root}/steps/pcb");
     let mut files: Vec<(String, String)> = vec![];
-    // layers top to bottom: (name, type, polarity)
-    let layers = [
-        ("comp_+_top", "COMPONENT"),
-        ("top_silk", "SILK_SCREEN"),
-        ("top_paste", "SOLDER_PASTE"),
-        ("top_mask", "SOLDER_MASK"),
-        ("top", "SIGNAL"),
-        ("bottom", "SIGNAL"),
-        ("bottom_mask", "SOLDER_MASK"),
-        ("bottom_paste", "SOLDER_PASTE"),
-        ("bottom_silk", "SILK_SCREEN"),
-        ("comp_+_bot", "COMPONENT"),
-        ("drill", "DRILL"),
-    ];
+    let copper = x.p.board.copper_layers();
+    let odb_name = |l: Layer| match l {
+        Layer::Top => "top".to_string(),
+        Layer::Bottom => "bottom".to_string(),
+        Layer::In(k) => format!("in{k}"),
+    };
+    // blind and buried via spans, each with its own drill layer
+    let mut spans: Vec<[Layer; 2]> = vec![];
+    for v in &x.p.board.vias {
+        if let Some(sp) = v.span.filter(|_| v.kind() != "through") {
+            if !spans.contains(&sp) {
+                spans.push(sp);
+            }
+        }
+    }
+    spans.sort_by_key(|s| (s[0].order(), s[1].order()));
+    let span_name = |s: &[Layer; 2]| format!("drill_{}-{}", odb_name(s[0]), odb_name(s[1]));
+    // layers top to bottom: (name, type, start, end)
+    let mut layers: Vec<(String, &str, String, String)> = ["comp_+_top:COMPONENT", "top_silk:SILK_SCREEN", "top_paste:SOLDER_PASTE", "top_mask:SOLDER_MASK"]
+        .iter()
+        .map(|t| t.split_once(':').unwrap())
+        .map(|(n, t)| (n.to_string(), t, String::new(), String::new()))
+        .collect();
+    for l in &copper {
+        layers.push((odb_name(*l), "SIGNAL", String::new(), String::new()));
+    }
+    for t in ["bottom_mask:SOLDER_MASK", "bottom_paste:SOLDER_PASTE", "bottom_silk:SILK_SCREEN", "comp_+_bot:COMPONENT"] {
+        let (n, t) = t.split_once(':').unwrap();
+        layers.push((n.to_string(), t, String::new(), String::new()));
+    }
+    layers.push(("drill".into(), "DRILL", "top".into(), "bottom".into()));
+    for sp in &spans {
+        layers.push((span_name(sp), "DRILL", odb_name(sp[0]), odb_name(sp[1])));
+    }
     let mut matrix = String::from("STEP {\n    COL=1\n    NAME=PCB\n}\n\n");
-    for (i, (name, ty)) in layers.iter().enumerate() {
-        let (start, end) = if *ty == "DRILL" { ("top", "bottom") } else { ("", "") };
+    for (i, (name, ty, start, end)) in layers.iter().enumerate() {
         let _ = write!(matrix, "LAYER {{\n    ROW={}\n    CONTEXT=BOARD\n    TYPE={ty}\n    NAME={}\n    POLARITY=POSITIVE\n    START_NAME={}\n    END_NAME={}\n    OLD_NAME=\n    COLOR=0\n}}\n\n", i + 1, name.to_uppercase(), start.to_uppercase(), end.to_uppercase());
     }
     files.push((format!("{root}/matrix/matrix"), matrix));
@@ -586,8 +629,8 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
     outline.extend(x.p.board.holes.iter().map(|h| pcb::capsule(h.at, h.at, h.d / 2.0)));
     prof.surface(&outline);
     files.push((format!("{step}/profile"), prof.text()));
-    for side in [Layer::Top, Layer::Bottom] {
-        let tag = if side == Layer::Top { "top" } else { "bottom" };
+    for &side in &copper {
+        let tag = odb_name(side);
         let mut cu = Features::new();
         for (zi, _) in x.p.board.zones.iter().enumerate().filter(|(_, z)| z.layer == side) {
             for piece in fills.get(zi).into_iter().flatten() {
@@ -600,10 +643,13 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
         for pad in x.pads.iter().filter(|q| q.on(side)) {
             cu.pad(pad, 0.0);
         }
-        for v in &x.p.board.vias {
+        for v in x.p.board.vias.iter().filter(|v| v.on(side)) {
             cu.pad_sym(v.at, format!("r{}", (v.d * 1000.0).round() as i64));
         }
         files.push((format!("{step}/layers/{tag}/features"), cu.text()));
+        if !side.outer() {
+            continue;
+        }
         let mut mask = Features::new();
         let mut paste = Features::new();
         for pad in x.pads.iter().filter(|q| q.on(side)) {
@@ -636,10 +682,21 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
         files.push((format!("{step}/layers/{tag}_silk/features"), silk.text()));
     }
     let mut drill = Features::new();
-    for (c, d, _) in holes(&x) {
+    let through = |v: &pcb::Via| v.kind() == "through";
+    let mut hs: Vec<(P, f64)> = x.pads.iter().filter(|p| p.drill > 0.0).map(|p| (p.at, p.drill)).collect();
+    hs.extend(x.p.board.vias.iter().filter(|v| through(v)).map(|v| (v.at, v.drill)));
+    hs.extend(x.p.board.holes.iter().map(|h| (h.at, h.d)));
+    for (c, d) in hs {
         drill.pad_sym(c, format!("r{}", (d * 1000.0).round() as i64));
     }
     files.push((format!("{step}/layers/drill/features"), drill.text()));
+    for sp in &spans {
+        let mut f = Features::new();
+        for v in x.p.board.vias.iter().filter(|v| !through(v) && v.span == Some(*sp)) {
+            f.pad_sym(v.at, format!("r{}", (v.drill * 1000.0).round() as i64));
+        }
+        files.push((format!("{step}/layers/{}/features", span_name(sp)), f.text()));
+    }
     // components and their pins, per side
     for (side, dir) in [(Layer::Top, "comp_+_top"), (Layer::Bottom, "comp_+_bot")] {
         let mut s = String::from("UNITS=MM\n#\n");

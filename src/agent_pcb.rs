@@ -19,9 +19,7 @@ fn pts(v: &Value, what: &str) -> R<Vec<P>> {
 fn layer(v: Option<&Value>) -> R<Option<Layer>> {
     match v.and_then(|x| x.as_str()) {
         None => Ok(None),
-        Some("top") => Ok(Some(Layer::Top)),
-        Some("bottom") => Ok(Some(Layer::Bottom)),
-        Some(o) => Err(format!("layer is top or bottom, not {o}")),
+        Some(o) => Layer::parse(o).map(Some).ok_or_else(|| format!("layer is top, bottom or an inner layer in1, in2, …, not {o}")),
     }
 }
 
@@ -455,7 +453,30 @@ impl Session {
                     let at = x.get("at").and_then(pt).ok_or_else(|| format!("vias[{k}]: give at [x, y]"))?;
                     let net = x.get("net").and_then(|v| v.as_str()).map(String::from).or_else(|| pcb::net_at(&p, &nl, &pads, at, Layer::Top).map(|x| x.0)).unwrap_or_default();
                     let nr = p.net_rules(&nl, &net);
-                    p.board.vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net });
+                    let mut v = Via::new(at, nr.via_d, nr.via_drill, &net);
+                    if let Some(sp) = x.get("span").and_then(|v| v.as_array()) {
+                        let ends: Vec<Layer> = sp.iter().map(|l| layer(Some(l))?.ok_or_else(|| format!("vias[{k}].span: two layer names"))).collect::<R<_>>()?;
+                        let [a, b] = ends.as_slice() else { return Err(format!("vias[{k}].span: two layers, e.g. [\"top\", \"in1\"]")) };
+                        for l in [a, b] {
+                            if !p.board.has_layer(*l) {
+                                return Err(format!("vias[{k}].span: the board has no {} (it has {} copper layers; set pcb_edit layers)", l.key(), p.board.copper_layers().len()));
+                            }
+                        }
+                        if a == b {
+                            return Err(format!("vias[{k}].span: a via joins two different layers"));
+                        }
+                        let (a, b) = if a.order() < b.order() { (*a, *b) } else { (*b, *a) };
+                        if !(a == Layer::Top && b == Layer::Bottom) {
+                            v.span = Some([a, b]);
+                        }
+                    }
+                    if let Some(d) = x.get("d").and_then(|v| v.as_f64()) {
+                        v.d = d;
+                    }
+                    if let Some(d) = x.get("drill").and_then(|v| v.as_f64()) {
+                        v.drill = d;
+                    }
+                    p.board.vias.push(v);
                 }
                 let mut v = json!({});
                 // differential pairs first, so the autorouter goes round them
@@ -847,6 +868,9 @@ fn apply_board(p: &mut Pcb, a: &Value) -> R<()> {
         b.thickness = t;
     }
     b.stackup = crate::pcb_trace::stack(b);
+    if let Some(n) = a.get("layers").and_then(|v| v.as_u64()) {
+        b.set_copper_count(n as usize)?;
+    }
     if let Some(oz) = a.get("copper_oz").and_then(|v| v.as_f64()) {
         if !(0.25..=6.0).contains(&oz) {
             return Err("copper_oz: 0.5, 1, 2 or 3 (oz/ft²)".into());
@@ -884,7 +908,7 @@ pub fn tools() -> Vec<Value> {
     let xy = |d: &str| json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": d});
     let pts = |d: &str| json!({"type": "array", "items": xy("[x, y] mm"), "description": d});
     let num = |d: &str| json!({"type": "number", "description": d});
-    let layer = json!({"type": "string", "enum": ["top", "bottom"], "description": "copper layer"});
+    let layer = json!({"type": "string", "pattern": "^(top|bottom|in[0-9]+)$", "description": "copper layer: top, bottom, or inner layer in1, in2, … (on a board with more than two layers)"});
     let board = json!({
         "name": {"type": "string", "description": "tab name"},
         "width": {"type": "number", "description": "rectangular board width, mm (from the origin)"},
@@ -892,6 +916,7 @@ pub fn tools() -> Vec<Value> {
         "corner_radius": {"type": "number", "description": "rectangular board corner radius, mm"},
         "outline": pts("board outline [[x, y], …] mm, instead of width/height"),
         "thickness": {"type": "number", "description": "board thickness mm (default 1.6)"},
+        "layers": {"type": "integer", "description": "copper layers: 2 (default), 4, 6, … Inner layers are in1, in2, … from the top; the stackup gets prepregs and cores to the board thickness"},
         "color": {"type": "string", "enum": ["green", "black", "blue", "red", "white", "purple"], "description": "solder mask colour"},
         "copper_oz": {"type": "number", "description": "copper weight of every layer, oz/ft² (default 1; 2 for high current)"},
         "er": {"type": "number", "description": "dielectric relative permittivity for impedance (default 4.5, FR4)"},
@@ -983,7 +1008,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_add_parts", "description": format!("Add parts from the library. symbol: {}. Each part gets the next reference for its prefix (R1, C2, U1) unless reference is given, its library footprint and value unless given, and a spot beside the board until placed. Returns each part's reference and pins.", pcb_lib::SYMBOLS.iter().map(|s| format!("{} ({}, {})", s.key, s.name, s.footprint)).collect::<Vec<_>>().join(", ")), "inputSchema": obj(json!({"pcb": pcb, "parts": {"type": "array", "description": "parts to add", "items": {"type": "object", "properties": part_fields(json!({"symbol": {"type": "string", "description": "library symbol key"}, "reference": {"type": "string", "description": "reference designator, default the next free one"}})), "required": ["symbol"], "additionalProperties": false}}}), &["pcb", "parts"])}),
         json!({"name": "pcb_connect", "description": "Connect pins into nets on the schematic: {\"nets\": {\"VCC\": [\"U1.8\", \"R1.1\"], \"GND\": [\"U1.1\", \"C1.2\"]}}. Pins are REF.PIN by number or by pin name. Each pin gets a short wire and a label (ground and supply ports for names like GND, VCC, +5V, 3V3); nets named by a port get the wider power track width. Returns the netlist.", "inputSchema": obj(json!({"pcb": pcb, "nets": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "description": "REF.PIN"}, "description": "pins"}, "description": "net name → list of pins"}}), &["pcb", "nets"])}),
         json!({"name": "pcb_edit", "description": "Change a PCB tab: board size/outline/thickness/colour/rules, parts (place them with at/rot/side, change value or footprint, delete), schematic wires and labels, mounting holes, copper pours (zones), clear_routing, auto_place.", "inputSchema": obj(edit, &["pcb"])}),
-        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
+        json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}, "span": {"type": "array", "items": layer.clone(), "minItems": 2, "maxItems": 2, "description": "blind or buried via: the two layers it joins, e.g. [\"top\", \"in1\"] (default: through all layers)"}, "d": num("pad diameter mm (default from the net's rules)"), "drill": num("drill mm (default from the net's rules)")}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),

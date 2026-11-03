@@ -44,6 +44,17 @@ pub mod colors {
     pub const TEXT: [u8; 3] = [0, 90, 130];
     pub const LABEL: [u8; 3] = [20, 20, 20];
     pub const POWER: [u8; 3] = [200, 0, 0];
+    /// Inner layers in turn.
+    pub const INNER: [[u8; 3]; 4] = [[226, 160, 40], [70, 176, 90], [170, 96, 206], [40, 178, 178]];
+}
+
+/// The colour a copper layer is drawn in.
+pub fn layer_color(l: Layer) -> [u8; 3] {
+    match l {
+        Layer::Top => colors::TOP,
+        Layer::Bottom => colors::BOTTOM,
+        Layer::In(k) => colors::INNER[(k as usize + 3) % 4],
+    }
 }
 
 fn a(c: [u8; 3], alpha: u8) -> [u8; 4] {
@@ -102,14 +113,26 @@ pub struct BoardView {
     pub active: Layer,
     pub top: bool,
     pub bottom: bool,
+    /// Inner layers (all of them).
+    pub inner: bool,
     pub silk: bool,
     pub zones: bool,
     pub air: bool,
 }
 
+impl BoardView {
+    pub fn shows(&self, l: Layer) -> bool {
+        match l {
+            Layer::Top => self.top,
+            Layer::Bottom => self.bottom,
+            Layer::In(_) => self.inner,
+        }
+    }
+}
+
 impl Default for BoardView {
     fn default() -> Self {
-        BoardView { active: Layer::Top, top: true, bottom: true, silk: true, zones: true, air: true }
+        BoardView { active: Layer::Top, top: true, bottom: true, inner: true, silk: true, zones: true, air: true }
     }
 }
 
@@ -153,14 +176,12 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
         out.push(d(a(colors::BOARD, 255), Prim::Fill(vec![b.outline.clone()])));
     }
     let id = |q: P| q;
-    let layer_col = |l: Layer| if l == Layer::Top { colors::TOP } else { colors::BOTTOM };
-    let order = [v.active.other(), v.active];
-    for l in order {
-        let shown = match l {
-            Layer::Top => v.top,
-            Layer::Bottom => v.bottom,
-        };
-        if !shown {
+    let layer_col = layer_color;
+    // bottom up, the active layer last (on top)
+    let mut order: Vec<Layer> = b.copper_layers().into_iter().rev().filter(|l| *l != v.active).collect();
+    order.push(v.active);
+    for &l in &order {
+        if !v.shows(l) {
             continue;
         }
         let alpha = if l == v.active { 235 } else { 120 };
@@ -196,13 +217,27 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
     for via in &b.vias {
         out.push(d([190, 190, 190, 255], Prim::Circle { c: via.at, r: via.d / 2.0, w: 0.0, fill: true }));
         out.push(d([30, 30, 30, 255], Prim::Circle { c: via.at, r: via.drill / 2.0, w: 0.0, fill: true }));
+        // blind and buried vias: a ring in each end layer's colour
+        if let Some([l0, l1]) = via.span {
+            let r = (via.d + via.drill) / 4.0;
+            let w = ((via.d - via.drill) / 4.0).max(0.03);
+            for (l, a0) in [(l0, 90.0f64), (l1, -90.0)] {
+                let pt = |k: usize| {
+                    let t = (a0 + 180.0 * k as f64 / 8.0).to_radians();
+                    [via.at[0] + r * t.cos(), via.at[1] + r * t.sin()]
+                };
+                for k in 0..8 {
+                    out.push(d(a(layer_col(l), 255), Prim::Seg { a: pt(k), b: pt(k + 1), w }));
+                }
+            }
+        }
     }
     for h in &b.holes {
         out.push(d([8, 8, 8, 255], Prim::Circle { c: h.at, r: h.d / 2.0, w: 0.0, fill: true }));
         out.push(d(a(colors::EDGE, 255), Prim::Circle { c: h.at, r: h.d / 2.0, w: 0.1, fill: false }));
     }
     if v.silk {
-        for side in order {
+        for side in [v.active.other(), v.active] {
             for part in p.parts.iter().filter(|x| x.side() == side) {
                 let col = if side == Layer::Top { colors::SILK_TOP } else { colors::SILK_BOTTOM };
                 let alpha = if side == v.active { 255 } else { 150 };
@@ -217,9 +252,8 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
     // keepouts: a dashed red outline with hatching
     for k in b.keepouts.iter().filter(|k| k.outline.len() >= 3) {
         let shown = match k.layer {
-            Some(Layer::Top) => v.top,
-            Some(Layer::Bottom) => v.bottom,
-            None => v.top || v.bottom,
+            Some(l) => v.shows(l),
+            None => v.top || v.bottom || v.inner,
         };
         if !shown {
             continue;
@@ -629,11 +663,34 @@ fn copper_layer(p: &Pcb, pads: &[WPad], fills: &[Fill], l: Layer) -> String {
     for pad in pads.iter().filter(|x| x.on(l)) {
         g.pad(pad, 0.0);
     }
-    for v in &p.board.vias {
+    for v in p.board.vias.iter().filter(|v| v.on(l)) {
         g.flash_circle(v.at, v.d);
     }
-    let f = if l == Layer::Top { "Copper,L1,Top" } else { "Copper,L2,Bot" };
-    g.finish(f, "Positive")
+    g.finish(&copper_function(p, l), "Positive")
+}
+
+/// A copper layer's number from the top (1-based) among the board's copper layers.
+pub fn layer_number(p: &Pcb, l: Layer) -> usize {
+    p.board.copper_layers().iter().position(|x| *x == l).unwrap_or(0) + 1
+}
+
+/// Gerber X2 file function of a copper layer: Copper,L1,Top … Copper,L2,Inr … Copper,Ln,Bot.
+pub fn copper_function(p: &Pcb, l: Layer) -> String {
+    let side = match l {
+        Layer::Top => "Top",
+        Layer::Bottom => "Bot",
+        Layer::In(_) => "Inr",
+    };
+    format!("Copper,L{},{side}", layer_number(p, l))
+}
+
+/// The copper Gerber file name of a layer, as KiCad names them.
+pub fn copper_file(base: &str, p: &Pcb, l: Layer) -> String {
+    match l {
+        Layer::Top => format!("{base}-F_Cu.gtl"),
+        Layer::Bottom => format!("{base}-B_Cu.gbl"),
+        Layer::In(k) => format!("{base}-In{k}_Cu.g{}", layer_number(p, l)),
+    }
 }
 
 fn mask_layer(pads: &[WPad], l: Layer) -> String {
@@ -682,6 +739,12 @@ fn edge_layer(p: &Pcb) -> String {
 }
 
 fn excellon(holes: &[(P, f64)], plated: bool) -> String {
+    excellon_span(holes, plated, (1, 2), "")
+}
+
+/// Drill file for holes from layer `span.0` to `span.1` (numbers from the top); `kind` is
+/// Blind or Buried for a via span, empty for through holes.
+fn excellon_span(holes: &[(P, f64)], plated: bool, span: (usize, usize), kind: &str) -> String {
     // tools by diameter as written (to the micron), so two sizes that print alike are one tool
     let um = |d: f64| (d * 1000.0).round() / 1000.0;
     let holes: Vec<(P, f64)> = holes.iter().map(|(at, d)| (*at, um(*d))).collect();
@@ -693,7 +756,8 @@ fn excellon(holes: &[(P, f64)], plated: bool) -> String {
     }
     sizes.sort_by(|a, b| a.total_cmp(b));
     let mut s = String::from("M48\n; Made by rCAD\n");
-    let _ = writeln!(s, "; #@! TF.FileFunction,{},1,2,{}", if plated { "Plated" } else { "NonPlated" }, if plated { "PTH" } else { "NPTH" });
+    let what = if !kind.is_empty() { kind } else if plated { "PTH" } else { "NPTH" };
+    let _ = writeln!(s, "; #@! TF.FileFunction,{},{},{},{what}", if plated { "Plated" } else { "NonPlated" }, span.0, span.1);
     s += "FMAT,2\nMETRIC\n";
     for (i, dia) in sizes.iter().enumerate() {
         let _ = writeln!(s, "T{}C{:.3}", i + 1, dia);
@@ -719,9 +783,8 @@ pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
     let fills = pcb::fill_zones(p, &nl, &pads);
     let base: String = p.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
     let base = if base.is_empty() { "board".to_string() } else { base };
-    let mut out = vec![
-        (format!("{base}-F_Cu.gtl"), copper_layer(p, &pads, &fills, Layer::Top)),
-        (format!("{base}-B_Cu.gbl"), copper_layer(p, &pads, &fills, Layer::Bottom)),
+    let mut out: Vec<(String, String)> = p.board.copper_layers().into_iter().map(|l| (copper_file(&base, p, l), copper_layer(p, &pads, &fills, l))).collect();
+    out.extend([
         (format!("{base}-F_Mask.gts"), mask_layer(&pads, Layer::Top)),
         (format!("{base}-B_Mask.gbs"), mask_layer(&pads, Layer::Bottom)),
         (format!("{base}-F_Paste.gtp"), paste_layer(&pads, Layer::Top)),
@@ -729,11 +792,26 @@ pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
         (format!("{base}-F_Silkscreen.gto"), silk_layer(p, Layer::Top)),
         (format!("{base}-B_Silkscreen.gbo"), silk_layer(p, Layer::Bottom)),
         (format!("{base}-Edge_Cuts.gm1"), edge_layer(p)),
-    ];
+    ]);
+    let n = p.board.copper_layers().len();
     let mut pth: Vec<(P, f64)> = pads.iter().filter(|x| x.drill > 0.0).map(|x| (x.at, x.drill)).collect();
-    pth.extend(p.board.vias.iter().map(|v| (v.at, v.drill)));
+    pth.extend(p.board.vias.iter().filter(|v| v.kind() == "through").map(|v| (v.at, v.drill)));
     let npth: Vec<(P, f64)> = p.board.holes.iter().map(|h| (h.at, h.d)).collect();
-    out.push((format!("{base}-PTH.drl"), excellon(&pth, true)));
+    out.push((format!("{base}-PTH.drl"), excellon_span(&pth, true, (1, n), "")));
+    // a drill file per blind or buried span
+    let mut spans: Vec<(usize, usize, &'static str)> = vec![];
+    for v in p.board.vias.iter().filter(|v| v.kind() != "through") {
+        let [a, b] = v.span.unwrap();
+        let (x, y) = (layer_number(p, a).min(layer_number(p, b)), layer_number(p, a).max(layer_number(p, b)));
+        if !spans.iter().any(|s| s.0 == x && s.1 == y) {
+            spans.push((x, y, if v.kind() == "blind" { "Blind" } else { "Buried" }));
+        }
+    }
+    spans.sort();
+    for (x, y, kind) in spans {
+        let holes: Vec<(P, f64)> = p.board.vias.iter().filter(|v| v.span.is_some_and(|[a, b]| layer_number(p, a).min(layer_number(p, b)) == x && layer_number(p, a).max(layer_number(p, b)) == y)).map(|v| (v.at, v.drill)).collect();
+        out.push((format!("{base}-PTH-L{x}-L{y}.drl"), excellon_span(&holes, true, (x, y), kind)));
+    }
     if !npth.is_empty() {
         out.push((format!("{base}-NPTH.drl"), excellon(&npth, false)));
     }
@@ -1118,6 +1196,40 @@ mod tests {
     use super::*;
 
     #[test]
+    fn inner_gerbers_and_blind_drills() {
+        let mut p = crate::pcb::tests::led_board();
+        p.board.set_copper_count(4).unwrap();
+        p.board.tracks.push(pcb::Track { a: [10.0, 5.0], b: [20.0, 5.0], width: 0.25, layer: Layer::In(1), net: "GND".into() });
+        p.board.vias.push(pcb::Via::new([10.0, 5.0], 0.6, 0.3, "GND"));
+        let mut blind = pcb::Via::new([20.0, 5.0], 0.45, 0.2, "GND");
+        blind.span = Some([Layer::Top, Layer::In(1)]);
+        p.board.vias.push(blind);
+        let files = gerbers(&p);
+        let get = |end: &str| files.iter().find(|f| f.0.ends_with(end)).map(|f| f.1.clone());
+        let in1 = get("In1_Cu.g2").expect("inner layer 1");
+        assert!(in1.contains("%TF.FileFunction,Copper,L2,Inr*%"), "{in1}");
+        assert!(get("In2_Cu.g3").is_some());
+        assert!(get("B_Cu.gbl").unwrap().contains("%TF.FileFunction,Copper,L4,Bot*%"));
+        // the blind via is drilled from L1 to L2 only, and isn't in the bottom copper
+        let span = get("-PTH-L1-L2.drl").expect("blind drill file");
+        assert!(span.contains("C0.200") && span.contains("Blind"), "{span}");
+        let thru = get("-PTH.drl").unwrap();
+        assert!(!thru.contains("C0.200"), "{thru}");
+        let bottom = get("B_Cu.gbl").unwrap();
+        assert!(!bottom.contains("X20000000Y"), "the blind via has no pad on the bottom");
+        let job = crate::pcb_fab::gbrjob(&p, &files);
+        let job: serde_json::Value = serde_json::from_str(&job).unwrap();
+        assert_eq!(job["GeneralSpecs"]["LayerNumber"], 4);
+        let coppers = job["MaterialStackup"].as_array().unwrap().iter().filter(|l| l["Type"] == "Copper").count();
+        assert_eq!(coppers, 4);
+        let odb = crate::pcb_fab::odb(&p);
+        let has = |n: &str| odb.iter().any(|f| f.0.ends_with(n));
+        assert!(has("layers/in1/features") && has("layers/in2/features") && has("layers/drill_top-in1/features"));
+        let matrix = String::from_utf8(odb.iter().find(|f| f.0.ends_with("matrix/matrix")).unwrap().1.clone()).unwrap();
+        assert!(matrix.contains("NAME=DRILL_TOP-IN1") && matrix.contains("END_NAME=IN1"), "{matrix}");
+    }
+
+    #[test]
     fn gerbers_have_the_layers() {
         let mut p = crate::pcb::tests::led_board();
         crate::pcb_route::autoroute(&mut p, None);
@@ -1324,7 +1436,7 @@ mod tests {
     #[test]
     fn board_script_drills_vias_and_guards_thickness() {
         let mut p = crate::pcb::tests::led_board();
-        p.board.vias.push(pcb::Via { at: [7.0, 8.0], d: 0.6, drill: 0.3, net: String::new() });
+        p.board.vias.push(pcb::Via { at: [7.0, 8.0], d: 0.6, drill: 0.3, net: String::new(), span: None });
         p.board.holes.push(pcb::Hole { at: [1.0, 1.0], d: 0.0 });
         p.name = "a\nlet x = ;\"b".into();
         let s = board_script(&p);

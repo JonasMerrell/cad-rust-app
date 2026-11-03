@@ -1,4 +1,4 @@
-//! A grid autorouter for PCB tabs: A* on two layers with vias, one airwire at a time, shortest
+//! A grid autorouter for PCB tabs: A* on every copper layer with through vias, one airwire at a time, shortest
 //! first. Copper of other nets is kept out by its clearance; zones are refilled afterwards and
 //! anything they no longer connect is routed in another pass.
 
@@ -18,7 +18,8 @@ struct Map {
     h: f64,
     c: f64,
     via: bool,
-    m: [Vec<i32>; 2],
+    /// One cell map per copper layer, top first.
+    m: Vec<Vec<i32>>,
 }
 
 struct Grid {
@@ -27,16 +28,14 @@ struct Grid {
     nx: usize,
     ny: usize,
     maps: Vec<Map>,
-}
-
-fn li(l: Layer) -> usize {
-    match l {
-        Layer::Top => 0,
-        Layer::Bottom => 1,
-    }
+    /// The board's copper layers, top first (the maps' layer order).
+    layers: Vec<Layer>,
 }
 
 impl Grid {
+    fn li(&self, l: Layer) -> usize {
+        self.layers.iter().position(|x| *x == l).unwrap_or(0)
+    }
     fn centre(&self, x: usize, y: usize) -> P {
         [self.lo[0] + (x as f64 + 0.5) * self.g, self.lo[1] + (y as f64 + 0.5) * self.g]
     }
@@ -49,11 +48,21 @@ impl Grid {
     /// Mark the cells within each map's half-width plus the clearance (the larger of the copper's
     /// and the map's; none for a keepout) of a piece of copper.
     fn mark(&mut self, cu: &Cu, layer: Option<Layer>, net: i32, clearance: f64) {
+        self.mark_on(cu, &|l| layer.is_none_or(|x| x == l), net, clearance);
+    }
+
+    /// `mark` on the layers `on` accepts (a blind via's span).
+    fn mark_on(&mut self, cu: &Cu, on: &dyn Fn(Layer) -> bool, net: i32, clearance: f64) {
         let all: Vec<usize> = (0..self.maps.len()).collect();
-        self.mark_maps(&all, cu, layer, net, Some(clearance));
+        self.mark_maps_on(&all, cu, on, net, Some(clearance));
     }
 
     fn mark_maps(&mut self, maps: &[usize], cu: &Cu, layer: Option<Layer>, net: i32, clearance: Option<f64>) {
+        self.mark_maps_on(maps, cu, &|l| layer.is_none_or(|x| x == l), net, clearance);
+    }
+
+    fn mark_maps_on(&mut self, maps: &[usize], cu: &Cu, on: &dyn Fn(Layer) -> bool, net: i32, clearance: Option<f64>) {
+        let ls: Vec<usize> = (0..self.layers.len()).filter(|&i| on(self.layers[i])).collect();
         let (lo, hi) = cu.bbox();
         for &mi in maps {
             let c = clearance.map(|c| c.max(self.maps[mi].c)).unwrap_or(0.0);
@@ -78,11 +87,8 @@ impl Grid {
                     if gap >= r {
                         continue;
                     }
-                    for l in [Layer::Top, Layer::Bottom] {
-                        if layer.is_some_and(|x| x != l) {
-                            continue;
-                        }
-                        let v = &mut self.maps[mi].m[li(l)][y * self.nx + x];
+                    for &l in &ls {
+                        let v = &mut self.maps[mi].m[l][y * self.nx + x];
                         *v = if net >= 0 && (*v == FREE || *v == net) { net } else { WALL };
                     }
                 }
@@ -174,17 +180,18 @@ pub fn autoroute(p: &mut Pcb, only: Option<&str>) -> Outcome {
 
 /// Layers the net has copper on at a point.
 fn layers_at(p: &Pcb, pads: &[WPad], at: P, net: &str) -> Vec<Layer> {
+    let all = p.board.copper_layers();
     let mut v = vec![];
-    for l in [Layer::Top, Layer::Bottom] {
+    for &l in &all {
         let pad = pads.iter().any(|x| x.on(l) && pcb::dist(x.at, at) < 1e-6);
         let track = p.board.tracks.iter().any(|t| t.layer == l && t.net == net && (pcb::dist(t.a, at) < 1e-6 || pcb::dist(t.b, at) < 1e-6));
-        let via = p.board.vias.iter().any(|x| pcb::dist(x.at, at) < 1e-6);
+        let via = p.board.vias.iter().any(|x| x.on(l) && pcb::dist(x.at, at) < 1e-6);
         if pad || track || via {
             v.push(l);
         }
     }
     if v.is_empty() {
-        v = vec![Layer::Top, Layer::Bottom];
+        v = all;
     }
     v
 }
@@ -286,8 +293,9 @@ fn edge_walls(grid: &mut Grid, outline: &[P], edge: f64) {
             let i = y * nx + x;
             for map in &mut grid.maps {
                 if !inside || d[i] < edge + map.h {
-                    map.m[0][i] = WALL;
-                    map.m[1][i] = WALL;
+                    for m in &mut map.m {
+                        m[i] = WALL;
+                    }
                 }
             }
         }
@@ -328,7 +336,9 @@ fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)
     for &(h, c, via) in extra {
         add(h, c, via);
     }
-    let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: [vec![FREE; n], vec![FREE; n]] }).collect() };
+    let layers = p.board.copper_layers();
+    let nl_ = layers.len();
+    let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: vec![vec![FREE; n]; nl_] }).collect(), layers };
     edge_walls(&mut grid, &p.board.outline, r.edge);
     let ids: HashMap<&str, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as i32)).collect();
     let mut cl: HashMap<&str, f64> = HashMap::new();
@@ -339,7 +349,7 @@ fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)
         };
         let net = if it.net.is_empty() { WALL } else { ids.get(name).copied().unwrap_or(WALL) };
         let c = *cl.entry(it.net.as_str()).or_insert_with(|| p.net_rules(nl, &it.net).clearance);
-        grid.mark(&it.cu, it.layer, net, c);
+        grid.mark_on(&it.cu, &|l| it.on(l), net, c);
     }
     for h in &p.board.holes {
         grid.mark(&Cu::Seg { a: h.at, b: h.at, r: h.d / 2.0 }, None, WALL, r.clearance);
@@ -372,8 +382,9 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
     let (tx, ty) = grid.cell(b)?;
     let n = nx * ny;
     let st = |x: usize, y: usize, l: usize| l * n + y * nx + x;
-    let mut cost = vec![f32::INFINITY; 2 * n];
-    let mut came = vec![u32::MAX; 2 * n];
+    let nl = grid.layers.len();
+    let mut cost = vec![f32::INFINITY; nl * n];
+    let mut came = vec![u32::MAX; nl * n];
     let mut heap = BinaryHeap::new();
     let h = |x: usize, y: usize| -> f32 {
         let (dx, dy) = ((x as i32 - tx as i32).abs() as f32, (y as i32 - ty as i32).abs() as f32);
@@ -384,11 +395,11 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
     let via = &grid.maps[vmi.unwrap_or(0)].m;
     // the start and end cells sit on the net's own copper
     for l in la {
-        let s = st(sx, sy, li(*l));
+        let s = st(sx, sy, grid.li(*l));
         cost[s] = 0.0;
         heap.push((Reverse((h(sx, sy) * 64.0) as u64), s as u32));
     }
-    let goal: Vec<usize> = lb.iter().map(|l| li(*l)).collect();
+    let goal: Vec<usize> = lb.iter().map(|l| grid.li(*l)).collect();
     let mut expanded = 0usize;
     while let Some((_, s)) = heap.pop() {
         let s = s as usize;
@@ -436,8 +447,8 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
                 continue;
             }
             let mut c = if k % 2 == 1 { std::f32::consts::SQRT_2 } else { 1.0 };
-            // top prefers x, bottom prefers y
-            let along = if l == 0 { *dy == 0 } else { *dx == 0 };
+            // layers take turns: the top prefers x, the next one y, …
+            let along = if l % 2 == 0 { *dy == 0 } else { *dx == 0 };
             if !along {
                 c *= if k % 2 == 1 { 1.1 } else { 1.25 };
             }
@@ -455,13 +466,16 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
         // a via to the other layer (the via map keeps them out of surface mount pads, so the
         // start and goal cells may have one: two ends in one cell on different layers need it)
         let here = y * nx + x;
-        if vmi.is_some() && free(via[0][here], net) && free(via[1][here], net) {
-            let s2 = st(x, y, 1 - l);
-            let g2 = g0 + via_cost;
-            if g2 < cost[s2] {
-                cost[s2] = g2;
-                came[s2] = s as u32;
-                heap.push((Reverse(((g2 + h(x, y)) * 64.0) as u64), s2 as u32));
+        if vmi.is_some() && via.iter().all(|m| free(m[here], net)) {
+            // a through via reaches every layer
+            for l2 in (0..nl).filter(|&l2| l2 != l) {
+                let s2 = st(x, y, l2);
+                let g2 = g0 + via_cost + 0.5 * (l2 as f32 - l as f32).abs();
+                if g2 < cost[s2] {
+                    cost[s2] = g2;
+                    came[s2] = s as u32;
+                    heap.push((Reverse(((g2 + h(x, y)) * 64.0) as u64), s2 as u32));
+                }
             }
         }
     }
@@ -471,7 +485,7 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
 /// Turn a cell path into tracks (straight runs merged) and vias.
 fn to_copper(grid: &Grid, path: &[(usize, usize, usize)], a: P, b: P, w: f64, nr: &pcb::NetRules, net: &str) -> (Vec<Track>, Vec<Via>) {
     let centre = |x: usize, y: usize| grid.centre(x, y);
-    let layer = |l: usize| if l == 0 { Layer::Top } else { Layer::Bottom };
+    let layer = |l: usize| grid.layers[l];
     let mut tracks = vec![];
     let mut vias = vec![];
     let mut run: Vec<P> = vec![a];
@@ -481,7 +495,7 @@ fn to_copper(grid: &Grid, path: &[(usize, usize, usize)], a: P, b: P, w: f64, nr
         if l != cur {
             let at = *run.last().unwrap();
             push_run(&mut tracks, &run, w, layer(cur), net);
-            vias.push(Via { at, d: nr.via_d, drill: nr.via_drill, net: net.into() });
+            vias.push(Via::new(at, nr.via_d, nr.via_drill, net));
             run = vec![at];
             cur = l;
         }
@@ -620,7 +634,7 @@ pub fn route_pair(p: &mut Pcb, d: &pcb::DiffPair) -> Result<PairOutcome, String>
     let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
     let grid = build(p, &nl, &base, &[(h, c, false)], Some((&d.n, &d.p)));
     let mi = grid.find(h, c, false);
-    let common = |a: &WPad, b: &WPad| -> Vec<Layer> { [Layer::Top, Layer::Bottom].into_iter().filter(|l| a.on(*l) && b.on(*l)).collect() };
+    let common = |a: &WPad, b: &WPad| -> Vec<Layer> { p.board.copper_layers().into_iter().filter(|l| a.on(*l) && b.on(*l)).collect() };
     let mut layers = common(sp, sn);
     layers.retain(|l| common(ep, en).contains(l));
     if layers.is_empty() {
@@ -872,6 +886,25 @@ mod tests {
     use super::*;
 
     #[test]
+    fn routes_through_inner_layers() {
+        // outer layers walled off between the resistor and the LED: the route goes down to an
+        // inner layer and back
+        let mut p = crate::pcb::tests::led_board();
+        p.board.set_copper_count(4).unwrap();
+        for l in [Layer::Top, Layer::Bottom] {
+            p.board.keepouts.push(pcb::Keepout { outline: vec![[19.5, 0.0], [20.5, 0.0], [20.5, 40.0], [19.5, 40.0]], layer: Some(l), tracks: true, vias: false, pours: true, parts: false });
+        }
+        let out = autoroute(&mut p, None);
+        assert!(out.failed.is_empty(), "{:?}", out.failed);
+        assert!(out.vias >= 2);
+        assert!(p.board.tracks.iter().any(|t| matches!(t.layer, Layer::In(_))), "an inner layer is used");
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let issues = pcb::drc(&p, &nl, &pads, &[]);
+        assert!(issues.iter().all(|i| !i.error), "{issues:?}");
+    }
+
+    #[test]
     fn routes_the_led_board() {
         let mut p = crate::pcb::tests::led_board();
         let out = autoroute(&mut p, None);
@@ -970,7 +1003,7 @@ mod tests {
         for outline in [circle, l] {
             let (nx, ny, g) = (160, 160, 0.25);
             let hs = [0.125, 0.25, 0.3];
-            let mut grid = Grid { lo: [0.0, 0.0], g, nx, ny, maps: hs.iter().map(|&h| Map { h, c: 0.2, via: false, m: [vec![FREE; nx * ny], vec![FREE; nx * ny]] }).collect() };
+            let mut grid = Grid { lo: [0.0, 0.0], g, nx, ny, maps: hs.iter().map(|&h| Map { h, c: 0.2, via: false, m: vec![vec![FREE; nx * ny], vec![FREE; nx * ny]] }).collect(), layers: vec![Layer::Top, Layer::Bottom] };
             edge_walls(&mut grid, &outline, 0.3);
             for y in 0..ny {
                 for x in 0..nx {

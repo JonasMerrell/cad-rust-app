@@ -94,6 +94,34 @@ impl Stackup {
         }
     }
 
+    /// `n` copper layers (2, 4, 6, …) of `oz`, `total` mm thick: thin prepregs under the outer
+    /// layers and cores between inner pairs, as fabs build them (4 layers: 0.2 mm prepreg,
+    /// core, 0.2 mm prepreg).
+    pub fn layered(n: usize, total: f64, oz: f64) -> Stackup {
+        let n = n.max(2);
+        if n == 2 {
+            return Stackup::two_layer(total, oz);
+        }
+        let cu = oz * OZ_MM;
+        let gaps = n - 1;
+        let prepregs = gaps.div_ceil(2);
+        let cores = gaps - prepregs;
+        let dielectric = (total - n as f64 * cu).max(0.05 * gaps as f64);
+        let pp = (dielectric * 0.5 / prepregs as f64).min(0.2);
+        let core = if cores > 0 { (dielectric - pp * prepregs as f64) / cores as f64 } else { 0.0 };
+        let mut layers = vec![StackLayer { name: "Top mask".into(), kind: StackKind::Mask, thickness: 0.02, er: 3.5, copper_oz: 0.0 }];
+        for k in 0..n {
+            let name = if k == 0 { "Top".to_string() } else if k + 1 == n { "Bottom".to_string() } else { format!("Inner {k}") };
+            layers.push(StackLayer { name, kind: StackKind::Copper, thickness: um(cu), er: 1.0, copper_oz: oz });
+            if k + 1 < n {
+                let (kind, t, name) = if k % 2 == 0 { (StackKind::Prepreg, pp, "Prepreg") } else { (StackKind::Core, core, "Core") };
+                layers.push(StackLayer { name: name.into(), kind, thickness: um(t), er: 4.5, copper_oz: 0.0 });
+            }
+        }
+        layers.push(StackLayer { name: "Bottom mask".into(), kind: StackKind::Mask, thickness: 0.02, er: 3.5, copper_oz: 0.0 });
+        Stackup { layers }
+    }
+
     /// Indices of the copper layers, top first.
     pub fn coppers(&self) -> Vec<usize> {
         self.layers.iter().enumerate().filter(|(_, l)| l.kind == StackKind::Copper).map(|(i, _)| i).collect()
@@ -105,6 +133,7 @@ impl Stackup {
         match l {
             Layer::Top => c.first().copied(),
             Layer::Bottom => c.last().copied(),
+            Layer::In(k) => c.get(k as usize).copied().filter(|_| (k as usize) + 1 < c.len()),
         }
     }
 
@@ -159,6 +188,12 @@ impl Stackup {
     pub fn line(&self, l: Layer) -> Geometry {
         let Some(i) = self.copper_index(l) else { return Geometry::default() };
         let t = self.copper_mm(l);
+        if !l.outer() {
+            // an inner track between the planes above and below
+            let (h, er1) = self.dielectric_above(i).unwrap_or((0.2, 4.5));
+            let (h2, er2) = self.dielectric_below(i).unwrap_or((h, er1));
+            return Geometry { kind: LineKind::Stripline, h, h2, er: (er1 * h + er2 * h2) / (h + h2), t };
+        }
         let (h, er) = if l == Layer::Top { self.dielectric_below(i) } else { self.dielectric_above(i) }.unwrap_or((1.51, 4.5));
         Geometry { kind: LineKind::Microstrip, h, h2: 0.0, er, t }
     }
@@ -552,7 +587,7 @@ pub fn nets(pcb: &Pcb, nl: &Netlist, pads: &[WPad], target: &dyn Fn(&str) -> Tar
         r.z_min = f64::INFINITY;
         for t in &tracks {
             let th = st.copper_mm(t.layer);
-            r.rise = r.rise.max(temp_rise(t.width, th, tg.current, true));
+            r.rise = r.rise.max(temp_rise(t.width, th, tg.current, t.layer.outer()));
             let z = st.line(t.layer).line(t.width).z0;
             r.z_min = r.z_min.min(z);
             r.z_max = r.z_max.max(z);
@@ -594,7 +629,7 @@ fn worst_path(pcb: &Pcb, pads: &[WPad], my: &[usize], tracks: &[&pcb::Track], vi
     let pad_nodes: Vec<usize> = my.iter().map(|&i| add(&mut nodes, &mut adj, pads[i].at, None)).collect();
     let via_nodes: Vec<usize> = vias.iter().map(|v| add(&mut nodes, &mut adj, v.at, None)).collect();
     let mut ends: HashMap<(i64, i64, u8), usize> = HashMap::new();
-    let key = |p: P, l: Layer| ((p[0] * 1000.0).round() as i64, (p[1] * 1000.0).round() as i64, l as u8);
+    let key = |p: P, l: Layer| ((p[0] * 1000.0).round() as i64, (p[1] * 1000.0).round() as i64, l.order());
     let mut edges: Vec<(usize, usize, f64)> = vec![];
     for t in tracks {
         let mut node = |p: P| -> usize {
@@ -731,15 +766,15 @@ pub fn check(pcb: &Pcb, target: &dyn Fn(&str) -> Target) -> Vec<pcb::Issue> {
         let th = st.copper_mm(t.layer);
         let mid = [(t.a[0] + t.b[0]) / 2.0, (t.a[1] + t.b[1]) / 2.0];
         if tg.current > 0.0 {
-            let need = width_for_current(tg.current, th, dt, true);
-            if t.width < need - 1e-6 && seen.insert((t.net.clone(), t.layer as u8, true), ()).is_none() {
-                let rise = temp_rise(t.width, th, tg.current, true);
+            let need = width_for_current(tg.current, th, dt, t.layer.outer());
+            if t.width < need - 1e-6 && seen.insert((t.net.clone(), t.layer.order(), true), ()).is_none() {
+                let rise = temp_rise(t.width, th, tg.current, t.layer.outer());
                 out.push(pcb::Issue::new("current", mid, true, format!("{} carries {} A: a {} mm track on {} heats {:.0} °C (rule {} °C), it needs {:.2} mm", t.net, tg.current, t.width, t.layer.label().to_lowercase(), rise, dt, need)));
             }
         }
         if tg.impedance > 0.0 {
             let z = st.line(t.layer).line(t.width).z0;
-            if (z - tg.impedance).abs() > 0.1 * tg.impedance && seen.insert((t.net.clone(), t.layer as u8, false), ()).is_none() {
+            if (z - tg.impedance).abs() > 0.1 * tg.impedance && seen.insert((t.net.clone(), t.layer.order(), false), ()).is_none() {
                 let w = st.line(t.layer).width_for(tg.impedance).map(|w| format!(", {w:.3} mm gives {} Ω", tg.impedance)).unwrap_or_default();
                 out.push(pcb::Issue::new("impedance", mid, false, format!("{} should be {} Ω: a {} mm track on {} is {z:.0} Ω{w}", t.net, tg.impedance, t.width, t.layer.label().to_lowercase())));
             }
@@ -764,6 +799,20 @@ pub fn routed_width(pcb: &Pcb, base: f64, tg: Target) -> f64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn inner_layers_are_striplines() {
+        let st = Stackup::layered(4, 1.6, 1.0);
+        assert_eq!(st.coppers().len(), 4);
+        assert!((st.total() - 1.6).abs() < 1e-6, "{}", st.total());
+        let outer = st.line(Layer::Top);
+        let inner = st.line(Layer::In(1));
+        assert_eq!(outer.kind, LineKind::Microstrip);
+        assert_eq!(inner.kind, LineKind::Stripline);
+        assert!(inner.h > 0.0 && inner.h2 > 0.0);
+        // the same width has a lower impedance between two planes
+        assert!(inner.line(0.2).z0 < outer.line(0.2).z0);
+    }
 
     fn near(a: f64, b: f64, tol: f64) -> bool {
         (a - b).abs() <= tol * b.abs().max(1e-12)
