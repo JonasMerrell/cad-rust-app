@@ -31,7 +31,7 @@ screen. It needs an rCAD with the script document API (#102) and `d.tool` (#103)
 - **One Part Studio per printed part**, made by `project.rhai`: hull, deck, turret ring, turret
   shell, cupola, gun drum (split into its two print halves by a Split feature), barrel, sprocket,
   idler, road wheel, the track as printed, and the track as fitted round the wheels (for the
-  assembly only). Each studio has its key sizes as variables (wall, deck thickness, wheel radius,
+  assembly only, with its 42 grousers and lugs, a lug in each sprocket pocket). Each studio has its key sizes as variables (wall, deck thickness, wheel radius,
   pocket count, ring radius, horn clearance, drum radius, lug count and pitch, track width, …) and
   named sketches and features: revolved sections for the wheels and barrel, a loft and shell for
   the turret, patterns for the lug pockets, TSOP windows and track lugs (a curve pattern along the
