@@ -68,8 +68,15 @@ pub struct FeaUi {
     job: Option<(u64, Receiver<JobResult>, Arc<AtomicBool>)>,
     progress: Arc<Mutex<(String, f32)>>,
     pub computing: bool,
-    /// A change waiting to settle before it is solved.
-    pending: Option<(u64, Instant)>,
+    /// Start simulation was pressed: solve the open study on the next frame.
+    pub start: bool,
+    /// The study the shown result belongs to, and the key of the open study as it is now.
+    solved_of: Option<usize>,
+    now_key: u64,
+    /// Measured solve time over the estimate, from this session's runs (scales the next estimates).
+    speed: f64,
+    /// When the running job started and its estimated seconds.
+    job_clock: Option<(Instant, f64)>,
     mesh_cache: Option<(u64, Arc<Mesh>)>,
     mesh_rx: Option<(u64, Receiver<Arc<Mesh>>)>,
     /// The selected support or load (its faces are picked in the viewport).
@@ -105,9 +112,6 @@ pub struct FeaUi {
     pub pins: Vec<u32>,
     /// Mark where the shown field is largest (smallest for the factor of safety).
     pub show_max: bool,
-    /// A mesh too big to make without asking: (mesh key, estimated unknowns), and the key the user allowed.
-    big: Option<(u64, f64)>,
-    allowed_big: Option<u64>,
     /// Picking a periodic pair's side B (else side A).
     side_b: bool,
     /// The BC whose card is open in the sidebar (its fields shown).
@@ -128,7 +132,11 @@ impl Default for FeaUi {
             job: Default::default(),
             progress: Default::default(),
             computing: Default::default(),
-            pending: Default::default(),
+            start: Default::default(),
+            solved_of: Default::default(),
+            now_key: Default::default(),
+            speed: 1.0,
+            job_clock: Default::default(),
             mesh_cache: Default::default(),
             mesh_rx: Default::default(),
             sel: Default::default(),
@@ -155,8 +163,6 @@ impl Default for FeaUi {
             picks: Default::default(),
             pins: Default::default(),
             show_max: Default::default(),
-            big: Default::default(),
-            allowed_big: Default::default(),
             side_b: false,
             open: None,
             point_pick: None,
@@ -300,7 +306,7 @@ fn mesh_key(s: &Study, input: &Input, size: f64) -> u64 {
     h.finish()
 }
 
-/// Keep the results up to date: solve in the background once the study or the parts stop changing.
+/// Take finished results, and solve the open study in the background when Start simulation is pressed.
 fn refresh(app: &mut App, ctx: &egui::Context) {
     if let Some((k, rx, _)) = &app.fea.job {
         if let Ok((key, res)) = rx.try_recv() {
@@ -322,6 +328,11 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                             app.fea.show_results = true;
                         }
                         app.fea.error = None;
+                        // what the run took against its estimate tunes the next estimates to this computer
+                        if let Some((t0, est)) = app.fea.job_clock.take().filter(|c| c.1 > 2.0) {
+                            let k = (t0.elapsed().as_secs_f64() / est).clamp(0.05, 20.0);
+                            app.fea.speed = (app.fea.speed.ln() * 0.5 + k.ln() * 0.5).exp();
+                        }
                     }
                     Err(e) => {
                         app.fea.outcome = None;
@@ -342,28 +353,26 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     let Some(s) = study(app).cloned() else { return };
     let input = study_input(app, &s);
     let key = study_key(&s, &input);
-    if key == app.fea.key || app.fea.job.as_ref().map(|j| j.0 == key).unwrap_or(false) {
-        app.fea.pending = None;
+    app.fea.now_key = key;
+    // another study's result is not shown on this one
+    if app.fea.solved_of != index(app) && app.fea.job.is_none() {
+        if app.fea.outcome.is_some() || app.fea.error.is_some() {
+            app.fea.outcome = None;
+            app.fea.error = None;
+            app.fea.scene_dirty = true;
+        }
+        app.fea.key = 0;
+        app.fea.solved_of = index(app);
+    }
+    // nothing runs until the user presses Start simulation
+    if !std::mem::take(&mut app.fea.start) {
         return;
     }
-    // wait for edits to settle
-    match app.fea.pending {
-        Some((k, t)) if k == key => {
-            if t.elapsed().as_secs_f32() < 0.4 {
-                ctx.request_repaint_after(std::time::Duration::from_millis(100));
-                return;
-            }
-        }
-        _ => {
-            app.fea.pending = Some((key, Instant::now()));
-            ctx.request_repaint_after(std::time::Duration::from_millis(100));
-            return;
-        }
-    }
-    app.fea.pending = None;
     if let Some((_, _, cancel)) = app.fea.job.take() {
         cancel.store(true, Ordering::Relaxed);
+        app.fea.computing = false;
     }
+    app.fea.solved_of = index(app);
     if input.tris.is_empty() {
         app.fea.key = key;
         app.fea.outcome = None;
@@ -373,27 +382,12 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     }
     // a study that is not held and loaded yet has nothing to solve: don't mesh it
     if !ready(&s) {
-        app.fea.key = key;
-        app.fea.outcome = None;
-        app.fea.error = None;
-        app.fea.big = None;
-        app.fea.scene_dirty = true;
         return;
     }
     let size = s.element_size(&input);
     let mk = mesh_key(&s, &input, size);
     let cached = app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk).map(|m| m.1.clone());
-    // a mesh big enough to run out of memory waits until the user says to go ahead
-    let unknowns = 3.0 * fea::estimate_nodes(&s, &input, size);
-    if cached.is_none() && unknowns > BIG_MESH && app.fea.allowed_big != Some(mk) {
-        app.fea.key = key;
-        app.fea.outcome = None;
-        app.fea.error = None;
-        app.fea.big = Some((mk, unknowns));
-        app.fea.scene_dirty = true;
-        return;
-    }
-    app.fea.big = None;
+    app.fea.job_clock = Some((Instant::now(), estimate(app, &s, &input).secs));
     let (tx, rx) = std::sync::mpsc::channel();
     let cancel = Arc::new(AtomicBool::new(false));
     app.fea.job = Some((key, rx, cancel.clone()));
@@ -436,8 +430,70 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
     app.fea.mesh_rx = Some((mk, mrx));
 }
 
-/// Unknowns (3 per node) above which the user is asked before meshing.
+/// Unknowns (3 per node) above which the mesh size is shown as a warning.
 const BIG_MESH: f64 = 500_000.0;
+
+/// What solving the open study would take, from its unknowns (the cached mesh's when there is one), scaled
+/// by how this computer's earlier runs compared with their estimates.
+fn estimate(app: &App, s: &Study, input: &Input) -> fea::Cost {
+    let size = s.element_size(input);
+    let mk = mesh_key(s, input, size);
+    let nodes = match app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk) {
+        Some(m) => m.1.nodes.len() as f64,
+        None => fea::estimate_nodes(s, input, size),
+    };
+    let meshed = app.fea.mesh_cache.as_ref().is_some_and(|m| m.0 == mk);
+    let mut c = fea::estimate_cost(s, input.thickness(), nodes, meshed);
+    c.secs *= app.fea.speed;
+    c
+}
+
+/// Stop the running solve; the shown results stay.
+fn stop(app: &mut App) {
+    if let Some((_, _, cancel)) = app.fea.job.take() {
+        cancel.store(true, Ordering::Relaxed);
+    }
+    app.fea.computing = false;
+    app.fea.job_clock = None;
+    app.fea.scene_dirty = true;
+}
+
+/// Why a study can't be solved yet, if it can't.
+fn not_ready(s: &Study) -> Option<&'static str> {
+    if ready(s) {
+        return None;
+    }
+    Some(match (s.mode, s.analysis) {
+        (fea::SimMode::Advanced, _) => "Add a support (a boundary condition that holds the part) to solve.",
+        (_, Analysis::Transient) => "Add a load to solve.",
+        _ => "Hold the part with a support and add a load to solve.",
+    })
+}
+
+/// A duration like 40 s, 3 min or 1.5 h.
+fn fmt_secs(t: f64) -> String {
+    if t < 1.0 {
+        "under a second".into()
+    } else if t < 90.0 {
+        format!("{:.0} s", t)
+    } else if t < 5400.0 {
+        format!("{:.0} min", t / 60.0)
+    } else {
+        format!("{} h", sig(t / 3600.0))
+    }
+}
+
+/// A memory size like 350 MB or 4.2 GB.
+fn fmt_bytes(b: f64) -> String {
+    if b < 1e9 { format!("{:.0} MB", (b / 1e6).max(1.0)) } else { format!("{} GB", sig(b / 1e9)) }
+}
+
+/// Memory of this computer, in bytes (Linux: total RAM from /proc/meminfo).
+fn ram() -> Option<f64> {
+    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+    let kb: f64 = t.lines().find(|l| l.starts_with("MemTotal"))?.split_whitespace().nth(1)?.parse().ok()?;
+    Some(kb * 1024.0)
+}
 
 /// Whether a study has what its analysis needs before it is worth meshing: static needs a support and a
 /// load, transient a load; modal works on its own (free-free).
@@ -512,6 +568,20 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         {
             if app.tool_button(ui, k.icon(), k.label(), tip, k == LoadKind::Force, false, true).clicked() {
                 add_load(app, k);
+            }
+        }
+    });
+    App::group(ui, |ui| {
+        let ok = study(app).is_some_and(|s| ready(s));
+        if app.fea.computing {
+            if app.tool_button(ui, "close", "Stop", "Stop the simulation; the last results stay", true, true, true).clicked() {
+                stop(app);
+            }
+        } else {
+            let tip = study(app).and_then(not_ready).unwrap_or("Mesh the parts and solve the study");
+            if app.tool_button(ui, "play", "Start", tip, true, false, ok).clicked() {
+                app.fea.start = true;
+                ui.ctx().request_repaint();
             }
         }
     });
@@ -1069,53 +1139,95 @@ fn mesh_control_ui(app: &mut App, ui: &mut Ui, id: u64) {
     faces_row(app, ui, id);
 }
 
-fn results_ui(app: &mut App, ui: &mut Ui) {
+/// The Start simulation button with what the solve will take, or the running solve's progress and Stop.
+fn start_ui(app: &mut App, ui: &mut Ui) {
+    let Some(s) = study(app).cloned() else { return };
     if app.fea.computing {
         let (what, f) = app.fea.progress.lock().unwrap().clone();
         ui.horizontal(|ui| {
             ui.spinner();
             ui.label(RichText::new(format!("{what}…")).size(12.5));
+            if let Some((t0, est)) = app.fea.job_clock {
+                let t = t0.elapsed().as_secs_f64();
+                let left = if est > t { format!(" · about {} left", fmt_secs(est - t)) } else { String::new() };
+                ui.label(RichText::new(format!("{}{left}", fmt_secs(t))).color(theme::muted()).size(12.0));
+            }
         });
         if f > 0.0 {
             ui.add(egui::ProgressBar::new(f).desired_height(6.0));
         }
-    }
-    if let Some((mk, n)) = app.fea.big.filter(|_| !app.fea.computing) {
-        ui.horizontal_wrapped(|ui| {
-            ui.add(icons::image("warning", 14.0).tint(theme::error_soft()));
-            ui.label(
-                RichText::new(format!(
-                    "This mesh would have about {} unknowns: solving it could take very long or run out of memory. Use a bigger element size, or mesh it anyway.",
-                    fmt_count(n)
-                ))
-                .color(theme::error_soft())
-                .size(12.0),
-            );
-        });
-        if ui.button("Mesh anyway").clicked() {
-            app.fea.allowed_big = Some(mk);
-            app.fea.key = 0;
+        if ui.add_sized([ui.available_width(), 26.0], egui::Button::new("Stop")).on_hover_text("Stop the simulation; the last results stay").clicked() {
+            stop(app);
         }
+        ui.add_space(4.0);
         return;
     }
+    let input = study_input(app, &s);
+    if input.tris.is_empty() {
+        return;
+    }
+    let why = not_ready(&s);
+    let c = estimate(app, &s, &input);
+    let big = c.dof > BIG_MESH || ram().is_some_and(|r| c.bytes > 0.7 * r);
+    let up_to_date = app.fea.key == app.fea.now_key && (app.fea.outcome.is_some() || app.fea.error.is_some());
+    let label = if up_to_date { "Run again" } else { "Start simulation" };
+    // green like Finish sketch while there is something new to solve
+    let button = if up_to_date || why.is_some() {
+        egui::Button::image_and_text(icons::image("play", 14.0).tint(theme::text()), RichText::new(label).size(12.5))
+    } else {
+        egui::Button::image_and_text(icons::image("play", 14.0).tint(Color32::WHITE), RichText::new(label).color(Color32::WHITE).strong().size(12.5)).fill(theme::finish())
+    };
+    let r = ui.add_enabled(why.is_none(), button.min_size(egui::vec2(ui.available_width(), 28.0)));
+    let r = match why {
+        Some(w) => r.on_disabled_hover_text(w),
+        None => r.on_hover_text("Mesh the parts and solve the study"),
+    };
+    if r.clicked() {
+        app.fea.start = true;
+        ui.ctx().request_repaint();
+    }
+    match why {
+        Some(w) => {
+            ui.label(RichText::new(w).color(theme::muted()).size(12.0));
+        }
+        None => {
+            let col = if big { theme::error_soft() } else { theme::muted() };
+            ui.horizontal_wrapped(|ui| {
+                if big {
+                    ui.add(icons::image("warning", 14.0).tint(theme::error_soft()));
+                }
+                ui.label(RichText::new(format!("About {} of memory and {} ({} unknowns)", fmt_bytes(c.bytes), fmt_secs(c.secs), fmt_count(c.dof))).color(col).size(12.0))
+                    .on_hover_text(
+                        "A rough estimate from the number of unknowns (3 per node), before meshing from the element size. \
+                         The time adjusts to this computer after each run; transient runs take longer with more time steps",
+                    );
+            });
+            if let Some(r) = ram().filter(|r| c.bytes > 0.7 * r) {
+                ui.label(RichText::new(format!("This computer has {} of memory: the solve may run out of it. Use a bigger element size.", fmt_bytes(r))).color(theme::error_soft()).size(12.0));
+            }
+        }
+    }
+    ui.add_space(4.0);
+}
+
+fn results_ui(app: &mut App, ui: &mut Ui) {
+    start_ui(app, ui);
     if let Some(e) = app.fea.error.as_ref().filter(|_| !app.fea.computing) {
         ui.label(RichText::new(e).color(theme::error_soft()).size(12.5));
         return;
     }
     let Some(o) = app.fea.outcome.clone() else {
-        if !app.fea.computing {
-            let text = match study(app).map(|s| s.analysis) {
-                Some(Analysis::Transient) => "Results appear here once the part is loaded.",
-                _ => "Results appear here once the part is held and loaded.",
-            };
-            ui.label(RichText::new(text).color(theme::muted()).size(12.0));
-        }
         return;
     };
-    // while a change is being solved, the numbers below are the previous result's
-    let stale = app.fea.computing;
+    // after a change (and while it is being solved) the numbers below are the previous result's
+    let stale = app.fea.computing || app.fea.key != app.fea.now_key;
     if stale {
-        ui.label(RichText::new("The numbers below are from before your last change.").color(theme::muted()).italics().size(12.0));
+        let text = if app.fea.computing {
+            "The numbers below are from before your last change."
+        } else {
+            "The numbers below are from before your last change: start the simulation to update them."
+        };
+        ui.label(RichText::new(text).color(theme::muted()).italics().size(12.0));
     }
     for w in &o.warnings {
         ui.horizontal_wrapped(|ui| {

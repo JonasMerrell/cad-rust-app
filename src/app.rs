@@ -2884,9 +2884,9 @@ impl App {
             crate::pcb_ui::hint(self)
         } else if let crate::workspace::Tab::Sim(_) = self.tab {
             if crate::fea_ui::study(self).is_some_and(|s| s.mode == crate::fea::SimMode::Advanced) {
-                "Add boundary conditions and periodic pairs, click their faces, then read the results · hover for values".to_string()
+                "Add boundary conditions and periodic pairs, click their faces, then press Start simulation · hover for values".to_string()
             } else {
-                "Add supports and loads, click their faces, then read the results · Space animates, hover for values".to_string()
+                "Add supports and loads, click their faces, then press Start simulation · Space animates, hover for values".to_string()
             }
         } else if let Some(s) = &self.sketch {
             crate::sketcher::status_text(self, s)
