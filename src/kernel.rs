@@ -2559,7 +2559,12 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
     for (fi, face) in unique_faces(shape).into_iter().enumerate() {
         let mut loc = ffi::top_loc::Location_new();
         let th = ffi::b_rep::BRep_Tool_Triangulation(&face.inner, loc.pin_mut());
-        let Ok(tri) = ffi::poly::Handle_Poly_Triangulation_Get(&th) else { continue };
+        let Ok(tri) = ffi::poly::Handle_Poly_Triangulation_Get(&th) else {
+            // keep `faces` indexed like `unique_faces` (tri_face and face picking rely on it)
+            let g = face_geom(&face);
+            out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None });
+            continue;
+        };
         let trsf = ffi::top_loc::TopLoc_Location_Transformation(&loc);
         let base = (out.positions.len() / 3) as u32;
         let nn = tri.NbNodes();
