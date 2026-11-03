@@ -37,6 +37,53 @@ export_step(body, "body.step");
 `examples/zerotorque/parts.rhai` builds a putter head, a hosel plug and its foam core this way, and
 `examples/zerotorque/regions.rhai` runs the 2D region checks.
 
+## Parametric documents
+
+The shape functions below give finished solids: they export as STEP or STL, but a document can't
+edit them. To build something to open and keep editing in the editor, have the script build a
+Part Studio's feature tree instead. `new_document()` starts one (or `open_document(path)` loads a
+saved `.json`), and its functions add the same features the editor and the MCP tools do, so the
+saved file opens with every variable, sketch dimension and feature parameter editable:
+
+```rhai
+let doc = new_document();
+doc.variable("w", 60);                       // document variables, editable in the editor
+doc.variable("t", 8);
+let base = doc.sketch("top", "Plate");       // top, front, right, a face ref or a plane feature id
+base.rect([0, 0], "w", "w * 2 / 3");         // a centred rectangle, its width and height dimensioned
+doc.extrude(base, "t");
+let holes = doc.sketch(doc.faces(#{normal: [0, 0, 1]})[0], "Holes");
+for x in [-20, 20] { holes.circle([x, 0], 6); }   // diameter dimensioned
+doc.extrude(holes, 10, #{op: "remove", end: "through_all"});
+// round the four vertical corners
+doc.fillet(doc.edges().filter(|e| e.type == "line" && e.start[0] == e.end[0] && e.start[1] == e.end[1]), 3);
+doc.save("plate.json");                      // open it with `rcad plate.json`
+doc.export_file("plate.step");
+```
+
+| | |
+|---|---|
+| `new_document()`, `open_document(path)`, `d.save(path)` | the document (`save` writes every tab, like `save_document`) |
+| `d.variable(name, value)` | create or change a variable (a number or an expression) |
+| `d.sketch(plane[, name])` | a new sketch; `plane` is `"top"`, `"front"`, `"right"`, a face from `d.faces()` (or its `ref`) or a plane feature's id |
+| `sk.rect(center, w, h)`, `sk.circle(center, diameter)` | dimensioned rectangle and circle; sizes are numbers or expressions such as `"w / 2"` |
+| `sk.rect_corners(a, b)`, `sk.polygon(points)`, `sk.arc(center, start, end)` | dimensioned as drawn (sides, radius) |
+| `sk.line(a, b)`, `sk.polyline(points, closed)` | undimensioned |
+| `sk.add(item)` | any `sketch_add` item, e.g. `#{type: "center_rect", center: [0, 0], corner: [10, 5], dims: #{width: "a"}}` (see AGENTS.md) |
+| `sk.constrain(c or [c, …])`, `sk.info()`, `sk.regions()`, `sk.id` | `sketch_constrain` constraints by point and curve ids (`add` returns them); points, curves, degrees of freedom; region refs |
+| `d.extrude(profiles, depth[, opts])` | `profiles`: a sketch (all its regions), a region ref or an array; `opts`: `op` (`new`, `add`, `remove`, `intersect`; by default `new` for the first part and `add` after), `end`, `draft`, … |
+| `d.revolve(profiles, axis, angle[, opts])` | `axis`: `"x"`, `"y"`, `"z"` or a ref |
+| `d.fillet(edges, r)`, `d.chamfer(edges, dist)`, `d.shell(faces, t)` | edges and faces from `d.edges()` / `d.faces()` (or their refs) |
+| `d.feature(kind, params[, name])`, `d.edit(id, params)` | any feature kind with `add_feature`'s params; change a feature's params |
+| `d.faces([filter])`, `d.edges([filter])` | `list_geometry` entries (`ref`, `normal`, `center`, `length_mm`, …); filter by `body`, `box`, `normal`, `planar` |
+| `d.parts()`, `d.describe()` | parts with volume and bounding box; the whole feature tree |
+| `d.export_file(path)`, `d.render(path[, view])` | STEP, IGES, STL or OBJ by extension; a PNG |
+| `d.call(tool, args)` | any MCP tool by name (assemblies, drawings, CAM, …), returning its result |
+
+Feature functions return the new feature's id. A feature that fails to build is taken out again and
+throws, so `try`/`catch` can try another size. Values are in the document's units (mm by default) and
+can be expressions using its variables.
+
 ## Shapes
 
 | function | result |

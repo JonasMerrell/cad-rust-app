@@ -922,6 +922,7 @@ pub fn register(e: &mut Engine) {
 /// for scripts the user runs themselves (`rcad script`).
 pub fn register_io(e: &mut Engine) {
     register_files(e);
+    crate::script_doc::register(e);
     crate::script_num::register_render(e);
 }
 

@@ -76,6 +76,7 @@ mod rcnc;
 mod render;
 mod script;
 mod script_api;
+mod script_doc;
 mod script_num;
 mod script_ui;
 mod sketch;

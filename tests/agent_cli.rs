@@ -172,3 +172,86 @@ fn failed_cam_op_adds_nothing() {
     assert!(lines[4]["error"].as_str().unwrap().contains("no sketch"), "{}", lines[4]);
     assert_eq!(lines[5]["result"]["operations"], json!([]), "{}", lines[5]);
 }
+
+/// A Rhai script builds a feature tree, not baked solids: the saved document has the variables,
+/// dimensioned sketches and features, and changing a variable resizes the part when it reopens.
+#[test]
+fn script_builds_an_editable_feature_tree() {
+    let dir = scratch("script-doc");
+    std::fs::write(
+        dir.join("plate.rhai"),
+        r#"
+let doc = new_document();
+doc.variable("w", 60);
+doc.variable("t", 8);
+let base = doc.sketch("top", "Plate");
+base.rect([0, 0], "w", 40);
+doc.extrude(base, "t");
+let holes = doc.sketch(doc.faces(#{normal: [0, 0, 1]})[0], "Holes");
+for x in [-20, 20] { holes.circle([x, 0], 6); }
+doc.extrude(holes, 10, #{op: "remove", end: "through_all"});
+doc.fillet(doc.edges().filter(|e| e.type == "line" && e.start[0] == e.end[0] && e.start[1] == e.end[1]), 3);
+let failed = false;
+try { doc.fillet(doc.edges().filter(|e| e.type == "line"), 50); } catch { failed = true; }
+doc.save("plate.json");
+doc.export_file("plate.step");
+doc.render("plate.png", "iso");
+#{parts: doc.parts(), failed: failed, features: doc.describe().features.len()}
+"#,
+    )
+    .unwrap();
+    let o = Command::new(exe()).args(["script", "plate.rhai"]).current_dir(&dir).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let out: Value = serde_json::from_str(String::from_utf8_lossy(&o.stdout).lines().last().unwrap()).unwrap();
+    // the too-big fillet threw and was taken out again
+    assert_eq!(out["failed"], json!(true));
+    assert_eq!(out["features"], json!(5));
+    let vol = out["parts"][0]["volume_mm3"].as_f64().unwrap();
+    let hole = std::f64::consts::PI * 9.0 * 8.0;
+    let corners = 4.0 * (9.0 - std::f64::consts::PI * 9.0 / 4.0) * 8.0;
+    assert!((vol - (60.0 * 40.0 * 8.0 - 2.0 * hole - corners)).abs() < 1.0, "{vol}");
+
+    assert!(dir.join("plate.step").exists() && dir.join("plate.png").exists());
+    let saved = std::fs::read_to_string(dir.join("plate.json")).unwrap();
+    for want in ["\"Plate\"", "\"Holes\"", "\"expr\": \"w\"", "\"depth\": \"t\"", "\"diameter\"", "Fillet"] {
+        assert!(saved.contains(want) || saved.replace(' ', "").contains(&want.replace(' ', "")), "saved document lacks {want}");
+    }
+
+    // editing the variable resizes the reopened part, as it would in the editor
+    std::fs::write(dir.join("wider.rhai"), "let d = open_document(\"plate.json\"); d.variable(\"w\", 80); d.parts()[0].bbox_mm").unwrap();
+    let o = Command::new(exe()).args(["script", "wider.rhai"]).current_dir(&dir).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
+    let bbox: Value = serde_json::from_str(String::from_utf8_lossy(&o.stdout).lines().last().unwrap()).unwrap();
+    let w = bbox[1][0].as_f64().unwrap() - bbox[0][0].as_f64().unwrap();
+    assert!((w - 80.0).abs() < 1e-3, "{bbox}");
+}
+
+/// sketch_add `dims` stores driving dimensions, and their expressions resize the geometry.
+#[test]
+fn sketch_add_dims_drive_the_geometry() {
+    let dir = scratch("dims");
+    let steps = json!([
+        {"tool": "set_variable", "args": {"name": "d", "expr": "12"}},
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [
+            {"type": "center_rect", "center": [0, 0], "corner": [10, 10], "dims": {"width": "50", "height": "d * 2"}},
+            {"type": "circle", "center": [0, 0], "radius": 3, "dims": {"diameter": "d"}},
+            {"type": "line", "from": [30, 0], "to": [40, 0], "dims": true, "construction": true}
+        ]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 5}}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "ellipse", "center": [0, 0], "major_end": [5, 0], "minor_radius": 2, "dims": true}]}},
+        {"tool": "save_document", "args": {"path": "dims.json"}}
+    ]);
+    std::fs::write(dir.join("dims-run.json"), steps.to_string()).unwrap();
+    let o = Command::new(exe()).args(["run", "dims-run.json"]).current_dir(&dir).output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert!(lines[2].get("error").is_none(), "{}", lines[2]);
+    assert_eq!(lines[2]["result"]["created"][0]["dims"], json!(["width 50", "height d * 2"]));
+    assert_eq!(lines[2]["result"]["created"][2]["dims"], json!(["length 10"]));
+    let part = &lines[3]["result"]["parts"][0];
+    assert_eq!(part["bbox_mm"], json!([[-25.0, -12.0, 0.0], [25.0, 12.0, 5.0]]), "{part}");
+    let vol = 50.0 * 24.0 * 5.0 - std::f64::consts::PI * 36.0 * 5.0;
+    assert!((part["volume_mm3"].as_f64().unwrap() - vol).abs() < 0.5, "{part}");
+    // an item without dimensionable sizes says which ones have them
+    assert!(lines[4]["error"].as_str().unwrap().contains("ellipse takes no dims"), "{}", lines[4]);
+}

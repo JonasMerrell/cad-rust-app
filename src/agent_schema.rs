@@ -116,6 +116,11 @@ fn obj(props: Value, req: &[&str], desc: &str) -> Value {
     json!({"type": "object", "properties": props, "required": req, "additionalProperties": false, "description": desc})
 }
 
+/// A size given as a number or an expression in document units.
+fn size_expr(what: &str) -> Value {
+    json!({"type": ["number", "string"], "description": format!("{what}: a number or an expression (may use variables)")})
+}
+
 /// The persistent name a face or edge ref carries once a feature stored it (as describe shows it).
 fn topo_name() -> Value {
     arr(
@@ -255,7 +260,15 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
                 "major_end": xy("end of the ellipse's major axis"), "minor_radius": json!({"type": "number", "exclusiveMinimum": 0, "description": "ellipse minor radius"}),
                 "start_angle": t("number", "elliptical arc start, degrees from the major axis"), "end_angle": t("number", "elliptical arc end, degrees"),
                 "sides": json!({"type": "integer", "minimum": 3, "description": "polygon sides (default 6)"}),
-                "text": t("string", "text to write"), "height": json!({"type": "number", "exclusiveMinimum": 0, "description": "text height, mm"})
+                "text": t("string", "text to write"), "height": json!({"type": "number", "exclusiveMinimum": 0, "description": "text height, mm"}),
+                "dims": json!({"oneOf": [
+                    t("boolean", "true: dimension the item's sizes as drawn"),
+                    json!({"type": "object", "additionalProperties": false, "description": "an expression per size, which also resizes the item", "properties": {
+                        "length": size_expr("line length"), "width": size_expr("rect width"), "height": size_expr("rect height"),
+                        "diameter": size_expr("circle diameter"), "radius": size_expr("circle or arc radius"),
+                        "lengths": json!({"type": "array", "items": {"type": ["number", "string", "null"]}, "description": "polyline side lengths in order (null skips one)"})
+                    }})
+                ], "description": "driving dimensions, editable in the editor: line {length}, rect/center_rect {width, height}, circle {diameter or radius}, arc {radius}, polyline {lengths}"})
             }}),
             "items to add",
         ),

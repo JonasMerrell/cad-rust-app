@@ -36,6 +36,14 @@ the program), which Claude Code picks up when it runs in that folder; it starts
   `{"kind": "edge", "point": [x, y, z]}`. `list_geometry` returns ready-made
   refs for every face and edge; `sketch_info` returns refs for every region.
 - `render` returns a PNG, so agents can check their work visually.
+- Everything the tools make is a feature in the Part Studio's feature tree, so a
+  saved document opens in the editor with each sketch and feature editable. To
+  make sizes editable too, set variables and dimension sketches: give a
+  `sketch_add` item `dims` (`true` dimensions it as drawn, or expressions such
+  as `{"width": "w", "height": "h"}` that also resize it), or add dimensions
+  with `sketch_constrain`. Feature values (`depth`, `radius`, …) are
+  expressions, so `"t"` ties a depth to a variable. Prefer native features to
+  `define_custom_feature` and `import_file`, which are one entry each.
 - Sketch points at the same position are merged automatically, so chains of
   items connect without extra constraints.
 - Coplanar faces and collinear edges are merged after each operation, and
