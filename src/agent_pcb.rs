@@ -139,7 +139,7 @@ impl Session {
         json!({
             "pcb": pi,
             "name": p.name,
-            "board": {"size": [round(size[0]), round(size[1])], "thickness": p.board.thickness, "tracks": p.board.tracks.len(), "vias": p.board.vias.len(), "zones": p.board.zones.len()},
+            "board": {"size": [round(size[0]), round(size[1])], "thickness": p.board.thickness, "layers": p.board.copper_layers().len(), "tracks": p.board.tracks.len(), "vias": p.board.vias.len(), "zones": p.board.zones.len()},
             "parts": p.parts.len(),
             "nets": nl.nets.len(),
             "unrouted": air.len(),

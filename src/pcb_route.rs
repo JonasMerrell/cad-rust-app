@@ -30,6 +30,8 @@ struct Grid {
     maps: Vec<Map>,
     /// The board's copper layers, top first (the maps' layer order).
     layers: Vec<Layer>,
+    /// Layers with a pour (planes): routing there costs more, so signals keep to the others.
+    plane: Vec<bool>,
 }
 
 impl Grid {
@@ -338,7 +340,8 @@ fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)
     }
     let layers = p.board.copper_layers();
     let nl_ = layers.len();
-    let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: vec![vec![FREE; n]; nl_] }).collect(), layers };
+    let plane = if nl_ > 2 { layers.iter().map(|l| p.board.zones.iter().any(|z| z.layer == *l)).collect() } else { vec![false; nl_] };
+    let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: vec![vec![FREE; n]; nl_] }).collect(), layers, plane };
     edge_walls(&mut grid, &p.board.outline, r.edge);
     let ids: HashMap<&str, i32> = nl.nets.iter().enumerate().map(|(i, n)| (n.name.as_str(), i as i32)).collect();
     let mut cl: HashMap<&str, f64> = HashMap::new();
@@ -454,6 +457,9 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
             }
             if pd.is_some_and(|d| d != (*dx, *dy)) {
                 c += 1.5;
+            }
+            if grid.plane[l] {
+                c *= 4.0;
             }
             let s2 = st(x2, y2, l);
             let g2 = g0 + c;
@@ -1003,7 +1009,7 @@ mod tests {
         for outline in [circle, l] {
             let (nx, ny, g) = (160, 160, 0.25);
             let hs = [0.125, 0.25, 0.3];
-            let mut grid = Grid { lo: [0.0, 0.0], g, nx, ny, maps: hs.iter().map(|&h| Map { h, c: 0.2, via: false, m: vec![vec![FREE; nx * ny], vec![FREE; nx * ny]] }).collect(), layers: vec![Layer::Top, Layer::Bottom] };
+            let mut grid = Grid { lo: [0.0, 0.0], g, nx, ny, maps: hs.iter().map(|&h| Map { h, c: 0.2, via: false, m: vec![vec![FREE; nx * ny], vec![FREE; nx * ny]] }).collect(), layers: vec![Layer::Top, Layer::Bottom], plane: vec![false; 2] };
             edge_walls(&mut grid, &outline, 0.3);
             for y in 0..ny {
                 for x in 0..nx {
