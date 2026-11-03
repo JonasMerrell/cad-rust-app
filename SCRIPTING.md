@@ -78,7 +78,7 @@ doc.export_file("plate.step");
 | `d.faces([filter])`, `d.edges([filter])` | `list_geometry` entries (`ref`, `normal`, `center`, `length_mm`, …); filter by `body`, `box`, `normal`, `planar` |
 | `d.parts()`, `d.describe()` | parts with volume and bounding box; the whole feature tree |
 | `d.export_file(path)`, `d.render(path[, view])` | STEP, IGES, STL or OBJ by extension; a PNG |
-| `d.call(tool, args)` | any MCP tool by name (assemblies, drawings, CAM, …), returning its result |
+| `d.tool(name, args)` | any MCP tool by name (assemblies, drawings, CAM, …), returning its result (Rhai reserves `call` for function pointers) |
 
 Feature functions return the new feature's id. A feature that fails to build is taken out again and
 throws, so `try`/`catch` can try another size. Values are in the document's units (mm by default) and

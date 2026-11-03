@@ -196,7 +196,7 @@ try { doc.fillet(doc.edges().filter(|e| e.type == "line"), 50); } catch { failed
 doc.save("plate.json");
 doc.export_file("plate.step");
 doc.render("plate.png", "iso");
-#{parts: doc.parts(), failed: failed, features: doc.describe().features.len()}
+#{parts: doc.parts(), failed: failed, features: doc.describe().features.len(), tool: doc.tool("feature_defaults", #{kind: "hole"}).kind}
 "#,
     )
     .unwrap();
@@ -206,6 +206,8 @@ doc.render("plate.png", "iso");
     // the too-big fillet threw and was taken out again
     assert_eq!(out["failed"], json!(true));
     assert_eq!(out["features"], json!(5));
+    // any MCP tool through `tool` (Rhai keeps `call` for function pointers)
+    assert_eq!(out["tool"], json!("hole"));
     let vol = out["parts"][0]["volume_mm3"].as_f64().unwrap();
     let hole = std::f64::consts::PI * 9.0 * 8.0;
     let corners = 4.0 * (9.0 - std::f64::consts::PI * 9.0 / 4.0) * 8.0;

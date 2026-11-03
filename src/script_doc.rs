@@ -157,9 +157,10 @@ pub fn register(e: &mut Engine) {
         d.call("open_document", json!({"path": path}))?;
         Ok(d)
     });
-    // any MCP tool, by name, with its arguments as a map
-    e.register_fn("call", |d: &mut Doc, tool: &str, args: Map| -> Res<Dynamic> { Ok(from_json(&d.call(tool, arg(&Dynamic::from_map(args)))?)) });
-    e.register_fn("call", |d: &mut Doc, tool: &str| -> Res<Dynamic> { Ok(from_json(&d.call(tool, json!({}))?)) });
+    // any MCP tool, by name, with its arguments as a map. Rhai keeps `call` for function pointers, so
+    // `d.call(…)` never reaches a registered function: the name is `tool`.
+    e.register_fn("tool", |d: &mut Doc, tool: &str, args: Map| -> Res<Dynamic> { Ok(from_json(&d.call(tool, arg(&Dynamic::from_map(args)))?)) });
+    e.register_fn("tool", |d: &mut Doc, tool: &str| -> Res<Dynamic> { Ok(from_json(&d.call(tool, json!({}))?)) });
     e.register_fn("describe", |d: &mut Doc| -> Res<Dynamic> { Ok(from_json(&d.call("describe", json!({}))?)) });
     e.register_fn("parts", |d: &mut Doc| -> Res<Dynamic> { Ok(from_json(&d.call("describe", json!({}))?["parts"])) });
     e.register_fn("variable", |d: &mut Doc, name: &str, v: Dynamic| -> Res<()> {
