@@ -1191,7 +1191,12 @@ fn item_dims(sk: &mut Sketch, ty: &str, out: &Value, d: &Value, env: &crate::exp
     wanted.sort_by_key(|(k, _)| allowed.iter().position(|a| a == k));
     let expr = |v: &Option<Value>, mm: f64| -> R<String> {
         let e = match v {
-            None | Some(Value::Bool(true)) => crate::expr::trim(mm / env.units.scale(), 4),
+            // as drawn: 4 decimals when that is the drawn size, else enough digits that solving
+            // the sketch doesn't move the geometry (a size taken from imported geometry, say)
+            None | Some(Value::Bool(true)) => {
+                let v = mm / env.units.scale();
+                (4..=12).map(|d| crate::expr::trim(v, d)).find(|t| t.parse::<f64>().is_ok_and(|x| (x - v).abs() <= 1e-10 * v.abs().max(1.0))).unwrap_or_else(|| format!("{v}"))
+            }
             Some(Value::String(s)) => s.clone(),
             Some(Value::Number(n)) => n.to_string(),
             Some(o) => return Err(format!("a dimension is a number or an expression, got {o}")),

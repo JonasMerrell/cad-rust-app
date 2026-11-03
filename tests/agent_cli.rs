@@ -238,7 +238,8 @@ fn sketch_add_dims_drive_the_geometry() {
         {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [
             {"type": "center_rect", "center": [0, 0], "corner": [10, 10], "dims": {"width": "50", "height": "d * 2"}},
             {"type": "circle", "center": [0, 0], "radius": 3, "dims": {"diameter": "d"}},
-            {"type": "line", "from": [30, 0], "to": [40, 0], "dims": true, "construction": true}
+            {"type": "line", "from": [30, 0], "to": [40, 0], "dims": true, "construction": true},
+            {"type": "line", "from": [30, 5], "to": [42.819394117, 5], "dims": true, "construction": true}
         ]}},
         {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 5}}},
         {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "ellipse", "center": [0, 0], "major_end": [5, 0], "minor_radius": 2, "dims": true}]}},
@@ -250,6 +251,8 @@ fn sketch_add_dims_drive_the_geometry() {
     assert!(lines[2].get("error").is_none(), "{}", lines[2]);
     assert_eq!(lines[2]["result"]["created"][0]["dims"], json!(["width 50", "height d * 2"]));
     assert_eq!(lines[2]["result"]["created"][2]["dims"], json!(["length 10"]));
+    // a size that isn't round (from imported geometry, say) keeps every digit, so solving doesn't move it
+    assert_eq!(lines[2]["result"]["created"][3]["dims"], json!(["length 12.819394117"]));
     let part = &lines[3]["result"]["parts"][0];
     assert_eq!(part["bbox_mm"], json!([[-25.0, -12.0, 0.0], [25.0, 12.0, 5.0]]), "{part}");
     let vol = 50.0 * 24.0 * 5.0 - std::f64::consts::PI * 36.0 * 5.0;
