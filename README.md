@@ -212,6 +212,12 @@ renders, and each request can be undone from the panel. It connects through the 
 your computer (so requests use your Claude plan), an Anthropic API key, or a Claude Console account
 signed in with the `ant` CLI. A key is kept in `~/.config/cad-rust-app/claude.json`, readable only by you.
 
+To keep costs down, Opus (or Fable) plans by default and cheaper models do the work: it looks at the
+document, writes each change as a task with exact values, names and refs, and hands it to Sonnet or
+Haiku, which make the edits and report back. The panel shows each handed-off task, the worker's notes
+and the tokens each model used. Turn it off under "Opus plans, Sonnet and Haiku do the work" in the
+panel's settings to have the chosen model do everything itself.
+
 ## The robot arm example
 
 The arm at the top of this page is a full design done in rCAD: a 5-axis desktop arm with a

@@ -315,6 +315,12 @@ fn settings(app: &mut App, ui: &mut Ui) {
         });
     });
     muted(ui, "Higher effort thinks longer and costs more; high suits most modelling.");
+    if !crate::claude::WORKERS.iter().any(|w| w.1 == c.settings.model) {
+        ui.add_space(6.0);
+        let name = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1.trim_start_matches("Claude ")).unwrap_or("This model").to_string();
+        changed |= ui.checkbox(&mut c.settings.delegate, format!("{name} plans, Sonnet and Haiku do the work")).changed();
+        muted(ui, &format!("{name} looks at the document and writes exact steps; cheaper models make the edits. Costs much less than {name} doing every tool call."));
+    }
     if changed {
         let _ = crate::claude::save_settings(&c.settings);
     }
@@ -363,7 +369,8 @@ fn chat(app: &mut App, ui: &mut Ui) {
                 revert = ui.small_button("Undo last request").on_hover_text("Put the document back the way it was before Claude's last request").clicked();
             } else {
                 let model = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or("");
-                ui.label(RichText::new(format!("{model} · {}", c.settings.effort)).size(11.0).color(theme::muted()));
+                let workers = if c.settings.delegates() { " + Sonnet/Haiku" } else { "" };
+                ui.label(RichText::new(format!("{model}{workers} · {}", c.settings.effort)).size(11.0).color(theme::muted()));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if c.busy {
