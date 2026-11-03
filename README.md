@@ -138,7 +138,8 @@ crash detection, and post G-code for GRBL, LinuxCNC, Fanuc, Mach3 or rcnc.
 <img alt="Von Mises stress on a loaded aluminium bracket, with the legend, the mesh settings and the results summary" src="docs/screenshots/fea-static.png" width="100%">
 
 Linear elastic analysis of a Part Studio's parts with automatic 10-node tetrahedral meshing, refined
-at holes and fillets or by your own mesh controls. Pick supports and loads on faces and run:
+at holes and fillets or by your own mesh controls. Pick supports and loads on faces, then press
+**Start simulation** (it shows the unknowns, memory and time the solve should take first):
 
 - **Static:** von Mises stress, deflection, factor of safety and reaction forces.
 - **Modal:** natural frequencies, mode shapes and effective mass, free-free when nothing holds the part.

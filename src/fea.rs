@@ -610,6 +610,17 @@ impl Input {
         24.0 * vol / self.used_size(size).powi(3)
     }
 
+    /// How chunky the parts are: twice volume over surface area (a plate's thickness), over the cube root
+    /// of the volume. About 0.15 for a 5 mm plate, 0.33 for a cube.
+    pub fn thickness(&self) -> f64 {
+        let vol: f64 = self.tris.iter().map(|t| t[0].dot(t[1].cross(t[2])) / 6.0).sum::<f64>().abs();
+        let area: f64 = self.tris.iter().map(|t| (t[1] - t[0]).cross(t[2] - t[0]).length() / 2.0).sum();
+        if vol <= 0.0 || area <= 0.0 {
+            return 0.3;
+        }
+        2.0 * vol / area / vol.cbrt()
+    }
+
     /// Element size from the parts' volume, small enough for a quick solve. Unless the mesh is `refine`d
     /// at holes and fillets, it also shrinks for them.
     pub fn auto_size(&self, refine: bool) -> f64 {
@@ -765,6 +776,46 @@ pub fn estimate_nodes(study: &Study, input: &Input, size: f64) -> f64 {
         n += 70.0 * area / (2.0 * crate::fea_mesh::GRADING) * (1.0 / (s * s) - 1.0 / (h * h));
     }
     n
+}
+
+/// What a solve should take: unknowns, peak memory (bytes) and time (s) on a 4-core computer.
+#[derive(Clone, Copy, Debug)]
+pub struct Cost {
+    pub dof: f64,
+    pub bytes: f64,
+    pub secs: f64,
+}
+
+/// Estimate a solve's memory and time from its node count (`meshed`: the mesh is made already) and the
+/// parts' `Input::thickness`. Fitted to the sparse Cholesky solver on TET10 meshes of a 100 × 50 × 30 mm
+/// block and a 5 mm plate on 4 cores (`fea_solve::tests::cost_bench`): the factor's fill grows like
+/// n^1.47 and its time like n^2.05 in the unknowns n, and a thin plate takes about half the memory and a
+/// third of the time of a block with as many unknowns.
+pub fn estimate_cost(study: &Study, thickness: f64, nodes: f64, meshed: bool) -> Cost {
+    let n = (3.0 * nodes).max(1.0);
+    let f = n / 1e5;
+    // 0 for the plate, 1 for the block
+    let k = ((thickness - 0.149) / (0.297 - 0.149)).clamp(0.0, 1.25);
+    let (mem_k, time_k) = (0.52 + 0.48 * k, 0.31 + 0.69 * k);
+    // one factorisation, one solve with it (forward and back substitution), meshing and assembly
+    let factor = 8.85 * f.powf(2.05) * time_k;
+    let solve = 0.177 * f.powf(1.35) * mem_k.powf(0.65);
+    let setup = if meshed { 0.0 } else { 0.5 * f } + 0.4 * f;
+    let mut bytes = 1.46e9 * f.powf(1.47) * mem_k;
+    let secs = setup
+        + match (study.mode, study.analysis) {
+            (SimMode::Advanced, _) | (_, Analysis::Static) => factor + solve,
+            // shift-invert Lanczos: about 2k + 20 solves for k modes, with reorthogonalisation
+            (_, Analysis::Modal) => factor + (2.0 * study.modes.max(1) as f64 + 20.0) * solve * 1.3,
+            (_, Analysis::Transient) => {
+                let steps = study.transient.steps.clamp(10, 20000) as f64;
+                // 120 frames of the displacement are kept
+                bytes += 120.0 * n * 8.0;
+                // the lowest mode sizes the run, then each step is a solve and a few products
+                2.0 * factor + 22.0 * solve * 1.3 + steps * solve * 1.3
+            }
+        };
+    Cost { dof: n, bytes, secs }
 }
 
 /// Mesh the study's parts: as one when they share a material, part by part (bonded) when they don't.
@@ -1212,6 +1263,20 @@ pub fn fmt_time(t: f64) -> String {
 
 #[cfg(test)]
 mod tests {
+    /// The cost estimate stays near the measured solves it was fitted to (`fea_solve::tests::cost_bench`,
+    /// 4 cores): (block or plate, nodes, seconds to factor, peak bytes).
+    #[test]
+    fn cost_estimate_matches_measured_solves() {
+        let block = 2.0 * 150000.0 / 19000.0 / 150000f64.cbrt();
+        let plate = 2.0 * 25000.0 / 11500.0 / 25000f64.cbrt();
+        let s = Study::default();
+        for (th, nodes, secs, bytes) in [(block, 14595.0, 1.9, 0.44e9), (block, 50499.0, 18.6, 2.69e9), (block, 104735.0, 91.4, 7.95e9), (plate, 141489.0, 54.6, 6.47e9)] {
+            let c = estimate_cost(&s, th, nodes, true);
+            assert!((c.secs / secs - 1.0).abs() < 0.3, "{nodes} nodes: {} s, measured {secs}", c.secs);
+            assert!((c.bytes / bytes - 1.0).abs() < 0.3, "{nodes} nodes: {} GB, measured {}", c.bytes / 1e9, bytes / 1e9);
+        }
+    }
+
     use super::*;
 
     /// A 60 × 30 × 4 mm plate with a 10 mm hole in the middle, as the CAD tessellation would give it.
