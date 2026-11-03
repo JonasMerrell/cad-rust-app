@@ -214,15 +214,36 @@ pub fn erc(p: &Pcb, nl: &Netlist) -> Vec<Issue> {
                 LabelKind::Net => "Label",
                 LabelKind::Power => "Power port",
                 LabelKind::Ground => "Ground port",
+                LabelKind::Port => "Sheet port",
             };
             out.push(Issue::new("erc_labels", l.at, false, format!("{what} {} is not on a wire or pin", l.text.trim())));
         }
     }
     for (i, w) in p.wires.iter().enumerate() {
         for end in [w.a, w.b] {
-            let joined = on_wire(end, Some(i)) || on_pin(end) || p.labels.iter().any(|l| pcb::dist(l.at, end) < EPS) || nc_at(end);
+            let on_entry = p.sheet_symbols.iter().any(|s| (0..s.entries.len()).any(|k| pcb::dist(s.entry_at(k), end) < EPS));
+            let joined = on_wire(end, Some(i)) || on_pin(end) || p.labels.iter().any(|l| pcb::dist(l.at, end) < EPS) || nc_at(end) || on_entry;
             if !joined {
                 out.push(Issue::new("erc_labels", end, false, "A wire ends on nothing".into()));
+            }
+        }
+    }
+    // hierarchy: ports with no way up, entries wired to nothing
+    if p.hierarchical() {
+        use crate::pcb_sheet::sheet_at;
+        for l in p.labels.iter().filter(|l| l.kind == LabelKind::Port) {
+            let k = sheet_at(l.at);
+            if p.symbol_of(k).is_none() {
+                out.push(Issue::new("erc_sheets", l.at, false, format!("Port {} on {}: the sheet has no symbol on another sheet, so the port joins nothing", l.text.trim(), p.sheet_name(k))));
+            }
+        }
+        for s in &p.sheet_symbols {
+            for (k, e) in s.entries.iter().enumerate() {
+                let at = s.entry_at(k);
+                let wired = p.wires.iter().any(|w| pcb::seg_point(w.a, w.b, at) < EPS) || on_pin(at) || p.labels.iter().any(|l| pcb::dist(l.at, at) < EPS);
+                if !wired {
+                    out.push(Issue::new("erc_sheets", at, false, format!("Entry {} of the {} symbol is not wired", e.name, p.sheet_name(s.sheet))));
+                }
             }
         }
     }

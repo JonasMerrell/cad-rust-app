@@ -22,11 +22,13 @@ pub struct OutJob {
     pub drill_map: bool,
     pub pdf: bool,
     pub odb: bool,
+    /// The BOM, pick and place and prints once more for each assembly variant.
+    pub variants: bool,
 }
 
 impl Default for OutJob {
     fn default() -> Self {
-        OutJob { gerbers: true, bom: true, cpl: true, ipc356: true, drill_map: true, pdf: true, odb: true }
+        OutJob { gerbers: true, bom: true, cpl: true, ipc356: true, drill_map: true, pdf: true, odb: true, variants: false }
     }
 }
 
@@ -35,7 +37,7 @@ impl OutJob {
         *self == OutJob::default()
     }
     /// The outputs by name, for the agent and the sidebar.
-    pub const NAMES: [(&'static str, &'static str); 7] = [
+    pub const NAMES: [(&'static str, &'static str); 8] = [
         ("gerbers", "Gerbers, drills and the X2 job file"),
         ("bom", "Bill of materials (CSV)"),
         ("cpl", "Pick and place (CSV)"),
@@ -43,6 +45,7 @@ impl OutJob {
         ("drill_map", "Drill drawing (Gerber)"),
         ("pdf", "PDF: schematic, assembly and drill drawings"),
         ("odb", "ODB++ job"),
+        ("variants", "BOM, pick and place and prints for every variant"),
     ];
     pub fn get_mut(&mut self, name: &str) -> Option<&mut bool> {
         Some(match name {
@@ -53,6 +56,7 @@ impl OutJob {
             "drill_map" => &mut self.drill_map,
             "pdf" => &mut self.pdf,
             "odb" => &mut self.odb,
+            "variants" => &mut self.variants,
             _ => return None,
         })
     }
@@ -363,7 +367,7 @@ fn gerber_of(list: &[Draw], function: &str) -> String {
 /// The assembly drawing of one side: outline, pads, silkscreen and courtyards, references
 /// (the bottom seen from below, mirrored).
 pub fn assembly(p: &Pcb, side: Layer) -> Vec<Draw> {
-    let x = prep(p);
+    let x = prep(&p.as_variant(&p.variant));
     let mirror = side == Layer::Bottom;
     let (lo, hi) = x.p.board.bbox();
     let mx = |q: P| if mirror { [lo[0] + hi[0] - q[0], q[1]] } else { q };
@@ -398,10 +402,22 @@ pub fn assembly(p: &Pcb, side: Layer) -> Vec<Draw> {
         let c = mx(part.at);
         let h = ((b[1] - a[1]).min(b[0] - a[0]) * 0.35).clamp(0.6, 1.6);
         pcb_export::text(&mut list, &part.reference, [c[0], c[1] - h / 2.0], h, 1, 0.0, [0, 70, 160, 255], &|q| q);
+        if part.dnp {
+            // not fitted: crossed out, greyed
+            for d in &mut list {
+                d.rgba = [170, 170, 170, 255];
+            }
+            let c = court.map(|q| q);
+            list.push(Draw { rgba: [210, 40, 40, 255], prim: Prim::Seg { a: c[0], b: c[2], w: 0.15 } });
+            list.push(Draw { rgba: [210, 40, 40, 255], prim: Prim::Seg { a: c[1], b: c[3], w: 0.15 } });
+        }
         out.extend(list);
     }
     let id = |q: P| q;
-    let label = format!("{} - assembly, {} side{}", x.p.name, if mirror { "bottom" } else { "top" }, if mirror { " (seen from below)" } else { "" });
+    let mut label = format!("{} - assembly, {} side{}", x.p.name, if mirror { "bottom" } else { "top" }, if mirror { " (seen from below)" } else { "" });
+    if !p.variant.is_empty() {
+        label += &format!(", variant {}", p.variant);
+    }
     pcb_export::text(&mut out, &label, [lo[0], lo[1] - 4.0], 1.8, 0, 0.0, [20, 20, 20, 255], &id);
     out
 }
@@ -481,7 +497,13 @@ pub fn pdf(pages: &[Vec<Draw>]) -> Vec<u8> {
 /// The print set: schematic, top assembly, bottom assembly (when parts are there), drill drawing.
 pub fn prints(p: &Pcb) -> Vec<u8> {
     let nl = p.netlist();
-    let mut pages = vec![pcb_export::schematic_scene(p, &nl, None), assembly(p, Layer::Top)];
+    let sch = pcb_export::schematic_scene(p, &nl, None);
+    // a page per sheet that has anything on it
+    let mut pages: Vec<Vec<Draw>> = (0..p.sheet_count()).map(|k| crate::pcb_sheet::on_sheet(sch.clone(), k)).filter(|l| !l.is_empty()).collect();
+    if pages.is_empty() {
+        pages.push(sch);
+    }
+    pages.push(assembly(p, Layer::Top));
     if p.parts.iter().any(|q| q.bottom) {
         pages.push(assembly(p, Layer::Bottom));
     }
@@ -755,6 +777,22 @@ pub fn outputs(p: &Pcb, job: &OutJob) -> Vec<(String, Vec<u8>)> {
     }
     if job.odb {
         files.extend(odb(p));
+    }
+    if job.variants {
+        for v in &p.variants {
+            let mut q = p.clone();
+            q.variant = v.name.clone();
+            let dir: String = v.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+            if job.bom {
+                files.push((format!("assembly/{dir}/{base}-{dir}-BOM.csv"), pcb_export::bom_csv(&q).into_bytes()));
+            }
+            if job.cpl {
+                files.push((format!("assembly/{dir}/{base}-{dir}-CPL.csv"), pcb_export::cpl_csv(&q).into_bytes()));
+            }
+            if job.pdf {
+                files.push((format!("assembly/{dir}/{base}-{dir}-prints.pdf"), prints(&q)));
+            }
+        }
     }
     files
 }

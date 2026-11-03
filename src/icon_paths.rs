@@ -190,6 +190,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("pcbLabel", "M3 8h11l5 4-5 4H3zM7 12h4"),
     ("pcbPower", "M12 21V10M6 10h12M12 3l3 4H9z"),
     ("pcbGround", "M12 3v10M5 13h14M8 17h8M11 21h2"),
+    ("pcbPort", "M3 7h11l5 5-5 5H3zM6 12h6M10 9l3 3-3 3"),
     ("pcbRoute", "M4 20l6-6h6l4-4M2 19v2h2v-2zM20 9v2h2V9z"),
     ("pcbVia", "M12 4a8 8 0 1 0 0 16a8 8 0 1 0 0-16zM12 9a3 3 0 1 0 0 6a3 3 0 1 0 0-6z"),
     ("pcbZone", "M4 4h16v16H4zM4 10l6-6M4 16L16 4M8 20L20 8M14 20l6-6"),

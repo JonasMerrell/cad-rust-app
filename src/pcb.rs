@@ -48,6 +48,18 @@ pub struct Pcb {
     /// A stable id that links the tab to its "<name> 3D" Part Studio (survives renames).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub uid: String,
+    /// Schematic sheets (empty: one, "Main"). See `pcb_sheet`.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheets: Vec<crate::pcb_sheet::Sheet>,
+    /// Symbols that stand for child sheets, on their parent sheets.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub sheet_symbols: Vec<crate::pcb_sheet::SheetSym>,
+    /// Assembly variants.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub variants: Vec<crate::pcb_sheet::Variant>,
+    /// The active variant's name ("" for the base design).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub variant: String,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -87,6 +99,9 @@ pub struct Part {
     /// Left out of the circuit simulation.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub no_sim: bool,
+    /// Not fitted in the base design (variants can override).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub dnp: bool,
     /// Schematic position, quarter turns anticlockwise and mirror (about the vertical axis).
     pub sch: P,
     #[serde(default)]
@@ -116,6 +131,9 @@ pub enum LabelKind {
     Power,
     /// A ground port (the ground symbol below the point).
     Ground,
+    /// A sheet port: in a hierarchical design it meets the entry of the same name on the
+    /// sheet's symbol; in a flat one, ports of the same name on any sheet join.
+    Port,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
@@ -460,6 +478,7 @@ pub const CHECKS: &[(&str, &str)] = &[
     ("erc_nc", "No-connect marks on connected pins"),
     ("erc_labels", "Labels and wire ends that join nothing"),
     ("erc_names", "Nets that carry two different label names"),
+    ("erc_sheets", "Sheet ports with no symbol above, sheet entries wired to nothing"),
     ("erc_refs", "Duplicate references"),
     ("erc_footprint", "Unknown footprints"),
 ];
@@ -1095,7 +1114,13 @@ impl Pcb {
     pub fn netlist(&self) -> Netlist {
         let pins = self.sch_pins();
         let (nw, np, nl) = (self.wires.len(), pins.len(), self.labels.len());
-        let mut d = Dsu::new(nw + np + nl);
+        // sheet entries: (point on the parent, child sheet, name)
+        let entries: Vec<(P, usize, String)> = self.sheet_symbols.iter().flat_map(|s| (0..s.entries.len()).map(move |i| (s.entry_at(i), s.sheet, s.entries[i].name.trim().to_string()))).collect();
+        let ne = entries.len();
+        let hier = self.hierarchical();
+        let sheet = crate::pcb_sheet::sheet_at;
+        let supply = self.supply_names();
+        let mut d = Dsu::new(nw + np + nl + ne);
         let on_wire = |w: &Wire, p: P| seg_point(w.a, w.b, p) < EPS;
         for i in 0..nw {
             for j in i + 1..nw {
@@ -1129,9 +1154,33 @@ impl Pcb {
                 }
             }
             for (j, m) in self.labels.iter().enumerate().skip(k + 1) {
-                // labels name nets by their trimmed text; blank ones join nothing
-                if !l.text.trim().is_empty() && m.text.trim() == l.text.trim() {
+                // labels name nets by their trimmed text; blank ones join nothing. In a
+                // hierarchical design net labels and ports only join on their own sheet.
+                if l.text.trim().is_empty() || m.text.trim() != l.text.trim() {
+                    continue;
+                }
+                let global = |x: &Label| matches!(x.kind, LabelKind::Power | LabelKind::Ground) || (x.kind == LabelKind::Net && supply.contains(x.text.trim()));
+                let join = !hier || (global(l) && global(m)) || (!global(l) && !global(m) && sheet(l.at) == sheet(m.at));
+                if join {
                     d.join(nw + np + k, nw + np + j);
+                }
+            }
+        }
+        for (e, (at, child, name)) in entries.iter().enumerate() {
+            let ei = nw + np + nl + e;
+            for (i, w) in self.wires.iter().enumerate() {
+                if on_wire(w, *at) {
+                    d.join(ei, i);
+                }
+            }
+            for (j, p) in pins.iter().enumerate() {
+                if dist(*at, p.at) < EPS {
+                    d.join(ei, nw + j);
+                }
+            }
+            for (k, l) in self.labels.iter().enumerate() {
+                if dist(*at, l.at) < EPS || (l.kind == LabelKind::Port && sheet(l.at) == *child && !name.is_empty() && l.text.trim() == name) {
+                    d.join(ei, nw + np + k);
                 }
             }
         }
@@ -1149,13 +1198,23 @@ impl Pcb {
             };
             groups[gi].1.pins.push((p.part, p.num.clone()));
         }
+        // a net's name: a supply port's, else a net label's on the highest sheet, else a port's
+        let rank = |l: &Label| -> (u8, usize) {
+            match l.kind {
+                LabelKind::Power | LabelKind::Ground => (0, 0),
+                LabelKind::Net => (1, sheet(l.at)),
+                LabelKind::Port => (2, sheet(l.at)),
+            }
+        };
+        let mut best: Vec<Option<(u8, usize)>> = vec![None; groups.len()];
         for (k, l) in self.labels.iter().enumerate() {
             let root = d.find(nw + np + k);
-            if let Some(g) = groups.iter_mut().find(|g| g.0 == root) {
-                let better = g.1.name.is_empty() || (l.kind != LabelKind::Net && !g.1.power);
-                if better && !l.text.trim().is_empty() {
-                    g.1.name = l.text.trim().to_string();
-                    g.1.power = l.kind != LabelKind::Net;
+            if let Some(gi) = groups.iter().position(|g| g.0 == root) {
+                let r = rank(l);
+                if !l.text.trim().is_empty() && best[gi].is_none_or(|b| r < b) {
+                    best[gi] = Some(r);
+                    groups[gi].1.name = self.label_net_name(l);
+                    groups[gi].1.power = r.0 == 0;
                 }
             }
         }
@@ -1190,8 +1249,9 @@ impl Pcb {
             }
         }
         out.wire_net = (0..nw).map(|i| root_net.get(&d.find(i)).copied()).collect();
-        for (k, l) in self.labels.iter().enumerate() {
-            let t = l.text.trim();
+        for (k, l) in self.labels.iter().enumerate().filter(|(_, l)| l.kind != LabelKind::Port) {
+            let t = self.label_net_name(l);
+            let t = t.as_str();
             if let Some(&ni) = root_net.get(&d.find(nw + np + k)) {
                 if !t.is_empty() && out.nets[ni].name != t && !out.label_conflicts.iter().any(|c| c.0 == out.nets[ni].name && c.1 == t) {
                     out.label_conflicts.push((out.nets[ni].name.clone(), t.to_string(), l.at));

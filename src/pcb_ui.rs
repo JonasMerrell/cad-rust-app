@@ -48,6 +48,8 @@ pub enum Sel {
     Zone(usize),
     Hole(usize),
     Keepout(usize),
+    /// A sheet symbol on the schematic.
+    Sheet(usize),
 }
 
 struct Drag {
@@ -125,7 +127,9 @@ pub struct PcbUi {
     /// The IPC-7351 footprint wizard's inputs while it is open.
     wizard: Option<crate::pcb_ipc::IpcSpec>,
     /// The text for the next label, per kind (net, power, ground).
-    label_text: [String; 3],
+    label_text: [String; 4],
+    /// The schematic sheet shown.
+    pub sheet: usize,
     zone_net: String,
     pub(crate) highlight: Option<String>,
     pub(crate) hover: P,
@@ -176,6 +180,7 @@ impl Default for PcbUi {
             lib_search: String::new(),
             wizard: None,
             label_text: Default::default(),
+            sheet: 0,
             zone_net: String::new(),
             highlight: None,
             hover: [0.0; 2],
@@ -604,6 +609,9 @@ fn delete_sel(app: &mut App) {
         Sel::Keepout(i) if i < p.board.keepouts.len() => {
             p.board.keepouts.remove(i);
         }
+        Sel::Sheet(i) if i < p.sheet_symbols.len() => {
+            p.sheet_symbols.remove(i);
+        }
         _ => {}
     });
 }
@@ -753,6 +761,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         if pressed(egui::Key::G) {
             set_tool(app, Tool::Label(LabelKind::Ground));
         }
+        if pressed(egui::Key::P) {
+            set_tool(app, Tool::Label(LabelKind::Port));
+        }
         if pressed(egui::Key::Slash) {
             app.pcb.wire_vfirst = !app.pcb.wire_vfirst;
         }
@@ -864,6 +875,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             }
             if app.tool_button(ui, "pcbGround", "Ground", "A ground port (G)", false, t == Tool::Label(LabelKind::Ground), true).clicked() {
                 set_tool(app, Tool::Label(LabelKind::Ground));
+            }
+            if app.tool_button(ui, "pcbPort", "Port", "A sheet port: it meets the entry of the same name on the sheet's symbol, one sheet up (P)", false, t == Tool::Label(LabelKind::Port), true).clicked() {
+                set_tool(app, Tool::Label(LabelKind::Port));
             }
             if app.tool_button(ui, "pcbNoConnect", "No connect", "Mark pins left open on purpose, so the electrical check doesn't flag them (Q)", false, t == Tool::NoConnect, true).clicked() {
                 set_tool(app, Tool::NoConnect);
@@ -1007,7 +1021,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 section(ui, "Check", |ui| issues_ui(app, ui, &issues));
             }
             section(ui, "Library", |ui| library_ui(app, ui));
+            section(ui, "Sheets", |ui| sheets_ui(app, ui));
         }
+        section(ui, "Variants", |ui| variants_ui(app, ui));
         if app.pcb.view != View::Board || matches!(app.pcb.sel, Some(Sel::Part(_))) {
             section(ui, "Digi-Key", |ui| crate::digikey_ui::section_ui(app, ui));
         }
@@ -1040,6 +1056,7 @@ fn label_slot(k: LabelKind) -> usize {
         LabelKind::Net => 0,
         LabelKind::Power => 1,
         LabelKind::Ground => 2,
+        LabelKind::Port => 3,
     }
 }
 
@@ -1054,6 +1071,7 @@ fn default_label(t: &Tool) -> &'static str {
     match t {
         Tool::Label(LabelKind::Ground) => "GND",
         Tool::Label(LabelKind::Power) => "VCC",
+        Tool::Label(LabelKind::Port) => "IN",
         _ => "NET1",
     }
 }
@@ -1261,6 +1279,22 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             row(ui, "Value", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.value).desired_width(120.0));
             });
+            // the active variant: fitted or not, and its own value
+            let in_variant = p.variant_index(&p.variant).is_some();
+            let mut fit = p.fitted(i);
+            let tip = if in_variant { format!("Fitted in {}", p.variant) } else { "Fitted (off: not fitted in the base design; variants can put it back)".to_string() };
+            if ui.checkbox(&mut fit, if in_variant { format!("Fitted in {}", p.variant) } else { "Fitted".to_string() }).on_hover_text(tip).changed() {
+                p.set_fitted(i, fit);
+            }
+            if in_variant {
+                let mut v = p.value_of(i);
+                row(ui, "Variant value", |ui| {
+                    if ui.add(egui::TextEdit::singleline(&mut v).desired_width(120.0)).on_hover_text("This part's value in the active variant (clear it for the base value)").changed() {
+                        p.set_variant_value(i, &v);
+                    }
+                });
+            }
+            let part = &mut p.parts[i];
             row(ui, "Type", |ui| {
                 egui::ComboBox::from_id_salt("pcb-sym").width(140.0).selected_text(kind.map(|k| k.name).unwrap_or(part.symbol.as_str()).to_string()).height(320.0).show_ui(ui, |ui| {
                     for k in pcb_lib::SYMBOLS {
@@ -1567,6 +1601,37 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 ui.add(egui::DragValue::new(&mut h.at[1]).speed(0.05).suffix(" mm"));
             });
         }
+        Sel::Sheet(i) if i < p.sheet_symbols.len() => {
+            let k = p.sheet_symbols[i].sheet;
+            let mut name = p.sheet_name(k);
+            ui.label(RichText::new(format!("Sheet symbol · {name}")).strong());
+            row(ui, "Sheet name", |ui| {
+                if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).changed() {
+                    while p.sheets.len() <= k {
+                        let n = p.sheets.len();
+                        p.sheets.push(crate::pcb_sheet::Sheet { name: if n == 0 { "Main".into() } else { format!("Sheet {}", n + 1) } });
+                    }
+                    p.sheets[k].name = name.clone();
+                }
+            });
+            let s = &mut p.sheet_symbols[i];
+            row(ui, "Width", |ui| {
+                ui.add(egui::DragValue::new(&mut s.width).speed(0.254).range(5.08..=100.0).suffix(" mm"));
+            });
+            if s.entries.is_empty() {
+                ui.label(RichText::new("No entries yet: add ports (P) on the sheet").color(theme::muted()).size(11.5));
+            }
+            for e in &mut s.entries {
+                row(ui, &e.name, |ui| {
+                    ui.selectable_value(&mut e.right, false, "Left");
+                    ui.selectable_value(&mut e.right, true, "Right");
+                });
+            }
+            s.width = (s.width / GRID).round().max(2.0) * GRID;
+            if ui.button("Open sheet").on_hover_text("Show the sheet (or double-click the symbol)").clicked() {
+                open_sheet(app, k);
+            }
+        }
         _ => {
             app.pcb.sel = None;
         }
@@ -1836,6 +1901,153 @@ fn lengths_ui(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// Show schematic sheet k.
+pub(crate) fn open_sheet(app: &mut App, k: usize) {
+    app.pcb.sheet = k;
+    app.pcb.sel = None;
+    app.pcb.wire.clear();
+    app.pcb.fitted[vi(View::Schematic)] = false;
+    app.pcb.fitted[vi(View::Simulate)] = false;
+}
+
+fn sheets_ui(app: &mut App, ui: &mut Ui) {
+    let Some(pi) = index(app) else { return };
+    let n = app.ws.pcbs[pi].sheet_count();
+    let cur = app.pcb.sheet.min(n - 1);
+    for k in 0..n {
+        let p = &app.ws.pcbs[pi];
+        let depth = {
+            let mut d = 0;
+            let mut up = p.parent_of(k);
+            while let Some(u) = up {
+                d += 1;
+                up = if d < 8 { p.parent_of(u) } else { None };
+            }
+            d
+        };
+        let name = format!("{}{}", "   ".repeat(depth), p.sheet_name(k));
+        if ui.selectable_label(k == cur, name).on_hover_text("Show this sheet").clicked() {
+            open_sheet(app, k);
+        }
+    }
+    ui.add_space(4.0);
+    if cur > 0 || n > 1 {
+        let mut name = app.ws.pcbs[pi].sheet_name(cur);
+        row(ui, "Name", |ui| {
+            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).changed() {
+                let p = &mut app.ws.pcbs[pi];
+                if p.sheets.is_empty() {
+                    p.sheets.push(crate::pcb_sheet::Sheet { name: "Main".into() });
+                }
+                p.sheets[cur].name = name.clone();
+            }
+        });
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Add sheet").on_hover_text("A new, empty schematic sheet").clicked() {
+            let mut k = 0;
+            edit(app, |p| k = p.add_sheet(""));
+            open_sheet(app, k);
+        }
+        if cur > 0 && ui.button("Delete").on_hover_text("Delete this sheet (it must be empty)").clicked() {
+            let mut err = None;
+            edit(app, |p| err = p.remove_sheet(cur).err());
+            match err {
+                Some(e) => app.flash(e, ToastKind::Error),
+                None => open_sheet(app, cur - 1),
+            }
+        }
+    });
+    // a symbol for another sheet, placed on this one
+    let p = &app.ws.pcbs[pi];
+    let free: Vec<usize> = (1..n).filter(|&k| k != cur && p.symbol_of(k).is_none()).collect();
+    if !free.is_empty() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new("Place a symbol for").color(theme::muted()).size(11.5));
+            for k in free {
+                let name = app.ws.pcbs[pi].sheet_name(k);
+                if ui.button(&name).on_hover_text("Put this sheet's symbol here: its ports become entries to wire up").clicked() {
+                    let c = app.pcb.center[vi(View::Schematic)];
+                    let at = pcb::snap([c[0] - 7.62, c[1] + 5.08], GRID);
+                    let mut res = Ok(0);
+                    edit(app, |p| res = p.add_sheet_symbol(k, at));
+                    match res {
+                        Ok(i) => app.pcb.sel = Some(Sel::Sheet(i)),
+                        Err(e) => app.flash(e, ToastKind::Error),
+                    }
+                }
+            }
+        });
+    }
+    let p = &app.ws.pcbs[pi];
+    if n > 1 {
+        let note = if p.hierarchical() {
+            "Hierarchical: net labels stay on their sheet; ports reach the sheet above through the entries on its symbol. Supply ports join everywhere."
+        } else {
+            "Flat: labels and ports of the same name join across sheets. Place a sheet symbol to make the design hierarchical."
+        };
+        ui.label(RichText::new(note).color(theme::muted()).size(11.0));
+    }
+}
+
+fn variants_ui(app: &mut App, ui: &mut Ui) {
+    let Some(pi) = index(app) else { return };
+    let p = &app.ws.pcbs[pi];
+    let mut active = p.variant.clone();
+    let names: Vec<String> = p.variants.iter().map(|v| v.name.clone()).collect();
+    row(ui, "Active", |ui| {
+        egui::ComboBox::from_id_salt("pcb-variant").width(130.0).selected_text(if active.is_empty() { "Base design".to_string() } else { active.clone() }).show_ui(ui, |ui| {
+            ui.selectable_value(&mut active, String::new(), "Base design");
+            for n in &names {
+                ui.selectable_value(&mut active, n.clone(), n);
+            }
+        });
+    });
+    if active != p.variant {
+        let a = active.clone();
+        edit(app, |p| p.variant = a);
+    }
+    let p = &app.ws.pcbs[pi];
+    if let Some(vi_) = p.variant_index(&p.variant) {
+        let mut name = p.variants[vi_].name.clone();
+        let v = &p.variants[vi_];
+        let summary = format!("{} not fitted, {} put back, {} other values", v.dnp.len(), v.fitted.len(), v.values.len() + v.mpns.len());
+        row(ui, "Name", |ui| {
+            if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).lost_focus() && !name.trim().is_empty() {
+                let n = name.trim().to_string();
+                edit(app, |p| {
+                    p.variants[vi_].name = n.clone();
+                    p.variant = n;
+                });
+            }
+        });
+        ui.label(RichText::new(summary).color(theme::muted()).size(11.0));
+    }
+    ui.horizontal_wrapped(|ui| {
+        if ui.button("Add variant").on_hover_text("A variant fits some parts differently: not fitted, another value or part number. Pick a part to change it").clicked() {
+            edit(app, |p| {
+                let mut k = p.variants.len() + 1;
+                while p.variant_index(&format!("Variant {k}")).is_some() {
+                    k += 1;
+                }
+                let name = format!("Variant {k}");
+                p.variants.push(crate::pcb_sheet::Variant { name: name.clone(), ..Default::default() });
+                p.variant = name;
+            });
+        }
+        let p = &app.ws.pcbs[pi];
+        if let Some(i) = p.variant_index(&p.variant) {
+            if ui.button("Delete").clicked() {
+                edit(app, |p| {
+                    p.variants.remove(i);
+                    p.variant.clear();
+                });
+            }
+        }
+    });
+    ui.label(RichText::new("Parts not fitted are crossed out, and left off the BOM, pick and place and 3D model.").color(theme::muted()).size(11.0));
+}
+
 fn layers_ui(app: &mut App, ui: &mut Ui) {
     let s = &mut app.pcb.show;
     ui.horizontal_wrapped(|ui| {
@@ -2038,6 +2250,12 @@ fn sch_hit(p: &Pcb, at: P, tol: f64) -> Option<Sel> {
             return Some(Sel::Part(i));
         }
     }
+    for (i, s) in p.sheet_symbols.iter().enumerate().rev() {
+        let (lo, hi) = s.rect();
+        if at[0] >= lo[0] - 0.5 && at[0] <= hi[0] + 0.5 && at[1] >= lo[1] - 0.5 && at[1] <= hi[1] + 2.5 {
+            return Some(Sel::Sheet(i));
+        }
+    }
     None
 }
 
@@ -2055,6 +2273,11 @@ fn label_box_hit(l: &Label, at: P) -> bool {
         }
         LabelKind::Ground => (at[0] - l.at[0]).abs() < 1.8 && at[1] <= l.at[1] && at[1] >= l.at[1] - 3.8,
         LabelKind::Power => (at[0] - l.at[0]).abs() < 1.8 && at[1] >= l.at[1] && at[1] <= l.at[1] + 3.2,
+        LabelKind::Port => {
+            let w = pcb_lib::text_width(&l.text, 1.2) + 2.2;
+            let dx = if l.rot % 4 == 2 { l.at[0] - at[0] } else { at[0] - l.at[0] };
+            dx >= 0.0 && dx <= w && (at[1] - l.at[1]).abs() <= 1.0
+        }
     }
 }
 
@@ -2120,6 +2343,15 @@ fn sch_snap(p: &Pcb, at: P, tol: f64) -> P {
     }
     for w in &p.wires {
         for e in [w.a, w.b] {
+            let d = pcb::dist(e, at);
+            if d < tol && best.is_none_or(|b| d < b.0) {
+                best = Some((d, e));
+            }
+        }
+    }
+    for s in &p.sheet_symbols {
+        for k in 0..s.entries.len() {
+            let e = s.entry_at(k);
             let d = pcb::dist(e, at);
             if d < tol && best.is_none_or(|b| d < b.0) {
                 best = Some((d, e));
@@ -2208,6 +2440,13 @@ fn close_zone(app: &mut App) {
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
     let Some(pi) = index(app) else { return };
+    // sheet symbols follow their sheets' ports (derived, so no undo step of its own)
+    if !app.ws.pcbs[pi].sheet_symbols.is_empty() && app.ws.pcbs[pi].sync_entries() {
+        app.pcb.dirty = true;
+    }
+    if app.pcb.sheet >= app.ws.pcbs[pi].sheet_count() {
+        app.pcb.sheet = 0;
+    }
     refresh(app);
     let sim = app.pcb.view == View::Simulate;
     let full = ui.available_rect_before_wrap();
@@ -2229,10 +2468,14 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             let (a, b) = pcb_export::extent(&pcb_export::board_scene(p, &c.nl, &c.pads, &c.fills, &[], &BoardView::default()));
             pts.extend([a, b]);
             pcb::bbox(&pts)
-        } else if p.parts.is_empty() {
-            ([-60.0, -40.0], [60.0, 40.0])
         } else {
-            pcb_export::extent(&pcb_export::schematic_scene(p, &app.pcb.cache.nl, None))
+            let list = crate::pcb_sheet::on_sheet(pcb_export::schematic_scene(p, &app.pcb.cache.nl, None), app.pcb.sheet);
+            if list.is_empty() {
+                let o = crate::pcb_sheet::origin(app.pcb.sheet);
+                ([o[0] - 60.0, o[1] - 40.0], [o[0] + 60.0, o[1] + 40.0])
+            } else {
+                pcb_export::extent(&list)
+            }
         };
         let size = [(hi[0] - lo[0]).max(10.0), (hi[1] - lo[1]).max(10.0)];
         app.pcb.zoom[k] = ((rect.width() - 60.0) / size[0] as f32).min((rect.height() - 60.0) / size[1] as f32).clamp(0.5, 200.0);
@@ -2299,7 +2542,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         paint(&painter, &xf, &list);
         board_overlay(app, pi, &painter, &xf);
     } else {
-        let list = pcb_export::schematic_scene(p, &c.nl, app.pcb.highlight.as_deref());
+        let list = crate::pcb_sheet::on_sheet(pcb_export::schematic_scene(p, &c.nl, app.pcb.highlight.as_deref()), app.pcb.sheet);
         paint(&painter, &xf, &list);
         sch_overlay(app, pi, &painter, &xf);
         if sim {
@@ -2479,6 +2722,20 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                         app.pcb.sel = Some(Sel::Label(i));
                         // (the undo step is recorded when the drag ends, if it moved anything)
                         app.pcb.drag = Some(Drag { from: at, orig: p.labels[i].at, ends: vec![], before: p.clone() });
+                    } else if let Some(Sel::Sheet(i)) = sch_hit(p, at, tol) {
+                        app.pcb.sel = Some(Sel::Sheet(i));
+                        let s = &p.sheet_symbols[i];
+                        let pts: Vec<P> = (0..s.entries.len()).map(|k| s.entry_at(k)).collect();
+                        let mut ends = vec![];
+                        for (k, w) in p.wires.iter().enumerate() {
+                            if pts.iter().any(|q| pcb::dist(*q, w.a) < 1e-6) {
+                                ends.push((k, false, w.a));
+                            }
+                            if pts.iter().any(|q| pcb::dist(*q, w.b) < 1e-6) {
+                                ends.push((k, true, w.b));
+                            }
+                        }
+                        app.pcb.drag = Some(Drag { from: at, orig: s.at, ends, before: p.clone() });
                     }
                 }
             }
@@ -2502,12 +2759,33 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                         }
                     }
                     Some(Sel::Label(i)) if i < p.labels.len() => p.labels[i].at = target,
+                    Some(Sel::Sheet(i)) if i < p.sheet_symbols.len() => {
+                        p.sheet_symbols[i].at = target;
+                        for (w, b, orig) in ends {
+                            if let Some(w) = p.wires.get_mut(w) {
+                                let q = pcb::add(orig, delta);
+                                if b {
+                                    w.b = q;
+                                } else {
+                                    w.a = q;
+                                }
+                            }
+                        }
+                    }
                     _ => {}
                 }
                 app.pcb.dirty = true;
             }
             if resp.drag_stopped() {
                 finish_drag(app);
+            }
+            if double {
+                // a sheet symbol opens its sheet
+                if let Some(Sel::Sheet(i)) = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol)) {
+                    let k = app.ws.pcbs[pi].sheet_symbols[i].sheet;
+                    open_sheet(app, k);
+                    return;
+                }
             }
             if clicked {
                 app.pcb.sel = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol));
@@ -2740,7 +3018,22 @@ fn sch_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         Some(Sel::Label(i)) if i < p.labels.len() => {
             painter.circle_stroke(xf.s(p.labels[i].at), 6.0, Stroke::new(1.5, hl));
         }
+        Some(Sel::Sheet(i)) if i < p.sheet_symbols.len() => {
+            let (lo, hi) = p.sheet_symbols[i].rect();
+            painter.rect_stroke(egui::Rect::from_two_pos(xf.s(lo), xf.s(hi)).expand(4.0), 3.0, Stroke::new(1.5, hl), egui::StrokeKind::Outside);
+        }
         _ => {}
+    }
+    // the sheet's name, and where it sits in the hierarchy
+    if p.sheet_count() > 1 {
+        let mut path = vec![p.sheet_name(app.pcb.sheet)];
+        let mut up = p.parent_of(app.pcb.sheet);
+        while let Some(k) = up {
+            path.push(p.sheet_name(k));
+            up = p.parent_of(k).filter(|x| !path.contains(&p.sheet_name(*x)));
+        }
+        path.reverse();
+        painter.text(xf.rect.left_top() + egui::vec2(12.0, 10.0), egui::Align2::LEFT_TOP, path.join("  ›  "), egui::FontId::proportional(13.0), Color32::from_gray(80));
     }
     let h = app.pcb.hover;
     match &app.pcb.tool {

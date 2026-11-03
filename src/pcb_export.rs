@@ -25,6 +25,15 @@ pub struct Draw {
     pub prim: Prim,
 }
 
+/// A primitive's first point (for sorting drawing items onto sheets).
+pub fn first_point(p: &Prim) -> Option<P> {
+    match p {
+        Prim::Seg { a, .. } => Some(*a),
+        Prim::Circle { c, .. } => Some(*c),
+        Prim::Fill(cs) => cs.first().and_then(|c| c.first()).copied(),
+    }
+}
+
 fn d(rgba: [u8; 4], prim: Prim) -> Draw {
     Draw { rgba, prim }
 }
@@ -368,7 +377,16 @@ pub fn schematic_scene(p: &Pcb, nl: &Netlist, highlight: Option<&str>) -> Vec<Dr
             ([lo[0], hi[1] + 0.8], [lo[0], lo[1] - 2.2])
         };
         text(&mut out, &part.reference, r_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
-        text(&mut out, &part.value, v_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
+        text(&mut out, &p.value_of(i), v_at, 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
+        if !p.fitted(i) {
+            // not fitted in this variant: a red cross over the symbol
+            let red = [210, 40, 40, 220];
+            out.push(d(red, Prim::Seg { a: lo, b: hi, w: 0.35 }));
+            out.push(d(red, Prim::Seg { a: [lo[0], hi[1]], b: [hi[0], lo[1]], w: 0.35 }));
+        }
+    }
+    for s in &p.sheet_symbols {
+        sheet_symbol(&mut out, p, s);
     }
     let hl_net = highlight.and_then(|h| nl.by_name(h));
     for (k, w) in p.wires.iter().enumerate() {
@@ -469,6 +487,42 @@ pub fn label(out: &mut Vec<Draw>, l: &Label) {
             text(out, &l.text, pcb::add(c, off), 1.3, anchor, rot, col, &|q| q);
             out.push(d(a(colors::WIRE, 255), Prim::Circle { c, r: 0.25, w: 0.0, fill: true }));
         }
+        LabelKind::Port => {
+            // a pentagon from the point, pointing away from it
+            let col = a(colors::LABEL, 255);
+            let s = if l.rot % 4 == 2 { -1.0 } else { 1.0 };
+            let w = pcb_lib::text_width(&l.text, 1.2) + 1.2;
+            let h = 1.0;
+            let pts = [[0.0, h], [w, h], [w + h, 0.0], [w, -h], [0.0, -h], [0.0, h]].map(|q: P| [c[0] + s * q[0], c[1] + q[1]]);
+            for k in 0..pts.len() - 1 {
+                out.push(d(col, Prim::Seg { a: pts[k], b: pts[k + 1], w: 0.2 }));
+            }
+            text(out, &l.text, [c[0] + s * 0.6, c[1] - 0.6], 1.2, if s > 0.0 { 0 } else { 2 }, 0.0, col, &|q| q);
+        }
+    }
+}
+
+/// A sheet symbol: the box, the sheet's name above, and an entry per port.
+pub fn sheet_symbol(out: &mut Vec<Draw>, p: &Pcb, s: &crate::pcb_sheet::SheetSym) {
+    let (lo, hi) = s.rect();
+    let col = a(colors::SYMBOL, 255);
+    let fill = a([255, 240, 200], 255);
+    out.push(d(fill, Prim::Fill(vec![vec![lo, [hi[0], lo[1]], hi, [lo[0], hi[1]]]])));
+    for (q0, q1) in [(lo, [hi[0], lo[1]]), ([hi[0], lo[1]], hi), (hi, [lo[0], hi[1]]), ([lo[0], hi[1]], lo)] {
+        out.push(d(col, Prim::Seg { a: q0, b: q1, w: 0.3 }));
+    }
+    text(out, &p.sheet_name(s.sheet), [lo[0], hi[1] + 0.8], 1.4, 0, 0.0, a(colors::TEXT, 255), &|q| q);
+    text(out, "sheet", [lo[0], lo[1] - 2.2], 1.0, 0, 0.0, a(colors::PIN, 255), &|q| q);
+    for (i, e) in s.entries.iter().enumerate() {
+        let at = s.entry_at(i);
+        let k = if e.right { -1.0 } else { 1.0 };
+        let lc = a(colors::LABEL, 255);
+        // a small arrow on the edge, the name inside
+        let tri = [[at[0], at[1] + 0.6], [at[0] + k * 1.0, at[1]], [at[0], at[1] - 0.6], [at[0], at[1] + 0.6]];
+        for j in 0..3 {
+            out.push(d(lc, Prim::Seg { a: tri[j], b: tri[j + 1], w: 0.2 }));
+        }
+        text(out, &e.name, [at[0] + k * 1.5, at[1] - 0.5], 1.1, if e.right { 2 } else { 0 }, 0.0, lc, &|q| q);
     }
 }
 
@@ -821,7 +875,11 @@ pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
 /// Bill of materials, grouped by value, footprint and part numbers. The first five columns are
 /// JLCPCB's (LCSC is a part's "LCSC" field, or its MPN when that is an LCSC number like C25804);
 /// then the manufacturer, MPN, Digi-Key number, description, datasheet and each extra field.
+/// The bill of materials for the active variant (parts not fitted left out).
 pub fn bom_csv(p: &Pcb) -> String {
+    let mut p = p.as_variant(&p.variant);
+    p.parts.retain(|x| !x.dnp);
+    let p = &p;
     let lcsc = |part: &pcb::Part| {
         part.fields.iter().find(|(k, _)| k.eq_ignore_ascii_case("LCSC")).map(|f| f.1.clone()).unwrap_or_else(|| {
             let m = part.mpn.trim();
@@ -875,8 +933,9 @@ pub fn bom_csv(p: &Pcb) -> String {
 
 /// Pick and place: each part's centre, side and rotation.
 pub fn cpl_csv(p: &Pcb) -> String {
+    let p = &p.as_variant(&p.variant);
     let mut s = String::from("Designator,Mid X,Mid Y,Layer,Rotation\n");
-    let mut parts: Vec<&pcb::Part> = p.parts.iter().collect();
+    let mut parts: Vec<&pcb::Part> = p.parts.iter().filter(|x| !x.dnp).collect();
     parts.sort_by(|a, b| pcb::natural(&a.reference, &b.reference));
     for part in parts {
         let _ = writeln!(s, "{},{:.4}mm,{:.4}mm,{},{}", part.reference, part.at[0], part.at[1], if part.bottom { "Bottom" } else { "Top" }, (part.rot.rem_euclid(360.0) * 1000.0).round() / 1000.0);
@@ -1084,7 +1143,8 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
     // (documents from before the uids, and copies, get their own)
     crate::pcb::ensure_uids(&mut ws.pcbs);
     let found = studio_of(ws, pi);
-    let p = ws.pcbs[pi].clone();
+    // the active variant's parts: those not fitted get no body
+    let p = ws.pcbs[pi].as_variant(&ws.pcbs[pi].variant);
     let want = format!("{} 3D", p.name);
     let si = match found {
         Some(i) => {
@@ -1163,7 +1223,7 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
     v.insert(PCB_KEY.to_string(), p.uid.clone());
     let mask = p.board.mask_rgb();
     upsert(doc, "Board", BOARD_DEF, v, mask);
-    for part in &p.parts {
+    for part in p.parts.iter().filter(|x| !x.dnp) {
         let fp = part.footprint();
         let def = fp_def_name(&fp.name);
         set_def(
