@@ -168,8 +168,10 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
         if v.zones {
             for (zi, z) in b.zones.iter().enumerate().filter(|(_, z)| z.layer == l) {
                 if let Some(f) = fills.get(zi) {
+                    // a darker shade than the tracks, so tracks on a pour stand out
+                    let dark = [(col[0] as f32 * 0.5) as u8, (col[1] as f32 * 0.5) as u8, (col[2] as f32 * 0.5) as u8];
                     for piece in f {
-                        out.push(d(a(col, (alpha as f32 * 0.55) as u8), Prim::Fill(piece.clone())));
+                        out.push(d(a(dark, (alpha as f32 * 0.75) as u8), Prim::Fill(piece.clone())));
                     }
                 }
                 for s in 0..z.outline.len() {
