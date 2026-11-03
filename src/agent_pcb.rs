@@ -58,6 +58,7 @@ fn label_kind(net: &str) -> LabelKind {
 pub(crate) fn connect(p: &mut Pcb, net: &str, pins: &[(usize, String)]) {
     let all = p.sch_pins();
     let kind = label_kind(net);
+    let multi = p.sheet_count() > 1;
     for (pi, num) in pins {
         let Some(sp) = all.iter().find(|x| x.part == *pi && &x.num == num) else { continue };
         if p.labels.iter().any(|l| l.text == net && pcb::dist(l.at, sp.at) < 1e-6) {
@@ -83,13 +84,82 @@ pub(crate) fn connect(p: &mut Pcb, net: &str, pins: &[(usize, String)]) {
         };
         p.labels.push(Label { at: end, text: net.to_string(), kind, rot });
     }
+    // with several sheets a supply needs one supply port somewhere: net labels named like it
+    // then join it on every sheet
+    if multi && kind != LabelKind::Net && !p.labels.iter().any(|l| l.text == net && l.kind != LabelKind::Net && l.kind != LabelKind::Port) {
+        if let Some(l) = p.labels.iter_mut().rev().find(|l| l.text == net && l.kind == LabelKind::Net) {
+            l.kind = kind;
+        }
+    }
 }
 
 /// Lay new symbols out in columns on the schematic, clear of the others.
-fn free_sch_spot(p: &Pcb) -> P {
-    let n = p.parts.len();
+fn free_sch_spot(p: &Pcb, sheet: usize) -> P {
+    let n = p.parts.iter().filter(|x| crate::pcb_sheet::sheet_at(x.sch) == sheet).count();
     let (col, rowi) = (n % 6, n / 6);
-    pcb::snap([col as f64 * 30.48, -(rowi as f64) * 35.56], GRID)
+    pcb::snap(pcb::add(crate::pcb_sheet::origin(sheet), [col as f64 * 30.48, -(rowi as f64) * 35.56]), GRID)
+}
+
+/// A sheet by name or number (1 is the first), from an agent argument.
+fn sheet_arg(p: &Pcb, x: &Value) -> R<Option<usize>> {
+    match x.get("sheet") {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(n)) => {
+            let k = n.as_u64().unwrap_or(0) as usize;
+            if k >= 1 && k <= p.sheet_count() { Ok(Some(k - 1)) } else { Err(format!("sheet {k}: the sheets are 1 to {}", p.sheet_count())) }
+        }
+        Some(Value::String(s)) => p.find_sheet(s).map(Some).ok_or_else(|| format!("no sheet {s}; the sheets are {} (pcb_edit sheets adds one)", (0..p.sheet_count()).map(|k| p.sheet_name(k)).collect::<Vec<_>>().join(", "))),
+        Some(o) => Err(format!("sheet: a name or number, not {o}")),
+    }
+}
+
+/// In a hierarchical design, carry a net from pins on lower sheets up through ports and sheet
+/// entries to the sheets above, so pins on different sheets end up on one net.
+fn carry_up(p: &mut Pcb, net: &str, pins: &[(usize, String)]) {
+    use crate::pcb_sheet::sheet_at;
+    if !p.hierarchical() || label_kind(net) != LabelKind::Net {
+        return;
+    }
+    let all = p.sch_pins();
+    let mut sheets: Vec<usize> = pins.iter().filter_map(|(i, n)| all.iter().find(|x| x.part == *i && &x.num == n)).map(|x| sheet_at(x.at)).collect();
+    sheets.sort();
+    sheets.dedup();
+    if sheets.len() < 2 {
+        return;
+    }
+    // the net labels at these pins on lower sheets become ports
+    for l in &mut p.labels {
+        let k = sheet_at(l.at);
+        if l.kind == LabelKind::Net && l.text == net && k != 0 && sheets.contains(&k) && p.sheet_symbols.iter().any(|s| s.sheet == k) {
+            l.kind = LabelKind::Port;
+        }
+    }
+    let mut todo: Vec<usize> = sheets.into_iter().filter(|&k| k != 0).collect();
+    let mut done = vec![];
+    while let Some(k) = todo.pop() {
+        if done.contains(&k) {
+            continue;
+        }
+        done.push(k);
+        p.sync_entries();
+        let Some(si) = p.symbol_of(k) else { continue };
+        let Some(ei) = p.sheet_symbols[si].entries.iter().position(|e| e.name == net) else { continue };
+        let s = &p.sheet_symbols[si];
+        let at = s.entry_at(ei);
+        let right = s.entries[ei].right;
+        let parent = sheet_at(s.at);
+        let end = [at[0] + if right { GRID } else { -GRID }, at[1]];
+        if p.labels.iter().any(|l| pcb::dist(l.at, end) < 1e-6) {
+            continue;
+        }
+        p.wires.push(Wire { a: at, b: end });
+        let up = parent != 0 && p.symbol_of(parent).is_some();
+        p.labels.push(Label { at: end, text: net.to_string(), kind: if up { LabelKind::Port } else { LabelKind::Net }, rot: if right { 0 } else { 2 } });
+        if up {
+            todo.push(parent);
+        }
+    }
+    p.sync_entries();
 }
 
 /// Move part `i` (just added) off any symbol it overlaps: the column slot if that is clear,
@@ -97,6 +167,8 @@ fn free_sch_spot(p: &Pcb) -> P {
 fn clear_sch_spot(p: &mut Pcb, i: usize) {
     let boxes: Vec<(P, P)> = p.parts.iter().enumerate().filter(|(j, _)| *j != i).map(|(_, q)| crate::pcb_export::sch_bbox(q)).collect();
     let at = p.parts[i].sch;
+    // search on the part's own sheet
+    let o = crate::pcb_sheet::origin(crate::pcb_sheet::sheet_at(at));
     p.parts[i].sch = [0.0; 2];
     let (lo, hi) = crate::pcb_export::sch_bbox(&p.parts[i]);
     let hits = |c: P| {
@@ -108,7 +180,7 @@ fn clear_sch_spot(p: &mut Pcb, i: usize) {
     if hits(at) {
         'search: for row in 0..200 {
             for col in 0..80 {
-                let c = [col as f64 * 5.08, -(row as f64) * 5.08];
+                let c = [o[0] + col as f64 * 5.08, o[1] - (row as f64) * 5.08];
                 if !hits(c) {
                     spot = c;
                     break 'search;
@@ -251,7 +323,12 @@ impl Session {
                 let mut added = vec![];
                 for (k, x) in list.iter().enumerate() {
                     let sym = x.get("symbol").and_then(|v| v.as_str()).ok_or_else(|| format!("parts[{k}]: give symbol ({})", pcb_lib::SYMBOLS.iter().map(|s| s.key).collect::<Vec<_>>().join(", ")))?;
-                    let sch = x.get("sch").and_then(pt).unwrap_or_else(|| free_sch_spot(&p));
+                    let sheet = sheet_arg(&p, x).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    let sch = match (x.get("sch").and_then(pt), sheet) {
+                        (Some(q), Some(sh)) => pcb::add(crate::pcb_sheet::origin(sh), q),
+                        (Some(q), None) => q,
+                        (None, sh) => free_sch_spot(&p, sh.unwrap_or(0)),
+                    };
                     let i = p.add_part(sym, x.get("footprint").and_then(|v| v.as_str()), x.get("value").and_then(|v| v.as_str()), sch).map_err(|e| format!("parts[{k}]: {e}"))?;
                     if let Some(r) = x.get("reference").and_then(|v| v.as_str()) {
                         if p.part_index(r).is_some_and(|j| j != i) {
@@ -259,8 +336,13 @@ impl Session {
                         }
                         p.parts[i].reference = r.to_string();
                     }
-                    edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
-                    if x.get("sch").is_none() {
+                    let mut x = x.clone();
+                    if let (Some(o), Some(_)) = (x.as_object_mut(), sheet) {
+                        // the position is on the sheet (already placed)
+                        o.remove("sch");
+                    }
+                    edit_part(&mut p, i, &x).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    if x.get("sch").is_none() && a["parts"][k].get("sch").is_none() {
                         clear_sch_spot(&mut p, i);
                     }
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
@@ -277,6 +359,7 @@ impl Session {
                 for (net, pins) in nets {
                     let pins: Vec<(usize, String)> = pins.as_array().ok_or_else(|| format!("{net}: a list of pins like \"R1.2\""))?.iter().map(|x| x.as_str().ok_or_else(|| format!("{net}: pins are strings like \"R1.2\"")).and_then(|s| pin_ref(&p, s))).collect::<R<_>>()?;
                     connect(&mut p, net, &pins);
+                    carry_up(&mut p, net, &pins);
                 }
                 let nl = p.netlist();
                 p.retag_copper_since(&self.ws.pcbs[pi], &nl);
@@ -302,6 +385,15 @@ impl Session {
                         p.parts[i].reference = nr.to_string();
                     }
                     edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    if let Some(sh) = sheet_arg(&p, x).map_err(|e| format!("parts[{k}]: {e}"))? {
+                        // onto another sheet, at the same spot on it (sch, if given, is on that sheet)
+                        let cur = crate::pcb_sheet::sheet_at(p.parts[i].sch);
+                        let local = pcb::sub(p.parts[i].sch, crate::pcb_sheet::origin(cur));
+                        p.parts[i].sch = pcb::add(crate::pcb_sheet::origin(sh), local);
+                        if sh != cur && x.get("sch").is_none() {
+                            clear_sch_spot(&mut p, i);
+                        }
+                    }
                 }
                 for (k, w) in a.get("wires").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
                     let v = pts(w, &format!("wires[{k}]"))?;
@@ -316,9 +408,60 @@ impl Session {
                         None | Some("net") => LabelKind::Net,
                         Some("power") => LabelKind::Power,
                         Some("ground") => LabelKind::Ground,
-                        Some(o) => return Err(format!("labels[{k}]: kind is net, power or ground, not {o}")),
+                        Some("port") => LabelKind::Port,
+                        Some(o) => return Err(format!("labels[{k}]: kind is net, power, ground or port, not {o}")),
+                    };
+                    let at = match sheet_arg(&p, l).map_err(|e| format!("labels[{k}]: {e}"))? {
+                        Some(sh) => pcb::add(crate::pcb_sheet::origin(sh), at),
+                        None => at,
                     };
                     p.labels.push(Label { at, text: text.into(), kind, rot: 0 });
+                }
+                for s in a.get("sheets").and_then(|v| v.as_array()).into_iter().flatten() {
+                    let name = s.as_str().ok_or("sheets: names of sheets to add")?;
+                    if p.find_sheet(name).is_none() {
+                        p.add_sheet(name);
+                    }
+                }
+                if let Some(list) = a.get("sheet_symbols").and_then(|v| v.as_array()) {
+                    for (k, x) in list.iter().enumerate() {
+                        let child = sheet_arg(&p, x).map_err(|e| format!("sheet_symbols[{k}]: {e}"))?.ok_or_else(|| format!("sheet_symbols[{k}]: give sheet (the sheet it stands for)"))?;
+                        let parent = match x.get("on") {
+                            Some(o) => sheet_arg(&p, &json!({"sheet": o})).map_err(|e| format!("sheet_symbols[{k}].on: {e}"))?.unwrap_or(0),
+                            None => p.parent_of(child).unwrap_or(0),
+                        };
+                        let local = x.get("at").and_then(pt).unwrap_or_else(|| [-60.96, 20.32 - 25.4 * k as f64]);
+                        let at = pcb::snap(pcb::add(crate::pcb_sheet::origin(parent), local), GRID);
+                        if let Some(old) = p.symbol_of(child) {
+                            p.sheet_symbols.remove(old);
+                        }
+                        p.add_sheet_symbol(child, at).map_err(|e| format!("sheet_symbols[{k}]: {e}"))?;
+                        if let Some(r) = x.get("right").and_then(|v| v.as_array()) {
+                            let si = p.symbol_of(child).unwrap();
+                            for e in &mut p.sheet_symbols[si].entries {
+                                e.right = r.iter().any(|n| n.as_str() == Some(e.name.as_str()));
+                            }
+                        }
+                    }
+                }
+                if let Some(v) = a.get("variants") {
+                    p.variants = serde_json::from_value(v.clone()).map_err(|e| format!("variants: {e}"))?;
+                    for var in &p.variants {
+                        for r in var.dnp.iter().chain(&var.fitted).chain(var.values.keys()).chain(var.mpns.keys()) {
+                            if p.part_index(r).is_none() {
+                                return Err(format!("variants {}: no part {r}", var.name));
+                            }
+                        }
+                    }
+                    if p.variant_index(&p.variant).is_none() {
+                        p.variant.clear();
+                    }
+                }
+                if let Some(v) = a.get("variant").and_then(|v| v.as_str()) {
+                    if !v.is_empty() && p.variant_index(v).is_none() {
+                        return Err(format!("variant {v}: the variants are {}", p.variants.iter().map(|x| x.name.clone()).collect::<Vec<_>>().join(", ")));
+                    }
+                    p.variant = p.variant_index(v).map(|i| p.variants[i].name.clone()).unwrap_or_default();
                 }
                 if let Some(h) = a.get("holes").and_then(|v| v.as_array()) {
                     p.board.holes = h
@@ -550,7 +693,7 @@ impl Session {
                         json!({
                             "reference": x.reference, "value": x.value, "symbol": x.symbol, "footprint": x.footprint,
                             "at": r2(x.at), "rot": round(x.rot), "side": if x.bottom { "bottom" } else { "top" },
-                            "courtyard": [r2(lo), r2(hi)], "sch": r2(x.sch),
+                            "courtyard": [r2(lo), r2(hi)], "sch": r2(x.sch), "sheet": p.sheet_name(crate::pcb_sheet::sheet_at(x.sch)), "fitted": p.fitted(i),
                             "bom": {"mpn": x.mpn, "manufacturer": x.manufacturer, "description": x.description, "datasheet": x.datasheet, "digikey": x.digikey, "package": x.package, "fields": x.fields.iter().map(|(k, v)| (k.clone(), json!(v))).collect::<serde_json::Map<String, Value>>()},
                             "sim": sim_json(x, &p.sim),
                             "pads": pads.iter().filter(|q| q.part == i).map(|q| json!({"pin": q.num, "at": r2(q.at), "net": q.net.map(|n| nl.nets[n].name.clone())})).collect::<Vec<_>>(),
@@ -563,6 +706,14 @@ impl Session {
                 v["parts"] = json!(parts);
                 v["nets"] = json!(nl.nets.iter().map(|n| json!({"name": n.name, "pins": n.pins.iter().map(|(i, num)| format!("{}.{}", p.parts[*i].reference, num)).collect::<Vec<_>>()})).collect::<Vec<_>>());
                 v["lengths"] = json!(nl.nets.iter().filter(|n| p.board.tracks.iter().any(|t| t.net == n.name)).map(|n| json!({"net": n.name, "length": round(crate::pcb_tune::net_length(p, &n.name))})).collect::<Vec<_>>());
+                if p.sheet_count() > 1 {
+                    v["sheets"] = json!((0..p.sheet_count()).map(|k| json!({"name": p.sheet_name(k), "parent": p.parent_of(k).map(|q| p.sheet_name(q)), "ports": p.ports_on(k), "origin": r2(crate::pcb_sheet::origin(k))})).collect::<Vec<_>>());
+                    v["hierarchical"] = json!(p.hierarchical());
+                }
+                if !p.variants.is_empty() {
+                    v["variants"] = serde_json::to_value(&p.variants).unwrap_or_default();
+                    v["variant"] = json!(p.variant);
+                }
                 v["airwires"] = json!(air.iter().take(100).map(|w| json!({"net": w.net, "from": r2(w.a), "to": r2(w.b)})).collect::<Vec<_>>());
                 v
             }
@@ -585,7 +736,11 @@ impl Session {
                 let width = a.get("width").and_then(|v| v.as_u64()).unwrap_or(1000).clamp(100, 4000) as u32;
                 let png = match a.get("view").and_then(|v| v.as_str()).unwrap_or("board") {
                     "schematic" => {
-                        let list = crate::pcb_export::schematic_scene(p, &nl, None);
+                        let sheet = sheet_arg(p, a)?.unwrap_or(0);
+                        let list = crate::pcb_sheet::on_sheet(crate::pcb_export::schematic_scene(p, &nl, None), sheet);
+                        if list.is_empty() {
+                            return Err(format!("{} is empty", p.sheet_name(sheet)));
+                        }
                         let (lo, hi) = crate::pcb_export::extent(&list);
                         crate::pcb_export::png(&list, ([lo[0] - 5.0, lo[1] - 5.0], [hi[0] + 5.0, hi[1] + 5.0]), width, [250, 249, 244])?
                     }
@@ -609,6 +764,13 @@ impl Session {
             "export_pcb" => {
                 let pi = self.pcb_idx(a)?;
                 let path = a.get("path").and_then(|v| v.as_str()).ok_or("give path: a .zip for the Gerbers and drill files, or a folder")?;
+                if let Some(v) = a.get("variant").and_then(|v| v.as_str()) {
+                    let p = &mut self.ws.pcbs[pi];
+                    if !v.is_empty() && p.variant_index(v).is_none() {
+                        return Err(format!("variant {v}: the variants are {}", p.variants.iter().map(|x| x.name.clone()).collect::<Vec<_>>().join(", ")));
+                    }
+                    p.variant = p.variant_index(v).map(|i| p.variants[i].name.clone()).unwrap_or_default();
+                }
                 let sets = a.get("outputs").and_then(|v| v.as_object());
                 if let Some(o) = sets {
                     let job = &mut self.ws.pcbs[pi].outputs;
@@ -704,7 +866,7 @@ impl Session {
                     }
                     None => {
                         let sym = a.get("symbol").and_then(|v| v.as_str()).unwrap_or(crate::digikey::symbol_for(&product));
-                        let sch = a.get("sch").and_then(pt).unwrap_or_else(|| free_sch_spot(&p));
+                        let sch = a.get("sch").and_then(pt).unwrap_or_else(|| free_sch_spot(&p, 0));
                         let i = p.add_part(sym, None, None, sch)?;
                         let changed = crate::digikey::apply(&mut p.parts[i], &product, true);
                         let part = &mut p.parts[i];
@@ -809,6 +971,9 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
     }
     if let Some(b) = x.get("no_sim").and_then(|v| v.as_bool()) {
         part.no_sim = b;
+    }
+    if let Some(b) = x.get("fitted").and_then(|v| v.as_bool()) {
+        part.dnp = !b;
     }
     if let Some(b) = x.get("sch_mirror").and_then(|v| v.as_bool()) {
         part.sch_mirror = b;
@@ -976,6 +1141,8 @@ pub fn tools() -> Vec<Value> {
             "fields": {"type": "object", "additionalProperties": {"type": "string", "description": "value; empty removes the field"}, "description": "extra BOM fields by name: {\"Tolerance\": \"1%\", \"LCSC\": \"C17414\"}"},
             "sim": {"type": "object", "additionalProperties": {"type": "string", "description": "value with SI prefix (300, 2.5m, 10p); empty resets it"}, "description": "simulation model parameter overrides by key; pcb_info lists each part's model parameters and keys (e.g. a BJT's bf, a diode's is/n/bv/rs/cj, an op amp's gbw/sr, a regulator's vset)"},
             "no_sim": {"type": "boolean", "description": "leave the part out of the circuit simulation"},
+            "fitted": {"type": "boolean", "description": "false: not fitted (DNP) in the base design; variants can change it"},
+            "sheet": {"type": "string", "description": "schematic sheet by name or number (1 = the first); sch is then on that sheet"},
             "sch_mirror": {"type": "boolean", "description": "mirror the schematic symbol"},
             "pin_names": {"type": "array", "items": {"type": "string"}, "description": "ICs and connectors: pin names in pin order (pins can then be given as U1.VCC)"},
             "at": xy("board position of the footprint origin (its centre), mm"),
@@ -994,7 +1161,11 @@ pub fn tools() -> Vec<Value> {
     edit["pcb"] = pcb.clone();
     edit["parts"] = json!({"type": "array", "items": {"type": "object", "properties": part_fields(json!({"reference": {"type": "string", "description": "which part (R1, U2, …)"}, "new_reference": {"type": "string", "description": "rename it"}, "symbol": {"type": "string", "description": "change the library symbol (part type)"}, "delete": {"type": "boolean", "description": "remove the part"}})), "required": ["reference"], "additionalProperties": false}, "description": "change parts: [{reference, at, rot, side, value, footprint, …}]"});
     edit["wires"] = json!({"type": "array", "items": pts("polyline"), "description": "schematic wires to add, each a polyline [[x, y], …] (pins connect where a wire passes through their end point)"});
-    edit["labels"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("label position, mm"), "text": {"type": "string", "description": "net name"}, "kind": {"type": "string", "enum": ["net", "power", "ground"], "description": "default net"}}, "required": ["at", "text"], "additionalProperties": false}, "description": "schematic labels to add [{at: [x, y], text, kind: net | power | ground}]; labels with the same text are one net"});
+    edit["labels"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("label position, mm"), "text": {"type": "string", "description": "net name"}, "kind": {"type": "string", "enum": ["net", "power", "ground", "port"], "description": "default net; port is a sheet port"}, "sheet": {"type": "string", "description": "sheet name or number; at is then on that sheet"}}, "required": ["at", "text"], "additionalProperties": false}, "description": "schematic labels to add [{at: [x, y], text, kind: net | power | ground | port}]; labels with the same text are one net (in a hierarchical design only on their own sheet)"});
+    edit["sheets"] = json!({"type": "array", "items": {"type": "string", "description": "sheet name"}, "description": "schematic sheets to add (the first sheet is Main). Put parts on one with parts[].sheet"});
+    edit["sheet_symbols"] = json!({"type": "array", "items": {"type": "object", "properties": {"sheet": {"type": "string", "description": "the sheet the symbol stands for"}, "on": {"type": "string", "description": "the parent sheet it is drawn on (default Main)"}, "at": xy("top left corner on the parent sheet, mm"), "right": {"type": "array", "items": {"type": "string", "description": "port name"}, "description": "entries drawn on the right side (the rest on the left)"}}, "required": ["sheet"], "additionalProperties": false}, "description": "hierarchical design: a symbol on the parent sheet for each child sheet, with an entry per port on the child. Once a design has sheet symbols, net labels are local to their sheet and ports reach up through the entries; pcb_connect then adds the ports and entry wiring itself when a net's pins are on different sheets"});
+    edit["variants"] = json!({"type": "array", "items": {"type": "object", "properties": {"name": {"type": "string", "description": "variant name"}, "dnp": {"type": "array", "items": {"type": "string", "description": "reference"}, "description": "parts not fitted"}, "fitted": {"type": "array", "items": {"type": "string", "description": "reference"}, "description": "parts fitted though the base design leaves them off"}, "values": {"type": "object", "additionalProperties": {"type": "string", "description": "value"}, "description": "other values by reference"}, "mpns": {"type": "object", "additionalProperties": {"type": "string", "description": "part number"}, "description": "other part numbers by reference"}}, "required": ["name"], "additionalProperties": false}, "description": "assembly variants (replaces the list): the BOM, pick and place, assembly drawings, 3D model and simulation follow the active one"});
+    edit["variant"] = json!({"type": "string", "description": "the active variant by name (\"\" for the base design)"});
     edit["holes"] = json!({"type": "array", "items": {"type": "object", "properties": {"at": xy("hole centre, mm"), "d": num("diameter mm (default 3.2)")}, "required": ["at"], "additionalProperties": false}, "description": "replace the mounting holes: [{at: [x, y], d (default 3.2)}]"});
     edit["zones"] = json!({"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net name"}, "layer": layer.clone(), "outline": pts("pour outline, default the whole board"), "pads": {"type": "string", "enum": ["tht_relief", "relief", "solid"], "description": "how the pour joins its net's pads: thermal reliefs on through-hole pads (default), on all pads, or solid"}, "clearance": num("gap to other nets, 0 = the net's clearance"), "relief_gap": num("thermal relief gap, 0 = 0.3 mm"), "spoke": num("thermal spoke width, 0 = the net's track")}, "required": ["net"], "additionalProperties": false}, "description": "replace the copper pours: [{net, layer: top | bottom (default bottom), outline (default the whole board), pads}]; a GND pour on the bottom is a good default"});
     edit["keepouts"] = json!({"type": "array", "items": {"type": "object", "properties": {"outline": pts("keepout outline"), "layer": layer.clone(), "tracks": {"type": "boolean", "description": "no tracks (default true)"}, "vias": {"type": "boolean", "description": "no vias (default true)"}, "pours": {"type": "boolean", "description": "no pour copper (default true)"}, "parts": {"type": "boolean", "description": "no parts (default false)"}}, "required": ["outline"], "additionalProperties": false}, "description": "replace the keepout areas (antenna clearance, mounting hardware, enclosure ribs); layer omitted = both"});
@@ -1011,8 +1182,8 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on both layers with vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}, "span": {"type": "array", "items": layer.clone(), "minItems": 2, "maxItems": 2, "description": "blind or buried via: the two layers it joins, e.g. [\"top\", \"in1\"] (default: through all layers)"}, "d": num("pad diameter mm (default from the net's rules)"), "drill": num("drill mm (default from the net's rules)")}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
         json!({"name": "pcb_info", "description": "A PCB tab's parts (board position, rotation, side, courtyard, schematic position, every pad with its board position and net), nets with their pins, the outline, rules and up to 100 airwires (unrouted connections).", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
-        json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
-        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
+        json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "sheet": {"type": "string", "description": "schematic: the sheet by name or number (default the first)"}, "layer": {"type": "string", "enum": ["top", "bottom"], "description": "board layer drawn on top"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
+        json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "variant": {"type": "string", "description": "make this variant active first (\"\" for the base design): the BOM and pick and place follow it"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
         json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
         json!({"name": "pcb_library", "description": "The PCB's own part library. import: a KiCad footprint (.kicad_mod), symbol library (.kicad_sym), a folder (.pretty, .kicad_symdir or a download with both) or a ZIP (SnapEDA, Ultra Librarian, SamacSys and similar give KiCad ZIPs). Symbols become \"Library:Name\" keys with their pins, drawing and electrical pin types (used by the ERC); a symbol's footprint is linked when it was imported too. generate: IPC-7351B land patterns from datasheet dimensions (mm, nominal), named the IPC way (RESC2012X50N, SOIC127P600X175-8N, QFN50P400X400X90-17N): chip {family: chip, size: 0805, kind: R|C|L|D|LED} or {body: [L, W], lead, height}; sop/qfp {pins, pitch, body, span: [toe-to-toe x, y], lead (foot length), lead_w, height, ep}; son/qfn {pins, pitch, body, lead, lead_w, height, ep: [w, h] exposed pad}; bga {pitch, ball, rows, cols, height}. density M, N (default) or L.", "inputSchema": obj(json!({"pcb": pcb, "import": {"type": "string", "description": "KiCad file, folder or ZIP to import"}, "generate": {"type": "array", "description": "IPC-7351 footprints to generate", "items": {"type": "object", "properties": {
@@ -1075,6 +1246,50 @@ mod tests {
         assert!(vcc.power);
         assert!(nl.by_name("GND").is_some());
         assert!(pin_ref(&p, "U1.9").is_err());
+    }
+
+    #[test]
+    fn the_sheets_example_connects_across_sheets() {
+        let steps: Vec<Value> = serde_json::from_str(include_str!("../examples/pcb-555-sheets.json")).unwrap();
+        let mut s = Session::new();
+        for st in steps.iter().take_while(|st| st["tool"] != "check_pcb").filter(|st| st["tool"].as_str().is_some_and(|t| t.contains("pcb"))) {
+            s.call(st["tool"].as_str().unwrap(), &st["args"]).unwrap();
+        }
+        let (v, _) = s.call("check_pcb", &json!({"pcb": 0})).unwrap();
+        assert_eq!(v["ok"], true, "{v:#}");
+        assert!(v["erc"].as_array().unwrap().is_empty(), "{v:#}");
+        let p = &s.ws.pcbs[0].clone();
+        assert_eq!(p.sheet_count(), 3);
+        assert!(p.hierarchical());
+        let nl = p.netlist();
+        // OUT runs from U1 on Timer through both sheet symbols to R3 on LED
+        let out = &nl.nets[nl.by_name("OUT").unwrap()];
+        assert_eq!(out.pins.len(), 2);
+        assert_eq!(nl.nets.len(), 7, "{:?}", nl.nets.iter().map(|n| &n.name).collect::<Vec<_>>());
+        assert!(nl.by_name("CTRL").is_some(), "unique local names keep their own name");
+        assert_eq!(p.ports_on(1), vec!["OUT".to_string()]);
+        // variants: the BOM of No LED leaves D1 and R3 off; Slow changes C1
+        let mut q = p.clone();
+        q.variant = "No LED".into();
+        let bom = crate::pcb_export::bom_csv(&q);
+        assert!(!bom.contains("D1") && !bom.contains("R3") && bom.contains("U1"), "{bom}");
+        assert!(!crate::pcb_export::cpl_csv(&q).contains("D1"));
+        q.variant = "Slow".into();
+        assert!(crate::pcb_export::bom_csv(&q).contains("\"47u\""));
+        let mut job = crate::pcb_fab::OutJob { variants: true, ..Default::default() };
+        job.odb = false;
+        let files = crate::pcb_fab::outputs(p, &job);
+        assert!(files.iter().any(|f| f.0 == "assembly/No_LED/Blinker-No_LED-BOM.csv"), "{:?}", files.iter().map(|f| &f.0).collect::<Vec<_>>());
+        // the print set has a page per sheet
+        let pdf = crate::pcb_fab::prints(p);
+        let pages = String::from_utf8_lossy(&pdf).matches("/Type /Page ").count();
+        assert!(pages >= 5, "three sheets, the assembly and the drill drawing: {pages}");
+        let (info, _) = s.call("pcb_info", &json!({"pcb": 0})).unwrap();
+        assert_eq!(info["sheets"][1]["parent"], "Main");
+        assert_eq!(info["variants"].as_array().unwrap().len(), 2);
+        // the simulation follows the variant: with No LED, D1 is open
+        let qq = p.as_variant("No LED");
+        assert!(qq.parts.iter().find(|x| x.reference == "D1").unwrap().dnp);
     }
 
     #[test]

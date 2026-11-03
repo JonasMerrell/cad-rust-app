@@ -688,6 +688,9 @@ pub fn model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
     if part.no_sim {
         return Ok(Model::Open("left out of the simulation".into()));
     }
+    if part.dnp {
+        return Ok(Model::Open("not fitted".into()));
+    }
     let mut m = base_model(part, setup)?;
     if !part.sim.is_empty() {
         let mut bad = vec![];
@@ -1058,6 +1061,8 @@ pub fn default_sources(p: &Pcb) -> Vec<Source> {
 }
 
 pub fn build(p: &Pcb) -> Result<Built, String> {
+    // the active variant: parts not fitted are open, others take their variant value
+    let p = &p.as_variant(&p.variant);
     let setup = &p.sim;
     let nl = p.netlist();
     let (ground, tied) = grounds(p, &nl);
