@@ -377,7 +377,10 @@ for x in [-29.15, -1.55] {
     s_adds.push(block(vec3(xi.min(xo), -3.5, 59.0), vec3(xi.max(xo), 1.0, shell_z1)).common([tvol]).cut([ycyl(x, -4.5, GUN[1], 0.8, 6)]));
 }
 // M2 pivot holes through the brackets and the side walls (the screws go in from outside)
-tshell = fuse([tshell.cut(s_cuts)] + s_adds).cut([ycyl(GUN[0], -40, GUN[1], 1.2, 80)]).unify();
+// (the tubes' bores are cut again after the fuse so they go on through the roof)
+let bores = [ycyl(GUN[0], -40, GUN[1], 1.2, 80)];
+for p in tur_screws { bores.push(zcyl(p[0], p[1], ring_z1 + 3.0, 2.2, shell_z1)); }
+tshell = fuse([tshell.cut(s_cuts)] + s_adds).cut(bores).unify();
 
 // gun drum: holds the Pi camera (looking out of the front window) and the barrel, turns on two M2
 // screws in the trunnion brackets; open at the back to put the camera in and let its ribbon out.
@@ -578,6 +581,16 @@ fn posed(gun, gx, gz, deg) {
     let out = [];
     for g in gun { out.push(#{name: g.name, shape: g.shape.rotate(vec3(gx, 0, gz), vec3(0, 1, 0), -deg), color: g.color}); }
     out
+}
+// second argument "reference": each printed part where project.rhai models it (wheels at their own
+// axle), one STEP each, for checking the feature-based project against this script
+if ARGS.len() > 1 && ARGS[1] == "reference" {
+    let refs = #{"hull-tub": tub, deck: deck, "turret-ring": tring, "turret-shell": tshell, cupola: cupola,
+                 "gun-drum-left": drum_l, "gun-drum-right": drum_r, barrel: barrel, sprocket: sprocket_l, idler: idler_l,
+                 "road-wheel": road_l, track: track_print(LUGS, PITCH, BAND, TRACK_W)};
+    let vols = #{};
+    for k in refs.keys() { export_step(refs[k], out + k + ".step"); vols[k] = refs[k].volume(); }
+    return vols;
 }
 // fourth argument "project": write every part where it sits in the tank, one STEP each, and a list of
 // them, for building an rCAD project (make_project.py)

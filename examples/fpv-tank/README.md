@@ -22,10 +22,45 @@ should be none). The `stl/` folder here has a build of the STLs.
 
     python3 examples/fpv-tank/make_project.py <path to rcad> out
 
-writes `out/FPV Tank.zip`, an rCAD project: open it with Import project (ZIP)… in the File menu, or Import project… on the home screen. Its Part Studio
-has all 35 parts where they sit in the tank, named and coloured, with their materials, and the
-project folder also holds the scripts, this README and the print STLs (`print/`). It takes about
-4 minutes, most of it rCAD importing each part.
+writes `out/FPV Tank.zip`, an rCAD project built from sketches and features, so every part opens
+editable. Open it with Import project (ZIP)… in the File menu, or Import project… on the home
+screen. It needs an rCAD with the script document API (#102) and `d.tool` (#103).
+
+<img alt="The assembly in rCAD" src="fpv-tank-rcad.png" width="60%">
+
+- **One Part Studio per printed part**, made by `project.rhai`: hull, deck, turret ring, turret
+  shell, cupola, gun drum (split into its two print halves by a Split feature), barrel, sprocket,
+  idler, road wheel, the track as printed, and the track as fitted round the wheels (for the
+  assembly only). Each studio has its key sizes as variables (wall, deck thickness, wheel radius,
+  pocket count, ring radius, horn clearance, drum radius, lug count and pitch, track width, …) and
+  named sketches and features: revolved sections for the wheels and barrel, a loft and shell for
+  the turret, patterns for the lug pockets, TSOP windows and track lugs (a curve pattern along the
+  pitch line), mirrors for the hull's second side, countersunk hole features for the deck screws.
+- **Bought parts** in their own studio, as the same outline stand-ins as `parts.rhai`.
+- **An assembly** (`FPV Tank`): the hull and deck fixed; the 12 wheels on revolute mates on their
+  axles; the turret ring on a revolute mate limited to ±90°, the shell and cupola fastened to it; the
+  gun drum on a revolute mate at its pivot limited to −6°…+20°, with the other half, the barrel,
+  camera and LED fastened to it; standard screws (M3 × 30 wheel axles, M3 × 35 idler screws,
+  countersunk M3 × 12 deck screws, M2 × 6 drum pivots).
+
+Sections drawn as outlines (the wheel and barrel sections, the hull's side profile, the turret
+outlines) keep their own dimensions, so a variable change that should move them needs the section
+edited too. The ZIP also holds the scripts, this README and the print STLs (`print/`).
+
+    python3 examples/fpv-tank/check_project.py <path to rcad> out/check
+
+samples every part of the project on a grid against `parts.rhai`. They match: no difference at
+all on 9 parts; the turret ring differs by 27 mm³ because `parts.rhai` draws its wire slot's arcs
+as straight segments and the project has true arcs; the deck and track show under 4 mm³, single
+grid points on curved edges. The assembly's interference check finds only the screws' threads in their
+pilot holes.
+
+Building it turned up a few things in rCAD, worked round in `project.rhai`: a dimensioned polygon
+with an edge on the revolve axis fails to revolve; faces split by an intersect can't be shelled or
+joined (the hull's side profile runs 1 mm past the plan outline to avoid that); a disc inside a
+ring's hole is lost when both regions are extruded together; mate connectors given by
+origin and axis are moved onto the nearest face when the assembly rebuilds, so every connector here
+sits on the axis of a hole; there's no TPU material and no M2 countersunk screw in the library.
 
 ## Motion check
 
@@ -78,7 +113,7 @@ the barrel at the bottom as the aim mark. About 150 frames, 20 minutes to render
 | hull-tub | 1 | PLA or ABS | open top up; upper and lower glacis, sloped rear plate; motor pockets, wheel axle bosses, idler slots, battery strap slots, Radxa standoffs |
 | deck | 1 | PLA or ABS | prints upside down (flat top on the bed); fenders and side skirts over the tracks, engraved grille and hatch, countersunk screws, SG90 hangs underneath |
 | turret-ring | 1 | PLA | prints upside down; the servo horn screws into the cross recess, the arc slot lets the wires through for ±90° |
-| turret-shell | 1 | PLA | prints roof down; faceted with a rear bustle, round embrasure for the gun drum with trunnion brackets either side, brackets for the elevation servo in the bustle, 4 hit sensor windows; 4 tubes from the roof take the screws that hold it to the ring |
+| turret-shell | 1 | PLA | prints roof down; faceted with a rear bustle, round embrasure for the gun drum with trunnion brackets either side, brackets for the elevation servo in the bustle, 4 hit sensor windows; 4 tubes from the roof take the screws that hold it to the ring (open through the roof) |
 | gun-drum-left, gun-drum-right | 1 each | PLA | two halves, each printed on its outer side face, glued together; the Pi camera screws to 4 standoffs behind the front window (mounted upside down, flip the image in software), barrel socket below it; turns on two M2 screws, open at the back for the camera ribbon |
 | cupola | 1 | PLA | spigot into the turret roof; the hit LED shines through it |
 | barrel | 1 | PLA | prints standing on its back end; 5 mm IR LED at the back, glued into the drum's socket |
