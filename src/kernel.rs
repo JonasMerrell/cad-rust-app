@@ -1843,6 +1843,20 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
     if bodies.is_empty() {
         return Err("there are no bodies to export".into());
     }
+    if format == "step" {
+        // an assembly of the parts, with the names and colours they have in the Part Studio
+        let parts: Vec<(&Shape, String, Option<[u8; 3]>)> = bodies
+            .iter()
+            .enumerate()
+            .map(|(i, b)| {
+                let props = doc.parts.get(&crate::doc::body_key(b.id));
+                let name = props.and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Part {}", i + 1));
+                (&b.shape, name, props.and_then(|p| p.color))
+            })
+            .collect();
+        let name = std::path::Path::new(path).file_stem().map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "Part Studio".into());
+        return occ::write_step_named(&name, &parts, path);
+    }
     let shapes: Vec<&Shape> = bodies.iter().map(|b| &b.shape).collect();
     let shape = occ::compound(&shapes)?;
     match format {
