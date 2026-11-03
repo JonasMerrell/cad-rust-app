@@ -38,6 +38,8 @@ pub struct ClaudeUi {
     /// "Undo last request" throws them away.
     after_hash: Option<u64>,
     confirm_revert: bool,
+    /// Scroll the history to its end on the next frame.
+    scroll_to_end: bool,
 }
 
 impl Default for ClaudeUi {
@@ -61,6 +63,7 @@ impl Default for ClaudeUi {
             attempt: (0, None),
             after_hash: None,
             confirm_revert: false,
+            scroll_to_end: false,
         }
     }
 }
@@ -323,10 +326,62 @@ fn settings(app: &mut App, ui: &mut Ui) {
     }
 }
 
+/// The tallest the request box grows before it scrolls itself.
+const INPUT_MAX_H: f32 = 150.0;
+
 fn chat(app: &mut App, ui: &mut Ui) {
-    let input_h = 96.0;
-    let list_h = (ui.available_height() - input_h).max(80.0);
-    ScrollArea::vertical().id_salt("claude-chat").auto_shrink([false, false]).max_height(list_h).stick_to_bottom(true).show(ui, |ui| {
+    // The request box and its buttons sit in a panel along the bottom so they stay put however
+    // long the conversation or the typed request gets; the history scrolls in what is left.
+    let input = egui::Panel::bottom("claude-input").frame(Frame::NONE).resizable(false).show_separator_line(false).show(ui, |ui| {
+        ui.separator();
+        let (mut go, mut revert) = (false, false);
+        let c = &mut app.claude;
+        theme::field_style(ui);
+        // a long request scrolls inside its box instead of pushing the buttons off the panel
+        let r = ScrollArea::vertical()
+            .id_salt("claude-input")
+            .max_height(INPUT_MAX_H)
+            .stick_to_bottom(true)
+            .show(ui, |ui| {
+                ui.add(
+                    egui::TextEdit::multiline(&mut c.input)
+                        .hint_text("Ask Claude to design or change something… (Enter sends, Shift+Enter for a new line)")
+                        .desired_rows(3)
+                        .desired_width(f32::INFINITY),
+                )
+            })
+            .inner;
+        let enter = r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
+        if enter {
+            // drop the newline the key press added
+            while c.input.ends_with('\n') {
+                c.input.pop();
+            }
+        }
+        ui.horizontal(|ui| {
+            if c.before.is_some() && c.changed && !c.busy {
+                revert = ui.small_button("Undo last request").on_hover_text("Put the document back the way it was before Claude's last request").clicked();
+            } else {
+                let model = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or("");
+                ui.label(RichText::new(format!("{model} · {}", c.settings.effort)).size(11.0).color(theme::muted()));
+            }
+            ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
+                if c.busy {
+                    if ui.button("Stop").clicked() {
+                        if let Some(w) = &c.worker {
+                            w.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+                        }
+                    }
+                } else {
+                    go = (ui.add_enabled(!c.input.trim().is_empty(), egui::Button::new("Send")).clicked() || enter) && !c.input.trim().is_empty();
+                }
+            });
+        });
+        (go, revert)
+    });
+    let (go, revert) = input.inner;
+    let jump = std::mem::take(&mut app.claude.scroll_to_end);
+    ScrollArea::vertical().id_salt("claude-chat").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if app.claude.entries.is_empty() {
             ui.add_space(8.0);
@@ -351,42 +406,10 @@ fn chat(app: &mut App, ui: &mut Ui) {
                 ui.label(RichText::new("Working…").size(12.0).color(theme::muted()));
             });
         }
-    });
-    ui.separator();
-    let c = &mut app.claude;
-    theme::field_style(ui);
-    let r = ui.add(
-        egui::TextEdit::multiline(&mut c.input)
-            .hint_text("Ask Claude to design or change something… (Enter sends, Shift+Enter for a new line)")
-            .desired_rows(3)
-            .desired_width(f32::INFINITY),
-    );
-    let enter = r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
-    if enter {
-        // drop the newline the key press added
-        while c.input.ends_with('\n') {
-            c.input.pop();
+        if jump {
+            // a new request: show it even when the history was scrolled up
+            ui.scroll_to_cursor(Some(Align::BOTTOM));
         }
-    }
-    let (mut go, mut revert) = (false, false);
-    ui.horizontal(|ui| {
-        if c.before.is_some() && c.changed && !c.busy {
-            revert = ui.small_button("Undo last request").on_hover_text("Put the document back the way it was before Claude's last request").clicked();
-        } else {
-            let model = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or("");
-            ui.label(RichText::new(format!("{model} · {}", c.settings.effort)).size(11.0).color(theme::muted()));
-        }
-        ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
-            if c.busy {
-                if ui.button("Stop").clicked() {
-                    if let Some(w) = &c.worker {
-                        w.stop.store(true, std::sync::atomic::Ordering::Relaxed);
-                    }
-                }
-            } else {
-                go = (ui.add_enabled(!c.input.trim().is_empty(), egui::Button::new("Send")).clicked() || enter) && !c.input.trim().is_empty();
-            }
-        });
     });
     if go {
         send(app, ui.ctx());
@@ -477,6 +500,7 @@ fn send(app: &mut App, ctx: &egui::Context) {
     c.confirm_revert = false;
     c.busy = true;
     c.entries.push(Entry::User(text.clone()));
+    c.scroll_to_end = true;
     let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone() });
 }
 
