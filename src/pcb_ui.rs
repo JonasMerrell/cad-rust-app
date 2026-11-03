@@ -764,12 +764,32 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             set_tool(app, Tool::Route);
         }
         if pressed(egui::Key::L) {
-            switch_layer(app, app.pcb.layer.other());
+            let next = next_layer(app, app.pcb.layer);
+            switch_layer(app, next);
         }
         if pressed(egui::Key::V) {
             via_here(app);
         }
     }
+}
+
+/// The board's copper layers, top to bottom.
+fn copper_layers(app: &App) -> Vec<Layer> {
+    index(app).map(|i| app.ws.pcbs[i].board.copper_layers()).unwrap_or_else(|| vec![Layer::Top, Layer::Bottom])
+}
+
+/// The copper layer after `l` (wrapping round), for L and for vias while routing.
+fn next_layer(app: &App, l: Layer) -> Layer {
+    let layers = copper_layers(app);
+    let i = layers.iter().position(|x| *x == l).unwrap_or(0);
+    layers[(i + 1) % layers.len()]
+}
+
+/// The active layer first, then the other copper layers from the nearest outward.
+fn layer_order(p: &Pcb, active: Layer) -> Vec<Layer> {
+    let mut v = p.board.copper_layers();
+    v.sort_by_key(|l| (l.order() as i32 - active.order() as i32).abs());
+    v
 }
 
 /// The active layer; while routing, changing it goes through a via.
@@ -787,7 +807,7 @@ fn via_here(app: &mut App) {
     let Some(r) = &app.pcb.route else { return };
     let at = *r.pts.last().unwrap();
     let net = r.net.clone();
-    let layer = r.layer.other();
+    let layer = next_layer(app, r.layer);
     refresh(app);
     let c = &app.pcb.cache;
     let pad = c.pads.iter().find(|x| x.cu().contains(at));
@@ -800,7 +820,7 @@ fn via_here(app: &mut App) {
         let nr = p.net_rules(&p.netlist(), &net);
         let (d, drill) = (nr.via_d, nr.via_drill);
         if !through && !p.board.vias.iter().any(|v| pcb::dist(v.at, at) < 1e-6) {
-            p.board.vias.push(Via { at, d, drill, net });
+            p.board.vias.push(Via::new(at, d, drill, &net));
         }
     });
     app.pcb.layer = layer;
@@ -885,9 +905,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         });
         App::group(ui, |ui| {
             let fg = |on: bool| if on { theme::active_text() } else { theme::text() };
-            for l in [Layer::Top, Layer::Bottom] {
+            for l in copper_layers(app) {
                 let on = app.pcb.layer == l;
-                let col = if l == Layer::Top { pcb_export::colors::TOP } else { pcb_export::colors::BOTTOM };
+                let col = pcb_export::layer_color(l);
                 let mut b = egui::Button::new(RichText::new(format!("● {}", l.label())).color(if on { Color32::from_rgb(col[0], col[1], col[2]) } else { fg(false) }).size(12.5)).min_size(egui::vec2(26.0, 26.0));
                 if on {
                     b = b.fill(theme::active_fill()).stroke(Stroke::new(1.0, theme::active_stroke()));
@@ -1427,14 +1447,16 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             ui.label("Wire · Del removes it");
         }
         Sel::Track(i) if i < p.board.tracks.len() => {
+            let cl = p.board.copper_layers();
             let t = &mut p.board.tracks[i];
             ui.label(RichText::new(format!("Track · {}", if t.net.is_empty() { "no net" } else { &t.net })).strong());
             row(ui, "Width", |ui| {
                 ui.add(egui::DragValue::new(&mut t.width).speed(0.01).range(0.05..=10.0).suffix(" mm").max_decimals(3));
             });
             row(ui, "Layer", |ui| {
-                ui.selectable_value(&mut t.layer, Layer::Top, "Top");
-                ui.selectable_value(&mut t.layer, Layer::Bottom, "Bottom");
+                for l in &cl {
+                    ui.selectable_value(&mut t.layer, *l, l.label());
+                }
             });
             let tc = t.clone();
             crate::pcb_trace_ui::track_info(app, ui, &tc);
@@ -1449,8 +1471,28 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             }
         }
         Sel::Via(i) if i < p.board.vias.len() => {
+            let cl = p.board.copper_layers();
             let v = &mut p.board.vias[i];
-            ui.label(RichText::new(format!("Via · {}", v.net)).strong());
+            ui.label(RichText::new(format!("Via · {} · {}", v.net, v.kind())).strong());
+            if cl.len() > 2 {
+                let [mut from, mut to] = v.span.unwrap_or([Layer::Top, Layer::Bottom]);
+                for (name, side) in [("From", &mut from), ("To", &mut to)] {
+                    row(ui, name, |ui| {
+                        egui::ComboBox::from_id_salt(("pcb-via-span", name)).selected_text(side.label()).show_ui(ui, |ui| {
+                            for l in &cl {
+                                ui.selectable_value(side, *l, l.label());
+                            }
+                        });
+                    });
+                }
+                if from.order() > to.order() {
+                    std::mem::swap(&mut from, &mut to);
+                }
+                if from != to {
+                    v.span = if from == Layer::Top && to == Layer::Bottom { None } else { Some([from, to]) };
+                }
+                ui.label(RichText::new("A via from an outer layer to an inner one is blind; between two inner layers it is buried.").small().color(theme::muted()));
+            }
             row(ui, "Diameter", |ui| {
                 ui.add(egui::DragValue::new(&mut v.d).speed(0.01).range(0.2..=5.0).suffix(" mm"));
             });
@@ -1460,6 +1502,7 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
         }
         Sel::Zone(i) if i < p.board.zones.len() => {
             let nets: Vec<String> = app.pcb.cache.nl.nets.iter().map(|n| n.name.clone()).collect();
+            let cl = p.board.copper_layers();
             let z = &mut p.board.zones[i];
             ui.label(RichText::new("Copper pour").strong());
             row(ui, "Net", |ui| {
@@ -1470,8 +1513,9 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                 });
             });
             row(ui, "Layer", |ui| {
-                ui.selectable_value(&mut z.layer, Layer::Top, "Top");
-                ui.selectable_value(&mut z.layer, Layer::Bottom, "Bottom");
+                for l in &cl {
+                    ui.selectable_value(&mut z.layer, *l, l.label());
+                }
             });
             row(ui, "Pads", |ui| {
                 let name = |c: pcb::PadConnect| match c {
@@ -1499,12 +1543,14 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             }
         }
         Sel::Keepout(i) if i < p.board.keepouts.len() => {
+            let cl = p.board.copper_layers();
             let k = &mut p.board.keepouts[i];
             ui.label(RichText::new("Keepout").strong());
             row(ui, "Layer", |ui| {
-                ui.selectable_value(&mut k.layer, None, "Both");
-                ui.selectable_value(&mut k.layer, Some(Layer::Top), "Top");
-                ui.selectable_value(&mut k.layer, Some(Layer::Bottom), "Bottom");
+                ui.selectable_value(&mut k.layer, None, "All");
+                for l in &cl {
+                    ui.selectable_value(&mut k.layer, Some(*l), l.label());
+                }
             });
             ui.checkbox(&mut k.tracks, "No tracks");
             ui.checkbox(&mut k.vias, "No vias");
@@ -1795,6 +1841,7 @@ fn layers_ui(app: &mut App, ui: &mut Ui) {
     ui.horizontal_wrapped(|ui| {
         ui.checkbox(&mut s.top, "Top");
         ui.checkbox(&mut s.bottom, "Bottom");
+        ui.checkbox(&mut s.inner, "Inner");
         ui.checkbox(&mut s.silk, "Silkscreen");
         ui.checkbox(&mut s.zones, "Pours");
         ui.checkbox(&mut s.air, "Ratsnest");
@@ -2015,25 +2062,26 @@ fn label_box_hit(l: &Label, at: P) -> bool {
 /// hidden pours can't be picked. A click on a part's pad picks the part, not the tracks that end
 /// on the pad.
 fn board_hit(p: &Pcb, pads: &[WPad], at: P, tol: f64, layer: Layer, show: &BoardView) -> Option<Sel> {
-    let shown = |l: Layer| if l == Layer::Top { show.top } else { show.bottom };
+    let order: Vec<Layer> = layer_order(p, layer).into_iter().filter(|l| show.shows(*l)).collect();
     for (i, v) in p.board.vias.iter().enumerate() {
-        if pcb::dist(v.at, at) <= v.d / 2.0 + tol {
+        if pcb::dist(v.at, at) <= v.d / 2.0 + tol && order.iter().any(|l| v.on(*l)) {
             return Some(Sel::Via(i));
         }
     }
-    for l in [layer, layer.other()].into_iter().filter(|l| shown(*l)) {
+    for &l in &order {
         if let Some(pad) = pads.iter().find(|x| x.layer.is_none_or(|pl| pl == l) && x.cu().contains(at)) {
             return Some(Sel::Part(pad.part));
         }
     }
-    for l in [layer, layer.other()].into_iter().filter(|l| shown(*l)) {
+    for &l in &order {
         for (i, t) in p.board.tracks.iter().enumerate().filter(|(_, t)| t.layer == l) {
             if pcb::seg_point(t.a, t.b, at) <= t.width / 2.0 + tol {
                 return Some(Sel::Track(i));
             }
         }
     }
-    for side in [layer, layer.other()] {
+    let near = if layer == Layer::Bottom { Layer::Bottom } else { Layer::Top };
+    for side in [near, near.other()] {
         for (i, part) in p.parts.iter().enumerate().rev().filter(|(_, x)| x.side() == side) {
             let (lo, hi) = p.court_world(part);
             if at[0] >= lo[0] && at[0] <= hi[0] && at[1] >= lo[1] && at[1] <= hi[1] {
@@ -2046,7 +2094,7 @@ fn board_hit(p: &Pcb, pads: &[WPad], at: P, tol: f64, layer: Layer, show: &Board
             return Some(Sel::Hole(i));
         }
     }
-    for (i, z) in p.board.zones.iter().enumerate().filter(|(_, z)| show.zones && shown(z.layer)) {
+    for (i, z) in p.board.zones.iter().enumerate().filter(|(_, z)| show.zones && show.shows(z.layer)) {
         let n = z.outline.len();
         if (0..n).any(|k| pcb::seg_point(z.outline[k], z.outline[(k + 1) % n], at) < tol * 2.0) {
             return Some(Sel::Zone(i));
@@ -2533,13 +2581,13 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                 let p = &app.ws.pcbs[pi];
                 let c = &app.pcb.cache;
                 let layer = app.pcb.layer;
-                let shown = |l: Layer| if l == Layer::Top { app.pcb.show.top } else { app.pcb.show.bottom };
+                let order: Vec<Layer> = layer_order(p, layer).into_iter().filter(|l| app.pcb.show.shows(*l)).collect();
                 match &app.pcb.route {
                     // the second click of the double-click that ended a route
                     None if double => {}
                     None => {
                         // start on a pad, track or via of a shown layer
-                        let hit = [layer, layer.other()].into_iter().filter(|l| shown(*l)).find_map(|l| pcb::copper_at(p, &c.nl, &c.pads, h, l, tol));
+                        let hit = order.iter().find_map(|&l| pcb::copper_at(p, &c.nl, &c.pads, h, l, tol));
                         if let Some(hit) = hit {
                             // a surface mount pad or track on the other side starts there
                             let l = hit.layer.unwrap_or(layer);
@@ -2789,7 +2837,7 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
     }
     let h = app.pcb.hover;
     if let Some(r) = &app.pcb.route {
-        let col = if r.layer == Layer::Top { pcb_export::colors::TOP } else { pcb_export::colors::BOTTOM };
+        let col = pcb_export::layer_color(r.layer);
         let col = Color32::from_rgba_unmultiplied(col[0], col[1], col[2], 170);
         let start = *r.pts.last().unwrap();
         let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == r.layer).and_then(|w| w.3.clone().map(|p| tidy_walk(start, w.1, p)));

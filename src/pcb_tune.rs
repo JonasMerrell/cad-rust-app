@@ -88,7 +88,7 @@ fn clear(p: &Pcb, nl: &Netlist, pads: &[pcb::WPad], segs: &[(P, P)], w: f64, lay
     for (a, b) in segs {
         let cu = Cu::Seg { a: *a, b: *b, r: w / 2.0 };
         for it in &its {
-            if it.net == net || it.layer.is_some_and(|l| l != layer) {
+            if it.net == net || !it.on(layer) {
                 continue;
             }
             let need = c.max(p.net_rules(nl, &it.net).clearance);

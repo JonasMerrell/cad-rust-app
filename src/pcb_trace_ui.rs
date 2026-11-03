@@ -67,6 +67,21 @@ pub fn stackup_ui(app: &mut App, ui: &mut Ui) {
     if (b.stackup.total() - b.thickness).abs() > 1e-3 || b.stackup.coppers().len() < 2 {
         b.stackup = tr::stack(b);
     }
+    let n = b.copper_layers().len();
+    let mut want = n;
+    row(ui, "Layers", |ui| {
+        egui::ComboBox::from_id_salt("pcb-layer-count").width(90.0).selected_text(format!("{n} layers")).show_ui(ui, |ui| {
+            for k in [2, 4, 6, 8, 10, 12, 16] {
+                ui.selectable_value(&mut want, k, format!("{k} layers"));
+            }
+        });
+    });
+    if want != n {
+        if let Err(e) = b.set_copper_count(want) {
+            app.flash_info(e, Some(std::time::Duration::from_secs(4)));
+        }
+        return;
+    }
     let mut set_total = None;
     for l in &mut b.stackup.layers {
         match l.kind {

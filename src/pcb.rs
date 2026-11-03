@@ -129,26 +129,73 @@ pub struct Label {
     pub rot: u8,
 }
 
-#[derive(Clone, Copy, Debug, Default, Serialize, Deserialize, PartialEq, Eq, Hash)]
-#[serde(rename_all = "lowercase")]
+/// A copper layer: the two outer ones, or inner layer `In(k)` (1 just under the top).
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
 pub enum Layer {
     #[default]
     Top,
     Bottom,
+    In(u8),
 }
 
 impl Layer {
+    /// The other outer side (an inner layer stays itself).
     pub fn other(self) -> Layer {
         match self {
             Layer::Top => Layer::Bottom,
             Layer::Bottom => Layer::Top,
+            l => l,
         }
     }
-    pub fn label(self) -> &'static str {
+    pub fn label(self) -> String {
         match self {
-            Layer::Top => "Top",
-            Layer::Bottom => "Bottom",
+            Layer::Top => "Top".into(),
+            Layer::Bottom => "Bottom".into(),
+            Layer::In(k) => format!("Inner {k}"),
         }
+    }
+    /// Short name as saved and as the agent writes it: top, bottom, in1, in2, …
+    pub fn key(self) -> String {
+        match self {
+            Layer::Top => "top".into(),
+            Layer::Bottom => "bottom".into(),
+            Layer::In(k) => format!("in{k}"),
+        }
+    }
+    pub fn parse(s: &str) -> Option<Layer> {
+        let s = s.trim().to_ascii_lowercase();
+        Some(match s.as_str() {
+            "top" | "f.cu" | "front" => Layer::Top,
+            "bottom" | "b.cu" | "back" => Layer::Bottom,
+            _ => {
+                let k = s.strip_prefix("in").map(|r| r.trim_start_matches(['_', ' ']).trim_end_matches(".cu")).and_then(|r| r.parse::<u8>().ok()).filter(|k| *k >= 1)?;
+                Layer::In(k)
+            }
+        })
+    }
+    /// Position from the top: top 0, inner layers 1, 2, …, bottom last (255).
+    pub fn order(self) -> u8 {
+        match self {
+            Layer::Top => 0,
+            Layer::In(k) => k,
+            Layer::Bottom => 255,
+        }
+    }
+    pub fn outer(self) -> bool {
+        !matches!(self, Layer::In(_))
+    }
+}
+
+impl Serialize for Layer {
+    fn serialize<S: serde::Serializer>(&self, s: S) -> Result<S::Ok, S::Error> {
+        s.serialize_str(&self.key())
+    }
+}
+
+impl<'de> Deserialize<'de> for Layer {
+    fn deserialize<D: serde::Deserializer<'de>>(d: D) -> Result<Layer, D::Error> {
+        let s = String::deserialize(d)?;
+        Layer::parse(&s).ok_or_else(|| serde::de::Error::custom(format!("unknown layer {s}; use top, bottom or in1, in2, …")))
     }
 }
 
@@ -169,6 +216,31 @@ pub struct Via {
     pub drill: f64,
     #[serde(default)]
     pub net: String,
+    /// The layers a blind or buried via joins (first above last); None for a through via.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub span: Option<[Layer; 2]>,
+}
+
+impl Via {
+    pub fn new(at: P, d: f64, drill: f64, net: &str) -> Via {
+        Via { at, d, drill, net: net.into(), span: None }
+    }
+    /// The span in layer order (top-most first), or None for a through via.
+    pub fn orders(&self) -> Option<(u8, u8)> {
+        self.span.map(|[a, b]| (a.order().min(b.order()), a.order().max(b.order())))
+    }
+    pub fn on(&self, l: Layer) -> bool {
+        self.orders().is_none_or(|(a, b)| (a..=b).contains(&l.order()))
+    }
+    /// "through", "blind" (reaches one outer side) or "buried".
+    pub fn kind(&self) -> &'static str {
+        match self.orders() {
+            None => "through",
+            Some((0, 255)) => "through",
+            Some((0, _)) | Some((_, 255)) => "blind",
+            _ => "buried",
+        }
+    }
 }
 
 /// How a pour joins the pads of its own net.
@@ -510,6 +582,44 @@ fn rect_outline_n(w: f64, h: f64, r: f64, n: usize) -> Vec<P> {
 }
 
 impl Board {
+    /// The copper layers, top to bottom, from the stackup (two when it has fewer).
+    pub fn copper_layers(&self) -> Vec<Layer> {
+        let n = self.stackup.coppers().len().max(2);
+        let mut v = vec![Layer::Top];
+        v.extend((1..n - 1).map(|k| Layer::In(k as u8)));
+        v.push(Layer::Bottom);
+        v
+    }
+    /// Change the number of copper layers (even, 2 to 32): a fresh stackup of that many at the
+    /// board's thickness and the outer copper weight. Refused while removed layers carry copper.
+    pub fn set_copper_count(&mut self, n: usize) -> Result<(), String> {
+        if !(2..=32).contains(&n) || n % 2 != 0 {
+            return Err(format!("layers: {n}; an even number of copper layers from 2 to 32 (4 and 6 are usual)"));
+        }
+        if n == self.copper_layers().len() {
+            return Ok(());
+        }
+        let oz = crate::pcb_trace::stack(self).copper_oz(Layer::Top);
+        let st = crate::pcb_trace::Stackup::layered(n, self.thickness, oz);
+        let keep = self.copper_layers();
+        let have = Board { stackup: st.clone(), ..Default::default() }.copper_layers();
+        let gone: Vec<String> = keep.iter().filter(|l| !have.contains(l)).map(|l| l.label()).collect();
+        let used = self.tracks.iter().any(|t| !have.contains(&t.layer))
+            || self.zones.iter().any(|z| !have.contains(&z.layer))
+            || self.keepouts.iter().any(|k| k.layer.is_some_and(|l| !have.contains(&l)))
+            || self.vias.iter().any(|v| v.span.is_some_and(|s| s.iter().any(|l| !have.contains(l))));
+        if used {
+            return Err(format!("{} still has tracks, pours, keepouts or vias: move or delete them first", gone.join(", ")));
+        }
+        self.stackup = st;
+        Ok(())
+    }
+    pub fn has_layer(&self, l: Layer) -> bool {
+        match l {
+            Layer::In(k) => (k as usize) + 1 < self.stackup.coppers().len().max(2),
+            _ => true,
+        }
+    }
     pub fn bbox(&self) -> (P, P) {
         bbox(&self.outline)
     }
@@ -1415,10 +1525,12 @@ pub fn natural(a: &str, b: &str) -> std::cmp::Ordering {
 pub struct Item {
     pub kind: ItemKind,
     pub cu: Cu,
-    /// None: on both layers.
+    /// None: on every layer (or the `span`).
     pub layer: Option<Layer>,
     /// Net name; "" for a pad with no connection.
     pub net: String,
+    /// A blind or buried via's layer orders (see `Layer::order`).
+    pub span: Option<(u8, u8)>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1431,11 +1543,20 @@ pub enum ItemKind {
 }
 
 impl Item {
-    pub fn shares_layer(&self, o: &Item) -> bool {
-        match (self.layer, o.layer) {
-            (Some(a), Some(b)) => a == b,
-            _ => true,
+    /// The layer orders a layer-less item reaches (a blind or buried via), all when None.
+    fn reach(&self) -> (u8, u8) {
+        match self.layer {
+            Some(l) => (l.order(), l.order()),
+            None => self.span.unwrap_or((0, 255)),
         }
+    }
+    pub fn on(&self, l: Layer) -> bool {
+        let (a, b) = self.reach();
+        (a..=b).contains(&l.order())
+    }
+    pub fn shares_layer(&self, o: &Item) -> bool {
+        let ((a0, a1), (b0, b1)) = (self.reach(), o.reach());
+        a0 <= b1 && b0 <= a1
     }
 }
 
@@ -1446,19 +1567,19 @@ pub type Fill = Shapes;
 pub fn items(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Item> {
     let mut v = vec![];
     for (i, p) in pads.iter().enumerate() {
-        v.push(Item { kind: ItemKind::Pad(i), cu: p.cu(), layer: p.layer, net: p.net.map(|n| nl.nets[n].name.clone()).unwrap_or_default() });
+        v.push(Item { kind: ItemKind::Pad(i), cu: p.cu(), layer: p.layer, net: p.net.map(|n| nl.nets[n].name.clone()).unwrap_or_default(), span: None });
     }
     for (i, t) in pcb.board.tracks.iter().enumerate() {
-        v.push(Item { kind: ItemKind::Track(i), cu: Cu::Seg { a: t.a, b: t.b, r: t.width / 2.0 }, layer: Some(t.layer), net: t.net.clone() });
+        v.push(Item { kind: ItemKind::Track(i), cu: Cu::Seg { a: t.a, b: t.b, r: t.width / 2.0 }, layer: Some(t.layer), net: t.net.clone(), span: None });
     }
     for (i, t) in pcb.board.vias.iter().enumerate() {
-        v.push(Item { kind: ItemKind::Via(i), cu: Cu::Seg { a: t.at, b: t.at, r: t.d / 2.0 }, layer: None, net: t.net.clone() });
+        v.push(Item { kind: ItemKind::Via(i), cu: Cu::Seg { a: t.at, b: t.at, r: t.d / 2.0 }, layer: None, net: t.net.clone(), span: t.orders() });
     }
     for (zi, f) in fills.iter().enumerate() {
         let Some(z) = pcb.board.zones.get(zi) else { continue };
         for (k, piece) in f.iter().enumerate() {
             if let Some(outer) = piece.first() {
-                v.push(Item { kind: ItemKind::Fill(zi, k), cu: Cu::Poly(outer.clone()), layer: Some(z.layer), net: z.net.clone() });
+                v.push(Item { kind: ItemKind::Fill(zi, k), cu: Cu::Poly(outer.clone()), layer: Some(z.layer), net: z.net.clone(), span: None });
             }
         }
     }
@@ -1633,7 +1754,7 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
         // keep clear of other nets, and of earlier zones on the same layer
         let mut obstacles: Vec<Contour> = vec![];
         for it in &base_items {
-            if it.layer.is_some_and(|l| l != z.layer) {
+            if !it.on(z.layer) {
                 continue;
             }
             if it.net != z.net || it.net.is_empty() {
@@ -1683,7 +1804,7 @@ pub fn fill_zones(pcb: &Pcb, nl: &Netlist, pads: &[WPad]) -> Vec<Fill> {
             area = overlay(&area, &sp, OverlayRule::Union);
         }
         // keep pieces that reach a pad, via or track of the net
-        let own: Vec<&Item> = base_items.iter().filter(|it| it.net == z.net && !z.net.is_empty() && it.layer.is_none_or(|l| l == z.layer)).collect();
+        let own: Vec<&Item> = base_items.iter().filter(|it| it.net == z.net && !z.net.is_empty() && it.on(z.layer)).collect();
         area.retain(|piece| own.iter().any(|it| probe(&it.cu).iter().any(|p| inside(&piece[0], *p) && !piece[1..].iter().any(|h| inside(h, *p)))));
         fills[zi] = area;
     }
@@ -2040,7 +2161,7 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
     if r.checks("antenna") {
         for (ti, t) in b.tracks.iter().enumerate() {
             for end in [t.a, t.b] {
-                let tip = Item { kind: ItemKind::Track(ti), cu: Cu::Seg { a: end, b: end, r: t.width / 2.0 }, layer: Some(t.layer), net: t.net.clone() };
+                let tip = Item { kind: ItemKind::Track(ti), cu: Cu::Seg { a: end, b: end, r: t.width / 2.0 }, layer: Some(t.layer), net: t.net.clone(), span: None };
                 let joined = all.iter().any(|o| o.kind != ItemKind::Track(ti) && (o.net == t.net || o.net.is_empty() || t.net.is_empty()) && touching(&tip, o, fills));
                 if !joined {
                     out.push(Issue::new("antenna", end, false, format!("Track on {} ends on nothing", if t.net.is_empty() { "no net" } else { &t.net })));
@@ -2110,7 +2231,7 @@ pub fn copper_at(pcb: &Pcb, nl: &Netlist, pads: &[WPad], at: P, layer: Layer, to
         }
     }
     for v in &pcb.board.vias {
-        if dist(v.at, at) <= v.d / 2.0 + tol {
+        if v.on(layer) && dist(v.at, at) <= v.d / 2.0 + tol {
             return Some(CopperHit { net: v.net.clone(), at: v.at, layer: None, pad: false });
         }
     }
@@ -2134,6 +2255,36 @@ pub fn closest_on(a: P, b: P, p: P) -> P {
 #[cfg(test)]
 pub(crate) mod tests {
     use super::*;
+
+    #[test]
+    fn inner_layers_and_via_spans() {
+        assert_eq!(serde_json::to_string(&Layer::In(2)).unwrap(), "\"in2\"");
+        assert_eq!(serde_json::from_str::<Layer>("\"bottom\"").unwrap(), Layer::Bottom);
+        assert_eq!(serde_json::from_str::<Layer>("\"in1\"").unwrap(), Layer::In(1));
+        assert_eq!(Layer::parse("In3.Cu"), Some(Layer::In(3)));
+        let mut b = Board::default();
+        assert_eq!(b.copper_layers(), vec![Layer::Top, Layer::Bottom]);
+        b.set_copper_count(6).unwrap();
+        assert_eq!(b.copper_layers().len(), 6);
+        assert!(b.has_layer(Layer::In(4)) && !b.has_layer(Layer::In(5)));
+        assert!(b.set_copper_count(5).is_err());
+        let mut v = Via::new([0.0, 0.0], 0.6, 0.3, "GND");
+        assert_eq!(v.kind(), "through");
+        v.span = Some([Layer::Top, Layer::In(1)]);
+        assert_eq!(v.kind(), "blind");
+        assert!(v.on(Layer::Top) && v.on(Layer::In(1)) && !v.on(Layer::In(2)) && !v.on(Layer::Bottom));
+        v.span = Some([Layer::In(1), Layer::In(2)]);
+        assert_eq!(v.kind(), "buried");
+        // a saved via without a span is still a through via
+        let back: Via = serde_json::from_str(r#"{"at":[1,2],"d":0.6,"drill":0.3,"net":"A"}"#).unwrap();
+        assert_eq!(back.kind(), "through");
+        // inner tracks block shrinking the stack
+        b.tracks.push(Track { a: [0.0, 0.0], b: [5.0, 0.0], width: 0.2, layer: Layer::In(3), net: "A".into() });
+        assert!(b.set_copper_count(4).is_err());
+        b.tracks.clear();
+        b.set_copper_count(4).unwrap();
+        assert_eq!(b.copper_layers()[2], Layer::In(2));
+    }
 
     /// An LED with its resistor: two parts, wires, a supply and ground port.
     #[test]
@@ -2519,7 +2670,7 @@ pub(crate) mod tests {
         for s in [[[5.0, 35.0], [15.0, 35.0]], [[15.0, 35.0], [15.0, 30.0]]] {
             p.board.tracks.push(Track { a: s[0], b: s[1], width: 0.25, layer: Layer::Top, net: String::new() });
         }
-        p.board.vias.push(Via { at: [15.0, 30.0], d: 0.6, drill: 0.3, net: String::new() });
+        p.board.vias.push(Via { at: [15.0, 30.0], d: 0.6, drill: 0.3, net: String::new(), span: None });
         let issues = drc(&p, &nl, &pads, &[]);
         assert!(!issues.iter().any(|i| i.rule == "clearance" && i.message.contains("no net")), "{issues:?}");
         // a separate net-less track too close to it is still an error
