@@ -87,7 +87,34 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     view_cube(app, ui, rect);
     view_tools(app, ui, rect);
+    if let Some(n) = app.isolated_parts().map(|b| b.len()) {
+        if isolation_banner(ui, rect, &format!("Isolated: {n} part{}", if n == 1 { "" } else { "s" })) {
+            app.end_isolation();
+        }
+    }
     context_menu(app, ui);
+}
+
+/// The note at the top of the viewport while isolating; true when Exit isolate is clicked.
+pub fn isolation_banner(ui: &Ui, rect: egui::Rect, text: &str) -> bool {
+    let pal = crate::theme::pal();
+    let mut exit = false;
+    egui::Area::new(egui::Id::new("isolation-banner"))
+        .order(egui::Order::Middle)
+        .pivot(egui::Align2::CENTER_TOP)
+        .fixed_pos(egui::pos2(rect.center().x, rect.top() + 10.0))
+        .show(ui.ctx(), |ui| {
+            egui::Frame::new().fill(pal.panel).stroke(Stroke::new(1.0, pal.active_stroke)).corner_radius(8).inner_margin(egui::Margin::symmetric(10, 4)).show(ui, |ui| {
+                ui.horizontal(|ui| {
+                    ui.add(crate::icons::image("isolate", 14.0).tint(pal.active_text));
+                    ui.label(egui::RichText::new(text).size(12.0).color(pal.text));
+                    if ui.button(egui::RichText::new("Exit isolate").size(12.0)).on_hover_text("Show everything again (Esc or I)").clicked() {
+                        exit = true;
+                    }
+                });
+            });
+        });
+    exit
 }
 
 /// Viewport background: a soft vertical gradient.
@@ -185,7 +212,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     // sketch points (for holes etc.)
     let mut best: Option<(f32, Ref)> = None;
     for f in &app.doc.features {
-        if f.hidden || rolled.contains(&f.id) {
+        if app.feature_hidden(f) || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
@@ -240,7 +267,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     // sketch curves, again skipping the ones behind the part
     let mut near: Vec<(f32, DVec3, Ref)> = vec![];
     for f in &app.doc.features {
-        if f.hidden || rolled.contains(&f.id) {
+        if app.feature_hidden(f) || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
@@ -287,7 +314,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
         }
     }
     for f in &app.doc.features {
-        if f.hidden || rolled.contains(&f.id) {
+        if app.feature_hidden(f) || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
@@ -321,7 +348,7 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     }
     for f in &app.doc.features {
         if let (Op::Plane { .. }, Some(fr)) = (&f.op, app.result.frames.get(&f.id)) {
-            if f.hidden || rolled.contains(&f.id) {
+            if app.feature_hidden(f) || rolled.contains(&f.id) {
                 continue;
             }
             if let Some((t, l)) = ray_plane(o, d, fr) {
@@ -493,7 +520,7 @@ fn build_scene(app: &App) -> SceneData {
     // plane features
     for f in &app.doc.features {
         if let (Op::Plane { .. }, Some(fr)) = (&f.op, app.result.frames.get(&f.id)) {
-            if f.hidden || rolled.contains(&f.id) {
+            if app.feature_hidden(f) || rolled.contains(&f.id) {
                 continue;
             }
             let r = Ref::FeaturePlane { feature: f.id };
@@ -607,7 +634,7 @@ fn build_scene(app: &App) -> SceneData {
 
     // sketches (the one being edited is drawn by the sketcher)
     for f in &app.doc.features {
-        if Some(f.id) == in_sketch || f.hidden || rolled.contains(&f.id) {
+        if Some(f.id) == in_sketch || app.feature_hidden(f) || rolled.contains(&f.id) {
             continue;
         }
         if let Op::Sketch { sketch, frame, .. } = &f.op {
@@ -733,7 +760,7 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
     if app.show_dims {
         let rolled = rolled_ids(app);
         for f in &app.doc.features {
-            if f.hidden || rolled.contains(&f.id) {
+            if app.feature_hidden(f) || rolled.contains(&f.id) {
                 continue;
             }
             if let Op::Sketch { sketch, frame, .. } = &f.op {
@@ -1068,6 +1095,9 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     if btn(ui, "measure", "Measure (M)", app.measure.is_some()).clicked() {
                         app.toggle_measure();
                     }
+                    if btn(ui, "isolate", crate::app::ISOLATE_TIP, app.isolation.is_some()).clicked() {
+                        app.toggle_isolate();
+                    }
                     if btn(ui, "normal", "Normal to: look straight at the selected plane or face (N)", false).clicked() {
                         app.view_normal_to_selection();
                     }
@@ -1148,6 +1178,14 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         app.set_part_hidden(b, true);
                         close = true;
                     }
+                    // the selected parts when the clicked one is among them, else just that part
+                    let sel = app.selected_parts();
+                    let these = if sel.contains(&b) { sel } else { vec![b] };
+                    let label = if these.len() > 1 { format!("Isolate {} parts", these.len()) } else { "Isolate part".to_string() };
+                    if ui.button(label).clicked() {
+                        app.isolate_parts(these);
+                        close = true;
+                    }
                 }
                 let sketch_feat = match t {
                     Ref::Region { sketch, .. } | Ref::SketchCurve { sketch, .. } | Ref::SketchPoint { sketch, .. } => Some(*sketch),
@@ -1202,6 +1240,10 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
             }
             if ui.button("Zoom to fit").clicked() {
                 app.fit_view();
+                close = true;
+            }
+            if app.isolation.is_some() && ui.button("Exit isolate").clicked() {
+                app.end_isolation();
                 close = true;
             }
             if app.doc.parts.values().any(|p| p.hidden) && ui.button("Show all parts").clicked() {
