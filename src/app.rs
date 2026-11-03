@@ -3687,7 +3687,7 @@ pub struct Isolation {
 
 /// Eye button on a tree row: shown while the row is hovered, or always when hidden.
 /// Returns true when clicked.
-fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
+pub(crate) fn eye_toggle(ui: &mut Ui, row: &egui::Response, x: f32, hidden: bool, id: impl std::hash::Hash + std::fmt::Debug) -> bool {
     let rect = egui::Rect::from_center_size(egui::pos2(x, row.rect.center().y), egui::vec2(18.0, 18.0));
     let r = ui.interact(rect, ui.id().with(id), Sense::click());
     if !(hidden || row.hovered() || r.hovered()) {
