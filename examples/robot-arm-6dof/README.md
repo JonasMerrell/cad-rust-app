@@ -79,10 +79,18 @@ PA-CF in its library, so the runs use Nylon (E 2.7 GPa). Stresses hardly depend 
 
 | Part | Before: peak (MPa) | After: peak (MPa) | Where the peak is now |
 |---|---|---|---|
-| Turntable/tower | 160 principal, 2.8 mm sag at the tool | 24 von Mises, 0.4 mm | a J2 bolt hole |
+| Turntable/tower | 160 principal; part moves up to 2.8 mm | 24 von Mises; part moves up to 0.4 mm | a J2 bolt hole |
 | Elbow housing | 20 principal | 12 | a J4 bolt hole |
 | Forearm | 13 principal | 9 | a J4 carrier bolt hole |
 | Wrist link | 8.5 principal | 8.5 | a J6 bolt hole (unchanged) |
+
+The displacements in the table are the largest movement anywhere on the part itself, at twice the
+load. What matters for accuracy is how far each part's flex moves the tool face, because a small
+tilt near the base swings the whole 500 mm arm. A separate check took the stiffness at each part's
+load point and carried it out to the tool. At 1× load in nylon, the tool face moves 0.75 mm from
+the turntable, 0.05 mm from the elbow housing, 0.11 mm from the forearm and 0.02 mm from the wrist
+link, about 0.9 mm in all. PA-CF is about 2.5 times stiffer, so expect roughly 0.35 mm, and most of
+that comes from the turntable. The gearboxes' own backlash and wind-up aren't included.
 
 The turntable was the weak spot. The tower stood on a 10 mm plate about 30 mm away from the J1
 flange, so the whole arm's moment bent that plate. The fixes:
