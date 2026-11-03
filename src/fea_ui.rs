@@ -2074,7 +2074,7 @@ fn overlay(app: &mut App, ui: &mut Ui, painter: &egui::Painter, rect: egui::Rect
         egui::Frame::new().fill(theme::window()).stroke(Stroke::new(1.0, theme::border())).corner_radius(6).inner_margin(Margin::symmetric(8, 4)).show(&mut child, |ui| {
             ui.horizontal(|ui| {
                 let icon = if app.fea.playing { "pause" } else { "camSim" };
-                if ui.add(egui::Button::image(icons::image(icon, 16.0).tint(theme::text()))).clicked() {
+                if ui.add(egui::Button::image(icons::image(icon, 16.0).tint(theme::text()))).on_hover_text(if app.fea.playing { "Pause" } else { "Play the result over time" }).clicked() {
                     toggle_play(app);
                 }
                 let mut f = app.fea.frame as f64;

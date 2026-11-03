@@ -279,6 +279,18 @@ pub fn input_fill() -> Color32 {
     if is_dark() { pal().bg } else { hex(0xf3f4f6) }
 }
 
+/// Behind a hovered button: a light accent tint, visible on panels and toolbar chips alike.
+pub fn hover_fill() -> Color32 {
+    let p = pal();
+    lerp(p.panel_2, p.accent, if is_dark() { 0.20 } else { 0.12 })
+}
+
+/// Outline of a hovered button.
+pub fn hover_stroke() -> Color32 {
+    let p = pal();
+    lerp(p.border, p.accent, 0.55)
+}
+
 /// Make combo boxes in `ui` look like filled input fields rather than flat buttons.
 pub fn field_style(ui: &mut egui::Ui) {
     let w = &mut ui.visuals_mut().widgets;
@@ -327,14 +339,15 @@ pub fn apply(ctx: &egui::Context) {
     w.inactive.fg_stroke = Stroke::new(1.0, p.text);
     w.inactive.corner_radius = r;
     w.hovered.bg_fill = p.panel_2;
-    w.hovered.weak_bg_fill = p.panel_2;
-    w.hovered.bg_stroke = Stroke::NONE;
+    // a hovered button is tinted and outlined, so it stands out on a panel and on a toolbar chip
+    w.hovered.weak_bg_fill = hover_fill();
+    w.hovered.bg_stroke = Stroke::new(1.0, hover_stroke());
     w.hovered.fg_stroke = Stroke::new(1.0, p.text);
     w.hovered.corner_radius = r;
     w.hovered.expansion = 0.0;
     w.active.bg_fill = if dark { hex(0x30343a) } else { hex(0xe6e9ed) };
-    w.active.weak_bg_fill = w.active.bg_fill;
-    w.active.bg_stroke = Stroke::NONE;
+    w.active.weak_bg_fill = lerp(p.panel_2, p.accent, if dark { 0.30 } else { 0.20 });
+    w.active.bg_stroke = Stroke::new(1.0, hover_stroke());
     w.active.fg_stroke = Stroke::new(1.0, p.text);
     w.active.corner_radius = r;
     w.active.expansion = 0.0;
@@ -349,6 +362,8 @@ pub fn apply(ctx: &egui::Context) {
 
     ctx.style_mut_of(theme, |s| {
         s.spacing.item_spacing = egui::vec2(6.0, 5.0);
+        // tooltips come up quickly once the pointer rests on a tool
+        s.interaction.tooltip_delay = 0.25;
         s.spacing.button_padding = egui::vec2(6.0, 4.0);
         s.spacing.interact_size.y = 28.0;
         s.spacing.menu_margin = egui::Margin::same(6);

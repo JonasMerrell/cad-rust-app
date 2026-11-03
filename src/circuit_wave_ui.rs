@@ -284,7 +284,7 @@ pub fn editor(ui: &mut Ui, k: usize, s: &mut Source, stop: f64) {
     if let Some(n) = ui.data(|d| d.get_temp::<String>(id.with("note"))) {
         ui.horizontal(|ui| {
             ui.label(RichText::new(&n).size(11.0).color(if n.starts_with('⚠') { theme::error() } else { theme::muted() }));
-            if ui.add(egui::Button::image(crate::icons::image("close", 10.0).tint(theme::muted())).frame(false)).clicked() {
+            if ui.add(egui::Button::image(crate::icons::image("close", 10.0).tint(theme::muted())).frame(false)).on_hover_text("Dismiss").clicked() {
                 ui.data_mut(|d| d.remove::<String>(id.with("note")));
             }
         });
