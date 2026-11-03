@@ -73,6 +73,8 @@ pub struct AsmUi {
     pub lib: crate::stdparts_ui::Lib,
     /// Playing back the mates a PCB simulation moved.
     pub motion: Option<Motion>,
+    /// Viewport right-click menu: where it opened and the instance under the pointer.
+    pub ctx: Option<(Pos2, Option<u64>)>,
 }
 
 /// Playback of a circuit simulation's motors and servos in an assembly.
@@ -572,6 +574,13 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if pressed(egui::Key::I) && app.asm.dialog.is_none() {
         toggle_isolate(app);
     }
+    if pressed(egui::Key::H) && app.asm.dialog.is_none() {
+        if crate::app::key_mods(ctx).1 {
+            show_all(app);
+        } else {
+            toggle_hide_selected(app);
+        }
+    }
 }
 
 /// In sight in the viewport: not hidden, or kept by the isolation.
@@ -609,6 +618,66 @@ pub fn toggle_isolate(app: &mut App) {
         let ids = app.asm.sel.clone();
         isolate(app, ids);
     }
+}
+
+/// Hide or show instances. Saved with the assembly and undoable; hiding one that is isolated
+/// also takes it out of the isolation, so it goes out of sight either way.
+pub fn set_hidden(app: &mut App, ids: &[u64], hidden: bool) {
+    let Some(a) = asm(app) else { return };
+    if !a.instances.iter().any(|x| ids.contains(&x.id) && x.hidden != hidden) {
+        return;
+    }
+    let stale = app.asm.clash_stale;
+    checkpoint(app);
+    // the interference result still holds for the parts it checked
+    app.asm.clash_stale = stale;
+    if let Some(a) = asm_mut(app) {
+        for x in a.instances.iter_mut().filter(|x| ids.contains(&x.id)) {
+            x.hidden = hidden;
+        }
+    }
+    if hidden {
+        if app.asm.hover.is_some_and(|h| ids.contains(&h.inst)) {
+            app.asm.hover = None;
+        }
+        if isolated(app).is_some() {
+            let left = app.isolation.as_mut().map(|i| {
+                i.instances.retain(|x| !ids.contains(x));
+                i.instances.len()
+            });
+            if left == Some(0) {
+                app.end_isolation();
+            }
+        }
+    }
+    app.asm.scene_dirty = true;
+}
+
+/// H: hide the selected instances, or show them when they are all hidden already.
+pub fn toggle_hide_selected(app: &mut App) {
+    let sel = app.asm.sel.clone();
+    if sel.is_empty() {
+        app.flash("Select the instances to hide", ToastKind::Info);
+        return;
+    }
+    let all_hidden = asm(app).map(|a| a.instances.iter().filter(|x| sel.contains(&x.id)).all(|x| x.hidden)).unwrap_or(false);
+    set_hidden(app, &sel, !all_hidden);
+}
+
+/// Hide every instance but these.
+pub fn hide_others(app: &mut App, keep: &[u64]) {
+    let others: Vec<u64> = asm(app).map(|a| a.instances.iter().map(|x| x.id).filter(|id| !keep.contains(id)).collect()).unwrap_or_default();
+    set_hidden(app, &others, true);
+}
+
+/// Shift+H: show every hidden instance.
+pub fn show_all(app: &mut App) {
+    let ids: Vec<u64> = asm(app).map(|a| a.instances.iter().filter(|x| x.hidden).map(|x| x.id).collect()).unwrap_or_default();
+    set_hidden(app, &ids, false);
+}
+
+pub fn any_hidden(app: &App) -> bool {
+    asm(app).is_some_and(|a| a.instances.iter().any(|x| x.hidden))
 }
 
 pub fn fit(app: &mut App) {
@@ -756,7 +825,10 @@ fn instances(app: &mut App, ui: &mut Ui) {
         return;
     }
     let rows: Vec<(u64, String, bool, bool, bool)> = a.instances.iter().map(|x| (x.id, x.name.clone(), x.fixed, x.hidden, !shown(app, x))).collect();
-    let mut toggle_hide = None;
+    let any_hidden = rows.iter().any(|r| r.3);
+    let mut hide: Option<(Vec<u64>, bool)> = None;
+    let mut others: Option<Vec<u64>> = None;
+    let mut show_every = false;
     let mut iso: Option<Option<Vec<u64>>> = None;
     for (id, name, fixed, hidden, out_of_sight) in rows {
         let picked = app.asm.sel.contains(&id);
@@ -765,7 +837,11 @@ fn instances(app: &mut App, ui: &mut Ui) {
             egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() }))
                 .min_size(egui::vec2(ui.available_width(), 20.0)),
         );
-        if r.clicked() {
+        // the selected instances when this row is one of them, else just this one
+        let these = if picked { app.asm.sel.clone() } else { vec![id] };
+        if crate::app::eye_toggle(ui, &r, r.rect.right() - 12.0, hidden, ("asm-eye", id)) {
+            hide = Some((these.clone(), !hidden));
+        } else if r.clicked() {
             if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
                 app.asm.sel.clear();
             }
@@ -774,15 +850,24 @@ fn instances(app: &mut App, ui: &mut Ui) {
             app.asm.scene_dirty = true;
         }
         r.context_menu(|ui| {
-            if ui.button(if hidden { "Show" } else { "Hide" }).clicked() {
-                toggle_hide = Some(id);
+            let n = these.len();
+            let what = if n > 1 { format!(" {n} instances") } else { String::new() };
+            if ui.button(format!("{}{what}", if hidden { "Show" } else { "Hide" })).on_hover_text("H").clicked() {
+                hide = Some((these.clone(), !hidden));
                 ui.close();
             }
-            // the selected instances when this row is one of them, else just this one
-            let these = if app.asm.sel.contains(&id) { app.asm.sel.clone() } else { vec![id] };
-            let label = if these.len() > 1 { format!("Isolate {} instances", these.len()) } else { "Isolate".to_string() };
+            if ui.button("Hide others").on_hover_text("Hide every instance but this").clicked() {
+                others = Some(these.clone());
+                ui.close();
+            }
+            if any_hidden && ui.button("Show all").on_hover_text("Shift+H").clicked() {
+                show_every = true;
+                ui.close();
+            }
+            ui.separator();
+            let label = if n > 1 { format!("Isolate {n} instances") } else { "Isolate".to_string() };
             if ui.button(label).on_hover_text("Show only this, until Esc, I or Exit isolate").clicked() {
-                iso = Some(Some(these));
+                iso = Some(Some(these.clone()));
                 ui.close();
             }
             if app.isolation.is_some() && ui.button("Exit isolate").clicked() {
@@ -796,13 +881,14 @@ fn instances(app: &mut App, ui: &mut Ui) {
         Some(None) => app.end_isolation(),
         None => {}
     }
-    if let Some(id) = toggle_hide {
-        if let Some(a) = asm_mut(app) {
-            if let Some(x) = a.instances.iter_mut().find(|x| x.id == id) {
-                x.hidden = !x.hidden;
-            }
-        }
-        app.asm.scene_dirty = true;
+    if let Some((ids, h)) = hide {
+        set_hidden(app, &ids, h);
+    }
+    if let Some(keep) = others {
+        hide_others(app, &keep);
+    }
+    if show_every {
+        show_all(app);
     }
 }
 
@@ -1316,6 +1402,12 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         }
     }
 
+    if resp.secondary_clicked() && app.asm.dialog.is_none() && app.asm.measure.is_none() {
+        if let Some(p) = resp.interact_pointer_pos().or(resp.hover_pos()) {
+            app.asm.ctx = Some((p, app.asm.hover.map(|h| h.inst)));
+        }
+    }
+
     // dragging instances (left drag; Shift rotates)
     if app.asm.dialog.is_none() {
         if resp.drag_started_by(egui::PointerButton::Primary) {
@@ -1401,7 +1493,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             app.end_isolation();
         }
     }
-    if let (Some(h), Some(p)) = (app.asm.hover, resp.hover_pos()) {
+    if let (Some(h), Some(p), None) = (app.asm.hover, resp.hover_pos(), app.asm.ctx) {
         if let Some(x) = asm(app).and_then(|a| a.instance(h.inst)) {
             let what = if h.edge.is_some() { "edge" } else { "face" };
             crate::viewport::label_box(&painter, p + egui::vec2(14.0, 18.0), &format!("{} · {what}", x.name), theme::text());
@@ -1427,6 +1519,64 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
         crate::viewport::label_box(&painter, rect.left_top() + egui::vec2(rect.width() / 2.0 - 120.0, 16.0), &text, theme::text());
     }
     mate_dialog(app, ui, rect);
+    viewport_menu(app, ui);
+}
+
+/// Right-click in the viewport: hide, show and isolate.
+fn viewport_menu(app: &mut App, ui: &mut Ui) {
+    let Some((pos, target)) = app.asm.ctx else { return };
+    if app.nav.as_ref().is_some_and(|n| n.moved > 3.0) {
+        app.asm.ctx = None;
+        return;
+    }
+    let target = target.filter(|id| asm(app).is_some_and(|a| a.instance(*id).is_some()));
+    let mut close = false;
+    let area = egui::Area::new(egui::Id::new("asm-ctx-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
+        egui::Frame::menu(ui.style()).fill(theme::panel_2()).show(ui, |ui| {
+            ui.set_min_width(200.0);
+            if let Some(id) = target {
+                let name = asm(app).and_then(|a| a.instance(id)).map(|x| x.name.clone()).unwrap_or_default();
+                ui.label(RichText::new(name).color(theme::muted()).size(11.0));
+                // the selected instances when the clicked one is among them, else just that one
+                let these = if app.asm.sel.contains(&id) { app.asm.sel.clone() } else { vec![id] };
+                let n = these.len();
+                if ui.button(if n > 1 { format!("Hide {n} instances") } else { "Hide".to_string() }).on_hover_text("H").clicked() {
+                    set_hidden(app, &these, true);
+                    close = true;
+                }
+                if ui.button("Hide others").clicked() {
+                    hide_others(app, &these);
+                    close = true;
+                }
+                if ui.button(if n > 1 { format!("Isolate {n} instances") } else { "Isolate".to_string() }).on_hover_text("I").clicked() {
+                    isolate(app, these);
+                    close = true;
+                }
+                ui.separator();
+            }
+            if any_hidden(app) && ui.button("Show all").on_hover_text("Shift+H").clicked() {
+                show_all(app);
+                close = true;
+            }
+            if app.isolation.is_some() && ui.button("Exit isolate").clicked() {
+                app.end_isolation();
+                close = true;
+            }
+            if ui.button("Zoom to fit").on_hover_text("F").clicked() {
+                fit(app);
+                close = true;
+            }
+            if !app.asm.sel.is_empty() && ui.button("Clear selection").clicked() {
+                app.asm.sel.clear();
+                app.asm.scene_dirty = true;
+                close = true;
+            }
+        });
+    });
+    let clicked_elsewhere = ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && !ui.input(|i| i.pointer.secondary_pressed());
+    if close || clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
+        app.asm.ctx = None;
+    }
 }
 
 fn check_interference(app: &mut App) {

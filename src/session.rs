@@ -1158,7 +1158,7 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("Del", "Delete the selection"),
         ],
     ),
-    ("Assembly", &[("Ctrl+A", "Select every instance"), ("I", "Isolate the selected instances"), ("Del", "Delete the selection"), ("F, 0–3", "Fit, standard views")]),
+    ("Assembly", &[("Ctrl+A", "Select every instance"), ("I", "Isolate the selected instances"), ("H", "Hide or show the selected instances"), ("Shift+H", "Show all instances"), ("Del", "Delete the selection"), ("F, 0–3", "Fit, standard views")]),
     ("Drawing", &[("S, D, R, A, N", "Select, dimension, radial, angle, note"), ("F", "Fit the sheet")]),
     ("Manufacture, Simulation", &[("Space", "Play the simulation / animation"), ("F", "Zoom to fit")]),
     ("Viewport mouse", &[("Right drag", "Orbit"), ("Middle drag or Shift+right drag", "Pan"), ("Wheel", "Zoom at the pointer"), ("Shift/Ctrl+click", "Add to the selection")]),
