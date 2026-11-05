@@ -737,6 +737,9 @@ impl App {
         }
         // Claude's change to the PCB is one undo step there; the history stays while its tab does
         crate::pcb_ui::ws_replaced(self, pcb_before, true);
+        // assembly UI state and the isolation name instances of the workspace just replaced
+        crate::asm_ui::leave(self);
+        self.isolation = None;
         self.picks.clear();
         if self.result.bodies.is_empty() {
             // frame the first parts Claude makes
@@ -771,6 +774,10 @@ impl App {
     /// Make `t` the visible tab; the Part Studio whose tab is shown becomes the live `doc`.
     pub fn switch_tab(&mut self, t: crate::workspace::Tab) {
         use crate::workspace::Tab;
+        if t != self.tab && matches!(self.tab, Tab::Assembly(_)) {
+            // the mate being made and the selection belong to the assembly being left
+            crate::asm_ui::leave(self);
+        }
         if self.sketch.is_some() {
             crate::sketcher::finish(self);
         }
@@ -2231,12 +2238,18 @@ impl App {
 
     /// Origin or an origin plane out of sight: hidden, or isolating parts.
     pub fn default_hidden(&self, name: &str) -> bool {
-        self.isolated_parts().is_some() || self.doc.hidden_defaults.iter().any(|h| h == name)
+        (self.isolated_parts().is_some() && !self.isolation_paused()) || self.doc.hidden_defaults.iter().any(|h| h == name)
+    }
+
+    /// A feature dialog is open or a sketch plane is wanted: sketches and planes (a new sketch's
+    /// regions, the origin planes) stay pickable while isolating.
+    fn isolation_paused(&self) -> bool {
+        self.dialog.is_some() || self.awaiting_sketch_plane
     }
 
     /// A sketch, plane or helix out of sight: hidden, or isolating parts (the sketch being edited still shows).
     pub fn feature_hidden(&self, f: &doc::Feature) -> bool {
-        f.hidden || (self.isolated_parts().is_some() && self.sketch.as_ref().is_none_or(|s| s.feature != f.id))
+        f.hidden || (self.isolated_parts().is_some() && !self.isolation_paused() && self.sketch.as_ref().is_none_or(|s| s.feature != f.id))
     }
 
     /// Out of sight in the viewport: hidden, or left out of the isolated parts.
@@ -2299,6 +2312,10 @@ impl App {
         if self.isolation.take().is_some() {
             self.scene_dirty = true;
             self.asm.scene_dirty = true;
+            // an interference result covers only what was in sight when it ran
+            if self.asm.clashes.is_some() {
+                self.asm.clash_stale = true;
+            }
         }
     }
 
@@ -2334,7 +2351,18 @@ impl App {
         self.checkpoint();
         let key = doc::body_key(id);
         let mut p = self.doc.parts.get(&key).cloned().unwrap_or_default();
+        let was_hidden = p.hidden;
         f(&mut p);
+        if p.hidden && !was_hidden && self.isolated_parts().is_some() {
+            // hiding an isolated part takes it out of the isolation, so it goes out of sight
+            let left = self.isolation.as_mut().map(|i| {
+                i.bodies.retain(|b| *b != id);
+                i.bodies.len()
+            });
+            if left == Some(0) {
+                self.end_isolation();
+            }
+        }
         if p == doc::PartProps::default() {
             self.doc.parts.remove(&key);
         } else {

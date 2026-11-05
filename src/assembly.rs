@@ -96,13 +96,20 @@ pub fn leaves(all: &[Assembly], inst: &Instance) -> Vec<Leaf> {
 /// The parts of an instance like `leaves`, with the parts hidden inside sub-assemblies too when
 /// `hidden` is set: hiding is only for looking, so a bill of materials still counts them.
 pub fn leaves_with(all: &[Assembly], inst: &Instance, hidden: bool) -> Vec<Leaf> {
-    fn rec(all: &[Assembly], inst: &Instance, acc: Pose, depth: usize, hidden: bool, out: &mut Vec<Leaf>) {
+    leaves_shown(all, inst).into_iter().filter(|(_, shown)| hidden || *shown).map(|(l, _)| l).collect()
+}
+
+/// Every part of an instance (hidden ones inside sub-assemblies included), with whether it is in
+/// sight. The position in this list is the leaf number mate connectors and picks store, so it must
+/// not change when something inside a sub-assembly is hidden or shown.
+pub fn leaves_shown(all: &[Assembly], inst: &Instance) -> Vec<(Leaf, bool)> {
+    fn rec(all: &[Assembly], inst: &Instance, acc: Pose, depth: usize, shown: bool, out: &mut Vec<(Leaf, bool)>) {
         match inst.sub {
-            None => out.push(Leaf { studio: inst.studio, body: inst.body, pose: acc }),
+            None => out.push((Leaf { studio: inst.studio, body: inst.body, pose: acc }, shown)),
             Some(k) if depth < 8 => {
                 if let Some(a) = all.get(k) {
-                    for c in a.instances.iter().filter(|c| hidden || !c.hidden) {
-                        rec(all, c, acc.compose(&c.pose), depth + 1, hidden, out);
+                    for c in &a.instances {
+                        rec(all, c, acc.compose(&c.pose), depth + 1, shown && !c.hidden, out);
                     }
                 }
             }
@@ -110,7 +117,7 @@ pub fn leaves_with(all: &[Assembly], inst: &Instance, hidden: bool) -> Vec<Leaf>
         }
     }
     let mut out = vec![];
-    rec(all, inst, Pose::default(), 0, hidden, &mut out);
+    rec(all, inst, Pose::default(), 0, true, &mut out);
     out
 }
 
@@ -805,7 +812,8 @@ pub fn refresh_connectors<'m>(all: &mut [Assembly], ai: usize, mesh: &dyn Fn(usi
         for (side, c) in [(true, m.a), (false, m.b)] {
             let Some(c) = c else { continue };
             let Some(inst) = asm.instance(c.inst) else { continue };
-            let leaves = leaves(all, inst);
+            // numbered over every part, hidden ones too, like the connectors' leaf numbers
+            let leaves = leaves_with(all, inst, true);
             let found = (|| {
                 let li = c.on.map(|r| r.leaf as usize).or_else(|| (leaves.len() == 1).then_some(0))?;
                 let l = leaves.get(li)?;
@@ -965,6 +973,35 @@ mod tests {
         assert_eq!(refresh_connectors(&mut all, 0, &|_, _| Some(&gone)), vec![3]);
         // the moving side of a new mate is the less constrained one
         assert_eq!(mate_anchor(&all[0], 3), vec![1]);
+    }
+
+    #[test]
+    fn hiding_inside_a_sub_assembly_keeps_leaf_numbers() {
+        // sub: a thin slab (leaf 0) and a thick one 100 up (leaf 1); the top assembly mates on leaf 1
+        let mut low = inst(1, true, [0.0; 3]);
+        low.body = (1, 0);
+        let mut high = inst(2, false, [0.0, 0.0, 100.0]);
+        high.body = (2, 0);
+        let mut sub = Assembly { name: "sub".into(), instances: vec![low, high], ..Default::default() };
+        let mut top_i = inst(5, true, [0.0; 3]);
+        top_i.sub = Some(0);
+        let thick = slab(20.0);
+        let thin = slab(8.0);
+        let mut c = infer_connector(5, 1, &thick, Some(1), None, DVec3::new(30.0, 10.0, 20.0)).unwrap();
+        c.origin[2] += 100.0;
+        let other = Connector { inst: 6, origin: [0.0; 3], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None };
+        let mut top = Assembly { name: "top".into(), instances: vec![top_i.clone()], ..Default::default() };
+        top.mates.push(Mate { id: 9, name: "m".into(), kind: MateKind::Fastened, a: Some(c), b: Some(other), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
+        // the thin slab is hidden inside the sub-assembly
+        sub.instances[0].hidden = true;
+        let mut all = vec![sub, top];
+        let shown = leaves_shown(&all, &top_i);
+        assert_eq!(shown.iter().map(|(l, s)| (l.body, *s)).collect::<Vec<_>>(), vec![((1, 0), false), ((2, 0), true)]);
+        let mesh = |_: usize, b: BodyId| if b == (2, 0) { Some(&thick) } else { Some(&thin) };
+        assert!(refresh_connectors(&mut all, 1, &mesh).is_empty(), "the connector still finds its part");
+        let after = all[1].mates[0].a.unwrap();
+        assert_eq!(after.on.unwrap().leaf, 1);
+        assert!((DVec3::from(after.origin) - DVec3::new(30.0, 10.0, 120.0)).length() < 1e-6, "{:?}", after.origin);
     }
 
     #[test]
