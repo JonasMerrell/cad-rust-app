@@ -508,6 +508,20 @@ fn prune_images(messages: &mut [Value]) -> bool {
     true
 }
 
+/// The tool calls not to run: those whose input wasn't valid JSON, and a call the length limit
+/// cut off (the last block of a `max_tokens` reply), whose input may never have arrived and
+/// would otherwise run as `{}`.
+fn bad_inputs(content: &[Value], stop_reason: &str, mut bad: Vec<String>) -> Vec<String> {
+    if stop_reason == "max_tokens" {
+        if let Some(id) = content.last().filter(|b| b["type"] == "tool_use").and_then(|b| b["id"].as_str()) {
+            if !bad.iter().any(|b| b == id) {
+                bad.push(id.to_string());
+            }
+        }
+    }
+    bad
+}
+
 /// Where the conversation stood before a turn, to put it back when the API rejects the turn.
 struct Mark {
     len: usize,
@@ -551,7 +565,8 @@ impl Chat {
         let stop_flag = self.stop.clone();
         let session = self.session.get_or_insert_with(crate::agent::Session::new);
         session.cancel = Some(stop_flag);
-        if ws != self.seen {
+        // (a Part Studio switch alone leaves the JSON as it was)
+        if ws != self.seen || studio != self.seen_studio {
             let w = crate::workspace::Workspace::from_json(ws)?;
             session.load_workspace(w, studio)?;
             let (json, cur) = session.workspace_json();
@@ -683,7 +698,8 @@ impl Chat {
                 }
                 return Ok(true);
             }
-            let results = self.run_tools(&calls, &reply.bad_inputs, run.planner.then_some(cred), stop, send);
+            let bad = bad_inputs(&content, &stop_reason, reply.bad_inputs);
+            let results = self.run_tools(&calls, &bad, run.planner.then_some(cred), stop, send);
             messages.push(json!({"role": "user", "content": results}));
             if stop_reason == "max_tokens" {
                 send(FromWorker::Notice("The reply hit the length limit.".into()));
@@ -819,7 +835,8 @@ impl Chat {
             }
         };
         let (ws, studio) = session.workspace_json();
-        if ws != self.seen {
+        // switch_part_studio changes only the active Part Studio: the editor follows it too
+        if ws != self.seen || studio != self.seen_studio {
             self.seen = ws.clone();
             self.seen_studio = studio;
             send(FromWorker::Workspace { json: ws, studio });
@@ -828,31 +845,33 @@ impl Chat {
     }
 }
 
-/// File types a tool writes, by the argument that names the output.
-fn output_types(name: &str, a: &Value) -> Option<(&'static str, Vec<String>)> {
+/// File types a tool writes, by the arguments that name the outputs.
+fn output_types(name: &str, a: &Value) -> Vec<(&'static str, Vec<String>)> {
     let list = |l: &[&str]| l.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-    Some(match name {
-        "export" => (
+    match name {
+        "export" => vec![(
             "path",
             match a["format"].as_str().unwrap_or("") {
                 "step" => list(&["step", "stp"]),
                 "iges" => list(&["iges", "igs"]),
                 f => vec![f.to_string()],
             },
-        ),
-        "render" | "render_assembly" | "render_cam" | "render_drawing" | "render_simulation" | "simulate_cam" | "render_pcb" | "simulate_pcb" => ("path", list(&["png"])),
+        )],
+        // simulate_pcb also writes the probed waveforms as CSV
+        "simulate_pcb" => vec![("path", list(&["png"])), ("csv", list(&["csv"]))],
+        "render" | "render_assembly" | "render_cam" | "render_drawing" | "render_simulation" | "simulate_cam" | "render_pcb" => vec![("path", list(&["png"]))],
         "export_drawing" => {
             const ALL: [&str; 4] = ["pdf", "svg", "dxf", "png"];
             let ext = a["path"].as_str().and_then(|p| std::path::Path::new(p).extension()).map(|e| e.to_string_lossy().to_lowercase());
             let format = a["format"].as_str().map(|f| f.to_lowercase()).or(ext).filter(|f| ALL.contains(&f.as_str()));
-            ("path", format.map(|f| vec![f]).unwrap_or_else(|| list(&ALL)))
+            vec![("path", format.map(|f| vec![f]).unwrap_or_else(|| list(&ALL)))]
         }
-        "export_web" | "export_setup_sheet" => ("path", list(&["html", "htm"])),
-        "export_gcode" => ("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"])),
-        "export_pcb" => ("path", list(&["zip"])),
-        "cam_soft_jaws" => ("export_step", list(&["step", "stp"])),
-        _ => return None,
-    })
+        "export_web" | "export_setup_sheet" => vec![("path", list(&["html", "htm"]))],
+        "export_gcode" => vec![("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"]))],
+        "export_pcb" => vec![("path", list(&["zip"]))],
+        "cam_soft_jaws" => vec![("export_step", list(&["step", "stp"]))],
+        _ => vec![],
+    }
 }
 
 /// The chat panel's limits on what Claude's tool calls may touch outside the document (the
@@ -868,17 +887,28 @@ fn check_outputs(name: &str, a: &Value) -> Result<(), String> {
         }
         return Ok(());
     }
-    let Some((key, types)) = output_types(name, a) else { return Ok(()) };
-    let Some(path) = a[key].as_str() else { return Ok(()) };
-    let p = std::path::Path::new(path);
-    if !p.is_file() {
-        return Ok(());
+    if name == "export_pcb" {
+        // a path that isn't a .zip is a folder that gets every file (BOM.csv, CPL.csv, Gerbers…):
+        // only a new or empty folder, or one an earlier export filled
+        if let Some(path) = a["path"].as_str() {
+            let p = std::path::Path::new(path);
+            if p.is_dir() && std::fs::read_dir(p).map(|mut d| d.next().is_some()).unwrap_or(false) && !p.join("BOM.csv").is_file() && !p.join("gerbers").is_dir() {
+                return Err(format!("{path} is a folder that already holds other files, which the export could overwrite; write to a new folder or a .zip"));
+            }
+        }
     }
-    let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
-    if types.iter().any(|t| *t == ext) {
-        return Ok(());
+    for (key, types) in output_types(name, a) {
+        let Some(path) = a[key].as_str() else { continue };
+        let p = std::path::Path::new(path);
+        if !p.is_file() {
+            continue;
+        }
+        let ext = p.extension().map(|e| e.to_string_lossy().to_lowercase()).unwrap_or_default();
+        if !types.iter().any(|t| *t == ext) {
+            return Err(format!("{path} already exists and is not a .{} file, so it was not overwritten; write to another path", types.first().map(|s| s.as_str()).unwrap_or("?")));
+        }
     }
-    Err(format!("{path} already exists and is not a .{} file, so it was not overwritten; write to another path", types.first().map(|s| s.as_str()).unwrap_or("?")))
+    Ok(())
 }
 
 /// An http(s) address on this computer or a private network.
@@ -1085,6 +1115,20 @@ enum CcLine {
     End,
 }
 
+/// Write a file only the user can read (it may hold a secret).
+fn write_private(p: &std::path::Path, text: &str) -> std::io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::io::Write;
+        use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
+        let mut f = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(p)?;
+        f.set_permissions(std::fs::Permissions::from_mode(0o600))?;
+        f.write_all(text.as_bytes())
+    }
+    #[cfg(not(unix))]
+    std::fs::write(p, text)
+}
+
 fn claude_command() -> std::process::Command {
     let name = std::env::var("CLAUDE_CODE_PATH").ok().filter(|p| !p.is_empty()).unwrap_or_else(|| "claude".into());
     #[allow(unused_mut)]
@@ -1160,13 +1204,22 @@ impl Chat {
     fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let (addr, token) = (&bridge.addr, &bridge.token);
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
-        let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge", addr, "--token", token]}}});
+        // the token goes in the server's environment, through a config file only the user can read,
+        // never on a command line (which other users on the computer can list)
+        let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge", addr], "env": {(crate::agent::BRIDGE_TOKEN_ENV): token}}}});
+        // a neutral folder, so no project's CLAUDE.md or settings come along
+        let dir = std::env::temp_dir().join("rcad-claude");
+        let _ = std::fs::create_dir_all(&dir);
+        // in the user's own config folder (a shared temp folder could hold someone else's link)
+        let private = settings_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).filter(|d| std::fs::create_dir_all(d).is_ok()).unwrap_or_else(|| dir.clone());
+        let mcp_file = private.join(format!("claude-code-mcp-{}.json", std::process::id()));
+        write_private(&mcp_file, &mcp.to_string()).map_err(|e| format!("could not write the Claude Code tool settings: {e}"))?;
         let mut cmd = claude_command();
         let delegates = settings.delegates();
         let (builtin, allowed) = if delegates { ("Agent", "mcp__cad,Agent") } else { ("", "mcp__cad") };
         cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", builtin, "--allowedTools", allowed, "--permission-mode", "dontAsk"])
             .arg("--mcp-config")
-            .arg(mcp.to_string())
+            .arg(&mcp_file)
             .arg("--append-system-prompt")
             .arg(if delegates { claude_code_planner_text() } else { format!("{}\n\nThe tools are the cad MCP server's (mcp__cad__describe and so on).", system_text()) })
             .args(["--model", &settings.model, "--effort", &settings.effort]);
@@ -1176,9 +1229,6 @@ impl Chat {
         if let Some(id) = &self.cc_session {
             cmd.args(["--resume", id]);
         }
-        // a neutral folder, so no project's CLAUDE.md or settings come along
-        let dir = std::env::temp_dir().join("rcad-claude");
-        let _ = std::fs::create_dir_all(&dir);
         cmd.current_dir(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -1537,6 +1587,18 @@ mod tests {
     }
 
     #[test]
+    fn a_tool_call_cut_off_by_the_length_limit_does_not_run() {
+        let t = |id: &str| json!({"type": "tool_use", "id": id, "name": "create_sketch", "input": {}});
+        let content = vec![json!({"type": "text", "text": "x"}), t("a"), t("b")];
+        assert_eq!(bad_inputs(&content, "max_tokens", vec![]), vec!["b".to_string()]);
+        assert_eq!(bad_inputs(&content, "max_tokens", vec!["b".into()]), vec!["b".to_string()]);
+        assert!(bad_inputs(&content, "tool_use", vec![]).is_empty());
+        // a call followed by more text was complete
+        let content = vec![t("a"), json!({"type": "text", "text": "and"})];
+        assert!(bad_inputs(&content, "max_tokens", vec![]).is_empty());
+    }
+
+    #[test]
     fn exports_do_not_overwrite_other_files() {
         let d = std::env::temp_dir().join(format!("rcad-chat-out-{}", std::process::id()));
         std::fs::create_dir_all(&d).unwrap();
@@ -1552,6 +1614,17 @@ mod tests {
         assert!(check_outputs("cam_soft_jaws", &json!({"cam": 0, "export_step": doc})).is_err());
         assert!(check_outputs("export_drawing", &json!({"path": doc})).is_err());
         assert!(check_outputs("describe", &json!({})).is_ok());
+        // the waveform CSV of a circuit simulation is checked too
+        assert!(check_outputs("simulate_pcb", &json!({"pcb": 0, "csv": doc})).is_err());
+        assert!(check_outputs("simulate_pcb", &json!({"pcb": 0, "csv": d.join("wave.csv").to_string_lossy()})).is_ok());
+        // a PCB export into a folder holding other files is refused; a new folder or an earlier export's is fine
+        let dir = d.to_string_lossy().to_string();
+        assert!(check_outputs("export_pcb", &json!({"pcb": 0, "path": dir})).is_err());
+        assert!(check_outputs("export_pcb", &json!({"pcb": 0, "path": d.join("fab").to_string_lossy()})).is_ok());
+        let fab = d.join("fab-old");
+        std::fs::create_dir_all(&fab).unwrap();
+        std::fs::write(fab.join("BOM.csv"), "x").unwrap();
+        assert!(check_outputs("export_pcb", &json!({"pcb": 0, "path": fab.to_string_lossy()})).is_ok());
         let _ = std::fs::remove_dir_all(&d);
     }
 }

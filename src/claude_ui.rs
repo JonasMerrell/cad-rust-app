@@ -40,6 +40,8 @@ pub struct ClaudeUi {
     confirm_revert: bool,
     /// Scroll the history to its end on the next frame.
     scroll_to_end: bool,
+    /// Part Studios that got their undo step in this request: one per request, not per tool call.
+    checkpointed: Vec<usize>,
 }
 
 impl Default for ClaudeUi {
@@ -64,6 +66,7 @@ impl Default for ClaudeUi {
             after_hash: None,
             confirm_revert: false,
             scroll_to_end: false,
+            checkpointed: vec![],
         }
     }
 }
@@ -435,7 +438,7 @@ fn chat(app: &mut App, ui: &mut Ui) {
             let (json, studio) = app.claude.before.take().unwrap();
             app.claude.confirm_revert = false;
             if let Ok(ws) = crate::workspace::Workspace::from_json(&json) {
-                app.apply_agent_workspace(ws, studio);
+                app.apply_agent_workspace(ws, studio, true);
                 app.claude.entries.push(Entry::Notice { text: "Undid the last request's changes.".into(), error: false });
             }
         }
@@ -505,6 +508,7 @@ fn send(app: &mut App, ctx: &egui::Context) {
     c.changed = false;
     c.after_hash = None;
     c.confirm_revert = false;
+    c.checkpointed.clear();
     c.busy = true;
     c.entries.push(Entry::User(text.clone()));
     c.scroll_to_end = true;
@@ -567,7 +571,13 @@ fn poll(app: &mut App, ctx: &egui::Context) {
             FromWorker::Workspace { json, studio } => {
                 c.changed = true;
                 match crate::workspace::Workspace::from_json(&json) {
-                    Ok(ws) => app.apply_agent_workspace(ws, studio),
+                    Ok(ws) => {
+                        let cur = app.cur_studio;
+                        let first = !app.claude.checkpointed.contains(&cur);
+                        if app.apply_agent_workspace(ws, studio, first) {
+                            app.claude.checkpointed.push(cur);
+                        }
+                    }
                     Err(e) => c.entries.push(Entry::Notice { text: format!("Could not apply Claude's change: {e}"), error: true }),
                 }
             }

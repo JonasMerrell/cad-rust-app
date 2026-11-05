@@ -941,6 +941,7 @@ pub fn run_source(src: &str, args: &[String], path: Option<&std::path::Path>) ->
     register_io(&mut e);
     e.set_max_operations(0);
     e.set_max_array_size(0);
+    crate::script_doc::set_base_dir(path.and_then(|p| p.parent()).filter(|d| !d.as_os_str().is_empty()).map(|d| d.to_path_buf()));
     if let Some(dir) = path.and_then(|p| p.parent()) {
         let mut r = rhai::module_resolvers::FileModuleResolver::new_with_path(dir);
         r.enable_cache(true);

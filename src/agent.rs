@@ -34,6 +34,7 @@ pub(crate) use pcb::connect as pcb_connect;
 pub(crate) mod query;
 #[path = "agent_schema.rs"]
 mod schema;
+pub(crate) use schema::MODELLING_TOOLS;
 
 pub struct Session {
     /// The active Part Studio (its copy in `ws` is stale until `sync`).
@@ -1805,12 +1806,15 @@ pub fn failed(v: &Value) -> bool {
     v.get("ok") == Some(&json!(false)) && v.get("new_errors").is_some()
 }
 
+/// The environment variable that carries the chat panel's bridge token to `rcad mcp --bridge`.
+pub const BRIDGE_TOKEN_ENV: &str = "RCAD_BRIDGE_TOKEN";
+
 pub fn mcp_main() {
     // `--bridge ADDR --token T`: the rCAD chat panel started this server through Claude Code,
     // and tool calls go to the document open in that window
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
-    let bridge = arg("--bridge").map(|addr| (addr, arg("--token").unwrap_or_default()));
+    let bridge = arg("--bridge").map(|addr| (addr, std::env::var(BRIDGE_TOKEN_ENV).ok().filter(|t| !t.is_empty()).or_else(|| arg("--token")).unwrap_or_default()));
     let mut link: Option<(std::net::TcpStream, std::io::BufReader<std::net::TcpStream>)> = None;
     let mut forward = |name: &str, args: &Value| -> R<Value> {
         let (addr, token) = bridge.as_ref().unwrap();

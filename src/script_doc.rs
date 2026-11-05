@@ -27,6 +27,23 @@ type Res<T> = Result<T, Box<EvalAltResult>>;
 #[derive(Clone)]
 pub struct Doc(Rc<RefCell<Session>>);
 
+thread_local! {
+    /// The running script's folder: relative input files (open_document, import_file) are also
+    /// looked for there, as `rcad run` does next to its script.
+    static BASE_DIR: RefCell<Option<std::path::PathBuf>> = const { RefCell::new(None) };
+}
+
+/// Set the folder relative input files of the script about to run are looked for in.
+pub fn set_base_dir(dir: Option<std::path::PathBuf>) {
+    BASE_DIR.with(|b| *b.borrow_mut() = dir);
+}
+
+fn session() -> Session {
+    let mut s = Session::new();
+    s.base_dir = BASE_DIR.with(|b| b.borrow().clone());
+    s
+}
+
 /// A sketch feature of a document.
 #[derive(Clone)]
 pub struct DocSketch {
@@ -37,7 +54,7 @@ pub struct DocSketch {
 impl Doc {
     /// Run a tool; a feature left failing is undone and becomes an error, as a script expects.
     fn call(&self, tool: &str, mut args: Value) -> Res<Value> {
-        let modelling = matches!(tool, "add_feature" | "edit_feature" | "set_variable" | "sketch_add" | "sketch_constrain" | "create_sketch" | "delete_feature" | "set_part" | "set_parts");
+        let modelling = crate::agent::MODELLING_TOOLS.contains(&tool);
         if modelling && args.get("rollback").is_none() {
             if let Some(o) = args.as_object_mut() {
                 o.insert("rollback".into(), json!(true));
@@ -151,9 +168,9 @@ pub fn register(e: &mut Engine) {
     e.register_type_with_name::<Doc>("Document");
     e.register_type_with_name::<DocSketch>("Sketch");
 
-    e.register_fn("new_document", || -> Doc { Doc(Rc::new(RefCell::new(Session::new()))) });
+    e.register_fn("new_document", || -> Doc { Doc(Rc::new(RefCell::new(session()))) });
     e.register_fn("open_document", |path: &str| -> Res<Doc> {
-        let d = Doc(Rc::new(RefCell::new(Session::new())));
+        let d = Doc(Rc::new(RefCell::new(session())));
         d.call("open_document", json!({"path": path}))?;
         Ok(d)
     });
