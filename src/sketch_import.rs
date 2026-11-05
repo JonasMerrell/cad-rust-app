@@ -686,7 +686,9 @@ fn cubic_arc(c: &[DVec2; 4]) -> Option<(DVec2, f64, f64)> {
     let (a, m, b) = (c[0], cubic_at(c, 0.5), c[3]);
     let ctr = circumcenter(a, m, b)?;
     let r = (a - ctr).length();
-    let tol = 1e-3 * r + 1e-6;
+    // relative to the chord as well: a nearly straight curve sits on a huge circle, whose
+    // tolerance would otherwise swallow a real S-bend
+    let tol = 1e-3 * r.min(a.distance(b)) + 1e-6;
     if [0.1, 0.25, 0.4, 0.6, 0.75, 0.9].iter().any(|t| ((cubic_at(c, *t) - ctr).length() - r).abs() > tol) {
         return None;
     }
@@ -798,7 +800,12 @@ pub fn add_to_sketch(sk: &mut Sketch, d: &Drawing, scale: f64, offset: DVec2) ->
                 if a.distance(b) < 1e-9 {
                     continue;
                 }
-                Geom::Line { a: point(sk, a), b: point(sk, b) }
+                let (a, b) = (point(sk, a), point(sk, b));
+                // ends close enough to share a point: a zero-length line
+                if a == b {
+                    continue;
+                }
+                Geom::Line { a, b }
             }
             Item::Circle { c, r } if r > 0.0 => Geom::Circle { c: point(sk, c), r },
             Item::Arc { c, r, a0, a1 } if r > 0.0 => {
@@ -806,7 +813,20 @@ pub fn add_to_sketch(sk: &mut Sketch, d: &Drawing, scale: f64, offset: DVec2) ->
                 if pa.distance(pb) < 1e-9 {
                     Geom::Circle { c: point(sk, c), r }
                 } else {
-                    Geom::Arc { c: point(sk, c), a: point(sk, pa), b: point(sk, pb) }
+                    let (ic, ia, ib) = (point(sk, c), point(sk, pa), point(sk, pb));
+                    if ia == ib {
+                        // ends that share a point: nearly a full turn is a circle, a sliver is nothing
+                        if (a1 - a0).rem_euclid(TAU) > std::f64::consts::PI {
+                            Geom::Circle { c: ic, r }
+                        } else {
+                            continue;
+                        }
+                    } else if ic == ia || ic == ib {
+                        // smaller than the point tolerance
+                        continue;
+                    } else {
+                        Geom::Arc { c: ic, a: ia, b: ib }
+                    }
                 }
             }
             Item::Ellipse { c, major, ratio, t0, mut t1 } => {
@@ -989,5 +1009,45 @@ mod tests {
         assert!((*c - DVec2::new(20.0, 10.0)).length() < 1e-3 && (r - 10.0).abs() < 1e-3, "{c} {r}");
         assert!(((a1 - a0).rem_euclid(TAU) - std::f64::consts::PI).abs() < 1e-3);
         assert_eq!(d.items.iter().filter(|i| matches!(i, Item::Line(..))).count(), 3);
+    }
+
+    #[test]
+    fn tiny_pieces_do_not_become_degenerate_curves() {
+        let r = 0.0004;
+        let d = Drawing {
+            items: vec![
+                Item::Line(DVec2::ZERO, DVec2::new(10.0, 0.0)),
+                // shorter than the point tolerance: both ends land on one point
+                Item::Line(DVec2::new(10.0, 0.0), DVec2::new(10.0005, 0.0)),
+                // a sliver of an arc whose ends share a point, and one smaller than the tolerance
+                Item::Arc { c: DVec2::new(0.0, 20.0), r: 5.0, a0: 0.0, a1: 0.0001 },
+                Item::Arc { c: DVec2::new(30.0, 0.0), r, a0: 0.0, a1: 1.0 },
+                // nearly a full turn: a circle
+                Item::Arc { c: DVec2::new(50.0, 0.0), r: 5.0, a0: 0.0, a1: TAU - 0.0001 },
+            ],
+            skipped: vec![],
+        };
+        let mut sk = Sketch::default();
+        assert_eq!(add_to_sketch(&mut sk, &d, 1.0, DVec2::ZERO), 2);
+        for c in &sk.curves {
+            let pts = Sketch::curve_points(&c.geom);
+            let mut u = pts.clone();
+            u.sort();
+            u.dedup();
+            assert_eq!(u.len(), pts.len(), "{:?}", c.geom);
+        }
+        assert!(sk.curves.iter().any(|c| matches!(c.geom, Geom::Circle { .. })));
+    }
+
+    #[test]
+    fn a_gentle_s_bend_is_not_an_arc() {
+        // nearly straight, so the circle through its ends and middle is huge
+        let c = [DVec2::ZERO, DVec2::new(3.0, 1.0), DVec2::new(7.0, -0.99), DVec2::new(10.0, 0.0)];
+        assert!(cubic_arc(&c).is_none());
+        // a real quarter circle still is one
+        let k = 0.5522847498;
+        let q = [DVec2::new(10.0, 0.0), DVec2::new(10.0, 10.0 * k), DVec2::new(10.0 * k, 10.0), DVec2::new(0.0, 10.0)];
+        let (ctr, r, _) = cubic_arc(&q).unwrap();
+        assert!(ctr.length() < 1e-2 && (r - 10.0).abs() < 1e-2);
     }
 }

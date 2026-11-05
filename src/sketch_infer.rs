@@ -272,6 +272,11 @@ pub fn drop_point(sk: &mut Sketch, p: Id, onto: Drop) -> bool {
             }) {
                 return false;
             }
+            // nor one at the midpoint of a line the other ends: the line would shrink to nothing
+            let ends = |l: Id| sk.curve(l).map(|c| Sketch::curve_points(&c.geom)).unwrap_or_default();
+            if sk.constraints.iter().any(|k| matches!(*k, Constraint::Midpoint { p: m, l } if (m == p && ends(l).contains(&q)) || (m == q && ends(l).contains(&p)))) {
+                return false;
+            }
             sk.merge_point(p, q);
             true
         }
@@ -415,6 +420,17 @@ mod tests {
         assert!(!drop_point(&mut sk, e, Drop::Mid(l)));
         assert!(drop_point(&mut sk, c, Drop::Origin));
         assert!(!drop_point(&mut sk, c, Drop::Origin));
+    }
+
+    #[test]
+    fn dropping_an_end_on_its_lines_midpoint_point_is_refused() {
+        // q sits at the middle of line l; joining l's end to q would shrink l to nothing
+        let (mut sk, pa, _, l) = sk_with_line(DVec2::ZERO, DVec2::new(10.0, 0.0));
+        let q = sk.add_point(DVec2::new(5.0, 0.0));
+        sk.constraints.push(Constraint::Midpoint { p: q, l });
+        assert!(!drop_point(&mut sk, pa, Drop::Point(q)));
+        assert!(!drop_point(&mut sk, q, Drop::Point(pa)));
+        assert!(sk.is_point(pa) && sk.is_point(q));
     }
 
     #[test]
