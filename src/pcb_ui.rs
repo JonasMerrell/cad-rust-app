@@ -586,7 +586,10 @@ fn delete_sel(app: &mut App) {
     let Some(s) = app.pcb.sel.take() else { return };
     edit(app, |p| match s {
         Sel::Part(i) if i < p.parts.len() => {
-            p.parts.remove(i);
+            let r = p.parts.remove(i).reference;
+            if !p.parts.iter().any(|x| x.reference == r) {
+                p.forget_ref(&r);
+            }
         }
         Sel::Wire(i) if i < p.wires.len() => {
             p.wires.remove(i);
@@ -1299,8 +1302,41 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
             let sim_model = crate::circuit::model_params(&p.parts[i], &p.sim);
             ui.label(RichText::new(kind.map(|k| k.name).unwrap_or(p.parts[i].symbol.rsplit(':').next().unwrap_or("Part"))).strong());
             let part = &mut p.parts[i];
+            let old_ref = part.reference.clone();
+            let mut focused = false;
             row(ui, "Reference", |ui| {
-                ui.add(egui::TextEdit::singleline(&mut part.reference).desired_width(120.0));
+                focused = ui.add(egui::TextEdit::singleline(&mut part.reference).desired_width(120.0)).has_focus();
+            });
+            // variants name parts by reference: once the edit is done (the box loses focus or
+            // another part is shown) their settings move from the old reference to the new one
+            let pend_id = egui::Id::new("pcb-ref-rename");
+            let pid = p.parts[i].id;
+            let mut pending: Option<(u64, String)> = ui.data(|d| d.get_temp(pend_id));
+            let flush = |p: &mut Pcb, (id, orig): (u64, String)| {
+                if let Some(cur) = p.parts.iter().find(|x| x.id == id).map(|x| x.reference.clone()) {
+                    if cur != orig && !p.parts.iter().any(|x| x.id != id && x.reference == orig) {
+                        p.rename_ref(&orig, &cur);
+                    }
+                }
+            };
+            if p.parts[i].reference != old_ref && pending.as_ref().is_none_or(|x| x.0 != pid) {
+                if let Some(x) = pending.take() {
+                    flush(p, x);
+                }
+                pending = Some((pid, old_ref.clone()));
+            }
+            if pending.as_ref().is_some_and(|x| x.0 != pid || !focused) {
+                flush(p, pending.take().unwrap());
+            }
+            ui.data_mut(|d| {
+                match pending {
+                    Some(x) => {
+                        d.insert_temp(pend_id, x);
+                    }
+                    None => {
+                        d.remove::<(u64, String)>(pend_id);
+                    }
+                }
             });
             let dup = |p: &Pcb| p.parts.iter().enumerate().any(|(k, q)| k != i && q.reference.trim().eq_ignore_ascii_case(p.parts[i].reference.trim()));
             if dup(p) || p.parts[i].reference.trim().is_empty() {
@@ -1646,20 +1682,47 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                     p.sheets[k].name = name.clone();
                 }
             });
+            if p.sheet_name_taken(k) {
+                ui.label(RichText::new("Another sheet has this name: its nets get the sheet number too").color(theme::error_soft()).size(11.5));
+            }
             let s = &mut p.sheet_symbols[i];
+            // where the entries meet wires now: wires on them follow a change of side or width
+            let was: Vec<P> = (0..s.entries.len()).map(|k| s.entry_at(k)).collect();
             row(ui, "Width", |ui| {
                 ui.add(egui::DragValue::new(&mut s.width).speed(0.254).range(5.08..=100.0).suffix(" mm"));
             });
             if s.entries.is_empty() {
                 ui.label(RichText::new("No entries yet: add ports (P) on the sheet").color(theme::muted()).size(11.5));
             }
-            for e in &mut s.entries {
+            let mut side = None;
+            for (k, e) in s.entries.iter().enumerate() {
+                let mut right = e.right;
                 row(ui, &e.name, |ui| {
-                    ui.selectable_value(&mut e.right, false, "Left");
-                    ui.selectable_value(&mut e.right, true, "Right");
+                    ui.selectable_value(&mut right, false, "Left");
+                    ui.selectable_value(&mut right, true, "Right");
                 });
+                if right != e.right {
+                    side = Some((k, right));
+                }
+            }
+            if let Some((k, right)) = side {
+                s.fix_slots();
+                s.set_side(k, right);
             }
             s.width = (s.width / GRID).round().max(2.0) * GRID;
+            let now: Vec<P> = (0..s.entries.len()).map(|k| s.entry_at(k)).collect();
+            for (a, b) in was.iter().zip(&now) {
+                if pcb::dist(*a, *b) > 1e-9 {
+                    for w in &mut p.wires {
+                        if pcb::dist(w.a, *a) < 1e-6 {
+                            w.a = *b;
+                        }
+                        if pcb::dist(w.b, *a) < 1e-6 {
+                            w.b = *b;
+                        }
+                    }
+                }
+            }
             if ui.button("Open sheet").on_hover_text("Show the sheet (or double-click the symbol)").clicked() {
                 open_sheet(app, k);
             }
@@ -1974,6 +2037,9 @@ fn sheets_ui(app: &mut App, ui: &mut Ui) {
                 p.sheets[cur].name = name.clone();
             }
         });
+        if app.ws.pcbs[pi].sheet_name_taken(cur) {
+            ui.label(RichText::new("Another sheet has this name: its nets get the sheet number too").color(theme::error_soft()).size(11.5));
+        }
     }
     ui.horizontal_wrapped(|ui| {
         if ui.button("Add sheet").on_hover_text("A new, empty schematic sheet").clicked() {
@@ -2047,6 +2113,11 @@ fn variants_ui(app: &mut App, ui: &mut Ui) {
         row(ui, "Name", |ui| {
             if ui.add(egui::TextEdit::singleline(&mut name).desired_width(120.0)).lost_focus() && !name.trim().is_empty() {
                 let n = name.trim().to_string();
+                let taken = app.ws.pcbs[pi].variants.iter().enumerate().any(|(j, v)| j != vi_ && v.name.eq_ignore_ascii_case(&n));
+                if taken {
+                    app.flash(format!("There is already a variant {n}"), ToastKind::Error);
+                    return;
+                }
                 edit(app, |p| {
                     p.variants[vi_].name = n.clone();
                     p.variant = n;

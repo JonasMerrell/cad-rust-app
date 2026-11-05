@@ -382,8 +382,16 @@ pub fn parse_csv(text: &str) -> Result<Vec<Product>, String> {
     let mut out = vec![];
     for r in &rows[hi + 1..] {
         let get = |c: Option<usize>| c.and_then(|c| r.get(c)).map(|x| x.trim().to_string()).unwrap_or_default();
-        let num = |c: Option<usize>| {
-            let t: String = get(c).chars().filter(|ch| ch.is_ascii_digit() || *ch == '.').collect();
+        // a count: every digit ("4,005,123", "4.005.123"); a price: "$0.10", or "0,10 €"
+        // with a decimal comma
+        let count = |c: Option<usize>| {
+            let t: String = get(c).chars().filter(|ch| ch.is_ascii_digit()).collect();
+            t.parse::<f64>().ok()
+        };
+        let price = |c: Option<usize>| {
+            let raw = get(c);
+            let t: String = raw.chars().filter(|ch| ch.is_ascii_digit() || *ch == '.' || *ch == ',').collect();
+            let t = if t.contains('.') { t.replace(',', "") } else { t.replace(',', ".") };
             t.parse::<f64>().ok()
         };
         let params: Vec<(String, String)> = rows[hi]
@@ -405,8 +413,8 @@ pub fn parse_csv(text: &str) -> Result<Vec<Product>, String> {
             category: get(c_cat),
             package: find("Package / Case"),
             device_package: find("Supplier Device Package"),
-            stock: num(c_stock),
-            price: num(c_price),
+            stock: count(c_stock),
+            price: price(c_price),
             params,
         };
         // a "Datasheet" cell can hold several links; keep the first
@@ -462,6 +470,9 @@ pub fn symbol_for(p: &Product) -> &'static str {
         "SW"
     } else if has(&["CONN", "HEADER", "TERMINAL BLOCK", "CONNECTOR"]) {
         "J"
+    } else if has(&["SERVO", "STEPPER", "MOTOR"]) && has(&["DRIVER", "DRV", "CONTROLLER", "IC"]) {
+        // "Motor Drivers, Controllers": an IC, not a motor
+        "U"
     } else if has(&["SERVO"]) {
         "SERVO"
     } else if has(&["STEPPER"]) {
@@ -553,16 +564,24 @@ pub fn footprint_for(p: &Product, symbol: &str) -> Option<String> {
     }
     // pin count before a package family: "8-SOIC", "14-TSSOP", "8-DIP"
     let counted = |fam: &[&str]| -> Option<usize> {
+        // the whole family word: "8-SON" and "8-SOP" are not SOICs
         text.split(|c: char| c.is_whitespace() || c == '|').find_map(|w| {
             let (n, f) = w.split_once('-')?;
-            (fam.iter().any(|x| f.starts_with(x))).then(|| n.parse::<usize>().ok()).flatten()
+            (fam.iter().any(|x| f == *x)).then(|| n.parse::<usize>().ok()).flatten()
         })
     };
     if let Some(n) = counted(&["SOIC", "SO"]) {
-        return ok(format!("SOIC-{n}"));
+        // the library's SOICs are the narrow 3.9 mm body, not the 5.3 or 7.5 mm wide ones
+        let wide = ["5.30MM", "7.50MM", "0.209\"", "0.295\""].into_iter().any(has);
+        return if wide { None } else { ok(format!("SOIC-{n}")) };
     }
-    if let Some(n) = counted(&["TSSOP", "MSOP"]) {
+    if let Some(n) = counted(&["TSSOP"]) {
         return ok(format!("TSSOP-{n}"));
+    }
+    // 6 and 8 lead SOT-23s have no footprint here (the 3 pad SOT-23 would be wrong)
+    let words: Vec<&str> = text.split(|c: char| c.is_whitespace() || c == '|').collect();
+    if has("SOT-23-6") || has("SOT-23-8") || has("SOT-26") || has("SOT-457") || words.contains(&"SC-74") {
+        return None;
     }
     if let Some(n) = counted(&["DIP", "PDIP"]) {
         return ok(format!("DIP-{n}"));
@@ -601,7 +620,12 @@ pub fn footprint_for(p: &Product, symbol: &str) -> Option<String> {
             let n: String = s[..k].chars().rev().take_while(|c| c.is_ascii_digit() || *c == '.').collect::<Vec<_>>().into_iter().rev().collect();
             n.parse::<f64>().ok()
         });
-        return ok(if dia.is_some_and(|d| d > 6.5) { "CP_D8".into() } else { "CP_D5".into() });
+        // the library has 5 and 8 mm cans: a bigger can needs a footprint of its own
+        return match dia {
+            Some(d) if d > 8.5 => None,
+            Some(d) if d > 6.5 => ok("CP_D8".into()),
+            _ => ok("CP_D5".into()),
+        };
     }
     if symbol == "R" && has("AXIAL") {
         return ok("R_Axial".into());
@@ -787,6 +811,36 @@ mod tests {
         assert_eq!(value_for(&r, "R"), "4.7k");
         let l = mk("FIXED IND 10UH 1A 200 MOHM SMD", &[("Inductance", "10 µH")]);
         assert_eq!((symbol_for(&l), value_for(&l, "L").as_str()), ("L", "10u"));
+    }
+
+    #[test]
+    fn packages_that_must_not_match() {
+        let mk = |desc: &str, pkg: &str| Product { description: desc.into(), mpn: "X1".into(), package: pkg.into(), ..Default::default() };
+        // 6 lead SOT-23s, SONs, MSOPs and wide SOICs have no footprint here
+        assert_eq!(footprint_for(&mk("IC REG BUCK 1A TSOT23-6", "SOT-23-6 Thin, TSOT-23-6"), "U"), None);
+        assert_eq!(footprint_for(&mk("MOSFET 2N-CH 20V SOT-26", "SOT-23-6"), "Q_NMOS"), None);
+        assert_eq!(footprint_for(&mk("IC OPAMP 8SON", "8-SON (3x3)"), "U"), None);
+        assert_eq!(footprint_for(&mk("IC OPAMP 8MSOP", "8-TSSOP, 8-MSOP (0.118\", 3.00mm Width)"), "U").as_deref(), Some("TSSOP-8"));
+        assert_eq!(footprint_for(&mk("IC OPAMP 8MSOP", "8-MSOP"), "U"), None);
+        assert_eq!(footprint_for(&mk("IC FLASH 8SOIC", "8-SOIC (0.209\", 5.30mm Width)"), "U"), None);
+        assert_eq!(footprint_for(&mk("IC 8SOIC", "8-SOIC (0.154\", 3.90mm Width)"), "U").as_deref(), Some("SOIC-8"));
+        assert_eq!(footprint_for(&mk("REG LDO SOT23-5", "SC-74A, SOT-753"), "U").as_deref(), Some("SOT-23-5"));
+        // a motor driver is an IC
+        let drv = Product { category: "Motor Drivers, Controllers".into(), description: "IC MTR DRV BIPOLR 8-35V 28HTSSOP".into(), ..Default::default() };
+        assert_eq!(symbol_for(&drv), "U");
+        let motor = Product { category: "Motors - AC, DC".into(), description: "MOTOR DC 3V 12000RPM".into(), ..Default::default() };
+        assert_eq!(symbol_for(&motor), "M");
+        // a 10 mm can is neither the 5 nor the 8 mm footprint
+        let cp = |d: &str| Product { description: "CAP ALUM 1000UF 20% 25V RADIAL".into(), package: "Radial, Can".into(), params: vec![("Size / Dimension".into(), d.into())], ..Default::default() };
+        assert_eq!(footprint_for(&cp("0.394\" Dia (10.00mm)"), "CP"), None);
+        assert_eq!(footprint_for(&cp("0.315\" Dia (8.00mm)"), "CP").as_deref(), Some("CP_D8"));
+    }
+
+    #[test]
+    fn csv_prices_with_a_decimal_comma() {
+        let csv = "Mfr Part #;Mfr;Stock;Price\nRC0805;YAGEO;4.005.123;0,10 €\n";
+        let v = parse_csv(csv).unwrap();
+        assert_eq!((v[0].stock, v[0].price), (Some(4005123.0), Some(0.10)));
     }
 
     #[test]

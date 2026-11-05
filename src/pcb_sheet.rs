@@ -49,13 +49,52 @@ pub struct SheetEntry {
     /// On the right side (outputs, by habit); left otherwise.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub right: bool,
+    /// Row down its side (0 is the top). Kept when other entries come and go, so wires on the
+    /// parent stay on the entry they were drawn to. None (older files): by order on its side.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slot: Option<usize>,
 }
 
 impl SheetSym {
     /// Entry rows on the taller side.
     fn rows(&self) -> usize {
-        let r = self.entries.iter().filter(|e| e.right).count();
-        r.max(self.entries.len() - r).max(1)
+        (0..self.entries.len()).map(|i| self.slot_of(i) + 1).max().unwrap_or(1).max(1)
+    }
+    /// The row of entry i down its side.
+    pub fn slot_of(&self, i: usize) -> usize {
+        let e = &self.entries[i];
+        e.slot.unwrap_or_else(|| self.entries[..i].iter().filter(|x| x.right == e.right).count())
+    }
+    /// The first row on a side no entry uses.
+    pub fn free_slot(&self, right: bool) -> usize {
+        let used: Vec<usize> = (0..self.entries.len()).filter(|&i| self.entries[i].right == right).map(|i| self.slot_of(i)).collect();
+        (0..).find(|k| !used.contains(k)).unwrap_or(0)
+    }
+    /// Give every entry an explicit row: where it is drawn now, or the first free row when that
+    /// one is taken. Returns whether anything changed.
+    pub fn fix_slots(&mut self) -> bool {
+        let mut changed = false;
+        for i in 0..self.entries.len() {
+            if self.entries[i].slot.is_some() {
+                continue;
+            }
+            let right = self.entries[i].right;
+            let want = self.slot_of(i);
+            let taken = (0..self.entries.len()).any(|j| j != i && self.entries[j].right == right && self.entries[j].slot == Some(want));
+            let k = if taken { self.free_slot(right) } else { want };
+            self.entries[i].slot = Some(k);
+            changed = true;
+        }
+        changed
+    }
+    /// Move entry i to a side (the first free row there).
+    pub fn set_side(&mut self, i: usize, right: bool) {
+        if self.entries[i].right != right || self.entries[i].slot.is_none() {
+            self.entries[i].slot = None;
+            let k = self.free_slot(right);
+            self.entries[i].right = right;
+            self.entries[i].slot = Some(k);
+        }
     }
     pub fn height(&self) -> f64 {
         (self.rows() + 1) as f64 * ENTRY_PITCH
@@ -68,7 +107,7 @@ impl SheetSym {
     /// Where entry `i` meets wires: on the box edge, on the 2.54 grid down the side.
     pub fn entry_at(&self, i: usize) -> P {
         let e = &self.entries[i];
-        let k = self.entries[..i].iter().filter(|x| x.right == e.right).count();
+        let k = self.slot_of(i);
         [if e.right { self.at[0] + self.width } else { self.at[0] }, self.at[1] - (k + 1) as f64 * ENTRY_PITCH]
     }
     pub fn contains(&self, q: P) -> bool {
@@ -172,6 +211,8 @@ impl Pcb {
         for l in &mut self.labels {
             shift(&mut l.at);
         }
+        // no-connect marks alone don't keep a sheet: they go with it
+        self.no_connects.retain(|q| sheet_at(*q) != k);
         for q in &mut self.no_connects {
             shift(q);
         }
@@ -212,14 +253,19 @@ impl Pcb {
         for i in 0..self.sheet_symbols.len() {
             let ports = self.ports_on(self.sheet_symbols[i].sheet);
             let s = &mut self.sheet_symbols[i];
-            let before = s.entries.len();
-            s.entries.retain(|e| ports.contains(&e.name));
-            changed |= s.entries.len() != before;
-            for p in ports {
-                if !s.entries.iter().any(|e| e.name == p) {
-                    s.entries.push(SheetEntry { name: p, right: false });
-                    changed = true;
-                }
+            changed |= s.fix_slots();
+            // entries keep their rows: a port renamed takes over its old entry's place
+            let gone: Vec<SheetEntry> = s.entries.iter().filter(|e| !ports.contains(&e.name)).cloned().collect();
+            let new: Vec<String> = ports.into_iter().filter(|p| !s.entries.iter().any(|e| &e.name == p)).collect();
+            s.entries.retain(|e| !gone.contains(e));
+            changed |= !gone.is_empty() || !new.is_empty();
+            if let ([old], [name]) = (gone.as_slice(), new.as_slice()) {
+                s.entries.push(SheetEntry { name: name.clone(), ..old.clone() });
+                continue;
+            }
+            for p in new {
+                let k = s.free_slot(false);
+                s.entries.push(SheetEntry { name: p, right: false, slot: Some(k) });
             }
         }
         changed
@@ -235,9 +281,15 @@ impl Pcb {
         let parent = sheet_at(at);
         // no loops: the parent may not sit below the child
         let mut up = Some(parent);
+        // (bounded: a loop already in the file must not hang)
+        let mut steps = 0;
         while let Some(s) = up {
             if s == child {
                 return Err(format!("{} is inside {}: a sheet can't contain itself", self.sheet_name(parent), self.sheet_name(child)));
+            }
+            steps += 1;
+            if steps > self.sheet_symbols.len() + 1 {
+                return Err("the sheet symbols make a loop: delete one of them first".into());
             }
             up = self.symbol_of(s).map(|i| sheet_at(self.sheet_symbols[i].at));
         }
@@ -249,6 +301,30 @@ impl Pcb {
     pub fn parent_of(&self, k: usize) -> Option<usize> {
         self.symbol_of(k).map(|i| sheet_at(self.sheet_symbols[i].at))
     }
+    /// How deep sheet k sits below a top sheet (0 for a top sheet).
+    pub fn depth(&self, k: usize) -> usize {
+        let mut d = 0;
+        let mut up = self.parent_of(k);
+        while let Some(u) = up {
+            d += 1;
+            if d > self.sheet_symbols.len() {
+                break;
+            }
+            up = self.parent_of(u);
+        }
+        d
+    }
+    /// The sheet's name as it prefixes its local nets: with its number when another sheet has
+    /// the same name, so two sheets' nets never share a name.
+    fn net_prefix(&self, k: usize) -> String {
+        let n = self.sheet_name(k);
+        if self.sheet_name_taken(k) { format!("{n} ({})", k + 1) } else { n }
+    }
+    /// Whether another sheet has the same name as sheet k.
+    pub fn sheet_name_taken(&self, k: usize) -> bool {
+        let n = self.sheet_name(k);
+        (0..self.sheet_count()).any(|j| j != k && self.sheet_name(j).eq_ignore_ascii_case(&n))
+    }
     /// A net name for a label on sheet k: a sheet-local name also used on another sheet carries
     /// its sheet's name (below the first sheet), so two sheets' "SDA" stay two nets.
     pub fn label_net_name(&self, l: &Label) -> String {
@@ -258,7 +334,7 @@ impl Pcb {
         let local = |x: &Label| x.kind == LabelKind::Port || (x.kind == LabelKind::Net && !supply.contains(x.text.trim()));
         let clash = || self.labels.iter().any(|m| local(m) && m.text.trim() == t && sheet_at(m.at) != k);
         if self.hierarchical() && k != 0 && local(l) && clash() {
-            format!("{}/{}", self.sheet_name(k), t)
+            format!("{}/{}", self.net_prefix(k), t)
         } else {
             t
         }
@@ -294,6 +370,33 @@ impl Pcb {
         let part = &self.parts[i];
         self.active().and_then(|v| v.mpns.get(&part.reference)).cloned().unwrap_or_else(|| part.mpn.clone())
     }
+    /// A part's reference changed: its variant settings follow it.
+    pub fn rename_ref(&mut self, old: &str, new: &str) {
+        if old == new {
+            return;
+        }
+        for v in &mut self.variants {
+            for r in v.dnp.iter_mut().chain(v.fitted.iter_mut()) {
+                if r == old {
+                    *r = new.to_string();
+                }
+            }
+            for m in [&mut v.values, &mut v.mpns] {
+                if let Some(x) = m.remove(old) {
+                    m.insert(new.to_string(), x);
+                }
+            }
+        }
+    }
+    /// A part was deleted: drop its variant settings (a later part of that name starts clean).
+    pub fn forget_ref(&mut self, r: &str) {
+        for v in &mut self.variants {
+            v.dnp.retain(|x| x != r);
+            v.fitted.retain(|x| x != r);
+            v.values.remove(r);
+            v.mpns.remove(r);
+        }
+    }
     /// A copy as the variant builds it: parts not fitted dropped from the parts list's outputs
     /// (marked `dnp`), others with their variant value and part number. "" is the base design.
     pub fn as_variant(&self, name: &str) -> Pcb {
@@ -303,8 +406,22 @@ impl Pcb {
             let (fit, value, mpn) = (p.fitted(i), p.value_of(i), p.mpn_of(i));
             let part = &mut p.parts[i];
             part.dnp = !fit;
+            // another value or part number is another part: the base part's order numbers,
+            // description and datasheet don't belong to it (the BOM would order the base part)
+            let other_mpn = mpn != part.mpn;
+            if other_mpn || value != part.value {
+                part.digikey.clear();
+                part.description.clear();
+                part.datasheet.clear();
+                part.fields.retain(|(k, _)| !k.eq_ignore_ascii_case("LCSC"));
+                if !other_mpn {
+                    part.mpn.clear();
+                }
+            }
             part.value = value;
-            part.mpn = mpn;
+            if other_mpn {
+                part.mpn = mpn;
+            }
         }
         p.variant.clear();
         p
@@ -413,6 +530,135 @@ mod tests {
         assert!(p.add_sheet_symbol(child, origin(g)).is_err(), "the grandchild sits inside the child");
         assert!(p.add_sheet_symbol(g, [50.0, 0.0]).is_err(), "already has a symbol");
         assert!(p.add_sheet_symbol(child, [20.0, 20.0]).is_ok());
+    }
+
+    /// Two child ports wired up on the parent; renaming or removing one leaves the other's
+    /// entry (and so its wire and net) where it was.
+    #[test]
+    fn entries_keep_their_rows() {
+        let mut p = Pcb::new("H");
+        let child = p.add_sheet("Child");
+        let o = origin(child);
+        for (k, n) in ["A", "B", "C"].iter().enumerate() {
+            p.labels.push(Label { at: crate::pcb::add(o, [0.0, -10.0 * k as f64]), text: n.to_string(), kind: LabelKind::Port, rot: 0 });
+        }
+        let si = p.add_sheet_symbol(child, [20.0, 20.0]).unwrap();
+        let at = |p: &Pcb, n: &str| {
+            let s = &p.sheet_symbols[si];
+            s.entry_at(s.entries.iter().position(|e| e.name == n).unwrap())
+        };
+        let (a, b, c) = (at(&p, "A"), at(&p, "B"), at(&p, "C"));
+        // rename B to X: X takes B's place, C stays put
+        p.labels[1].text = "X".into();
+        assert!(p.sync_entries());
+        assert_eq!((at(&p, "A"), at(&p, "X"), at(&p, "C")), (a, b, c));
+        // remove A: the others don't move up
+        p.labels.remove(0);
+        p.sync_entries();
+        assert_eq!((at(&p, "X"), at(&p, "C")), (b, c));
+        assert_eq!(p.sheet_symbols[si].entries.len(), 2);
+        // a new port fills the free row
+        p.labels.push(Label { at: crate::pcb::add(o, [0.0, -40.0]), text: "D".into(), kind: LabelKind::Port, rot: 0 });
+        p.sync_entries();
+        assert_eq!(at(&p, "D"), a);
+        // moving one to the right takes the first free row there, the rest stay
+        let s = &mut p.sheet_symbols[si];
+        let k = s.entries.iter().position(|e| e.name == "C").unwrap();
+        s.set_side(k, true);
+        assert_eq!(s.entry_at(k), [20.0 + s.width, a[1]]);
+        assert_eq!((at(&p, "X"), at(&p, "D")), (b, a));
+        // an older file's entries (no rows saved) keep their places
+        let mut old = SheetSym { sheet: 1, at: [0.0, 0.0], width: 15.24, entries: vec![] };
+        for n in ["P", "Q"] {
+            old.entries.push(SheetEntry { name: n.into(), right: false, slot: None });
+        }
+        let before: Vec<P> = (0..2).map(|i| old.entry_at(i)).collect();
+        assert!(old.fix_slots());
+        assert_eq!((0..2).map(|i| old.entry_at(i)).collect::<Vec<_>>(), before);
+    }
+
+    /// A child sheet's net label of the same name as the parent's, on the same net through its
+    /// port, is no "second name"; two sheets of one name keep their nets apart.
+    #[test]
+    fn sheet_local_names() {
+        let mut p = Pcb::new("H");
+        let j = p.add_part("J", Some("PinHeader_1x02"), None, [0.0, 0.0]).unwrap();
+        let child = p.add_sheet("Child");
+        let r = p.add_part("R", None, None, [0.0, 0.0]).unwrap();
+        p.parts[r].sch = crate::pcb::add(origin(child), [0.0, 0.0]);
+        let pins = p.sch_pins();
+        let pin = |part: usize, n: &str| pins.iter().find(|x| x.part == part && x.num == n).unwrap().at;
+        p.labels.push(Label { at: pin(r, "1"), text: "SDA".into(), kind: LabelKind::Port, rot: 0 });
+        p.labels.push(Label { at: pin(r, "1"), text: "SDA".into(), kind: LabelKind::Net, rot: 0 });
+        let si = p.add_sheet_symbol(child, [20.0, 20.0]).unwrap();
+        let e = p.sheet_symbols[si].entry_at(0);
+        let j1 = pin(j, "1");
+        p.wires.push(Wire { a: e, b: [e[0], j1[1]] });
+        p.wires.push(Wire { a: [e[0], j1[1]], b: j1 });
+        p.labels.push(Label { at: j1, text: "SDA".into(), kind: LabelKind::Net, rot: 0 });
+        let nl = p.netlist();
+        let n = nl.pin_net[&(j, "1".to_string())];
+        assert_eq!(nl.pin_net.get(&(r, "1".to_string())), Some(&n));
+        assert_eq!(nl.nets[n].name, "SDA");
+        assert!(nl.label_conflicts.is_empty(), "{:?}", nl.label_conflicts);
+        // two sheets named alike: their local nets get the sheet number too
+        let a = p.add_sheet("Power");
+        let b = p.add_sheet("Other");
+        p.sheets[b].name = "power".into();
+        let l1 = Label { at: origin(a), text: "EN".into(), kind: LabelKind::Net, rot: 0 };
+        let l2 = Label { at: origin(b), text: "EN".into(), kind: LabelKind::Net, rot: 0 };
+        p.labels.push(l1.clone());
+        p.labels.push(l2.clone());
+        assert_ne!(p.label_net_name(&l1), p.label_net_name(&l2));
+        assert!(p.sheet_name_taken(a));
+    }
+
+    #[test]
+    fn removing_a_sheet_takes_its_no_connects() {
+        let mut p = Pcb::new("S");
+        p.add_sheet("A");
+        p.add_sheet("B");
+        p.no_connects.push(crate::pcb::add(origin(1), [5.0, 5.0]));
+        p.no_connects.push(crate::pcb::add(origin(2), [5.0, 5.0]));
+        p.remove_sheet(1).unwrap();
+        assert_eq!(p.no_connects, vec![crate::pcb::add(origin(1), [5.0, 5.0])]);
+    }
+
+    #[test]
+    fn variant_part_numbers_and_renames() {
+        let mut p = crate::pcb::tests::led_board();
+        let r = p.parts.iter().position(|x| x.reference == "R1").unwrap();
+        let d = p.parts.iter().position(|x| x.reference == "D1").unwrap();
+        p.parts[r].mpn = "RC0805FR-07330RL".into();
+        p.parts[r].manufacturer = "YAGEO".into();
+        p.parts[r].digikey = "311-330CRCT-ND".into();
+        p.parts[r].fields = vec![("LCSC".into(), "C17630".into()), ("Tolerance".into(), "1%".into())];
+        p.parts[d].mpn = "LED-RED".into();
+        p.parts[d].digikey = "LED-ND".into();
+        p.variants.push(Variant { name: "Lite".into(), values: [("R1".to_string(), "1k".to_string())].into(), mpns: [("D1".to_string(), "C2286".to_string())].into(), ..Default::default() });
+        let v = p.as_variant("Lite");
+        // another value: the 330 Ω part's numbers are gone, its other fields stay
+        let vr = &v.parts[r];
+        assert_eq!((vr.value.as_str(), vr.mpn.as_str(), vr.digikey.as_str()), ("1k", "", ""));
+        assert_eq!(vr.fields, vec![("Tolerance".to_string(), "1%".to_string())]);
+        // another part number: the base Digi-Key number goes
+        assert_eq!((v.parts[d].mpn.as_str(), v.parts[d].digikey.as_str()), ("C2286", ""));
+        let bom = crate::pcb_export::bom_csv(&{
+            let mut q = p.clone();
+            q.variant = "Lite".into();
+            q
+        });
+        assert!(!bom.contains("C17630") && !bom.contains("311-330CRCT-ND"), "{bom}");
+        // the base design is unchanged
+        assert_eq!(p.as_variant("").parts[r].digikey, "311-330CRCT-ND");
+        // a renamed part keeps its variant settings; a deleted one's go
+        p.variants[0].dnp.push("D1".into());
+        p.parts[d].reference = "D5".into();
+        p.rename_ref("D1", "D5");
+        p.variant = "Lite".into();
+        assert!(!p.fitted(d) && p.mpn_of(d) == "C2286");
+        p.forget_ref("D5");
+        assert!(p.fitted(d) && p.variants[0].mpns.is_empty());
     }
 
     #[test]
