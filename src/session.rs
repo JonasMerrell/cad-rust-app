@@ -637,6 +637,9 @@ impl App {
         self.asm.sel.clear();
         self.asm.sel_mate = None;
         self.asm.dialog = None;
+        // hover, menus, interference results and the isolation name the old instances too
+        crate::asm_ui::leave(self);
+        self.isolation = None;
         self.cam = Default::default();
         self.fea = Default::default();
         // the PCB editor keeps its history and view while its tab is still there

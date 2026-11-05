@@ -26,6 +26,8 @@ pub struct Hit {
 
 pub struct MateDialog {
     pub mate: u64,
+    /// The assembly it edits (its index), so it never acts on another tab's assembly.
+    pub asm: usize,
     pub before: Assembly,
     pub active: usize,
 }
@@ -249,6 +251,7 @@ pub fn undo(app: &mut App) {
         app.asm.dialog = None;
         app.asm.scene_dirty = true;
         app.dwg.dirty = true;
+        prune_isolation(app);
     }
 }
 
@@ -256,8 +259,10 @@ pub fn redo(app: &mut App) {
     if let Some(s) = app.asm.redo.pop() {
         let cur = (std::mem::replace(&mut app.ws.assemblies, s.0), std::mem::replace(&mut app.ws.drawings, s.1));
         app.asm.undo.push(cur);
+        app.asm.dialog = None;
         app.asm.scene_dirty = true;
         app.dwg.dirty = true;
+        prune_isolation(app);
     }
 }
 
@@ -294,9 +299,14 @@ struct Part<'a> {
 
 /// The parts of an instance (one, or all of a sub-assembly's), indexed by `Hit::leaf`.
 fn parts_of<'a>(app: &'a App, inst: &Instance) -> Vec<Option<Part<'a>>> {
-    assembly::leaves(&app.ws.assemblies, inst)
+    // numbered over every part (hidden ones inside sub-assemblies are None), so `Hit::leaf` and
+    // the mate connectors' leaf numbers don't shift when something is hidden or shown
+    assembly::leaves_shown(&app.ws.assemblies, inst)
         .into_iter()
-        .map(|l| {
+        .map(|(l, shown)| {
+            if !shown {
+                return None;
+            }
             let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body)?;
             let color = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
             Some(Part { local: l.pose, mesh, color })
@@ -354,7 +364,7 @@ fn follow_parts(app: &mut App) {
     // a cheap fingerprint of the geometry the instances use
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    let leaves: Vec<assembly::Leaf> = app.ws.assemblies[i].instances.iter().flat_map(|x| assembly::leaves(&app.ws.assemblies, x)).collect();
+    let leaves: Vec<assembly::Leaf> = app.ws.assemblies[i].instances.iter().flat_map(|x| assembly::leaves_with(&app.ws.assemblies, x, true)).collect();
     for l in &leaves {
         if let Some(m) = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body) {
             (l.studio, l.body, m.volume.to_bits(), m.area.to_bits(), m.faces.len(), m.edges.len()).hash(&mut h);
@@ -487,12 +497,12 @@ fn start_mate(app: &mut App, kind: MateKind) {
     let id = a.new_id();
     let n = a.mates.iter().filter(|m| m.kind == kind).count() + 1;
     a.mates.push(Mate { id, name: format!("{} {n}", kind.label()), kind, a: None, b: None, flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
-    app.asm.dialog = Some(MateDialog { mate: id, before, active: 0 });
+    app.asm.dialog = Some(MateDialog { mate: id, asm: i, before, active: 0 });
     app.asm.sel.clear();
 }
 
 fn mate_ok(app: &mut App) {
-    if let Some(d) = app.asm.dialog.take() {
+    if let Some(d) = app.asm.dialog.take().filter(|d| asm_index(app) == Some(d.asm)) {
         let incomplete = asm(app).and_then(|a| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.is_none() || m.b.is_none()).unwrap_or(false);
         if incomplete {
             if let Some(a) = asm_mut(app) {
@@ -506,12 +516,46 @@ fn mate_ok(app: &mut App) {
 
 fn mate_cancel(app: &mut App) {
     if let Some(d) = app.asm.dialog.take() {
-        if let Some(i) = asm_index(app) {
-            app.ws.assemblies[i] = d.before;
+        if asm_index(app) == Some(d.asm) && d.asm < app.ws.assemblies.len() {
+            app.ws.assemblies[d.asm] = d.before;
             app.asm.undo.pop();
         }
     }
     app.asm.scene_dirty = true;
+}
+
+/// Leaving this Assembly tab: finish the mate being made, and drop the selection and other
+/// state that names this assembly's instances and mates (ids are per assembly, so they would
+/// pick out different ones in the next assembly).
+pub fn leave(app: &mut App) {
+    if app.asm.dialog.is_some() {
+        mate_ok(app);
+    }
+    app.asm.sel.clear();
+    app.asm.sel_mate = None;
+    app.asm.hover = None;
+    app.asm.ctx = None;
+    app.asm.drag = None;
+    app.asm.measure = None;
+    app.asm.relation = None;
+    if app.asm.clashes.is_some() || app.asm.checking {
+        app.asm.clashes = None;
+        app.asm.clash_ids.clear();
+        app.asm.checking = false;
+    }
+    app.asm.scene_dirty = true;
+}
+
+/// Drop isolated instances that are gone (deleted, or undone away); end the isolation when
+/// none are left.
+pub fn prune_isolation(app: &mut App) {
+    let Some(keep) = isolated(app) else { return };
+    let ids: Vec<u64> = asm(app).map(|a| keep.iter().copied().filter(|id| a.instance(*id).is_some()).collect()).unwrap_or_default();
+    if ids.is_empty() {
+        app.end_isolation();
+    } else if let Some(i) = app.isolation.as_mut() {
+        i.instances = ids;
+    }
 }
 
 fn delete_selection(app: &mut App) {
@@ -523,6 +567,7 @@ fn delete_selection(app: &mut App) {
         a.mates.retain(|m| Some(m.id) != sel_mate && !m.a.map(|c| sel.contains(&c.inst)).unwrap_or(false) && !m.b.map(|c| sel.contains(&c.inst)).unwrap_or(false));
     }
     app.asm.sel.clear();
+    prune_isolation(app);
     app.asm.scene_dirty = true;
 }
 
@@ -531,9 +576,15 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if crate::app::key_mods(ctx).0 {
         // Ctrl+A selects every instance; other Ctrl keys are not the letters' tools
         if pressed(egui::Key::A) && app.asm.dialog.is_none() {
-            app.asm.sel = asm(app).map(|a| a.instances.iter().map(|x| x.id).collect()).unwrap_or_default();
+            // the instances in sight, as Ctrl+A in a Part Studio
+            app.asm.sel = asm(app).map(|a| a.instances.iter().filter(|x| shown(app, x)).map(|x| x.id).collect()).unwrap_or_default();
             app.asm.scene_dirty = true;
         }
+        return;
+    }
+    if pressed(egui::Key::Escape) && app.asm.ctx.is_some() {
+        // Esc closes the right-click menu and does nothing else
+        app.asm.ctx = None;
         return;
     }
     if pressed(egui::Key::Escape) {
@@ -586,7 +637,8 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
 /// In sight in the viewport: not hidden, or kept by the isolation.
 pub fn shown(app: &App, x: &Instance) -> bool {
     match isolated(app) {
-        Some(keep) => keep.contains(&x.id),
+        // hiding wins: an isolated instance that gets hidden (Ctrl+Z, say) goes out of sight
+        Some(keep) => keep.contains(&x.id) && !x.hidden,
         None => !x.hidden,
     }
 }
@@ -602,11 +654,21 @@ pub fn isolate(app: &mut App, ids: Vec<u64>) {
         app.flash("Select the instances to isolate", ToastKind::Info);
         return;
     }
+    // hidden ones stay hidden (Show them first)
+    let ids: Vec<u64> = ids.into_iter().filter(|id| asm(app).and_then(|a| a.instance(*id)).is_some_and(|x| !x.hidden)).collect();
+    if ids.is_empty() {
+        app.flash("The selected instances are hidden: show them first", ToastKind::Info);
+        return;
+    }
     app.asm.sel.retain(|x| ids.contains(x));
     if app.asm.hover.is_some_and(|h| !ids.contains(&h.inst)) {
         app.asm.hover = None;
     }
     app.isolation = Some(crate::app::Isolation { tab: app.tab, bodies: vec![], instances: ids });
+    // an interference result covers what was in sight when it ran
+    if app.asm.clashes.is_some() {
+        app.asm.clash_stale = true;
+    }
     app.asm.scene_dirty = true;
 }
 
@@ -623,14 +685,33 @@ pub fn toggle_isolate(app: &mut App) {
 /// Hide or show instances. Saved with the assembly and undoable; hiding one that is isolated
 /// also takes it out of the isolation, so it goes out of sight either way.
 pub fn set_hidden(app: &mut App, ids: &[u64], hidden: bool) {
+    set_hidden_many(app, &[(ids, hidden)]);
+}
+
+/// Several hide/show changes as one undo step.
+fn set_hidden_many(app: &mut App, changes: &[(&[u64], bool)]) {
+    if app.asm.dialog.is_some() {
+        // cancelling the mate would put the old visibility back and take the wrong undo step
+        app.flash("Finish the mate first", ToastKind::Info);
+        return;
+    }
     let Some(a) = asm(app) else { return };
-    if !a.instances.iter().any(|x| ids.contains(&x.id) && x.hidden != hidden) {
+    if !changes.iter().any(|(ids, hidden)| a.instances.iter().any(|x| ids.contains(&x.id) && x.hidden != *hidden)) {
         return;
     }
     let stale = app.asm.clash_stale;
     checkpoint(app);
-    // the interference result still holds for the parts it checked
-    app.asm.clash_stale = stale;
+    // the interference result still holds for the parts it checked, unless parts come back
+    // into sight that it didn't check
+    let showing = changes.iter().any(|(ids, hidden)| !*hidden && !ids.is_empty());
+    app.asm.clash_stale = stale || showing;
+    for (ids, hidden) in changes {
+        set_hidden_now(app, ids, *hidden);
+    }
+    app.asm.scene_dirty = true;
+}
+
+fn set_hidden_now(app: &mut App, ids: &[u64], hidden: bool) {
     if let Some(a) = asm_mut(app) {
         for x in a.instances.iter_mut().filter(|x| ids.contains(&x.id)) {
             x.hidden = hidden;
@@ -650,7 +731,6 @@ pub fn set_hidden(app: &mut App, ids: &[u64], hidden: bool) {
             }
         }
     }
-    app.asm.scene_dirty = true;
 }
 
 /// H: hide the selected instances, or show them when they are all hidden already.
@@ -667,11 +747,18 @@ pub fn toggle_hide_selected(app: &mut App) {
 /// Hide every instance but these.
 pub fn hide_others(app: &mut App, keep: &[u64]) {
     let others: Vec<u64> = asm(app).map(|a| a.instances.iter().map(|x| x.id).filter(|id| !keep.contains(id)).collect()).unwrap_or_default();
-    set_hidden(app, &others, true);
+    // the kept ones come into sight if they were hidden
+    set_hidden_many(app, &[(keep, false), (others.as_slice(), true)]);
 }
 
 /// Shift+H: show every hidden instance.
 pub fn show_all(app: &mut App) {
+    if app.asm.dialog.is_some() {
+        app.flash("Finish the mate first", ToastKind::Info);
+        return;
+    }
+    // everything in sight again, as Show all parts in a Part Studio
+    app.end_isolation();
     let ids: Vec<u64> = asm(app).map(|a| a.instances.iter().filter(|x| x.hidden).map(|x| x.id).collect()).unwrap_or_default();
     set_hidden(app, &ids, false);
 }
@@ -684,9 +771,8 @@ pub fn fit(app: &mut App) {
     let Some(a) = asm(app) else { return };
     let mut lo = DVec3::splat(f64::INFINITY);
     let mut hi = DVec3::splat(f64::NEG_INFINITY);
-    // isolating frames just the isolated instances
-    let only = isolated(app);
-    for x in a.instances.iter().filter(|x| only.is_none_or(|k| k.contains(&x.id))) {
+    // just the instances in sight (hidden ones, or ones an isolation leaves out, don't count)
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
         if let Some((l, h)) = world_bbox(app, x) {
             lo = lo.min(l);
             hi = hi.max(h);
@@ -833,13 +919,17 @@ fn instances(app: &mut App, ui: &mut Ui) {
     for (id, name, fixed, hidden, out_of_sight) in rows {
         let picked = app.asm.sel.contains(&id);
         let label = if fixed { format!("📌 {name}") } else { name };
-        let r = ui.add(
-            egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() }))
-                .min_size(egui::vec2(ui.available_width(), 20.0)),
-        );
+        // room on the right for the eye, so long names don't run under it
+        let w = (ui.available_width() - 22.0).max(40.0);
+        let r = ui
+            .scope(|ui| {
+                ui.set_max_width(w);
+                ui.add(egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() })).truncate().min_size(egui::vec2(w, 20.0)))
+            })
+            .inner;
         // the selected instances when this row is one of them, else just this one
         let these = if picked { app.asm.sel.clone() } else { vec![id] };
-        if crate::app::eye_toggle(ui, &r, r.rect.right() - 12.0, hidden, ("asm-eye", id)) {
+        if crate::app::eye_toggle(ui, &r, r.rect.right() + 11.0, hidden, ("asm-eye", id)) {
             hide = Some((these.clone(), !hidden));
         } else if r.clicked() {
             if !ui.input(|i| i.modifiers.shift || i.modifiers.command) {
@@ -946,7 +1036,7 @@ fn mates(app: &mut App, ui: &mut Ui) {
             if let Some(i) = asm_index(app) {
                 let before = app.ws.assemblies[i].clone();
                 checkpoint(app);
-                app.asm.dialog = Some(MateDialog { mate: id, before, active: 0 });
+                app.asm.dialog = Some(MateDialog { mate: id, asm: i, before, active: 0 });
             }
         }
         Some(("suppress", id)) => {
@@ -1717,6 +1807,10 @@ fn relations(app: &mut App, ui: &mut Ui) {
 
 fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
     let Some(d) = &app.asm.dialog else { return };
+    if asm_index(app) != Some(d.asm) {
+        app.asm.dialog = None;
+        return;
+    }
     let (mid, active) = (d.mate, d.active);
     let Some(a) = asm(app) else { return };
     let Some(m) = a.mates.iter().find(|m| m.id == mid).cloned() else {

@@ -177,7 +177,8 @@ impl Session {
         };
         // nearest face or edge over the instance's parts
         let mut best: Option<(f64, usize, Option<usize>, Option<usize>, DVec3)> = None;
-        let leaves = assembly::leaves(&self.ws.assemblies, x);
+        // numbered like the connectors' leaf (hidden parts of a sub-assembly included)
+        let leaves = assembly::leaves_with(&self.ws.assemblies, x, true);
         for (li, l) in leaves.iter().enumerate() {
             let Some(m) = self.mesh(l.studio, l.body) else { continue };
             let lp = l.pose.inverse_apply(pt);
