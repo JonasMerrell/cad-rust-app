@@ -10,6 +10,9 @@ use crate::pcb_lib::P;
 
 const FREE: i32 = -1;
 const WALL: i32 = -2;
+/// A net id no cell is marked with: copper with no net (or one the schematic lacks) may only use
+/// free cells.
+const NO_NET: i32 = i32::MAX;
 
 /// Per layer, which cells something of half-width `h` that keeps `c` from other nets may use:
 /// FREE, WALL, or only one net's. There is a map for each track width and via size the net
@@ -312,6 +315,11 @@ fn build(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], 
 
 /// `build` over part of the board (the autorouter's copper `region`).
 fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], alias: Option<(&str, &str)>, area: (P, P)) -> Grid {
+    build_layers(p, nl, base, extra, alias, area, p.board.copper_layers())
+}
+
+/// `build_in` with maps for only some copper `layers` (a walkaround needs just the one it routes on).
+fn build_layers(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)], alias: Option<(&str, &str)>, area: (P, P), layers: Vec<Layer>) -> Grid {
     let r = &p.board.rules;
     let (lo, hi) = area;
     let size = [hi[0] - lo[0], hi[1] - lo[1]];
@@ -338,7 +346,6 @@ fn build_in(p: &Pcb, nl: &pcb::Netlist, base: &[Item], extra: &[(f64, f64, bool)
     for &(h, c, via) in extra {
         add(h, c, via);
     }
-    let layers = p.board.copper_layers();
     let nl_ = layers.len();
     let plane = if nl_ > 2 { layers.iter().map(|l| p.board.zones.iter().any(|z| z.layer == *l)).collect() } else { vec![false; nl_] };
     let mut grid = Grid { lo, g, nx, ny, maps: profiles.iter().map(|&(h, c, via)| Map { h, c, via, m: vec![vec![FREE; n]; nl_] }).collect(), layers, plane };
@@ -441,7 +448,8 @@ fn search(grid: &Grid, mi: usize, vmi: Option<usize>, net: i32, a: P, la: &[Laye
             }
             let (x2, y2) = (x2 as usize, y2 as usize);
             let t = y2 * nx + x2;
-            let is_goal = x2 == tx && y2 == ty;
+            // the target cell is only open on the layers it has copper on
+            let is_goal = x2 == tx && y2 == ty && goal.contains(&l);
             if !free(track[l][t], net) && !is_goal {
                 continue;
             }
@@ -705,21 +713,32 @@ pub struct Walk {
     grid: Grid,
     net: i32,
     mi: usize,
+    layer: Layer,
 }
 
 impl Walk {
-    pub fn new(p: &Pcb, net: &str, width: f64) -> Walk {
+    /// The grid for routing `net` at `width` on `layer` (only that layer's maps are built).
+    pub fn new(p: &Pcb, net: &str, width: f64, layer: Layer) -> Walk {
         let nl = p.netlist();
         let pads = p.pads(&nl);
         let base: Vec<Item> = pcb::items(p, &nl, &pads, &[]);
         let c = p.net_rules(&nl, net).clearance;
-        let grid = build(p, &nl, &base, &[(width / 2.0, c, false)], None);
+        let grid = build_layers(p, &nl, &base, &[(width / 2.0, c, false)], None, p.board.bbox(), vec![layer]);
         let mi = grid.find(width / 2.0, c, false);
-        let id = nl.by_name(net).map(|i| i as i32).unwrap_or(WALL);
-        Walk { grid, net: id, mi }
+        // copper with no net is kept out of every wall, not let through them
+        let id = nl.by_name(net).map(|i| i as i32).unwrap_or(NO_NET);
+        Walk { grid, net: id, mi, layer }
     }
-    /// A clear path from `a` to `b` on `layer`, corners only; None when there is none nearby.
+    /// The layer the grid was built for.
+    pub fn layer(&self) -> Layer {
+        self.layer
+    }
+    /// A clear path from `a` to `b` on `layer`, corners only; None when there is none nearby (or
+    /// `layer` is not the grid's).
     pub fn path(&self, a: P, b: P, layer: Layer) -> Option<Vec<P>> {
+        if layer != self.layer {
+            return None;
+        }
         let path = search(&self.grid, self.mi, None, self.net, a, &[layer], b, &[layer], 150_000)?;
         Some(path_line(&self.grid, &path, a, b))
     }
@@ -993,9 +1012,49 @@ mod tests {
         let gap = tn.iter().map(|t| pcb::seg_point(t.a, t.b, m)).fold(f64::INFINITY, f64::min) - 0.3;
         assert!((gap - 0.25).abs() < 0.02, "gap {gap}");
         // walkaround finds a way round the resistor on the top layer
-        let w = Walk::new(&p, "GND", 0.25);
+        let w = Walk::new(&p, "GND", 0.25, Layer::Top);
         let path = w.path([20.0, 5.0], [40.0, 5.0], Layer::Top).unwrap();
         assert!(path.len() >= 2);
+    }
+
+    #[test]
+    fn goal_cell_is_no_way_through_on_other_layers() {
+        // the target is on top only; the bottom has another net's wall across the board, through
+        // the target cell, and vias fit only beyond it: no route (none through the wall under it)
+        let (nx, ny) = (20, 5);
+        let n = nx * ny;
+        let mut top = vec![FREE; n];
+        let mut bottom = vec![FREE; n];
+        let mut via = vec![vec![WALL; n]; 2];
+        for y in 0..ny {
+            for x in 0..10 {
+                top[y * nx + x] = WALL;
+            }
+            bottom[y * nx + 10] = WALL;
+            via[0][y * nx + 15] = FREE;
+            via[1][y * nx + 15] = FREE;
+        }
+        let grid = Grid { lo: [0.0, 0.0], g: 1.0, nx, ny, maps: vec![Map { h: 0.1, c: 0.1, via: false, m: vec![top, bottom] }, Map { h: 0.3, c: 0.1, via: true, m: via }], layers: vec![Layer::Top, Layer::Bottom], plane: vec![false; 2] };
+        let path = search(&grid, 0, Some(1), 0, [5.5, 2.5], &[Layer::Bottom], [10.5, 2.5], &[Layer::Top], 100_000);
+        assert!(path.as_ref().is_none_or(|p| !p.contains(&(10, 2, 1))), "{path:?}");
+    }
+
+    #[test]
+    fn walkaround_without_a_net_stays_out_of_walls() {
+        let p = crate::pcb::tests::led_board();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        // from beside a pad straight across it: no path may cross other copper
+        let pad = pads.iter().find(|x| x.net.is_some()).unwrap();
+        let w = Walk::new(&p, "", 0.25, Layer::Top);
+        let (a, b) = ([pad.at[0] - 4.0, pad.at[1]], [pad.at[0] + 4.0, pad.at[1]]);
+        if let Some(path) = w.path(a, b, Layer::Top) {
+            for s in path.windows(2) {
+                assert!(pad.cu().gap(&Cu::Seg { a: s[0], b: s[1], r: 0.125 }) > 0.0, "{path:?} crosses {pad:?}");
+            }
+        }
+        // a grid built for one layer answers for that layer only
+        assert!(w.path(a, b, Layer::Bottom).is_none());
     }
 
     #[test]

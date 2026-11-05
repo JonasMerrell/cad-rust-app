@@ -4,11 +4,22 @@
 use crate::pcb::{self, Cu, Issue, Netlist, Pcb, Track};
 use crate::pcb_lib::P;
 
-/// Routed length of a net: its tracks, plus a via barrel (the board thickness) per via.
+/// Routed length of a net: its tracks, plus a via barrel per via (the board thickness, or for a
+/// blind or buried via the stackup between the two layers it joins).
 pub fn net_length(p: &Pcb, net: &str) -> f64 {
     let t: f64 = p.board.tracks.iter().filter(|t| t.net == net).map(|t| pcb::dist(t.a, t.b)).sum();
-    let v = p.board.vias.iter().filter(|v| v.net == net).count() as f64 * p.board.thickness;
+    let mut st = None;
+    let v: f64 = p.board.vias.iter().filter(|v| v.net == net).map(|v| barrel(p, v, &mut st)).sum();
     t + v
+}
+
+/// A via's barrel length: the dielectric between the copper layers it joins.
+fn barrel(p: &Pcb, v: &pcb::Via, st: &mut Option<crate::pcb_trace::Stackup>) -> f64 {
+    let Some([a, b]) = v.span.filter(|_| v.kind() != "through") else { return p.board.thickness };
+    let st = st.get_or_insert_with(|| crate::pcb_trace::stack(&p.board));
+    let (Some(ia), Some(ib)) = (st.copper_index(a), st.copper_index(b)) else { return p.board.thickness };
+    let (lo, hi) = (ia.min(ib), ia.max(ib));
+    st.layers.get(lo + 1..hi).unwrap_or(&[]).iter().filter(|l| l.kind != crate::pcb_trace::StackKind::Mask).map(|l| l.thickness).sum()
 }
 
 /// The nets a length rule covers (names in the netlist matching its patterns).
@@ -216,6 +227,19 @@ pub fn match_lengths(p: &mut Pcb, rule: &pcb::LengthRule) -> Vec<(String, f64, f
 mod tests {
     use super::*;
     use crate::pcb::{Layer, LengthRule};
+
+    #[test]
+    fn blind_vias_count_their_own_depth() {
+        let mut p = crate::pcb::tests::led_board();
+        p.board.set_copper_count(4).unwrap();
+        p.board.vias.push(pcb::Via::new([1.0, 1.0], 0.6, 0.3, "X"));
+        let through = net_length(&p, "X");
+        assert!((through - p.board.thickness).abs() < 1e-9);
+        p.board.vias[0].span = Some([Layer::Top, Layer::In(1)]);
+        let blind = net_length(&p, "X");
+        // the prepreg under the top layer, 0.2 mm in a 4-layer stack
+        assert!(blind > 0.05 && blind < 0.5, "{blind}");
+    }
 
     #[test]
     fn meanders_reach_the_target_and_stay_clear() {
