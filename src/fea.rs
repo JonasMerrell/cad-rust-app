@@ -217,7 +217,7 @@ pub struct Transient {
     /// Shaking frequency (Hz).
     #[serde(default = "shake_hz")]
     pub frequency: f64,
-    /// Simulated time (s); None: ten periods of the lowest natural frequency.
+    /// Simulated time (s); None: five periods of the lowest natural frequency (after a ramp or pulse).
     #[serde(default)]
     pub duration: Option<f64>,
     #[serde(default = "steps")]
@@ -677,7 +677,8 @@ pub struct Outcome {
     /// Whether 3D-printed parts were modelled with walls and infill (`body_mats` are then slots of
     /// shell / infill blends, and the factor of safety is judged element by element).
     pub printed: bool,
-    /// Static runs with printed parts: the factor of safety of the walls and of the infill.
+    /// Static runs with printed parts: the factor of safety of the walls (the infill's when nothing is
+    /// wall) and of the infill.
     pub safety: Option<(f64, f64)>,
     pub solution: Solution,
     pub warnings: Vec<String>,
@@ -975,8 +976,15 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     let mut force = vec![0.0; 3 * nn];
     let mut any_load = false;
     let mut unloaded = vec![];
+    let mut undirected: Vec<String> = vec![];
     for l in study.loads.iter().filter(|l| !l.suppressed) {
         let dir = DVec3::from(l.direction).normalize_or_zero();
+        // a force along (or an acceleration in) no direction would load nothing
+        if dir == DVec3::ZERO && (l.kind == LoadKind::Gravity || (l.kind == LoadKind::Force && !l.normal)) {
+            warnings.push(format!("{} has no direction (0, 0, 0): it is left out", l.name));
+            undirected.push(l.name.clone());
+            continue;
+        }
         match l.kind {
             LoadKind::Gravity => {
                 crate::fea_solve::body_loads(&mesh, dir * (l.value * G), |ei| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho, &mut force);
@@ -1016,7 +1024,13 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
         }
     }
     if study.analysis != Analysis::Modal && !any_load {
-        return Err(if unloaded.is_empty() { "Add a load (Force, Pressure or Gravity)".into() } else { no_faces(&unloaded) });
+        return Err(if !unloaded.is_empty() {
+            no_faces(&unloaded)
+        } else if !undirected.is_empty() {
+            format!("{} {} no direction: give a direction", undirected.join(", "), if undirected.len() == 1 { "has" } else { "have" })
+        } else {
+            "Add a load (Force, Pressure or Gravity)".into()
+        });
     }
     if study.analysis == Analysis::Modal && study.loads.iter().any(|l| !l.suppressed) {
         warnings.push("Loads are ignored in a modal analysis: natural frequencies depend only on the supports, the shape and the material".into());
@@ -1037,7 +1051,7 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             let mut vm: Vec<f32> = stress.iter().map(crate::fea_solve::von_mises).collect();
             vm.sort_unstable_by(|a, b| a.total_cmp(b));
             if let (Some(&top), Some(&near)) = (vm.last(), vm.get(vm.len() * 999 / 1000)) {
-                if top > 5.0 * near && top as f64 > 0.2 * body_mats.iter().map(|m| m.yield_mpa).fold(mat.yield_mpa, f64::min) {
+                if top > 5.0 * near && top as f64 > 0.2 * body_mats.iter().map(|m| m.yield_mpa).filter(|y| *y > 0.0).fold(mat.yield_mpa, f64::min) {
                     warnings.push(format!(
                         "The largest stress ({top:.3e} MPa) is a spike at a few nodes, over 5 times the 99.9th percentile ({near:.3} MPa): most likely badly shaped elements, so don't trust the peak or the factor of safety; use a smaller mesh size (now {size} mm)"
                     ));
@@ -1045,7 +1059,8 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
             }
             let reactions = reactions(&mesh, &mat, &body_mats, &r.u, &problem.force, &support_nodes);
             if printed {
-                warnings.extend(printed_warning(&mesh, &mat, &body_mats, &shell, &r.u, None));
+                let (w, c, _) = shell_core_failure(&mesh, &mat, &body_mats, &shell, &r.u);
+                warnings.extend(printed_warning((w, None), (c, None)));
             } else if let Some(w) = yield_warning(&mesh, &mat, &body_mats, &stress, None) {
                 warnings.push(w);
             }
@@ -1082,6 +1097,9 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     let peak_stress = match &solution {
         Solution::Transient(t) => {
             let mut best: Option<(f64, f64, Vec<[f32; 6]>)> = None;
+            // printed parts: the walls' and the infill's worst moments, which need not be the moment of
+            // the largest von Mises stress (tension across the layers fails them first)
+            let (mut walls, mut core) = ((0.0f64, 0.0f64), (0.0f64, 0.0f64));
             for (tt, u) in &t.frames {
                 if cancel() {
                     return Err("cancelled".into());
@@ -1091,11 +1109,22 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
                 if best.as_ref().is_none_or(|b| vm > b.0) {
                     best = Some((vm, *tt, s));
                 }
+                if printed {
+                    let (w, c, _) = shell_core_failure(&mesh, &mat, &body_mats, &shell, u);
+                    if w > walls.0 {
+                        walls = (w, *tt);
+                    }
+                    if c > core.0 {
+                        core = (c, *tt);
+                    }
+                }
+            }
+            if printed {
+                warnings.extend(printed_warning((walls.0, Some(walls.1)), (core.0, Some(core.1))));
             }
             best.map(|(vm, tt, s)| {
-                match t.frames.iter().find(|f| f.0 == tt).filter(|_| printed) {
-                    Some(f) => warnings.extend(printed_warning(&mesh, &mat, &body_mats, &shell, &f.1, Some(tt))),
-                    None => warnings.extend(yield_warning(&mesh, &mat, &body_mats, &s, Some(tt))),
+                if !printed {
+                    warnings.extend(yield_warning(&mesh, &mat, &body_mats, &s, Some(tt)));
                 }
                 (vm, tt)
             })
@@ -1105,8 +1134,11 @@ pub fn run(study: &Study, input: &Input, mesh: Option<Arc<Mesh>>, progress: &dyn
     let mass = (0..mesh.tets.len()).map(|ei| crate::fea_solve::mat_at(&mesh, &body_mats, &mat, ei).rho * crate::fea_solve::element_volume(&mesh, ei)).sum();
     let safety = match &solution {
         Solution::Static { u, .. } if printed => {
-            let (w, c) = shell_core_failure(&mesh, &mat, &body_mats, &shell, u);
-            Some((1.0 / w.max(1e-12), 1.0 / c.max(1e-12)))
+            let (w, c, walls) = shell_core_failure(&mesh, &mat, &body_mats, &shell, u);
+            let infill = 1.0 / c.max(1e-12);
+            // a part with no walls (no wall loops nor top/bottom layers, or thinner than they are) is
+            // all infill: its factor of safety is the infill's, not an empty set's "> 1000"
+            Some((if walls { 1.0 / w.max(1e-12) } else { infill }, infill))
         }
         _ => None,
     };
@@ -1146,7 +1178,7 @@ fn reactions(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], u: &[f64], force
 /// How close each node's stress comes to failing its material (1 = at its strength; the factor of
 /// safety is its inverse): the averaged nodal stress against the weakest material around the node, or
 /// with displacements `u` (3D-printed parts, whose walls and infill differ widely in stiffness) each
-/// element's own stress against its own material, the worst at each node.
+/// element's own stress against its own material, averaged at each node (`fea_solve::element_failure`).
 pub fn node_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], u: Option<&[f64]>, stress: &[[f32; 6]]) -> Vec<f64> {
     if let Some(u) = u {
         return crate::fea_solve::element_failure(mesh, mat, body_mats, u);
@@ -1169,8 +1201,9 @@ pub fn node_safety(o: &Outcome, u: &[f64], stress: &[[f32; 6]]) -> Vec<f64> {
     node_failure(&o.mesh, &o.mat, &o.body_mats, o.printed.then_some(u), stress).iter().map(|f| 1.0 / f.max(1e-12)).collect()
 }
 
-/// The largest nodal failure index in the walls (nodes whose elements are mostly shell) and in the infill.
-fn shell_core_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: &[f32], u: &[f64]) -> (f64, f64) {
+/// The largest nodal failure index in the walls (nodes whose elements are mostly shell) and in the infill,
+/// and whether any node is in the walls.
+fn shell_core_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: &[f32], u: &[f64]) -> (f64, f64, bool) {
     let fi = crate::fea_solve::element_failure(mesh, mat, body_mats, u);
     let mut share = vec![(0.0f64, 0u32); mesh.nodes.len()];
     for (t, s) in mesh.tets.iter().zip(shell) {
@@ -1179,28 +1212,30 @@ fn shell_core_failure(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: 
             share[*v as usize].1 += 1;
         }
     }
-    let (mut w, mut c) = (0.0f64, 0.0f64);
+    let (mut w, mut c, mut walls) = (0.0f64, 0.0f64, false);
     for (f, (s, n)) in fi.iter().zip(&share) {
-        if *s >= 0.5 * (*n).max(1) as f64 {
+        if *n > 0 && *s >= 0.5 * *n as f64 {
             w = w.max(*f);
+            walls = true;
         } else {
             c = c.max(*f);
         }
     }
-    (w, c)
+    (w, c, walls)
 }
 
 /// Warnings when the walls or the infill of 3D-printed parts pass their strength.
-fn printed_warning(mesh: &Mesh, mat: &Elastic, body_mats: &[Elastic], shell: &[f32], u: &[f64], at: Option<f64>) -> Vec<String> {
-    let (w, c) = shell_core_failure(mesh, mat, body_mats, shell, u);
-    let when = at.map(|t| format!(" at {}", fmt_time(t))).unwrap_or_default();
+/// `w` and `c`: the walls' and the infill's largest failure index (and when, in a time history).
+fn printed_warning(w: (f64, Option<f64>), c: (f64, Option<f64>)) -> Vec<String> {
+    let when = |at: Option<f64>| at.map(|t| format!(" at {}", fmt_time(t))).unwrap_or_default();
     let mut out = vec![];
+    let (w, c, when_w, when_c) = (w.0, c.0, when(w.1), when(c.1));
     if w > 1.0 {
-        out.push(format!("The stress in the walls reaches {:.0}% of the printed material's strength{when}: the layers would split or the part would break there", 100.0 * w));
+        out.push(format!("The stress in the walls reaches {:.0}% of the printed material's strength{when_w}: the layers would split or the part would break there", 100.0 * w));
     }
     if c > 1.0 {
         out.push(format!(
-            "The infill is loaded past its strength{when} ({:.0}%): it would crush or tear locally, leaving more of the load to the walls; more infill, a stronger pattern or more walls help",
+            "The infill is loaded past its strength{when_c} ({:.0}%): it would crush or tear locally, leaving more of the load to the walls; more infill, a stronger pattern or more walls help",
             100.0 * c
         ));
     }
@@ -1535,6 +1570,44 @@ mod tests {
         let (input, s) = printed_bar(Some(Print::default()), 5.0);
         let coarse = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
         assert!(coarse.warnings.iter().any(|w| w.contains("coarser than the printed walls")), "{:?}", coarse.warnings);
+    }
+
+    #[test]
+    fn hollow_print_solves_and_its_empty_core_is_not_judged() {
+        use crate::fea_print::{Print, PrintModel};
+        for model in [PrintModel::Isotropic, PrintModel::Layered] {
+            let (input, s) = printed_bar(Some(Print { infill: 0.0, model, ..Print::default() }), 1.25);
+            let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+            let Solution::Static { u, .. } = &o.solution else { panic!() };
+            assert!(u.iter().all(|v| v.is_finite()), "{model:?}");
+            // the walls carry the load (the pull on the end face's empty middle strains its edge, so the
+            // margins are small); the empty core is not judged as an infill of no strength, which gave
+            // a factor of safety of about 1e-12
+            let (walls, infill) = o.safety.unwrap();
+            assert!(walls > 0.05 && walls < 20.0 && infill > 0.05, "{model:?}: {walls} {infill}");
+        }
+    }
+
+    #[test]
+    fn printed_safety_counts_the_infill_when_there_are_no_walls() {
+        use crate::fea_print::Print;
+        let (input, s) = printed_bar(Some(Print { walls: 0, top_bottom: 0, ..Print::default() }), 2.5);
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        let (walls, infill) = o.safety.unwrap();
+        // nothing is wall: the headline is the infill's, not "> 1000"
+        assert!(walls == infill && infill < 100.0, "{walls} {infill}");
+        // no top/bottom layers: the walls alone still warn of a coarse mesh
+        let (input, s) = printed_bar(Some(Print { top_bottom: 0, ..Print::default() }), 5.0);
+        let o = run(&s, &input, None, &|_, _| {}, &|| false).unwrap();
+        assert!(o.warnings.iter().any(|w| w.contains("coarser than the printed walls")), "{:?}", o.warnings);
+    }
+
+    #[test]
+    fn a_load_with_no_direction_says_so() {
+        let (input, mut s) = printed_bar(None, 5.0);
+        s.loads[0].direction = [0.0; 3];
+        let e = run(&s, &input, None, &|_, _| {}, &|| false).err().unwrap();
+        assert!(e.contains("no direction"), "{e}");
     }
 
     #[test]

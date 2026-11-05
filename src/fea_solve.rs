@@ -679,12 +679,17 @@ pub fn nodal_stress(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> 
 }
 
 /// Failure index (see `Elastic::failure_index`) at each node: every element's own stress there against
-/// its own material, averaged over the elements around the node (as stresses are).
+/// its own material, averaged over the elements around the node (as stresses are; the worst of them would
+/// checkerboard where walls and infill meet). Elements of a material with no strength (the core of a
+/// print with no infill: hollow) are left out.
 pub fn element_failure(mesh: &Mesh, mat: &Elastic, mats: &[Elastic], u: &[f64]) -> Vec<f64> {
     let mut out = vec![0.0f64; mesh.nodes.len()];
     let mut cnt = vec![0u32; mesh.nodes.len()];
     for (ei, e) in mesh.tets.iter().enumerate() {
         let m = mat_at(mesh, mats, mat, ei);
+        if !(m.yield_mpa > 0.0) {
+            continue;
+        }
         let x = coords(mesh, e);
         for (k, l) in NODE_L.iter().enumerate() {
             let Some((g, _)) = grads(&x, *l) else { continue };
@@ -1518,6 +1523,27 @@ mod tests {
         let (d2, s2) = tip(&parts, 0, 7);
         assert!((d2 / d1 - 1.0).abs() < 0.003, "{d1} {d2}");
         assert!(s2 < 1.15 * s1, "{s1} {s2}");
+    }
+
+    #[test]
+    fn node_failure_averages_the_elements_and_skips_hollow_ones() {
+        // the same tetrahedron twice (two parts), stretched 0.1 %: one part half as strong as the other
+        let c = [DVec3::ZERO, DVec3::X, DVec3::Y, DVec3::Z];
+        let mut nodes = c.to_vec();
+        for (a, b) in crate::fea_mesh::TET_EDGES {
+            nodes.push((c[a] + c[b]) / 2.0);
+        }
+        let t: [u32; 10] = std::array::from_fn(|i| i as u32);
+        let mesh = Mesh { nodes: nodes.clone(), tets: vec![t, t], body: vec![0, 1], ..Default::default() };
+        let u: Vec<f64> = nodes.iter().flat_map(|p| [1e-3 * p.x, 0.0, 0.0]).collect();
+        let (strong, weak) = (Elastic::iso(1000.0, 0.0, 1e-9, 100.0, 0.0), Elastic::iso(1000.0, 0.0, 1e-9, 50.0, 0.0));
+        // σ = 1 MPa: the average of 1/100 and 1/50
+        let fi = element_failure(&mesh, &strong, &[strong, weak], &u);
+        assert!(fi.iter().all(|f| (f - 0.015).abs() < 1e-9), "{fi:?}");
+        // a part with no strength (no infill: hollow) is left out, not averaged in as a huge index
+        let hollow = Elastic::iso(1e-6, 0.0, 0.0, 0.0, 0.0);
+        let fi = element_failure(&mesh, &strong, &[strong, hollow], &u);
+        assert!(fi.iter().all(|f| (f - 0.01).abs() < 1e-9), "{fi:?}");
     }
 
     #[test]
