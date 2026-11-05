@@ -186,7 +186,7 @@ impl Layer {
             "top" | "f.cu" | "front" => Layer::Top,
             "bottom" | "b.cu" | "back" => Layer::Bottom,
             _ => {
-                let k = s.strip_prefix("in").map(|r| r.trim_start_matches(['_', ' ']).trim_end_matches(".cu")).and_then(|r| r.parse::<u8>().ok()).filter(|k| *k >= 1)?;
+                let k = s.strip_prefix("in").map(|r| r.trim_start_matches(['_', ' ']).trim_end_matches(".cu")).and_then(|r| r.parse::<u8>().ok()).filter(|k| (1..=30).contains(k))?;
                 Layer::In(k)
             }
         })
@@ -1478,6 +1478,8 @@ impl Pcb {
         let known = |n: &str| n.is_empty() || nl.by_name(n).is_some();
         let b = &self.board;
         let mut stale: Vec<String> = b.tracks.iter().map(|t| &t.net).chain(b.vias.iter().map(|v| &v.net)).chain(b.zones.iter().map(|z| &z.net)).filter(|n| !known(n)).cloned().collect();
+        // and the nets differential pairs and length rules name (not patterns)
+        stale.extend(b.rules.pairs.iter().flat_map(|d| [&d.p, &d.n]).chain(b.rules.lengths.iter().flat_map(|r| &r.nets)).filter(|n| !n.contains('*') && !known(n)).cloned());
         stale.sort();
         stale.dedup();
         if stale.is_empty() {
@@ -1526,6 +1528,13 @@ impl Pcb {
         }
         let b = &mut self.board;
         for n in b.tracks.iter_mut().map(|t| &mut t.net).chain(b.vias.iter_mut().map(|v| &mut v.net)).chain(b.zones.iter_mut().map(|z| &mut z.net)) {
+            if let Some(m) = map.get(n.as_str()) {
+                *n = m.clone();
+            }
+        }
+        // differential pairs and length rules follow their nets too
+        let rules = &mut b.rules;
+        for n in rules.pairs.iter_mut().flat_map(|d| [&mut d.p, &mut d.n]).chain(rules.lengths.iter_mut().flat_map(|r| r.nets.iter_mut())) {
             if let Some(m) = map.get(n.as_str()) {
                 *n = m.clone();
             }
@@ -2115,7 +2124,8 @@ pub fn drc(pcb: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill]) -> Vec<Issue>
         for it in &its {
             let hit = match it.kind {
                 ItemKind::Track(_) => k.tracks && k.on(it.layer),
-                ItemKind::Via(_) => k.vias,
+                // a blind or buried via only where it reaches the keepout's layer
+                ItemKind::Via(_) => k.vias && k.layer.is_none_or(|l| it.on(l)),
                 _ => false,
             };
             if hit && it.cu.gap(&area) <= 1e-6 {
@@ -2389,6 +2399,41 @@ pub(crate) mod tests {
         p.parts[d].at = [25.0, 20.0];
         p.parts[j].at = [6.0, 20.0];
         p
+    }
+
+    #[test]
+    fn rules_follow_a_renamed_net() {
+        let mut before = led_board();
+        before.board.rules.pairs.push(DiffPair { name: "P".into(), p: "Net-(D1-2)".into(), n: "GND".into(), ..Default::default() });
+        before.board.rules.lengths.push(LengthRule { name: "L".into(), nets: vec!["Net-(D1-2)".into(), "VCC*".into()], ..Default::default() });
+        let mut p = before.clone();
+        // name the resistor-LED net
+        let at = p.wires[0].a;
+        p.labels.push(Label { at, text: "MID".into(), kind: LabelKind::Net, rot: 0 });
+        let nl = p.netlist();
+        assert!(nl.by_name("MID").is_some());
+        assert!(p.retag_copper_since(&before, &nl));
+        assert_eq!(p.board.rules.pairs[0].p, "MID");
+        assert_eq!(p.board.rules.pairs[0].n, "GND");
+        assert_eq!(p.board.rules.lengths[0].nets, vec!["MID".to_string(), "VCC*".to_string()]);
+    }
+
+    #[test]
+    fn keepouts_and_layer_names_respect_via_spans() {
+        assert_eq!(Layer::parse("in255"), None, "would sort as the bottom");
+        assert_eq!(Layer::parse("in30"), Some(Layer::In(30)));
+        let mut p = led_board();
+        p.board.set_copper_count(4).unwrap();
+        let mut v = Via::new([3.0, 3.0], 0.6, 0.3, "");
+        v.span = Some([Layer::Top, Layer::In(1)]);
+        p.board.vias.push(v);
+        let sq = vec![[2.0, 2.0], [4.0, 2.0], [4.0, 4.0], [2.0, 4.0]];
+        p.board.keepouts.push(Keepout { outline: sq.clone(), layer: Some(Layer::In(2)), tracks: true, vias: true, pours: true, parts: false });
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        assert!(!drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "keepout"), "the blind via misses in2");
+        p.board.keepouts[0].layer = Some(Layer::In(1));
+        assert!(drc(&p, &nl, &pads, &[]).iter().any(|i| i.rule == "keepout"));
     }
 
     #[test]

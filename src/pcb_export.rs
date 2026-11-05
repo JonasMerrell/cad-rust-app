@@ -246,10 +246,12 @@ pub fn board_scene(p: &Pcb, nl: &Netlist, pads: &[WPad], fills: &[Fill], air: &[
         out.push(d(a(colors::EDGE, 255), Prim::Circle { c: h.at, r: h.d / 2.0, w: 0.1, fill: false }));
     }
     if v.silk {
-        for side in [v.active.other(), v.active] {
+        // the outer side nearest the active layer (the top for an inner one) drawn last
+        let near = if v.active == Layer::Bottom { Layer::Bottom } else { Layer::Top };
+        for side in [near.other(), near] {
             for part in p.parts.iter().filter(|x| x.side() == side) {
                 let col = if side == Layer::Top { colors::SILK_TOP } else { colors::SILK_BOTTOM };
-                let alpha = if side == v.active { 255 } else { 150 };
+                let alpha = if side == near { 255 } else { 150 };
                 silk(&mut out, part, a(col, alpha));
             }
         }

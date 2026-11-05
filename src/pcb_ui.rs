@@ -779,7 +779,7 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             switch_layer(app, next);
         }
         if pressed(egui::Key::V) {
-            via_here(app);
+            via_here(app, None);
         }
     }
 }
@@ -806,19 +806,21 @@ fn layer_order(p: &Pcb, active: Layer) -> Vec<Layer> {
 /// The active layer; while routing, changing it goes through a via.
 fn switch_layer(app: &mut App, l: Layer) {
     if app.pcb.route.as_ref().is_some_and(|r| r.layer != l) {
-        via_here(app);
+        via_here(app, Some(l));
     } else {
         app.pcb.layer = l;
     }
 }
 
-/// While routing: a via at the last point, and carry on on the other layer. On a plated hole or
-/// an existing via the route just changes layer; on a surface mount pad there is no via.
-fn via_here(app: &mut App) {
+/// While routing: a via at the last point, and carry on on layer `to` (the next one when None). On
+/// a plated hole or an existing via the route just changes layer (a blind or buried via there is
+/// widened to reach it); on a surface mount pad there is no via.
+fn via_here(app: &mut App, to: Option<Layer>) {
     let Some(r) = &app.pcb.route else { return };
     let at = *r.pts.last().unwrap();
     let net = r.net.clone();
-    let layer = next_layer(app, r.layer);
+    let from = r.layer;
+    let layer = to.unwrap_or_else(|| next_layer(app, from));
     refresh(app);
     let c = &app.pcb.cache;
     let pad = c.pads.iter().find(|x| x.cu().contains(at));
@@ -830,8 +832,11 @@ fn via_here(app: &mut App) {
     edit(app, |p| {
         let nr = p.net_rules(&p.netlist(), &net);
         let (d, drill) = (nr.via_d, nr.via_drill);
-        if !through && !p.board.vias.iter().any(|v| pcb::dist(v.at, at) < 1e-6) {
-            p.board.vias.push(Via::new(at, d, drill, &net));
+        if !through {
+            match p.board.vias.iter_mut().find(|v| pcb::dist(v.at, at) < 1e-6) {
+                Some(v) => widen_span(v, from, layer),
+                None => p.board.vias.push(Via::new(at, d, drill, &net)),
+            }
         }
     });
     app.pcb.layer = layer;
@@ -841,9 +846,36 @@ fn via_here(app: &mut App) {
     }
 }
 
+/// Make a blind or buried via reach layers `a` and `b` as well (a through via when it then joins
+/// both outer layers).
+fn widen_span(v: &mut Via, a: Layer, b: Layer) {
+    if v.on(a) && v.on(b) {
+        return;
+    }
+    let Some([s0, s1]) = v.span else { return };
+    let ends = [s0, s1, a, b];
+    let top = *ends.iter().min_by_key(|l| l.order()).unwrap();
+    let bottom = *ends.iter().max_by_key(|l| l.order()).unwrap();
+    v.span = if top == Layer::Top && bottom == Layer::Bottom { None } else { Some([top, bottom]) };
+}
+
+/// The active layer, or the top when the board has no such layer (a tab with fewer layers, an
+/// undone layer count).
+fn keep_layer(app: &mut App) {
+    if let Some(i) = index(app) {
+        if !app.ws.pcbs[i].board.has_layer(app.pcb.layer) {
+            app.pcb.layer = Layer::Top;
+            if app.pcb.route.as_ref().is_some_and(|r| !app.ws.pcbs[i].board.has_layer(r.layer)) {
+                app.pcb.route = None;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------- toolbar
 
 pub fn toolbar(app: &mut App, ui: &mut Ui) {
+    keep_layer(app);
     let board = app.pcb.view == View::Board;
     App::group(ui, |ui| {
         if app.tool_button(ui, "pcbSchematic", "Schematic", "The circuit: parts, wires and net labels (B)", true, app.pcb.view == View::Schematic, true).clicked() {
@@ -2440,6 +2472,7 @@ fn close_zone(app: &mut App) {
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
     let Some(pi) = index(app) else { return };
+    keep_layer(app);
     // sheet symbols follow their sheets' ports (derived, so no undo step of its own)
     if !app.ws.pcbs[pi].sheet_symbols.is_empty() && app.ws.pcbs[pi].sync_entries() {
         app.pcb.dirty = true;
@@ -2832,9 +2865,9 @@ fn walk_preview(app: &mut App, pi: usize, h: P, tol: f64) {
         return;
     };
     let (net, width, layer, from) = (r.net.clone(), r.width, r.layer, *r.pts.last().unwrap());
-    let stale = app.pcb.walk.as_ref().is_none_or(|w| w.1 != net || (w.2 - width).abs() > 1e-9 || w.3 != app.pcb.cache_gen);
+    let stale = app.pcb.walk.as_ref().is_none_or(|w| w.1 != net || (w.2 - width).abs() > 1e-9 || w.3 != app.pcb.cache_gen || w.0.layer() != layer);
     if stale {
-        app.pcb.walk = Some((crate::pcb_route::Walk::new(&app.ws.pcbs[pi], &net, width), net.clone(), width, app.pcb.cache_gen));
+        app.pcb.walk = Some((crate::pcb_route::Walk::new(&app.ws.pcbs[pi], &net, width, layer), net.clone(), width, app.pcb.cache_gen));
         app.pcb.walk_path = None;
     }
     // the same point a click would end on: copper of the net, else on the grid lined up with the last point
@@ -2865,10 +2898,11 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                     None if double => {}
                     None => {
                         // start on a pad, track or via of a shown layer
-                        let hit = order.iter().find_map(|&l| pcb::copper_at(p, &c.nl, &c.pads, h, l, tol));
-                        if let Some(hit) = hit {
-                            // a surface mount pad or track on the other side starts there
-                            let l = hit.layer.unwrap_or(layer);
+                        let hit = order.iter().find_map(|&l| pcb::copper_at(p, &c.nl, &c.pads, h, l, tol).map(|x| (x, l)));
+                        if let Some((hit, found)) = hit {
+                            // a surface mount pad or track on the other side starts there; a via or
+                            // plated hole on the layer it was found on (a blind via may miss the active one)
+                            let l = hit.layer.unwrap_or(found);
                             app.pcb.layer = l;
                             let w = p.track_width(&c.nl, &hit.net);
                             app.pcb.highlight = if hit.net.is_empty() { None } else { Some(hit.net.clone()) };
@@ -3154,6 +3188,21 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_via_reused_by_the_route_reaches_both_layers() {
+        let mut v = Via::new([0.0, 0.0], 0.6, 0.3, "A");
+        v.span = Some([Layer::In(1), Layer::In(2)]);
+        widen_span(&mut v, Layer::Top, Layer::In(1));
+        assert_eq!(v.span, Some([Layer::Top, Layer::In(2)]));
+        widen_span(&mut v, Layer::In(2), Layer::Bottom);
+        assert_eq!(v.span, None, "top to bottom is a through via");
+        // already reaching both: unchanged
+        let mut b = Via::new([0.0, 0.0], 0.6, 0.3, "A");
+        b.span = Some([Layer::Top, Layer::In(2)]);
+        widen_span(&mut b, Layer::Top, Layer::In(1));
+        assert_eq!(b.span, Some([Layer::Top, Layer::In(2)]));
+    }
 
     #[test]
     fn route_corners_snap_and_line_up() {
