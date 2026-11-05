@@ -106,6 +106,8 @@ pub enum Drag {
         points: Vec<(Id, DVec2)>,
         start: DVec2,
         radius: Option<(Id, f64)>,
+        /// Started on a point (not a curve): dropping it joins it to what is under the cursor.
+        point: bool,
     },
     /// Moving a dimension label.
     Label {
@@ -473,6 +475,12 @@ pub fn after_undo(app: &mut App) {
     s.conflicts.clear();
     s.sel = sel;
     s.order = order;
+    // ids come back with the undone sketch: a remembered line may now be another one
+    s.woken.clear();
+    s.guides.clear();
+    s.infer = None;
+    s.hover = None;
+    s.snap = None;
 }
 
 // ---------------------------------------------------------------- toolbar
@@ -892,7 +900,7 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
         _ => HashSet::new(),
     };
     // a single point being dragged shows what it would join when dropped
-    let point_drag = matches!(&app.sketch.as_ref().unwrap().drag, Some(Drag::Geometry { points, radius: None, .. }) if points.len() == 1);
+    let point_drag = matches!(&app.sketch.as_ref().unwrap().drag, Some(Drag::Geometry { point: true, .. }));
     let (mut snapped, snp, mut guides) = if point_drag {
         match snap(app, s, rect, raw, &exclude) {
             (p, sn @ Some(Snap::Point(_) | Snap::Curve(_) | Snap::Mid(_) | Snap::Origin), _) => (p, sn, vec![]),
@@ -985,12 +993,12 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
         let h0 = hit(app, press, rect, raw0);
         let (sk, _) = app.sk();
         let drag = match h0 {
-            Some(Sel::Point(p)) => Some(Drag::Geometry { points: vec![(p, sk.pv(p))], start: raw0, radius: None }),
+            Some(Sel::Point(p)) => Some(Drag::Geometry { points: vec![(p, sk.pv(p))], start: raw0, radius: None, point: true }),
             Some(Sel::Curve(c)) => {
                 let curve = sk.curve(c).unwrap();
                 match curve.geom {
                     // dragging a circle's rim changes its radius
-                    Geom::Circle { c: cc, r } if !shift => Some(Drag::Geometry { points: vec![(cc, sk.pv(cc))], start: raw0, radius: Some((c, r)) }),
+                    Geom::Circle { c: cc, r } if !shift => Some(Drag::Geometry { points: vec![(cc, sk.pv(cc))], start: raw0, radius: Some((c, r)), point: false }),
                     _ => {
                         let mut pts: Vec<Id> = Sketch::curve_points(&curve.geom);
                         // dragging a selected curve drags the whole selection
@@ -1006,7 +1014,7 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                         }
                         pts.sort();
                         pts.dedup();
-                        Some(Drag::Geometry { points: pts.iter().map(|p| (*p, sk.pv(*p))).collect(), start: raw0, radius: None })
+                        Some(Drag::Geometry { points: pts.iter().map(|p| (*p, sk.pv(*p))).collect(), start: raw0, radius: None, point: false })
                     }
                 }
             }
@@ -1024,7 +1032,7 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
     let dragging = ui.input(|i| i.pointer.primary_down());
     let drag = app.sketch.as_mut().unwrap().drag.take();
     match drag {
-        Some(Drag::Geometry { points, start, radius }) => {
+        Some(Drag::Geometry { points, start, radius, point }) => {
             let delta = raw - start;
             if let Some((cid, r0)) = radius {
                 let (sk, _) = app.sk();
@@ -1049,8 +1057,8 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                 app.solve_sketch(&hold);
             }
             if dragging {
-                app.sketch.as_mut().unwrap().drag = Some(Drag::Geometry { points, start, radius });
-            } else if let (true, Some(drop)) = (points.len() == 1 && radius.is_none(), app.sketch.as_ref().unwrap().snap.and_then(drop_target)) {
+                app.sketch.as_mut().unwrap().drag = Some(Drag::Geometry { points, start, radius, point });
+            } else if let (true, Some(drop)) = (point && points.len() == 1 && radius.is_none(), app.sketch.as_ref().unwrap().snap.and_then(drop_target)) {
                 // dropping a point onto a point, curve, midpoint or the origin joins it there
                 let before = app.doc.clone();
                 let p = points[0].0;
@@ -1063,6 +1071,11 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                     } else {
                         let sess = app.sketch.as_mut().unwrap();
                         sess.sel.remove(&Sel::Point(p));
+                        // a merge can drop constraints, shifting their indices: forget selected ones
+                        sess.sel.retain(|x| !matches!(x, Sel::Constraint(_)));
+                        sess.order.retain(|x| *x != Sel::Point(p) && !matches!(x, Sel::Constraint(_)));
+                        sess.conflicts.clear();
+                        sess.hover = None;
                         sess.snap = None;
                     }
                 }
@@ -1365,6 +1378,18 @@ fn commit_typed(app: &mut App, text: &str) {
             if len <= 0.0 {
                 return;
             }
+            // landing on a point already joined to this one by a line would only draw that line again
+            {
+                let sk = app.sk().0;
+                let end = pa + dir * len;
+                let back = sk.points.iter().find(|q| q.id != a && (q.v() - end).length() < 1e-6 * len.max(1.0)).map(|q| q.id);
+                if let Some(q) = back {
+                    if sk.curves.iter().any(|c| matches!(c.geom, Geom::Line { a: x, b: y } if (x == a && y == q) || (x == q && y == a))) {
+                        app.flash("A line already joins those points", ToastKind::Info);
+                        return;
+                    }
+                }
+            }
             app.sk_checkpoint();
             let sk = app.sk_mut();
             let end = pa + dir * len;
@@ -1489,6 +1514,10 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
         }
         Tool::Line => {
             let chain = app.sketch.as_ref().unwrap().chain;
+            // clicking on the chain's own end adds nothing (and no undo step)
+            if chain.is_some_and(|a| (p - app.sk().0.pv(a)).length() < 1e-9) {
+                return;
+            }
             app.sk_checkpoint();
             match chain {
                 None => {
@@ -1910,7 +1939,8 @@ fn apply_pattern(app: &mut App, circular: bool, count: u32, a: f64, b: f64) {
             }
         };
         let mut map = std::collections::HashMap::new();
-        let mut np = |out: &mut Sketch, id: Id| *map.entry(id).or_insert_with(|| out.add_point(xf(sk.pv(id))));
+        // the centre of a circular pattern turns onto itself: copies ending there share it
+        let mut np = |out: &mut Sketch, id: Id| if Some(id) == center_id { id } else { *map.entry(id).or_insert_with(|| out.add_point(xf(sk.pv(id)))) };
         for id in &curves {
             let Some(c) = sk.curve(*id) else { continue };
             let g = match c.geom {
@@ -1981,6 +2011,8 @@ fn trim(app: &mut App, cid: Id, at: DVec2) {
         sk.delete(&[cid].into(), &HashSet::new());
         return;
     }
+    // a trimmed pattern original or copy no longer matches the others: it stops following them
+    sk.unlink_pattern(cid);
     if !matches!(c.geom, Geom::Line { .. } | Geom::Circle { .. } | Geom::Arc { .. }) {
         trim_freeform(sk, &c, &splits, u0, u1);
         return;
@@ -2133,6 +2165,8 @@ fn extend(app: &mut App, cid: Id, at: DVec2) {
     let hits = regions::ray_hits(sk, fixed, d, cid);
     let next = hits.into_iter().filter(|t| *t > len + 1e-6).fold(f64::INFINITY, f64::min);
     if next.is_finite() {
+        // an extended pattern copy would be pulled back to the original's length
+        app.sk_mut().unlink_pattern(cid);
         if let Some(p) = app.sk_mut().point_mut(moving) {
             let q = fixed + d * next;
             p.x = q.x;
@@ -2179,6 +2213,9 @@ fn fillet_corner(app: &mut App, pid: Id, r: f64) -> Result<(), String> {
     let c = p + bis * (r / half.sin());
     let (q1, q2) = (p + u * t, p + v * t);
     let sk = app.sk_mut();
+    // rounded off on their own, the lines no longer match their pattern
+    sk.unlink_pattern(l1);
+    sk.unlink_pattern(l2);
     let n1 = sk.add_point(q1);
     let n2 = sk.add_point(q2);
     let cid = sk.add_point(c);
@@ -2655,7 +2692,16 @@ fn delete_selection(app: &mut App) {
         .collect();
     let cons: HashSet<usize> = sel.iter().filter_map(|s| if let Sel::Constraint(i) = s { Some(*i) } else { None }).collect();
     app.sk_mut().delete(&ids, &cons);
-    app.sketch.as_mut().unwrap().sel.clear();
+    let (sk, _) = app.sk();
+    let alive_lines: Vec<Id> = app.sketch.as_ref().unwrap().woken.iter().copied().filter(|l| sk.curve(*l).is_some()).collect();
+    let anchor_gone = app.sketch.as_ref().unwrap().chain.is_some_and(|a| !sk.is_point(a));
+    let sess = app.sketch.as_mut().unwrap();
+    sess.sel.clear();
+    sess.woken = alive_lines;
+    // a line chain can't go on from a deleted point
+    if anchor_gone {
+        sess.chain = None;
+    }
     app.after_sketch_edit();
 }
 
@@ -3820,7 +3866,9 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
             }
             let icon = match (sess.infer, sess.snap) {
                 (Some(d), _) => Some(d.constraint(0).icon()),
-                (None, Some(Snap::Point(_)) | Some(Snap::Curve(_)) | Some(Snap::Origin)) => Some("coincident"),
+                (None, Some(Snap::Point(_)) | Some(Snap::Origin)) => Some("coincident"),
+                // splines and outlines can't hold a point: it is only placed (or dropped) there
+                (None, Some(Snap::Curve(c))) if sk.curve(c).is_some_and(|x| matches!(x.geom, Geom::Line { .. }) || holds_points(&x.geom)) => Some("coincident"),
                 (None, Some(Snap::Mid(_))) => Some("midpoint"),
                 _ => None,
             };

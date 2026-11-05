@@ -521,8 +521,16 @@ impl Sketch {
             Constraint::PointOnLine { p, l } | Constraint::PointOnCircle { p, c: l } => {
                 curves.iter().find(|c| c.id == l).map(|c| !Self::curve_points(&c.geom).contains(&p)).unwrap_or(false)
             }
+            // the midpoint of a line at one of its own ends would collapse the line
+            Constraint::Midpoint { p, l } => curves.iter().find(|c| c.id == l).map(|c| !Self::curve_points(&c.geom).contains(&p)).unwrap_or(true),
             _ => true,
         });
+    }
+
+    /// Drop the pattern links of curve `id` (as original or copy): a curve reshaped on its own
+    /// (trimmed, filleted, extended) is no longer the same shape as the rest of its pattern.
+    pub fn unlink_pattern(&mut self, id: Id) {
+        self.constraints.retain(|k| !matches!(*k, Constraint::Pattern { a, b, .. } if a == id || b == id));
     }
 
     /// Delete the given points/curves/constraints (by id / index) and anything depending on them.
@@ -1605,6 +1613,40 @@ mod tests {
         // and the link round-trips through the file format
         let back: Sketch = serde_json::from_str(&serde_json::to_string(&s).unwrap()).unwrap();
         assert_eq!(back.constraints.len(), s.constraints.len());
+    }
+
+    #[test]
+    fn reshaped_pattern_curves_unlink() {
+        let mut s = Sketch::default();
+        let (a, b) = (s.add_point(DVec2::ZERO), s.add_point(DVec2::new(10.0, 0.0)));
+        let orig = s.add_curve(Geom::Line { a, b }, false);
+        let (c, d) = (s.add_point(DVec2::new(0.0, 5.0)), s.add_point(DVec2::new(10.0, 5.0)));
+        let copy = s.add_curve(Geom::Line { a: c, b: d }, false);
+        let (e, f) = (s.add_point(DVec2::new(0.0, 10.0)), s.add_point(DVec2::new(10.0, 10.0)));
+        let copy2 = s.add_curve(Geom::Line { a: e, b: f }, false);
+        for (k, id) in [(1.0, copy), (2.0, copy2)] {
+            s.constraints.push(Constraint::Pattern { a: orig, b: id, center: None, angle: 0.0, dx: 0.0, dy: 5.0 * k, circular: false });
+        }
+        s.unlink_pattern(copy);
+        assert!(s.constraints.iter().all(|k| !matches!(*k, Constraint::Pattern { b, .. } if b == copy)));
+        assert_eq!(s.constraints.len(), 1);
+        s.unlink_pattern(orig);
+        assert!(s.constraints.is_empty());
+    }
+
+    #[test]
+    fn merging_onto_a_lines_midpoint_drops_the_midpoint() {
+        let vars = crate::expr::Vars::default();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let (a, b) = (s.add_point(DVec2::ZERO), s.add_point(DVec2::new(10.0, 0.0)));
+        let l = s.add_curve(Geom::Line { a, b }, false);
+        let m = s.add_point(DVec2::new(5.0, 0.0));
+        s.constraints.push(Constraint::Midpoint { p: m, l });
+        s.merge_point(b, m);
+        assert!(s.constraints.is_empty(), "{:?}", s.constraints);
+        assert!(s.solve(&env, &[]).ok);
+        assert!((s.pv(a) - s.pv(m)).length() > 1.0, "the line kept its length");
     }
 
     #[test]

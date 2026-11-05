@@ -2052,9 +2052,30 @@ pub fn seg_edges(segs: &[Seg], fr: &Frame) -> R<Vec<Edge>> {
             }
         }
     }
+    // a line that came out shorter than OCCT's precision is a joint: its neighbours meet at its middle
+    let mut skip = vec![false; n];
+    if chain && n > 2 {
+        let closed = (end[n - 1] - start[0]).length() < 1e-4;
+        for i in 0..n {
+            if !matches!(segs[i], Seg::Line { .. }) || (end[i] - start[i]).length() >= 1e-7 {
+                continue;
+            }
+            let (prev, next) = ((i + n - 1) % n, (i + 1) % n);
+            if (!closed && (i == 0 || i + 1 == n)) || skip[prev] || (end[prev] - start[i]).length() > 1e-9 || (end[i] - start[next]).length() > 1e-9 {
+                continue;
+            }
+            let m = (start[i] + end[i]) * 0.5;
+            end[prev] = m;
+            start[next] = m;
+            skip[i] = true;
+        }
+    }
     let w = |p: DVec2| fr.to_world(p);
     let mut edges = vec![];
     for (i, s) in segs.iter().enumerate() {
+        if skip[i] {
+            continue;
+        }
         let (a, b) = (start[i], end[i]);
         match s {
             Seg::Line { .. } => edges.push(Edge::segment(w(a), w(b))),
