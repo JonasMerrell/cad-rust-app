@@ -191,19 +191,15 @@ pub fn generate(spec: &IpcSpec) -> Result<Footprint, String> {
     match s.family {
         Family::Chip => {
             if let Some((l, w, t, ht)) = chip_size(s.size.trim()) {
-                if s.body == [0.0; 2] {
-                    s.body = [l, w];
-                }
-                if s.lead == 0.0 {
-                    s.lead = t;
-                }
-                if s.height == 0.0 {
-                    s.height = ht;
-                }
+                // the size decides: values left over from another package don't count
+                s.body = [l, w];
+                s.lead = t;
+                s.height = ht;
             } else if !s.size.trim().is_empty() {
                 return Err(format!("unknown chip size {}; give 0201, 0402, 0603, 0805, 1206, 1210, 2010 or 2512, or body/lead/height", s.size));
             }
             need(s.body[0], "body [length, width]")?;
+            need(s.body[1], "body width (body [length, width])")?;
             need(s.lead, "lead (terminal length)")?;
             need(s.height, "height")?;
             let g = goals(Family::Chip, 0.0, s.body[0] < 1.6, d);
@@ -357,6 +353,9 @@ pub fn generate(spec: &IpcSpec) -> Result<Footprint, String> {
             if s.rows == 0 || s.cols == 0 {
                 return Err("give rows and cols".into());
             }
+            if s.rows > 400 || s.cols > 400 {
+                return Err("rows and cols are at most 400".into());
+            }
             if s.body[0] == 0.0 {
                 s.body = [s.cols as f64 * s.pitch + 1.0, s.rows as f64 * s.pitch + 1.0];
             }
@@ -422,6 +421,16 @@ mod tests {
         let m = generate(&IpcSpec { size: "0805".into(), density: 'M', kind: "C".into(), ..Default::default() }).unwrap();
         assert_eq!(m.name, "CAPC2012X50M");
         assert!(m.pads[1].size[0] > p.size[0]);
+    }
+
+    #[test]
+    fn chip_needs_a_width_and_the_size_decides() {
+        let e = generate(&IpcSpec { body: [2.0, 0.0], lead: 0.4, height: 0.5, ..Default::default() });
+        assert!(e.is_err(), "{e:?}");
+        // body, lead and height left from another package don't override the EIA size
+        let f = generate(&IpcSpec { size: "0805".into(), body: [3.9, 4.9], lead: 0.835, height: 1.75, ..Default::default() }).unwrap();
+        assert_eq!(f.name, "RESC2012X50N");
+        assert!(generate(&IpcSpec { family: Family::Bga, pitch: 0.5, ball: 0.3, rows: 500, cols: 2, height: 1.0, ..Default::default() }).is_err());
     }
 
     #[test]

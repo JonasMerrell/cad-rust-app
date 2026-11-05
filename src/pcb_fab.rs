@@ -102,7 +102,7 @@ pub fn ipc356(p: &Pcb) -> String {
     // names longer than 14 characters get an alias (P  NNAME)
     let mut alias: Vec<(String, String)> = vec![];
     let mut short = |n: &str| -> String {
-        if n.len() <= 14 {
+        if n.chars().count() <= 14 {
             return n.to_string();
         }
         if let Some(a) = alias.iter().find(|a| a.0 == n) {
@@ -138,15 +138,35 @@ pub fn ipc356(p: &Pcb) -> String {
             um(pad.size[0]).min(9999),
             um(pad.size[1]).min(9999),
             rot,
-            if tht { 0 } else if access == 1 { 1 } else { 2 }
+            // which sides solder mask covers (1 top, 2 bottom): a pad's own side is open
+            if tht { 0 } else if access == 1 { 2 } else { 1 }
         ));
     }
+    let n_cu = x.p.board.copper_layers().len();
     for v in &x.p.board.vias {
+        // a through via is reached from both sides, a blind one from its outer side only; a
+        // buried via cannot be probed
+        let access = match v.span {
+            None => 0,
+            Some([a, b]) => {
+                let (lo, hi) = (pcb_export::layer_number(&x.p, a).min(pcb_export::layer_number(&x.p, b)), pcb_export::layer_number(&x.p, a).max(pcb_export::layer_number(&x.p, b)));
+                match (lo == 1, hi == n_cu) {
+                    (true, true) => 0,
+                    (true, false) => 1,
+                    (false, true) => n_cu,
+                    (false, false) => continue,
+                }
+            }
+        };
         let net = short(if v.net.is_empty() { "N/C" } else { &v.net });
-        rows.push(format!("317{:<14}   VIA   -     D{:04}PA00X{:+07}Y{:+07}X{:04}Y{:04}R000 S3", net, um(v.drill).min(9999), um(v.at[0]), um(v.at[1]), um(v.d).min(9999), um(v.d).min(9999)));
+        rows.push(format!("317{:<14}   VIA   -     D{:04}PA{:02}X{:+07}Y{:+07}X{:04}Y{:04}R000 S3", net, um(v.drill).min(9999), access, um(v.at[0]), um(v.at[1]), um(v.d).min(9999), um(v.d).min(9999)));
     }
     for (full, a) in &alias {
-        let _ = writeln!(s, "P  {a:<6}{full}");
+        let _ = writeln!(s, "P  {a:<6} {full}");
+    }
+    // the reference field holds 6 characters: say which references were cut
+    for part in x.p.parts.iter().filter(|q| q.reference.chars().count() > 6) {
+        let _ = writeln!(s, "C  reference {} is written as {}", part.reference, part.reference.chars().take(6).collect::<String>());
     }
     for r in rows {
         let _ = writeln!(s, "{r}");
@@ -174,7 +194,7 @@ pub fn gbrjob(p: &Pcb, files: &[(String, String)]) -> String {
         }
     }
     let job = serde_json::json!({
-        "Header": {"GenerationSoftware": {"Vendor": "rCAD", "Application": "rCAD PCB", "Version": env!("CARGO_PKG_VERSION")}, "CreationDate": ""},
+        "Header": {"GenerationSoftware": {"Vendor": "rCAD", "Application": "rCAD PCB", "Version": env!("CARGO_PKG_VERSION")}, "CreationDate": now_utc().0},
         "GeneralSpecs": {
             "ProjectId": {"Name": p.name, "GUID": "", "Revision": "1"},
             "Size": {"X": (size[0] * 1000.0).round() / 1000.0, "Y": (size[1] * 1000.0).round() / 1000.0},
@@ -288,12 +308,13 @@ pub fn drill_drawing(p: &Pcb) -> Vec<Draw> {
     let (lo, _) = x.p.board.bbox();
     let id = |q: P| q;
     let mut y = lo[1] - 5.0;
-    pcb_export::text(&mut out, "Drill   Diameter   Count   Plated", [lo[0] + 3.0, y], 1.6, 0, 0.0, ink, &id);
+    // sizes by their symbol, not by tool number: each drill file numbers its own tools
+    pcb_export::text(&mut out, "Diameter   Count   Plated", [lo[0] + 3.0, y], 1.6, 0, 0.0, ink, &id);
     for (k, (d, pl)) in sizes.iter().enumerate() {
         y -= 3.2;
         drill_symbol(&mut out, k, [lo[0] + 1.0, y + 0.8], sym_r, ink);
         let n = hs.iter().filter(|h| (h.1 - d).abs() < 1e-6 && h.2 == *pl).count();
-        pcb_export::text(&mut out, &format!("{:<7} {:.2} mm    {:<6}  {}", format!("T{}", k + 1), d, n, if *pl { "yes" } else { "no" }), [lo[0] + 3.0, y], 1.6, 0, 0.0, ink, &id);
+        pcb_export::text(&mut out, &format!("{:.2} mm    {:<6}  {}", d, n, if *pl { "yes" } else { "no" }), [lo[0] + 3.0, y], 1.6, 0, 0.0, ink, &id);
     }
     y -= 3.2;
     pcb_export::text(&mut out, &format!("{} holes, board {:.2} x {:.2} mm, {} mm thick", hs.len(), x.p.board.size()[0], x.p.board.size()[1], x.p.board.thickness), [lo[0] + 3.0, y], 1.6, 0, 0.0, ink, &id);
@@ -394,7 +415,8 @@ pub fn assembly(p: &Pcb, side: Layer) -> Vec<Draw> {
             let _ = g;
             list.extend(l2.into_iter().map(|d| match d.prim {
                 Prim::Seg { a, b, w } => Draw { rgba: d.rgba, prim: Prim::Seg { a: mx(a), b: mx(b), w } },
-                o => Draw { rgba: d.rgba, prim: o },
+                Prim::Fill(cs) => Draw { rgba: d.rgba, prim: Prim::Fill(cs.into_iter().map(|c| c.into_iter().map(mx).collect()).collect()) },
+                Prim::Circle { c, r, w, fill } => Draw { rgba: d.rgba, prim: Prim::Circle { c: mx(c), r, w, fill } },
             }));
             break;
         }
@@ -513,8 +535,9 @@ pub fn prints(p: &Pcb) -> Vec<u8> {
 
 // ---------------------------------------------------------------- ODB++
 
-/// ODB++ symbol names (sizes in micrometres) for a pad, or None when it must be a surface.
-fn odb_symbol(pad: &WPad) -> Option<String> {
+/// ODB++ symbol names (sizes in micrometres) for a pad grown by `grow`, or None when it must be
+/// a surface.
+fn odb_symbol(pad: &WPad, grow: f64) -> Option<String> {
     let um = |v: f64| (v * 1000.0).round() as i64;
     let q = pad.rot.rem_euclid(90.0);
     if q > 1e-6 && (90.0 - q) > 1e-6 && pad.shape != crate::pcb_lib::PadShape::Round {
@@ -522,21 +545,39 @@ fn odb_symbol(pad: &WPad) -> Option<String> {
     }
     let swap = ((pad.rot / 90.0).round() as i64).rem_euclid(2) == 1;
     let (w, h) = if swap { (pad.size[1], pad.size[0]) } else { (pad.size[0], pad.size[1]) };
+    let (w, h) = (w + 2.0 * grow, h + 2.0 * grow);
     Some(match pad.shape {
         crate::pcb_lib::PadShape::Round => format!("r{}", um(w.min(h))),
         crate::pcb_lib::PadShape::Oval => format!("oval{}x{}", um(w), um(h)),
-        _ => format!("rect{}x{}", um(w), um(h)),
+        // the corner radius `pcb_export::pad_outline` gives round rectangles
+        crate::pcb_lib::PadShape::RoundRect => format!("rect{}x{}xr{}", um(w), um(h), um((pad.size[0].min(pad.size[1]) * 0.25).min(0.25) + grow)),
+        crate::pcb_lib::PadShape::Rect => format!("rect{}x{}", um(w), um(h)),
     })
 }
 
 struct Features {
     syms: Vec<String>,
+    /// Attribute names (`@n` lines), referenced from features as `;n=value`.
+    attrs: Vec<String>,
     body: String,
 }
 
+/// The `.drill` attribute's options, by index: plated, non_plated, via.
+const DRILL_PLATED: usize = 0;
+const DRILL_NON_PLATED: usize = 1;
+const DRILL_VIA: usize = 2;
+
 impl Features {
     fn new() -> Features {
-        Features { syms: vec![], body: String::new() }
+        Features { syms: vec![], attrs: vec![], body: String::new() }
+    }
+    /// A drill hole with its `.drill` attribute.
+    fn hole(&mut self, at: P, d: f64, kind: usize) {
+        if self.attrs.is_empty() {
+            self.attrs.push(".drill".into());
+        }
+        let i = self.sym(format!("r{}", (d * 1000.0).round() as i64));
+        let _ = writeln!(self.body, "P {:.4} {:.4} {i} P 0 0;0={kind}", at[0], at[1]);
     }
     fn sym(&mut self, s: String) -> usize {
         match self.syms.iter().position(|x| *x == s) {
@@ -578,10 +619,8 @@ impl Features {
         self.body += "SE\n";
     }
     fn pad(&mut self, pad: &WPad, grow: f64) {
-        let mut g = pad.clone();
-        g.size = [pad.size[0] + 2.0 * grow, pad.size[1] + 2.0 * grow];
-        match odb_symbol(&g) {
-            Some(s) => self.pad_sym(g.at, s),
+        match odb_symbol(pad, grow) {
+            Some(s) => self.pad_sym(pad.at, s),
             None => self.surface(&[pcb_export::pad_outline(pad, grow)]),
         }
     }
@@ -589,6 +628,12 @@ impl Features {
         let mut s = String::from("UNITS=MM\n#\n#Feature symbol names\n#\n");
         for (i, x) in self.syms.iter().enumerate() {
             let _ = writeln!(s, "${i} {x}");
+        }
+        if !self.attrs.is_empty() {
+            s += "#\n#Feature attribute names\n#\n";
+            for (i, x) in self.attrs.iter().enumerate() {
+                let _ = writeln!(s, "@{i} {x}");
+            }
         }
         s += "#\n#Layer features\n#\n";
         s += &self.body;
@@ -614,7 +659,7 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
     // blind and buried via spans, each with its own drill layer
     let mut spans: Vec<[Layer; 2]> = vec![];
     for v in &x.p.board.vias {
-        if let Some(sp) = v.span.filter(|_| v.kind() != "through") {
+        if let Some(sp) = v.span.filter(|_| v.kind() != "through").map(norm_span) {
             if !spans.contains(&sp) {
                 spans.push(sp);
             }
@@ -636,6 +681,10 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
         layers.push((n.to_string(), t, String::new(), String::new()));
     }
     layers.push(("drill".into(), "DRILL", "top".into(), "bottom".into()));
+    let npth = !x.p.board.holes.is_empty();
+    if npth {
+        layers.push(("drill_npth".into(), "DRILL", "top".into(), "bottom".into()));
+    }
     for sp in &spans {
         layers.push((span_name(sp), "DRILL", odb_name(sp[0]), odb_name(sp[1])));
     }
@@ -644,7 +693,7 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
         let _ = write!(matrix, "LAYER {{\n    ROW={}\n    CONTEXT=BOARD\n    TYPE={ty}\n    NAME={}\n    POLARITY=POSITIVE\n    START_NAME={}\n    END_NAME={}\n    OLD_NAME=\n    COLOR=0\n}}\n\n", i + 1, name.to_uppercase(), start.to_uppercase(), end.to_uppercase());
     }
     files.push((format!("{root}/matrix/matrix"), matrix));
-    files.push((format!("{root}/misc/info"), format!("JOB_NAME={job}\nODB_VERSION_MAJOR=7\nODB_VERSION_MINOR=0\nODB_SOURCE=rCAD\nCREATION_DATE=\nSAVE_APP=rCAD {}\nUNITS=MM\n", env!("CARGO_PKG_VERSION"))));
+    files.push((format!("{root}/misc/info"), format!("JOB_NAME={job}\nODB_VERSION_MAJOR=7\nODB_VERSION_MINOR=0\nODB_SOURCE=rCAD\nCREATION_DATE={}\nSAVE_APP=rCAD {}\nUNITS=MM\n", now_utc().1, env!("CARGO_PKG_VERSION"))));
     files.push((format!("{step}/stephdr"), "UNITS=MM\nX_DATUM=0\nY_DATUM=0\nX_ORIGIN=0\nY_ORIGIN=0\n".into()));
     let mut prof = Features::new();
     let mut outline = vec![pcb::ccw(x.p.board.outline.clone())];
@@ -703,50 +752,122 @@ pub fn odb(p: &Pcb) -> Vec<(String, Vec<u8>)> {
         }
         files.push((format!("{step}/layers/{tag}_silk/features"), silk.text()));
     }
+    // plated holes in `drill`, mounting holes in `drill_npth`, each tagged with `.drill`
     let mut drill = Features::new();
     let through = |v: &pcb::Via| v.kind() == "through";
-    let mut hs: Vec<(P, f64)> = x.pads.iter().filter(|p| p.drill > 0.0).map(|p| (p.at, p.drill)).collect();
-    hs.extend(x.p.board.vias.iter().filter(|v| through(v)).map(|v| (v.at, v.drill)));
-    hs.extend(x.p.board.holes.iter().map(|h| (h.at, h.d)));
-    for (c, d) in hs {
-        drill.pad_sym(c, format!("r{}", (d * 1000.0).round() as i64));
+    for p in x.pads.iter().filter(|p| p.drill > 0.0) {
+        drill.hole(p.at, p.drill, DRILL_PLATED);
+    }
+    for v in x.p.board.vias.iter().filter(|v| through(v)) {
+        drill.hole(v.at, v.drill, DRILL_VIA);
     }
     files.push((format!("{step}/layers/drill/features"), drill.text()));
+    if npth {
+        let mut f = Features::new();
+        for h in &x.p.board.holes {
+            f.hole(h.at, h.d, DRILL_NON_PLATED);
+        }
+        files.push((format!("{step}/layers/drill_npth/features"), f.text()));
+    }
     for sp in &spans {
         let mut f = Features::new();
-        for v in x.p.board.vias.iter().filter(|v| !through(v) && v.span == Some(*sp)) {
-            f.pad_sym(v.at, format!("r{}", (v.drill * 1000.0).round() as i64));
+        for v in x.p.board.vias.iter().filter(|v| !through(v) && v.span.map(norm_span) == Some(*sp)) {
+            f.hole(v.at, v.drill, DRILL_VIA);
         }
         files.push((format!("{step}/layers/{}/features", span_name(sp)), f.text()));
     }
-    // components and their pins, per side
-    for (side, dir) in [(Layer::Top, "comp_+_top"), (Layer::Bottom, "comp_+_bot")] {
+    // the fitted parts of the active variant (same part order as the board), each footprint once
+    // as a package
+    let fit = x.p.as_variant(&x.p.variant);
+    // names are single tokens
+    let tok = |n: &str| if n.trim().is_empty() { "-".to_string() } else { n.replace(char::is_whitespace, "_") };
+    let mut pkgs: Vec<String> = vec![];
+    for part in fit.parts.iter().filter(|q| !q.dnp) {
+        if !pkgs.contains(&part.footprint) {
+            pkgs.push(part.footprint.clone());
+        }
+    }
+    // ODB++ turns clockwise; rCAD anticlockwise
+    let cw = |deg: f64| (360.0 - deg.rem_euclid(360.0)).rem_euclid(360.0);
+    // components and their pins (toeprints, in the package's pin order), per side
+    let mut comp_of: Vec<Option<(&str, usize)>> = vec![None; fit.parts.len()];
+    for (side, dir, tag) in [(Layer::Top, "comp_+_top", "T"), (Layer::Bottom, "comp_+_bot", "B")] {
         let mut s = String::from("UNITS=MM\n#\n");
-        for (ci, (pi, part)) in x.p.parts.iter().enumerate().filter(|(_, q)| q.side() == side).enumerate() {
+        for (ci, (pi, part)) in fit.parts.iter().enumerate().filter(|(_, q)| q.side() == side && !q.dnp).enumerate() {
+            comp_of[pi] = Some((tag, ci));
+            let pkg = pkgs.iter().position(|f| *f == part.footprint).unwrap_or(0);
+            let mirror = if part.bottom { "M" } else { "N" };
             let _ = writeln!(s, "# CMP {ci}");
-            let _ = writeln!(s, "CMP 0 {:.4} {:.4} {:.3} {} {} {} ;", part.at[0], part.at[1], part.rot.rem_euclid(360.0), if part.bottom { "M" } else { "N" }, part.reference, part.footprint);
+            let _ = writeln!(s, "CMP {pkg} {:.4} {:.4} {:.3} {mirror} {} {} ;", part.at[0], part.at[1], cw(part.rot), tok(&part.reference), tok(&part.footprint));
             let _ = writeln!(s, "PRP VALUE '{}'", part.value.replace('\'', ""));
             for (k, pad) in x.pads.iter().filter(|q| q.part == pi).enumerate() {
                 let net = pad.net.map(|n| n as i64).unwrap_or(-1);
-                let _ = writeln!(s, "TOP {k} {:.4} {:.4} {:.3} N {net} 0 {}", pad.at[0], pad.at[1], pad.rot.rem_euclid(360.0), pad.num);
+                let _ = writeln!(s, "TOP {k} {:.4} {:.4} {:.3} {mirror} {net} 0 {}", pad.at[0], pad.at[1], cw(pad.rot), tok(&pad.num));
             }
             s += "#\n";
         }
         files.push((format!("{step}/layers/{dir}/components"), s));
     }
-    let mut eda = String::from("HDR rCAD\nUNITS=MM\n#\n");
+    let mut eda = String::from("HDR rCAD\nUNITS=MM\n");
+    let _ = writeln!(eda, "LYR {}", copper.iter().map(|l| odb_name(*l)).collect::<Vec<_>>().join(" "));
+    eda += "#\n";
     for (ni, n) in x.nl.nets.iter().enumerate() {
         let _ = writeln!(eda, "# NET {ni}");
         let _ = writeln!(eda, "NET {}", n.name.replace(' ', "_"));
         for (pi, num) in &n.pins {
-            if let Some(pad) = x.pads.iter().find(|q| q.part == *pi && &q.num == num) {
-                let side = if pad.layer == Some(Layer::Bottom) { "B" } else { "T" };
-                let _ = writeln!(eda, "SNT TOP {side} {} {}", pi, num);
+            // a pin of a fitted part: its component (by side and number there) and toeprint
+            let Some(Some((side, ci))) = comp_of.get(*pi) else { continue };
+            for (k, _) in x.pads.iter().filter(|q| q.part == *pi).enumerate().filter(|(_, q)| &q.num == num) {
+                let _ = writeln!(eda, "SNT TOP {side} {ci} {k}");
             }
+        }
+    }
+    // packages: their extent and pins in footprint coordinates
+    for (i, name) in pkgs.iter().enumerate() {
+        let fp = crate::pcb_lib::footprint(name).unwrap_or_else(|| crate::pcb_lib::footprint("R_0805").unwrap());
+        let (lo, hi) = fp.court;
+        let mut pitch = f64::INFINITY;
+        for (a, pa) in fp.pads.iter().enumerate() {
+            for pb in &fp.pads[a + 1..] {
+                pitch = pitch.min(pcb::dist(pa.at, pb.at));
+            }
+        }
+        let pitch = if pitch.is_finite() { pitch } else { 0.0 };
+        let _ = writeln!(eda, "# PKG {i}");
+        let _ = writeln!(eda, "PKG {} {:.4} {:.4} {:.4} {:.4} {:.4} ;", tok(name), pitch, lo[0], lo[1], hi[0], hi[1]);
+        let _ = writeln!(eda, "RC {:.4} {:.4} {:.4} {:.4}", lo[0], lo[1], hi[0] - lo[0], hi[1] - lo[1]);
+        for pad in &fp.pads {
+            let (ty, mt) = if pad.drill > 0.0 { ("T", "T") } else { ("S", "S") };
+            let _ = writeln!(eda, "PIN {} {ty} {:.4} {:.4} 0 E {mt}", tok(&pad.num), pad.at[0], pad.at[1]);
+            let (w, h) = (pad.size[0] / 2.0, pad.size[1] / 2.0);
+            let _ = writeln!(eda, "RC {:.4} {:.4} {:.4} {:.4}", pad.at[0] - w, pad.at[1] - h, 2.0 * w, 2.0 * h);
         }
     }
     files.push((format!("{step}/eda/data"), eda));
     files.into_iter().map(|(n, s)| (n, s.into_bytes())).collect()
+}
+
+/// A via span with its upper layer first.
+fn norm_span(s: [Layer; 2]) -> [Layer; 2] {
+    if s[0].order() <= s[1].order() { s } else { [s[1], s[0]] }
+}
+
+/// The time now in UTC: (ISO 8601 for the job file, yyyymmdd.hhmmss for ODB++).
+fn now_utc() -> (String, String) {
+    let t = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0) as i64;
+    let (days, secs) = (t.div_euclid(86400), t.rem_euclid(86400));
+    // days since 1970-01-01 to a civil date (Howard Hinnant's algorithm)
+    let z = days + 719468;
+    let era = z.div_euclid(146097);
+    let doe = z - era * 146097;
+    let yoe = (doe - doe / 1460 + doe / 36524 - doe / 146096) / 365;
+    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
+    let mp = (5 * doy + 2) / 153;
+    let d = doy - (153 * mp + 2) / 5 + 1;
+    let m = if mp < 10 { mp + 3 } else { mp - 9 };
+    let y = yoe + era * 400 + if m <= 2 { 1 } else { 0 };
+    let (hh, mm, ss) = (secs / 3600, secs / 60 % 60, secs % 60);
+    (format!("{y:04}-{m:02}-{d:02}T{hh:02}:{mm:02}:{ss:02}Z"), format!("{y:04}{m:02}{d:02}.{hh:02}{mm:02}{ss:02}"))
 }
 
 // ---------------------------------------------------------------- the job
@@ -779,10 +900,22 @@ pub fn outputs(p: &Pcb, job: &OutJob) -> Vec<(String, Vec<u8>)> {
         files.extend(odb(p));
     }
     if job.variants {
-        for v in &p.variants {
+        let mut dirs: Vec<String> = vec![];
+        for (vi, v) in p.variants.iter().enumerate() {
             let mut q = p.clone();
             q.variant = v.name.clone();
-            let dir: String = v.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+            let mut dir: String = v.name.trim().chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+            if dir.is_empty() {
+                dir = format!("variant{}", vi + 1);
+            }
+            // names that read alike get their own folders
+            let stem = dir.clone();
+            let mut k = 2;
+            while dirs.iter().any(|d| d.eq_ignore_ascii_case(&dir)) {
+                dir = format!("{stem}-{k}");
+                k += 1;
+            }
+            dirs.push(dir.clone());
             if job.bom {
                 files.push((format!("assembly/{dir}/{base}-{dir}-BOM.csv"), pcb_export::bom_csv(&q).into_bytes()));
             }
@@ -849,6 +982,76 @@ mod tests {
         for r in s.lines().filter(|l| l.starts_with("317") || l.starts_with("327")) {
             assert_eq!((&r[20..21] != " ", &r[38..39], &r[41..42], &r[49..50], &r[67..68]), (true, "A", "X", "Y", "R"), "{r}");
         }
+    }
+
+    #[test]
+    fn ipc356_masks_vias_and_aliases() {
+        let mut p = board();
+        p.board.set_copper_count(4).unwrap();
+        p.board.vias.clear();
+        let mut blind = pcb::Via::new([10.0, 5.0], 0.45, 0.2, "GND");
+        blind.span = Some([Layer::Top, Layer::In(1)]);
+        let mut buried = pcb::Via::new([12.0, 5.0], 0.45, 0.2, "GND");
+        buried.span = Some([Layer::In(1), Layer::In(2)]);
+        p.board.vias.extend([pcb::Via::new([8.0, 5.0], 0.6, 0.3, "GND"), blind, buried]);
+        let s = ipc356(&p);
+        // a top SMD pad is open on top: mask on the secondary side only
+        let r1 = s.lines().find(|l| l.starts_with("327") && l.contains("R1    -1")).unwrap();
+        assert!(r1.ends_with(" S2") && &r1[38..41] == "A01", "{r1}");
+        let vias: Vec<&str> = s.lines().filter(|l| l.contains("VIA   -")).collect();
+        assert_eq!(vias.len(), 2, "the buried via can't be probed: {s}");
+        assert!(vias.iter().any(|l| &l[38..41] == "A00") && vias.iter().any(|l| &l[38..41] == "A01"), "{vias:?}");
+        // long net names get an alias with the full name after a space
+        let mut p = board();
+        let n = p.labels.iter().position(|l| l.text == "VCC" && matches!(l.kind, pcb::LabelKind::Net)).unwrap();
+        p.labels[n].text = "SUPPLY_RAIL_3V3_MAIN".into();
+        let s = ipc356(&p);
+        assert!(s.lines().any(|l| l == "P  NNAME1 SUPPLY_RAIL_3V3_MAIN"), "{s}");
+    }
+
+    #[test]
+    fn odb_holes_components_and_netlist() {
+        let mut p = board();
+        p.parts[0].rot = 90.0;
+        // J1 (index 2) not fitted
+        p.parts[2].dnp = true;
+        let files = odb(&p);
+        let get = |end: &str| files.iter().find(|f| f.0.ends_with(end)).map(|f| String::from_utf8(f.1.clone()).unwrap());
+        // mounting holes in their own non-plated layer
+        let drill = get("layers/drill/features").unwrap();
+        assert!(!drill.contains("r3200") && drill.contains("@0 .drill") && drill.contains(";0=0"), "{drill}");
+        let npth = get("layers/drill_npth/features").unwrap();
+        assert!(npth.contains("r3200") && npth.contains(";0=1"), "{npth}");
+        assert!(get("matrix/matrix").unwrap().contains("NAME=DRILL_NPTH"));
+        let top = get("comp_+_top/components").unwrap();
+        // turned anticlockwise 90 in rCAD is 270 clockwise; the unfitted J1 is left out
+        assert!(top.lines().any(|l| l.starts_with("CMP ") && l.contains(" 270.000 N R1 ")), "{top}");
+        assert!(!top.contains(" J1 "), "{top}");
+        let eda = get("eda/data").unwrap();
+        assert!(eda.contains("\nLYR top bottom\n") && eda.contains("\nPKG "), "{eda}");
+        // R1 is component 0 on the top, its pads toeprints 0 and 1
+        assert!(eda.lines().any(|l| l == "SNT TOP T 0 0") && eda.lines().any(|l| l == "SNT TOP T 0 1"), "{eda}");
+        // every SNT names a component that is there
+        let comps = top.lines().filter(|l| l.starts_with("CMP ")).count();
+        for l in eda.lines().filter(|l| l.starts_with("SNT TOP T ")) {
+            let ci: usize = l.split_whitespace().nth(3).unwrap().parse().unwrap();
+            assert!(ci < comps, "{l}");
+        }
+        // round rectangles keep their corners
+        assert!(odb_symbol(&WPad { part: 0, num: "1".into(), at: [0.0; 2], size: [1.0, 0.6], shape: crate::pcb_lib::PadShape::RoundRect, rot: 0.0, drill: 0.0, layer: Some(Layer::Top), net: None }, 0.0).unwrap().starts_with("rect1000x600xr150"));
+    }
+
+    #[test]
+    fn variant_folders_and_dates() {
+        let mut p = board();
+        for n in ["A B", "A_B", ""] {
+            p.variants.push(crate::pcb_sheet::Variant { name: n.into(), ..Default::default() });
+        }
+        let job = OutJob { gerbers: false, ipc356: false, drill_map: false, pdf: false, odb: false, variants: true, ..Default::default() };
+        let names: Vec<String> = outputs(&p, &job).into_iter().map(|f| f.0).filter(|n| n.ends_with("-BOM.csv")).collect();
+        assert!(names.contains(&"assembly/A_B/LED-A_B-BOM.csv".to_string()) && names.contains(&"assembly/A_B-2/LED-A_B-2-BOM.csv".to_string()) && names.contains(&"assembly/variant3/LED-variant3-BOM.csv".to_string()), "{names:?}");
+        let (iso, odb_date) = now_utc();
+        assert!(iso.len() == 20 && iso.ends_with('Z') && odb_date.len() == 15, "{iso} {odb_date}");
     }
 
     #[test]
