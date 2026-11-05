@@ -347,6 +347,9 @@ impl Session {
                     }
                     added.push(json!({"reference": p.parts[i].reference, "footprint": p.parts[i].footprint, "pins": pins_json(&p, i)}));
                 }
+                if p.hierarchical() {
+                    p.sync_entries();
+                }
                 let nl = p.netlist();
                 p.retag_copper_since(&self.ws.pcbs[pi], &nl);
                 self.ws.pcbs[pi] = p;
@@ -374,15 +377,29 @@ impl Session {
                     p.name = pcb::unique_name(&self.ws.pcbs, &n, Some(pi));
                 }
                 apply_board(&mut p, a)?;
+                // sheets first, so parts and labels in the same call can go on them
+                for s in a.get("sheets").and_then(|v| v.as_array()).into_iter().flatten() {
+                    let name = s.as_str().ok_or("sheets: names of sheets to add")?;
+                    if p.find_sheet(name).is_none() {
+                        p.add_sheet(name);
+                    }
+                }
                 for (k, x) in a.get("parts").and_then(|v| v.as_array()).into_iter().flatten().enumerate() {
                     let r = x.get("reference").and_then(|v| v.as_str()).ok_or_else(|| format!("parts[{k}]: give reference"))?;
                     let i = p.part_index(r).ok_or_else(|| format!("parts[{k}]: no part {r}"))?;
                     if x.get("delete").and_then(|v| v.as_bool()) == Some(true) {
-                        p.parts.remove(i);
+                        let r = p.parts.remove(i).reference;
+                        if !p.parts.iter().any(|x| x.reference == r) {
+                            p.forget_ref(&r);
+                        }
                         continue;
                     }
                     if let Some(nr) = x.get("new_reference").and_then(|v| v.as_str()) {
-                        p.parts[i].reference = nr.to_string();
+                        let old = std::mem::replace(&mut p.parts[i].reference, nr.to_string());
+                        // the variants' settings follow the part
+                        if !p.parts.iter().any(|x| x.reference == old) {
+                            p.rename_ref(&old, nr);
+                        }
                     }
                     edit_part(&mut p, i, x).map_err(|e| format!("parts[{k}]: {e}"))?;
                     if let Some(sh) = sheet_arg(&p, x).map_err(|e| format!("parts[{k}]: {e}"))? {
@@ -417,12 +434,6 @@ impl Session {
                     };
                     p.labels.push(Label { at, text: text.into(), kind, rot: 0 });
                 }
-                for s in a.get("sheets").and_then(|v| v.as_array()).into_iter().flatten() {
-                    let name = s.as_str().ok_or("sheets: names of sheets to add")?;
-                    if p.find_sheet(name).is_none() {
-                        p.add_sheet(name);
-                    }
-                }
                 if let Some(list) = a.get("sheet_symbols").and_then(|v| v.as_array()) {
                     for (k, x) in list.iter().enumerate() {
                         let child = sheet_arg(&p, x).map_err(|e| format!("sheet_symbols[{k}]: {e}"))?.ok_or_else(|| format!("sheet_symbols[{k}]: give sheet (the sheet it stands for)"))?;
@@ -438,21 +449,36 @@ impl Session {
                         p.add_sheet_symbol(child, at).map_err(|e| format!("sheet_symbols[{k}]: {e}"))?;
                         if let Some(r) = x.get("right").and_then(|v| v.as_array()) {
                             let si = p.symbol_of(child).unwrap();
-                            for e in &mut p.sheet_symbols[si].entries {
+                            let s = &mut p.sheet_symbols[si];
+                            // a new symbol: its entries packed from the top of each side
+                            for e in &mut s.entries {
                                 e.right = r.iter().any(|n| n.as_str() == Some(e.name.as_str()));
+                                e.slot = None;
                             }
+                            s.fix_slots();
                         }
                     }
                 }
                 if let Some(v) = a.get("variants") {
-                    p.variants = serde_json::from_value(v.clone()).map_err(|e| format!("variants: {e}"))?;
-                    for var in &p.variants {
-                        for r in var.dnp.iter().chain(&var.fitted).chain(var.values.keys()).chain(var.mpns.keys()) {
-                            if p.part_index(r).is_none() {
-                                return Err(format!("variants {}: no part {r}", var.name));
-                            }
+                    let mut vars: Vec<crate::pcb_sheet::Variant> = serde_json::from_value(v.clone()).map_err(|e| format!("variants: {e}"))?;
+                    for (k, var) in vars.iter_mut().enumerate() {
+                        var.name = var.name.trim().to_string();
+                        if var.name.is_empty() {
+                            return Err(format!("variants[{k}]: give it a name"));
+                        }
+                        // references as the parts spell them ("d1" is D1)
+                        let real = |r: &String| p.part_index(r).map(|i| p.parts[i].reference.clone()).ok_or_else(|| format!("variants {}: no part {r}", var.name));
+                        var.dnp = var.dnp.iter().map(real).collect::<R<_>>()?;
+                        var.fitted = var.fitted.iter().map(real).collect::<R<_>>()?;
+                        var.values = var.values.iter().map(|(r, x)| real(r).map(|r| (r, x.clone()))).collect::<R<_>>()?;
+                        var.mpns = var.mpns.iter().map(|(r, x)| real(r).map(|r| (r, x.clone()))).collect::<R<_>>()?;
+                    }
+                    for (k, var) in vars.iter().enumerate() {
+                        if vars[..k].iter().any(|o| o.name.eq_ignore_ascii_case(&var.name)) {
+                            return Err(format!("variants: {} is named twice", var.name));
                         }
                     }
+                    p.variants = vars;
                     if p.variant_index(&p.variant).is_none() {
                         p.variant.clear();
                     }
@@ -547,6 +573,10 @@ impl Session {
                     Some("unplaced") => placed = Some(crate::pcb_route::auto_place(&mut p, false)),
                     Some("all") => placed = Some(crate::pcb_route::auto_place(&mut p, true)),
                     Some(o) => return Err(format!("auto_place is unplaced or all, not {o}")),
+                }
+                // new or renamed ports get their entries on the sheet symbols
+                if p.hierarchical() {
+                    p.sync_entries();
                 }
                 let nl = p.netlist();
                 p.retag_copper_since(&self.ws.pcbs[pi], &nl);

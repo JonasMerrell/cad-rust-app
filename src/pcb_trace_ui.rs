@@ -129,7 +129,7 @@ pub fn nets_ui(app: &mut App, ui: &mut Ui) {
     }
     let mut widen: Option<(String, f64)> = None;
     for r in &rep {
-        let short = r.current > 0.0 && r.min_width + 1e-6 < r.need_width;
+        let short = r.current > 0.0 && r.short;
         let off_z = r.impedance > 0.0 && (r.z_min < 0.9 * r.impedance || r.z_max > 1.1 * r.impedance);
         let col = if short { theme::error_soft() } else if off_z { theme::accent() } else { theme::text() };
         let on = app.pcb.highlight.as_deref() == Some(r.net.as_str());
@@ -154,8 +154,8 @@ pub fn nets_ui(app: &mut App, ui: &mut Ui) {
                 if r.current > 0.0 {
                     let s = format!("Warms {:.1} °C; {} needs {:.2} mm at {} °C", r.rise, amps(r.current), r.need_width, app.ws.pcbs[pi].board.rules.temp_rise);
                     ui.label(small(s).color(if short { theme::error_soft() } else { theme::text() }));
-                    if short && ui.small_button("Widen to fit").on_hover_text("Give every track of this net the width its current needs").clicked() {
-                        widen = Some((r.net.clone(), r.need_width));
+                    if short && ui.small_button("Widen to fit").on_hover_text("Give every track of this net the width its current needs on its layer").clicked() {
+                        widen = Some((r.net.clone(), r.current));
                     }
                 }
                 let z = if (r.z_max - r.z_min).abs() < 0.5 { format!("{:.0} Ω", r.z_min) } else { format!("{:.0}–{:.0} Ω", r.z_min, r.z_max) };
@@ -174,15 +174,22 @@ pub fn nets_ui(app: &mut App, ui: &mut Ui) {
     if ui.button("Trace calculator…").on_hover_text("Work out width, current, heating, resistance and impedance for any track").clicked() {
         app.pcb.trace.open = true;
     }
-    if let Some((net, w)) = widen {
-        let base = app.ws.pcbs[pi].board.rules.track;
-        let w = ((w.max(base)) / 0.05).ceil() * 0.05;
+    if let Some((net, amps)) = widen {
+        let b = &app.ws.pcbs[pi].board;
+        let (base, dt, st) = (b.rules.track, b.rules.temp_rise, tr::stack(b));
+        // each layer its own width: inner tracks shed heat worse and need more
+        let need = |l: Layer| ((tr::layer_width(&st, l, amps, dt).max(base)) / 0.05).ceil() * 0.05;
+        let mut widest = 0.0f64;
         crate::pcb_ui::edit(app, |p| {
-            for t in p.board.tracks.iter_mut().filter(|t| t.net == net && t.width < w) {
-                t.width = w;
+            for t in p.board.tracks.iter_mut().filter(|t| t.net == net) {
+                let w = need(t.layer);
+                if t.width < w {
+                    t.width = w;
+                    widest = widest.max(w);
+                }
             }
         });
-        app.flash_info(format!("{net} tracks are now {w:.2} mm: run Check for clearances, or Remove tracks and Autoroute to route them wide"), Some(std::time::Duration::from_secs(5)));
+        app.flash_info(format!("{net} tracks are now up to {widest:.2} mm: run Check for clearances, or Remove tracks and Autoroute to route them wide"), Some(std::time::Duration::from_secs(5)));
     }
 }
 
@@ -195,14 +202,17 @@ pub fn track_info(app: &App, ui: &mut Ui, t: &pcb::Track) {
     let len = pcb::dist(t.a, t.b);
     let dt = p.board.rules.temp_rise;
     let tg = tr::target(p, &app.pcb.cache.nl, &t.net);
-    let z = st.line(t.layer).line(t.width);
+    let g = st.line(t.layer);
+    let z = g.line(t.width);
+    let outer = t.layer.outer();
     ui.label(small(format!("{len:.2} mm, {} at 25 °C", ohms(tr::resistance(len, t.width, th, tr::AMBIENT)))).color(theme::muted()));
-    ui.label(small(format!("Carries {} at {dt} °C rise ({} oz)", amps(tr::current_for(t.width, th, dt, true)), st.copper_oz(t.layer)))).on_hover_text("IPC-2221, outer layer");
+    ui.label(small(format!("Carries {} at {dt} °C rise ({} oz)", amps(tr::current_for(t.width, th, dt, outer)), st.copper_oz(t.layer)))).on_hover_text(if outer { "IPC-2221, outer layer" } else { "IPC-2221, inner layer" });
     if tg.current > 0.0 {
-        let rise = tr::temp_rise(t.width, th, tg.current, true);
+        let rise = tr::temp_rise(t.width, th, tg.current, outer);
         ui.label(small(format!("At {} it warms {rise:.1} °C", amps(tg.current))).color(if rise > dt { theme::error_soft() } else { theme::text() }));
     }
-    ui.label(small(format!("{:.0} Ω microstrip, {:.2} ps/mm", z.z0, z.delay)));
+    let kind = if g.kind == LineKind::Stripline { "stripline" } else { "microstrip" };
+    ui.label(small(format!("{:.0} Ω {kind}, {:.2} ps/mm", z.z0, z.delay)));
 }
 
 /// The calculator window.
@@ -265,6 +275,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
                 if ui.small_button("From selected track").clicked() {
                     c.width = t.width;
                     c.length = pcb::dist(t.a, t.b);
+                    c.outer = t.layer.outer();
                     if let Some(st) = &stack {
                         c.geometry = st.line(t.layer);
                         c.copper_oz = st.copper_oz(t.layer);

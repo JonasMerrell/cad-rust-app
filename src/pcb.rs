@@ -618,8 +618,21 @@ impl Board {
         if n == self.copper_layers().len() {
             return Ok(());
         }
-        let oz = crate::pcb_trace::stack(self).copper_oz(Layer::Top);
-        let st = crate::pcb_trace::Stackup::layered(n, self.thickness, oz);
+        let old = crate::pcb_trace::stack(self);
+        let oz = old.copper_oz(Layer::Top);
+        let mut st = crate::pcb_trace::Stackup::layered(n, self.thickness, oz);
+        // keep the dielectric and the inner copper weight the user chose
+        let dielectric = |l: &crate::pcb_trace::StackLayer| matches!(l.kind, crate::pcb_trace::StackKind::Core | crate::pcb_trace::StackKind::Prepreg);
+        if let Some(er) = old.layers.iter().find(|l| dielectric(l)).map(|l| l.er) {
+            for l in st.layers.iter_mut().filter(|l| dielectric(l)) {
+                l.er = er;
+            }
+        }
+        let inner_oz = old.coppers().get(1).filter(|_| old.coppers().len() > 2).map(|&i| old.layers[i].copper_oz).filter(|o| *o > 0.0);
+        if let Some(ioz) = inner_oz {
+            st.set_copper(None, Some(ioz));
+            st.set_total(self.thickness);
+        }
         let keep = self.copper_layers();
         let have = Board { stackup: st.clone(), ..Default::default() }.copper_layers();
         let gone: Vec<String> = keep.iter().filter(|l| !have.contains(l)).map(|l| l.label()).collect();
@@ -1198,15 +1211,17 @@ impl Pcb {
             };
             groups[gi].1.pins.push((p.part, p.num.clone()));
         }
-        // a net's name: a supply port's, else a net label's on the highest sheet, else a port's
-        let rank = |l: &Label| -> (u8, usize) {
+        // a net's name: a supply port's, else a net label's on the highest sheet (nearest the
+        // top of the hierarchy), else a port's
+        let rank = |l: &Label| -> (u8, usize, usize) {
+            let k = sheet(l.at);
             match l.kind {
-                LabelKind::Power | LabelKind::Ground => (0, 0),
-                LabelKind::Net => (1, sheet(l.at)),
-                LabelKind::Port => (2, sheet(l.at)),
+                LabelKind::Power | LabelKind::Ground => (0, 0, 0),
+                LabelKind::Net => (1, self.depth(k), k),
+                LabelKind::Port => (2, self.depth(k), k),
             }
         };
-        let mut best: Vec<Option<(u8, usize)>> = vec![None; groups.len()];
+        let mut best: Vec<Option<(u8, usize, usize)>> = vec![None; groups.len()];
         for (k, l) in self.labels.iter().enumerate() {
             let root = d.find(nw + np + k);
             if let Some(gi) = groups.iter().position(|g| g.0 == root) {
@@ -1253,7 +1268,9 @@ impl Pcb {
             let t = self.label_net_name(l);
             let t = t.as_str();
             if let Some(&ni) = root_net.get(&d.find(nw + np + k)) {
-                if !t.is_empty() && out.nets[ni].name != t && !out.label_conflicts.iter().any(|c| c.0 == out.nets[ni].name && c.1 == t) {
+                // a sheet-local label of the net's own name (named "Sheet/SDA" only because
+                // another sheet also has an SDA) is no second name
+                if !t.is_empty() && out.nets[ni].name != t && out.nets[ni].name != l.text.trim() && !out.label_conflicts.iter().any(|c| c.0 == out.nets[ni].name && c.1 == t) {
                     out.label_conflicts.push((out.nets[ni].name.clone(), t.to_string(), l.at));
                 }
             }

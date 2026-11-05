@@ -548,8 +548,11 @@ pub struct NetReport {
     pub drop: f64,
     /// Hottest track's rise at the net's current, °C.
     pub rise: f64,
-    /// Width the net's current needs at the allowed rise, mm (0: no current set).
+    /// Width the net's current needs at the allowed rise, mm (0: no current set): on the
+    /// thinnest-shedding layer its tracks use (inner layers need more than outer ones).
     pub need_width: f64,
+    /// Some track is narrower than its layer needs for the net's current.
+    pub short: bool,
     /// Impedance range of its tracks (single ended), Ω.
     pub z_min: f64,
     pub z_max: f64,
@@ -596,8 +599,15 @@ pub fn nets(pcb: &Pcb, nl: &Netlist, pads: &[WPad], target: &dyn Fn(&str) -> Tar
             r.z_min = 0.0;
         }
         if tg.current > 0.0 {
-            let th = st.copper_mm(Layer::Top).min(st.copper_mm(Layer::Bottom));
-            r.need_width = width_for_current(tg.current, th, dt, true);
+            if tracks.is_empty() {
+                let th = st.copper_mm(Layer::Top).min(st.copper_mm(Layer::Bottom));
+                r.need_width = width_for_current(tg.current, th, dt, true);
+            }
+            for t in &tracks {
+                let need = layer_width(st, t.layer, tg.current, dt);
+                r.need_width = r.need_width.max(need);
+                r.short |= t.width < need - 1e-6;
+            }
         }
         if tg.impedance > 0.0 {
             r.z_width = st.line(Layer::Top).width_for(tg.impedance).unwrap_or(0.0);
@@ -612,6 +622,29 @@ pub fn nets(pcb: &Pcb, nl: &Netlist, pads: &[WPad], target: &dyn Fn(&str) -> Tar
         out.push(r);
     }
     out
+}
+
+/// Width (mm) a track on layer `l` needs to carry `i` A with at most `dt` °C rise.
+pub fn layer_width(st: &Stackup, l: Layer, i: f64, dt: f64) -> f64 {
+    width_for_current(i, st.copper_mm(l), dt, l.outer())
+}
+
+/// Depth (mm) of a board copper layer below the top surface.
+fn copper_z(st: &Stackup, l: Layer) -> Option<f64> {
+    let i = st.copper_index(l)?;
+    Some(st.layers[..i].iter().filter(|x| x.kind != StackKind::Mask).map(|x| x.thickness).sum())
+}
+
+/// The barrel length (mm) of a via: the board for a through via, its span for a blind or
+/// buried one.
+fn via_length(st: &Stackup, v: &pcb::Via, thick: f64) -> f64 {
+    match v.span {
+        Some([a, b]) => match (copper_z(st, a), copper_z(st, b)) {
+            (Some(za), Some(zb)) if (za - zb).abs() > 0.0 => (za - zb).abs(),
+            _ => thick,
+        },
+        None => thick,
+    }
 }
 
 /// The resistance network of a net: nodes are track ends, pads and vias; the worst pad-to-pad
@@ -647,9 +680,10 @@ fn worst_path(pcb: &Pcb, pads: &[WPad], my: &[usize], tracks: &[&pcb::Track], vi
     let thick = pcb.board.thickness;
     for (k, v) in vias.iter().enumerate() {
         edges.push((via_nodes[k], via_nodes[k], 0.0));
-        let barrel = via_resistance(v.drill, VIA_PLATING, thick, temp);
+        let barrel = via_resistance(v.drill, VIA_PLATING, via_length(st, v, thick), temp);
         for (ni, (p, l)) in nodes.iter().enumerate() {
-            if l.is_some() && pcb::dist(*p, v.at) <= v.d / 2.0 + 1e-6 {
+            // only track ends on the layers the via reaches
+            if l.is_some_and(|l| v.on(l)) && pcb::dist(*p, v.at) <= v.d / 2.0 + 1e-6 {
                 // half the barrel to each layer: a top-to-bottom hop costs the whole barrel
                 edges.push((via_nodes[k], ni, barrel / 2.0));
             }
@@ -663,6 +697,12 @@ fn worst_path(pcb: &Pcb, pads: &[WPad], my: &[usize], tracks: &[&pcb::Track], vi
                 if pad.on(*l) && (cu.contains(*p) || pcb::dist(*p, pad.at) < 1e-6) {
                     edges.push((pad_nodes[k], ni, 0.0));
                 }
+            }
+        }
+        // a via in the pad: half its barrel from the pad's layer, as for a track end
+        for (j, v) in vias.iter().enumerate() {
+            if cu.contains(v.at) && pad.layer.is_none_or(|l| v.on(l)) {
+                edges.push((pad_nodes[k], via_nodes[j], via_resistance(v.drill, VIA_PLATING, via_length(st, v, thick), temp) / 2.0));
             }
         }
     }
@@ -915,6 +955,32 @@ mod tests {
             t.width = w;
         }
         assert!(!check(&p, &tg).iter().any(|i| i.message.starts_with("VCC")));
+    }
+
+    #[test]
+    fn inner_tracks_need_more_width_and_blind_vias_are_short() {
+        let mut p = crate::pcb::tests::led_board();
+        p.board.set_copper_count(4).unwrap();
+        let nl = p.netlist();
+        let pads = p.pads(&nl);
+        let st = stack(&p.board);
+        let dt = p.board.rules.temp_rise;
+        // an inner track as wide as an outer one needs is still too thin
+        let outer = layer_width(&st, Layer::Top, 2.0, dt);
+        let inner = layer_width(&st, Layer::In(1), 2.0, dt);
+        assert!(inner > 2.0 * outer, "{inner} {outer}");
+        p.board.tracks.push(pcb::Track { a: [0.0, 0.0], b: [10.0, 0.0], width: outer, layer: Layer::In(1), net: "VCC".into() });
+        let tg = |n: &str| if n == "VCC" { Target { current: 2.0, impedance: 0.0 } } else { Target::default() };
+        let rep = nets(&p, &nl, &pads, &tg);
+        let vcc = rep.iter().find(|r| r.net == "VCC").unwrap();
+        assert!(vcc.short && near(vcc.need_width, inner, 1e-9), "{vcc:?}");
+        assert!(check(&p, &tg).iter().any(|i| i.rule == "current"));
+        // a blind via from the top to in1 is only the top prepreg long
+        let mut v = pcb::Via::new([0.0, 0.0], 0.6, 0.3, "VCC");
+        let through = via_length(&st, &v, p.board.thickness);
+        v.span = Some([Layer::Top, Layer::In(1)]);
+        let blind = via_length(&st, &v, p.board.thickness);
+        assert!(near(through, 1.6, 1e-9) && blind < 0.3 && blind > 0.0, "{through} {blind}");
     }
 
     #[test]
