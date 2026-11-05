@@ -696,8 +696,10 @@ impl App {
     }
 
     /// Take the document Claude edited (`studio` is the Part Studio it worked in). The live Part
-    /// Studio gets one undo step; new tabs are opened so the user sees them.
-    pub fn apply_agent_workspace(&mut self, mut ws: crate::workspace::Workspace, studio: usize) {
+    /// Studio gets an undo step when `checkpoint` is set (once per Claude request, so one undo
+    /// takes back the request's changes); new tabs are opened so the user sees them. Returns
+    /// whether it added the undo step.
+    pub fn apply_agent_workspace(&mut self, mut ws: crate::workspace::Workspace, studio: usize, checkpoint: bool) -> bool {
         use crate::workspace::Tab;
         if self.sketch.is_some() {
             crate::sketcher::finish(self);
@@ -706,13 +708,14 @@ impl App {
             self.dialog_ok();
         }
         if ws.studios.is_empty() {
-            return;
+            return false;
         }
         self.sync_ws();
         let counts = |w: &crate::workspace::Workspace| [w.studios.len(), w.assemblies.len(), w.drawings.len(), w.cams.len(), w.sims.len(), w.pcbs.len()];
         let (old, new) = (counts(&self.ws), counts(&ws));
         let cur = self.cur_studio;
-        if cur < ws.studios.len() && serde_json::to_string(&ws.studios[cur].doc).ok() != serde_json::to_string(&self.doc).ok() {
+        let checkpointed = checkpoint && cur < ws.studios.len() && serde_json::to_string(&ws.studios[cur].doc).ok() != serde_json::to_string(&self.doc).ok();
+        if checkpointed {
             self.checkpoint();
         }
         ws.active = self.tab;
@@ -769,6 +772,7 @@ impl App {
         // switch_tab rebuilds what other tabs need only when it changes tab
         self.tab = Tab::Studio(self.cur_studio);
         self.switch_tab(t);
+        checkpointed
     }
 
     /// Make `t` the visible tab; the Part Studio whose tab is shown becomes the live `doc`.

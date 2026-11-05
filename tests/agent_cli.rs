@@ -226,6 +226,10 @@ doc.render("plate.png", "iso");
     let bbox: Value = serde_json::from_str(String::from_utf8_lossy(&o.stdout).lines().last().unwrap()).unwrap();
     let w = bbox[1][0].as_f64().unwrap() - bbox[0][0].as_f64().unwrap();
     assert!((w - 80.0).abs() < 1e-3, "{bbox}");
+
+    // a relative document is also found next to the script, run from another folder
+    let o = Command::new(exe()).args(["script", &format!("{}/wider.rhai", dir.file_name().unwrap().to_string_lossy())]).current_dir(dir.parent().unwrap()).output().unwrap();
+    assert!(o.status.success(), "{}", String::from_utf8_lossy(&o.stderr));
 }
 
 /// sketch_add `dims` stores driving dimensions, and their expressions resize the geometry.

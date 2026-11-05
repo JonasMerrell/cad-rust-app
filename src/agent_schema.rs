@@ -68,7 +68,7 @@ pub(super) const FEATURE_KINDS: [&str; 37] = [
 
 /// Tools that change the active Part Studio: a call that leaves a feature failing reports
 /// `ok: false` with `new_errors`, and `rollback: true` undoes it.
-pub(super) const MODELLING_TOOLS: [&str; 11] = [
+pub(crate) const MODELLING_TOOLS: [&str; 11] = [
     "set_variable",
     "create_sketch",
     "sketch_add",

@@ -1850,7 +1850,9 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
             .enumerate()
             .map(|(i, b)| {
                 let props = doc.parts.get(&crate::doc::body_key(b.id));
-                let name = props.and_then(|p| p.name.clone()).unwrap_or_else(|| format!("Part {}", i + 1));
+                // the default names the parts list shows (surface bodies are "Surface n")
+                let kind = if solids_of(&b.shape).is_empty() { "Surface" } else { "Part" };
+                let name = props.and_then(|p| p.name.clone()).unwrap_or_else(|| format!("{kind} {}", i + 1));
                 (&b.shape, name, props.and_then(|p| p.color))
             })
             .collect();
@@ -2722,6 +2724,23 @@ mod tests {
         }
         assert!((m.volume - 6000.0).abs() < 1e-6);
         assert_eq!(m.edges.len(), 12);
+    }
+
+    /// Parts that share their geometry and differ only in placement (instances, as an imported
+    /// assembly gives them) keep their places in a STEP export.
+    #[test]
+    fn step_export_keeps_located_parts_in_place() {
+        let b = Shape::box_with_dimensions(10.0, 10.0, 10.0);
+        let m = [1.0, 0.0, 0.0, 100.0, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let moved = Shape::from_shape(&opencascade_sys::extra::ex_moved(&b.inner, &m));
+        let path = std::env::temp_dir().join(format!("rcad-step-located-{}.step", std::process::id()));
+        let p = path.to_string_lossy().to_string();
+        occ::write_step_named("two", &[(&b, "a".into(), Some([255, 0, 0])), (&moved, "b".into(), None)], &p).unwrap();
+        let back = Shape::read_step(&p).unwrap();
+        let _ = std::fs::remove_file(&path);
+        let (lo, hi) = occ::bbox(&back, false).unwrap();
+        assert!(lo.x.abs() < 1e-3 && (hi.x - 110.0).abs() < 1e-3, "{lo:?} {hi:?}");
+        assert_eq!(solids_of(&back).len(), 2);
     }
 }
 
