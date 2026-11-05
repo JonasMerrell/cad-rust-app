@@ -792,10 +792,6 @@ fn edge_layer(p: &Pcb) -> String {
     g.finish("Profile,NP", "Positive")
 }
 
-fn excellon(holes: &[(P, f64)], plated: bool) -> String {
-    excellon_span(holes, plated, (1, 2), "")
-}
-
 /// Drill file for holes from layer `span.0` to `span.1` (numbers from the top); `kind` is
 /// Blind or Buried for a via span, empty for through holes.
 fn excellon_span(holes: &[(P, f64)], plated: bool, span: (usize, usize), kind: &str) -> String {
@@ -867,7 +863,7 @@ pub fn gerbers(p: &Pcb) -> Vec<(String, String)> {
         out.push((format!("{base}-PTH-L{x}-L{y}.drl"), excellon_span(&holes, true, (x, y), kind)));
     }
     if !npth.is_empty() {
-        out.push((format!("{base}-NPTH.drl"), excellon(&npth, false)));
+        out.push((format!("{base}-NPTH.drl"), excellon_span(&npth, false, (1, n), "")));
     }
     out
 }
@@ -1069,7 +1065,8 @@ fn board_script(p: &Pcb) -> String {
     let pts: Vec<String> = p.board.outline.iter().map(|q| format!("[{}, {}]", num(q[0]), num(q[1]))).collect();
     let hole = |at: P, d: f64| format!("[{}, {}, {}]", num(at[0]), num(at[1]), num(d / 2.0));
     let mut holes: Vec<String> = pads.iter().filter(|x| x.drill > 0.0).map(|x| hole(x.at, x.drill)).collect();
-    holes.extend(p.board.vias.iter().filter(|v| v.drill > 0.0).map(|v| hole(v.at, v.drill)));
+    // blind and buried vias don't go through the board
+    holes.extend(p.board.vias.iter().filter(|v| v.drill > 0.0 && v.kind() == "through").map(|v| hole(v.at, v.drill)));
     holes.extend(p.board.holes.iter().filter(|h| h.d > 0.0).map(|h| hole(h.at, h.d)));
     // the name goes in a comment: no line breaks or other control characters
     let name: String = p.name.chars().map(|c| if c.is_control() { ' ' } else if c == '"' { '\'' } else { c }).collect();
@@ -1264,7 +1261,12 @@ mod tests {
         let mut blind = pcb::Via::new([20.0, 5.0], 0.45, 0.2, "GND");
         blind.span = Some([Layer::Top, Layer::In(1)]);
         p.board.vias.push(blind);
+        p.board.holes.push(pcb::Hole { at: [3.0, 3.0], d: 3.2 });
+        // the 3D board drills only the through via
+        let script = board_script(&p);
+        assert!(script.contains("[10, 5, 0.15]") && !script.contains("[20, 5, 0.1]"), "{script}");
         let files = gerbers(&p);
+        assert!(files.iter().find(|f| f.0.ends_with("-NPTH.drl")).unwrap().1.contains("NonPlated,1,4,NPTH"));
         let get = |end: &str| files.iter().find(|f| f.0.ends_with(end)).map(|f| f.1.clone());
         let in1 = get("In1_Cu.g2").expect("inner layer 1");
         assert!(in1.contains("%TF.FileFunction,Copper,L2,Inr*%"), "{in1}");
@@ -1421,7 +1423,7 @@ mod tests {
 
     #[test]
     fn drill_tools_merge_sizes_that_print_alike() {
-        let s = excellon(&[([1.0, 1.0], 0.8), ([2.0, 2.0], 0.8004), ([3.0, 3.0], 1.0)], true);
+        let s = excellon_span(&[([1.0, 1.0], 0.8), ([2.0, 2.0], 0.8004), ([3.0, 3.0], 1.0)], true, (1, 2), "");
         assert!(s.contains("T1C0.800\nT2C1.000\n%"), "{s}");
         assert!(!s.contains("T3"), "{s}");
         // no plated holes: the PTH file is still written (upload checkers want one), with no tools

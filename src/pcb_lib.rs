@@ -427,6 +427,12 @@ pub fn footprint(name: &str) -> Option<Footprint> {
     generated(name).or_else(|| FOOTPRINTS.read().ok()?.get(name).cloned())
 }
 
+/// Whether a name is one of the built-in (generated) footprints, which an imported footprint of
+/// the same name could not override.
+pub fn is_builtin_footprint(name: &str) -> bool {
+    generated(name).is_some()
+}
+
 /// Build a footprint from its name, or None for an unknown name.
 fn generated(name: &str) -> Option<Footprint> {
     let mut f = Footprint { name: name.into(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44] };

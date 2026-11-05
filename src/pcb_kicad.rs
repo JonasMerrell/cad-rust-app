@@ -246,6 +246,9 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
     let mut skipped_holes = 0;
     let mut odd_angles = 0;
     let mut custom = 0;
+    let mut slots = 0;
+    let mut offsets = 0;
+    let mut bottom_only = 0;
     for x in root.items() {
         let Some(h) = x.head() else { continue };
         if h.starts_with("fp_") {
@@ -284,9 +287,17 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
             skipped_holes += 1;
             continue;
         }
+        if kind == "thru_hole" {
+            if let Some(d) = x.get("drill") {
+                // rCAD drills round holes: a slot keeps its width, an offset hole goes to the centre
+                slots += d.items().iter().any(|i| i.atom() == Some("oval")) as usize;
+                offsets += d.get("offset").is_some_and(|o| o.num(1).unwrap_or(0.0).abs() > 1e-9 || o.num(2).unwrap_or(0.0).abs() > 1e-9) as usize;
+            }
+        }
         let layers: Vec<&str> = x.get("layers").map(|l| l.items().iter().skip(1).filter_map(|i| i.atom()).collect()).unwrap_or_default();
         if kind != "thru_hole" && !layers.iter().any(|l| *l == "F.Cu" || *l == "*.Cu") {
             // paste-only or bottom-only aperture pads have nothing to place on the top copper
+            bottom_only += layers.iter().any(|l| *l == "B.Cu") as usize;
             continue;
         }
         let shape = match shape {
@@ -313,6 +324,15 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
     if custom > 0 {
         notes.push(format!("{name}: {custom} custom-shaped pad(s) imported as rectangles"));
     }
+    if slots > 0 {
+        notes.push(format!("{name}: {slots} slotted hole(s) drilled round at the slot's width; check the drill files before fabrication"));
+    }
+    if offsets > 0 {
+        notes.push(format!("{name}: {offsets} hole(s) offset in their pad drilled at the pad's centre"));
+    }
+    if bottom_only > 0 {
+        notes.push(format!("{name}: {bottom_only} pad(s) on the bottom copper only left out"));
+    }
     let mut pads_bb = None;
     for p in &f.pads {
         grow(&mut pads_bb, [p.at[0] - p.size[0] / 2.0, p.at[1] - p.size[1] / 2.0]);
@@ -330,10 +350,20 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
 
 /// `…_H3.5mm…` or IPC names (`SOIC127P600X175-8N` → 1.75 mm).
 fn height_from_name(n: &str) -> Option<f64> {
-    if let Some(i) = n.find("_H") {
+    // every `_H`, so `_Horizontal_H3.5mm` finds 3.5
+    for (i, _) in n.match_indices("_H") {
         let s: String = n[i + 2..].chars().take_while(|c| c.is_ascii_digit() || *c == '.').collect();
         if let Ok(v) = s.parse::<f64>() {
             return Some(v);
+        }
+    }
+    // IPC names: `SOIC127P600X175-8N`, `QFN50P400X400X90-17N` (the last X before the pin count,
+    // in hundredths)
+    let head = n.split('-').next()?;
+    if head.chars().next().is_some_and(|c| c.is_ascii_alphabetic()) && head.contains('P') && !head.contains('_') {
+        let last = head.rsplit('X').next()?;
+        if head.contains('X') && !last.is_empty() && last.chars().all(|c| c.is_ascii_digit()) {
+            return last.parse::<f64>().ok().map(|v| v / 100.0);
         }
     }
     None
@@ -574,7 +604,11 @@ pub fn import_path(path: &Path) -> Result<Imported, String> {
                 if q.is_dir() && depth < 3 {
                     stack.push((q, depth + 1));
                 } else if q.to_str().is_some_and(wanted) {
-                    files.push((q.to_string_lossy().into_owned(), read(&q)?));
+                    // one unreadable file doesn't stop the rest
+                    match read(&q) {
+                        Ok(t) => files.push((q.to_string_lossy().into_owned(), t)),
+                        Err(e) => im.notes.push(e),
+                    }
                 }
             }
         }
@@ -636,9 +670,22 @@ fn fallback_footprint(s: &LibSymbol, n: usize) -> Option<String> {
 /// A symbol whose footprint was not imported is linked to one its filters accept, or to an
 /// IPC-7351 land pattern generated from the KiCad package name, with a note.
 pub fn add_to(p: &mut Pcb, mut im: Imported) -> Vec<String> {
+    // a built-in footprint's name would hide the imported one: the import is renamed
+    let mut renamed: Vec<(String, String)> = vec![];
+    for f in &mut im.footprints {
+        if pcb_lib::is_builtin_footprint(&f.name) {
+            let new = format!("{}_KiCad", f.name);
+            im.notes.push(format!("{}: same name as a built-in footprint, imported as {new}", f.name));
+            renamed.push((f.name.clone(), new.clone()));
+            f.name = new;
+        }
+    }
     pcb_lib::register_footprints(&im.footprints);
     for s in &mut im.symbols {
-        let want = s.footprint.rsplit(':').next().unwrap_or("").to_string();
+        let mut want = s.footprint.rsplit(':').next().unwrap_or("").to_string();
+        if let Some((_, new)) = renamed.iter().find(|r| r.0 == want) {
+            want = new.clone();
+        }
         let n = s.pins.iter().map(|x| x.num.as_str()).collect::<std::collections::BTreeSet<_>>().len();
         if !want.is_empty() && pcb_lib::footprint(&want).is_some() {
             s.footprint = want;
@@ -740,6 +787,32 @@ pub(crate) mod tests {
         assert_eq!(f.court, ([-3.7, -2.7], [3.7, 2.7]));
         assert_eq!(f.silk.len(), 3);
         assert!(notes.iter().any(|n| n.contains("non-plated")), "{notes:?}");
+    }
+
+    #[test]
+    fn notes_slots_and_heights_and_keeps_builtin_names() {
+        let fp = r#"(footprint "Jack_DC" (layer "F.Cu")
+  (pad "1" thru_hole oval (at 0 0) (size 2 3.5) (drill oval 1 2.5) (layers "*.Cu" "*.Mask"))
+  (pad "2" thru_hole circle (at 5 0) (size 2 2) (drill 1 (offset 0.3 0)) (layers "*.Cu" "*.Mask"))
+  (pad "3" smd rect (at 9 0) (size 1 1) (layers "B.Cu" "B.Mask"))
+)"#;
+        let mut notes = vec![];
+        let f = footprint(&parse(fp).unwrap(), &mut notes).unwrap();
+        assert_eq!(f.pads.len(), 2);
+        assert_eq!(f.pads[0].drill, 1.0);
+        for want in ["slotted", "offset", "bottom copper"] {
+            assert!(notes.iter().any(|n| n.contains(want)), "{want}: {notes:?}");
+        }
+        assert_eq!(height_from_name("Relay_Horizontal_H10.5mm"), Some(10.5));
+        assert_eq!(height_from_name("SOIC127P600X175-8N"), Some(1.75));
+        assert_eq!(height_from_name("PinHeader_1x02_P2.54mm_Horizontal"), None);
+        // an import named like a built-in footprint is renamed so that it isn't hidden
+        let mut sot = footprint(&parse(SOIC8).unwrap(), &mut vec![]).unwrap();
+        sot.name = "SOT-23".into();
+        let mut p = crate::pcb::tests::led_board();
+        let notes = add_to(&mut p, Imported { footprints: vec![sot], ..Default::default() });
+        assert!(p.footprints.iter().any(|f| f.name == "SOT-23_KiCad") && notes.iter().any(|n| n.contains("built-in")), "{notes:?}");
+        assert_eq!(pcb_lib::footprint("SOT-23_KiCad").unwrap().pads.len(), 8);
     }
 
     #[test]
