@@ -237,7 +237,7 @@ fn free_modes(app: &mut App, s: &Study) -> Vec<String> {
                 }
                 BcType::Spring { k } => {
                     let k = *k;
-                    on(&g, &mut r, &ids, &move |_| [DVec3::X, DVec3::Y, DVec3::Z].into_iter().zip(k).filter(|(_, c)| *c > 0.0).map(|(d, _)| d).collect())
+                    on(&g, &mut r, &ids, &move |_| [DVec3::X, DVec3::Y, DVec3::Z].into_iter().zip(k).filter(|(_, c)| *c != 0.0).map(|(d, _)| d).collect())
                 }
                 BcType::RemoteRigid { point, u, rot, .. } if !ids.is_empty() => {
                     for (k, d) in [DVec3::X, DVec3::Y, DVec3::Z].into_iter().enumerate() {
@@ -250,6 +250,18 @@ fn free_modes(app: &mut App, s: &Study) -> Vec<String> {
                     }
                 }
                 _ => {}
+            }
+        }
+        // a periodic pair holds the turns about the two axes across its offset (as crackh3d counts it)
+        let input = super::study_input(app, s);
+        for p in s.advanced.periodic.iter().filter(|p| !p.suppressed) {
+            let follower = faces_of(app, p.id | super::SIDE_B);
+            let (Some(d), Some(at)) = (crate::fea_adv::offset_of(p, &input).filter(|d| d.length() > 0.0), follower.iter().find_map(|f| g.faces.get(f)).and_then(|f| f.pts.first())) else {
+                continue;
+            };
+            let (e1, e2) = d.normalize().any_orthonormal_pair();
+            for e in [e1, e2] {
+                r.push(Restraint { point: at.0.to_array(), dir: e.to_array(), rotation: true });
             }
         }
     } else {
@@ -1346,14 +1358,16 @@ pub(super) fn glyphs(app: &App, s: &Study, geo: &Geo, sd: &mut SceneData) {
     }
     for l in s.loads.iter().filter(|x| !x.suppressed) {
         let c = rgba(Kind::Load(l.kind).key(), l.id);
-        let dir = DVec3::from(l.direction).normalize_or_zero();
+        // a negative value acts against the direction
+        let dir = DVec3::from(l.direction).normalize_or_zero() * if l.value < 0.0 { -1.0 } else { 1.0 };
         if l.kind == LoadKind::Gravity {
             let p = geo.centre;
             arrow(sd, p - dir * size * 1.5, p, c);
             continue;
         }
         let into = l.normal || l.kind == LoadKind::Pressure;
-        let push = l.kind != LoadKind::Pressure || l.value >= 0.0;
+        // a negative pressure or force into the faces pulls
+        let push = l.value >= 0.0;
         for (x, n) in geo.samples(&faces_of(app, l.id), per(l.id)) {
             if into {
                 if push {

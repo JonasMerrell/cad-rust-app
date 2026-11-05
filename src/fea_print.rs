@@ -305,7 +305,8 @@ pub fn material(p: &Printed, base: &Elastic, print: &Print, shell: f64) -> Elast
     match print.model {
         PrintModel::Isotropic => {
             let es = (2.0 * p.e_xy + p.e_z) / 3.0;
-            let ec = (2.0 * k.e_p * p.e_xy + k.e_z * p.e_z) / 3.0;
+            // no infill: a hollow core, kept barely stiff (as the layered model's) so the solve stays regular
+            let ec = ((2.0 * k.e_p * p.e_xy + k.e_z * p.e_z) / 3.0).max(1e-6);
             let sz = p.s_z * print.bond();
             let ys = p.s_xy.min(sz);
             let yc = (k.s_p * p.s_xy).min(k.s_z * sz);
@@ -452,8 +453,9 @@ pub fn assign(mesh: &Mesh, surf: &Surface, tris: &[[DVec3; 3]], parts: &[(String
         })
         .collect();
     let mut warnings = vec![];
-    let thin = print.wall().min(print.skin());
-    if thin > 0.0 && mesh.size > 2.0 * thin {
+    // the thinner of the shell's parts that exist (no walls or no top/bottom layers leave the other)
+    let thin = [print.wall(), print.skin()].into_iter().filter(|t| *t > 0.0).fold(f64::INFINITY, f64::min);
+    if thin.is_finite() && mesh.size > 2.0 * thin {
         warnings.push(format!(
             "Elements ({} mm) are coarser than the printed walls ({} mm) and top/bottom ({} mm), so they blend into the infill: use a smaller mesh size, or a mesh control where the stress matters",
             crate::expr::trim(mesh.size, 3),
@@ -535,6 +537,12 @@ mod tests {
         let iso = material(pla, &base, &Print { model: PrintModel::Isotropic, ..Print::default() }, 1.0);
         assert!((iso.failure_index(&[30.0, 0.0, 0.0, 0.0, 0.0, 0.0]) - 30.0 / pla.s_z).abs() < 1e-6);
         assert!((iso.failure_index(&[-30.0, 0.0, 0.0, 0.0, 0.0, 0.0]) - 30.0 / (COMPRESSION * pla.s_z)).abs() < 1e-6);
+        // no infill: the core is hollow, with no strength but a little stiffness so the solve stays regular
+        for model in [PrintModel::Isotropic, PrintModel::Layered] {
+            let hollow = material(pla, &base, &Print { infill: 0.0, model, ..Print::default() }, 0.0);
+            let stiff = hollow.d.map_or(hollow.e, |d| d[0][0].min(d[2][2]));
+            assert!(stiff > 0.0 && hollow.yield_mpa == 0.0 && hollow.rho == 0.0, "{model:?}: {hollow:?}");
+        }
         // infill is lighter and softer
         let core = material(pla, &base, &Print::default(), 0.0);
         assert!((core.rho - 0.2 * base.rho).abs() < 1e-15);

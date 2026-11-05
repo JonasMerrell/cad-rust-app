@@ -258,6 +258,21 @@ fn sig(v: f64) -> f64 {
     (v * k).round() / k
 }
 
+/// The printable plastics named in an outcome's material ("PLA-CF + Steel, printed: …"), matched by their
+/// whole names so that PLA-CF doesn't also list PLA.
+fn printed_solids(material: &str) -> Vec<&'static crate::fea_print::Printed> {
+    let names = material.split(", printed:").next().unwrap_or("");
+    let mut out: Vec<&'static crate::fea_print::Printed> = vec![];
+    for n in names.split(" + ") {
+        if let Some(p) = crate::fea_print::printed(n.trim()) {
+            if !out.iter().any(|q| q.name == p.name) {
+                out.push(p);
+            }
+        }
+    }
+    out
+}
+
 fn summary(s: &Study, o: &Outcome) -> Value {
     let m = &o.mesh;
     let mut v = json!({
@@ -265,7 +280,7 @@ fn summary(s: &Study, o: &Outcome) -> Value {
         "material": o.material,
         "material_props": {"E_mpa": o.mat.e, "poisson": o.mat.nu, "density_g_cm3": o.mat.rho * 1e9, "yield_mpa": o.mat.yield_mpa, "loss_factor": o.mat.eta},
         "mass_kg": sig(o.mass * 1e3),
-        "printed": s.print.as_ref().filter(|_| o.printed).map(|p| json!({"settings": p, "shell_wall_mm": p.wall(), "shell_top_bottom_mm": p.skin(), "solid": crate::fea_print::PRINTED.iter().filter(|x| o.material.contains(x.name)).map(|x| json!({"material": x.name, "E_xy_mpa": x.e_xy, "E_z_mpa": x.e_z, "strength_xy_mpa": x.s_xy, "strength_z_mpa": x.s_z, "source": x.source})).collect::<Vec<_>>()})),
+        "printed": s.print.as_ref().filter(|_| o.printed).map(|p| json!({"settings": p, "shell_wall_mm": p.wall(), "shell_top_bottom_mm": p.skin(), "solid": printed_solids(&o.material).into_iter().map(|x| json!({"material": x.name, "E_xy_mpa": x.e_xy, "E_z_mpa": x.e_z, "strength_xy_mpa": x.s_xy, "strength_z_mpa": x.s_z, "source": x.source})).collect::<Vec<_>>()})),
         "mesh": {"nodes": m.nodes.len(), "elements": m.tets.len(), "element": "10-node tetrahedron", "element_size_mm": round(if m.size > 0.0 { m.size } else { s.mesh_size.unwrap_or(0.0) }), "smallest_element_mm": round(if m.smallest > 0.0 { m.smallest } else { m.size }), "smallest_dihedral_deg": round(m.min_dihedral)},
         "warnings": o.warnings,
         "units": "mm, N, MPa, s",
@@ -408,6 +423,26 @@ impl Session {
                 })
                 .collect()
         };
+        // advanced mode: its boundary conditions and periodic pairs (supports and loads are ignored there)
+        if s.mode == fea::SimMode::Advanced {
+            for b in s.advanced.bcs.iter().filter(|x| !x.suppressed && x.bc.on_faces()) {
+                let what = format!("bc {:?}", b.name);
+                if b.faces.is_empty() {
+                    return Err(format!("{what} has no faces: give faces [{{point, normal}}] from list_geometry"));
+                }
+                resolve(&what, &b.faces)?;
+            }
+            for p in s.advanced.periodic.iter().filter(|x| !x.suppressed) {
+                for (side, faces) in [("a", &p.a), ("b", &p.b)] {
+                    let what = format!("periodic {:?} side {side}", p.name);
+                    if faces.is_empty() {
+                        return Err(format!("{what} has no faces: give {side} [{{point, normal}}] from list_geometry"));
+                    }
+                    resolve(&what, faces)?;
+                }
+            }
+            return Ok(());
+        }
         for sp in s.supports.iter().filter(|x| !x.suppressed) {
             let what = format!("support {:?}", sp.name);
             if sp.faces.is_empty() {
@@ -704,7 +739,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Nylon (humid), ASA, PC, PLA-CF, PETG-CF, ASA-CF, PET-CF, PPS-CF, PA6-CF, PA6-CF (humid), PA12-CF, PA12-CF (humid), Oak, Pine; \"\" = the part's material, steel when unset), print (3D-printed plastic parts, FDM: null = solid isotropic; true = defaults; or {model: layered (default: transversely isotropic about build_dir, maker X-Y/Z data, failure by pressure-modified von Mises (1.3x stronger in compression) plus interlayer tension/shear) | isotropic (average modulus, weakest Z strength), infill (% sparse density, default 20), pattern: grid | triangles | honeycomb | gyroid (Gibson-Ashby scaling), walls (default 2), line_width (mm, 0.45), top_bottom (solid layers, 4), layer_height (mm, 0.2), build_dir ([x,y,z], default [0,0,1]), layer_bond (layer bond over the data sheet's Z strength, default 1; 0.5-0.8 for cool, fast or tall prints)}; applies to parts of PLA, PETG, ABS, ASA, PC, Nylon, Nylon (humid), PLA-CF, PETG-CF, ASA-CF, PET-CF, PPS-CF, PA6-CF, PA6-CF (humid), PA12-CF, PA12-CF (humid): walls and top/bottom skin are solid, the inside is infill, so mesh at or below the wall thickness on faces that matter), mesh_size (element size mm, null = auto), refine (default true: smaller elements at small holes and fillets, about a third of their radius, grading back to mesh_size), mesh_controls [{faces, size (element size mm on those faces), name}] (finer mesh where you expect the peak stress), mode (simple (default): supports and loads below; advanced: a static study with crackh3d's boundary conditions and solver, set with bcs, periodic, gravity and solver, and supports/loads ignored), bcs (advanced) [{type: fixed | displacement {u: [x|null, y|null, z|null] mm} | symmetry | pressure {p MPa} | traction {t: [x,y,z] MPa} | force {f: [x,y,z] N total} | spring {k: [x,y,z] N/mm³ per area} | remote_rigid {point, force, moment N·mm, u: [..|null], rot: [..|null] rad (null = free)} | remote_distributing {point, force, moment} | point_force {at: [x,y,z], f}, faces, name}], periodic (advanced) [{a: [face refs] (leads), b: [face refs] (follows), offset ([x,y,z] from A to B, default from face centres), jump ([x,y,z] mm: u_B - u_A, e.g. mean strain × offset), name}], gravity (advanced: [x,y,z] in g or null), solver (advanced: iterative (CG+AMG, default) | direct), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
         json!({"name": "edit_simulation", "description": "Change a Simulation tab (same fields as create_simulation; supports and loads replace the whole lists).", "inputSchema": obj(fields, &["simulation"])}),
-        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress; 3D-printed parts: the walls' margin by the layered criterion, plus infill_factor_of_safety), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
+        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress; 3D-printed parts: the walls' margin by the layered criterion (the infill's when nothing is wall), plus infill_factor_of_safety), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
         json!({"name": "render_simulation", "description": "PNG of a Simulation tab's result as a colour map (blue low → red high) on the exaggerated deformed shape: field stress (von Mises, default), max_principal, min_principal, displacement, or safety (red where the factor of safety is low); the picture carries a title, a colour scale and the deformation scale; mode (modal, 1-based), time (transient s; default the moment of largest displacement), deform (× the automatic exaggeration, 0 = undeformed), view/direction/width/height/path as in render.", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["simulation"])}),
     ]
 }

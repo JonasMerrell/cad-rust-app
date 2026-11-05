@@ -78,6 +78,8 @@ pub struct FeaUi {
     /// When the running job started and its estimated seconds.
     job_clock: Option<(Instant, f64)>,
     mesh_cache: Option<(u64, Arc<Mesh>)>,
+    /// The last estimate, by what it depends on (the study and parts, the cached mesh and the speed).
+    est_cache: Option<(u64, fea::Cost)>,
     mesh_rx: Option<(u64, Receiver<Arc<Mesh>>)>,
     /// The selected support or load (its faces are picked in the viewport).
     pub sel: Option<u64>,
@@ -138,6 +140,7 @@ impl Default for FeaUi {
             speed: 1.0,
             job_clock: Default::default(),
             mesh_cache: Default::default(),
+            est_cache: None,
             mesh_rx: Default::default(),
             sel: Default::default(),
             show_results: true,
@@ -331,7 +334,9 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                         // what the run took against its estimate tunes the next estimates to this computer
                         if let Some((t0, est)) = app.fea.job_clock.take().filter(|c| c.1 > 2.0) {
                             let k = (t0.elapsed().as_secs_f64() / est).clamp(0.05, 20.0);
-                            app.fea.speed = (app.fea.speed.ln() * 0.5 + k.ln() * 0.5).exp();
+                            // `est` already carries the current speed: the measured speed is speed × k, and
+                            // the new one is the geometric mean of the old and the measured
+                            app.fea.speed = (app.fea.speed * k.sqrt()).clamp(0.05, 20.0);
                         }
                     }
                     Err(e) => {
@@ -340,6 +345,7 @@ fn refresh(app: &mut App, ctx: &egui::Context) {
                     }
                 }
                 app.fea.stress_cache = None;
+                app.fea.safety_cache = None;
                 app.fea.frame = app.fea.frame.min(frames(app).saturating_sub(1));
                 app.fea.mode = app.fea.mode.min(modes(app).saturating_sub(1));
                 app.fea.scene_dirty = true;
@@ -435,7 +441,22 @@ const BIG_MESH: f64 = 500_000.0;
 
 /// What solving the open study would take, from its unknowns (the cached mesh's when there is one), scaled
 /// by how this computer's earlier runs compared with their estimates.
-fn estimate(app: &App, s: &Study, input: &Input) -> fea::Cost {
+fn estimate(app: &mut App, s: &Study, input: &Input) -> fea::Cost {
+    // the estimate sizes the refinement at every hole and fillet: worked out again only when the study,
+    // the parts, the cached mesh or the speed change, not every frame
+    let key = {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        study_key(s, input).hash(&mut h);
+        app.fea.mesh_cache.as_ref().map(|m| (m.0, m.1.nodes.len())).hash(&mut h);
+        app.fea.speed.to_bits().hash(&mut h);
+        h.finish()
+    };
+    if let Some((k, c)) = app.fea.est_cache {
+        if k == key {
+            return c;
+        }
+    }
     let size = s.element_size(input);
     let mk = mesh_key(s, input, size);
     let nodes = match app.fea.mesh_cache.as_ref().filter(|m| m.0 == mk) {
@@ -445,6 +466,7 @@ fn estimate(app: &App, s: &Study, input: &Input) -> fea::Cost {
     let meshed = app.fea.mesh_cache.as_ref().is_some_and(|m| m.0 == mk);
     let mut c = fea::estimate_cost(s, input.thickness(), nodes, meshed);
     c.secs *= app.fea.speed;
+    app.fea.est_cache = Some((key, c));
     c
 }
 
@@ -490,9 +512,13 @@ fn fmt_bytes(b: f64) -> String {
 
 /// Memory of this computer, in bytes (Linux: total RAM from /proc/meminfo).
 fn ram() -> Option<f64> {
-    let t = std::fs::read_to_string("/proc/meminfo").ok()?;
-    let kb: f64 = t.lines().find(|l| l.starts_with("MemTotal"))?.split_whitespace().nth(1)?.parse().ok()?;
-    Some(kb * 1024.0)
+    // read once: the sidebar asks every frame
+    static RAM: std::sync::OnceLock<Option<f64>> = std::sync::OnceLock::new();
+    *RAM.get_or_init(|| {
+        let t = std::fs::read_to_string("/proc/meminfo").ok()?;
+        let kb: f64 = t.lines().find(|l| l.starts_with("MemTotal"))?.split_whitespace().nth(1)?.parse().ok()?;
+        Some(kb * 1024.0)
+    })
 }
 
 /// Whether a study has what its analysis needs before it is worth meshing: static needs a support and a
@@ -733,6 +759,12 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
                     s.bodies.clear();
                     s.supports.iter_mut().for_each(|x| x.faces.clear());
                     s.loads.iter_mut().for_each(|x| x.faces.clear());
+                    s.mesh_controls.iter_mut().for_each(|x| x.faces.clear());
+                    s.advanced.bcs.iter_mut().for_each(|x| x.faces.clear());
+                    s.advanced.periodic.iter_mut().for_each(|x| {
+                        x.a.clear();
+                        x.b.clear();
+                    });
                     need_build = Some(i);
                 }
             }
@@ -824,6 +856,10 @@ fn study_ui(app: &mut App, ui: &mut Ui) {
         adv::study_rows(app, ui);
     }
     if let Some(i) = need_build {
+        // the picks were of the other studio's faces
+        app.fea.sel = None;
+        app.fea.open = None;
+        app.fea.point_pick = None;
         crate::cam_ui::ensure_built(app, i);
     }
     if bodies.is_empty() {
@@ -1085,6 +1121,8 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
     }
     let input = study_input(app, &s);
     let want = size.unwrap_or(auto);
+    // the study as edited above; the estimate is cached, so this is cheap every frame
+    let est_nodes = study(app).cloned().filter(|_| !input.tris.is_empty()).map(|c| estimate(app, &c, &input).dof / 3.0).unwrap_or(0.0);
     match app.fea.outcome.as_ref().filter(|o| (o.mesh.size - input.used_size(want)).abs() <= 1e-9 * want.max(1.0)) {
         Some(o) => {
             let m = &o.mesh;
@@ -1098,7 +1136,7 @@ fn mesh_ui(app: &mut App, ui: &mut Ui) {
         }
         None if !input.tris.is_empty() => {
             // before meshing: how big the mesh will be
-            let nodes = fea::estimate_nodes(&s, &input, want);
+            let nodes = est_nodes;
             let col = if 3.0 * nodes > BIG_MESH { theme::error_soft() } else { theme::muted() };
             ui.label(RichText::new(format!("About {} nodes · {} unknowns", fmt_count(nodes), fmt_count(3.0 * nodes))).color(col).size(12.0));
         }
@@ -1512,7 +1550,7 @@ fn field_values(app: &mut App, o: &Outcome, disp: &[DVec3]) -> (Vec<f32>, f32, f
                     let key = (o as *const Outcome as usize, app.fea.frame);
                     if !o.printed {
                         fea::node_safety(o, u, &s).into_iter().map(|v| (v as f32).min(10.0)).collect()
-                    } else if let Some(v) = app.fea.safety_cache.as_ref().filter(|c| c.0 == key) {
+                    } else if let Some(v) = app.fea.safety_cache.as_ref().filter(|c| c.0 == key && c.1.len() == o.mesh.nodes.len()) {
                         v.1.to_vec()
                     } else if u.len() != 3 * o.mesh.nodes.len() {
                         vec![10.0; s.len()]
