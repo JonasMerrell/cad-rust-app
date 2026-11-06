@@ -348,6 +348,8 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("export", "format") => en(&["step", "iges", "stl", "obj"], "file format"),
         ("export", "path") => out_path("output file"),
         ("export", "ascii") => t("boolean", "STL: text instead of binary"),
+        ("export", "assembly") => t("integer", "export this assembly (STEP) instead of the Part Studio"),
+        ("export", "single_body") => t("boolean", "assembly: fuse every part into one solid body"),
         ("export_drawing", "format") => en(&["pdf", "svg", "dxf", "png"], "format (default from the path's extension)"),
         ("export_drawing", "path") => out_path("output file"),
         ("export_drawing", "sheet") => {

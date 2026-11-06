@@ -243,7 +243,8 @@ Pico controller firmware homes the steppers and runs a pick-and-place cycle in t
 - **Python:** [`python/`](python/README.md) builds `cadrust`, bindings with a FreeCAD-style API,
   offscreen renders, STEP assemblies and finite elements.
 - **Export:** STEP, IGES, STL, OBJ, PNG, G-code, and an interactive web page of an assembly whose
-  slider and revolute mates move within their limits.
+  slider and revolute mates move within their limits. An assembly exports as STEP with its parts in
+  place, or (File → Export → STEP as one body) with every part fused into a single solid.
 
 ## Install
 

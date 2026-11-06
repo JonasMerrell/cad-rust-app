@@ -87,7 +87,7 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 | `ray_cast` / `classify_points` | surface crossings along rays; whether points are in, on or out of the parts |
 | `list_geometry` | faces and edges with refs, normals, lengths, circle centres; filter by type, box, normal or planar |
 | `render` | shaded PNG from any standard or iso view (`iso_front_left`, `iso_back_right`, …) or a `direction`; sketches used by features are hidden unless `sketches: "all"` |
-| `export` | STEP, IGES, STL (binary unless `ascii: true`), OBJ |
+| `export` | STEP, IGES, STL (binary unless `ascii: true`), OBJ; with `assembly`, that assembly as STEP, and `single_body: true` fuses its parts into one solid (falls back to one compound, with a `note`) |
 | `define_custom_feature` | scripted feature types (Rhai): parameters + selection in, solids out; use with `add_feature` kind `custom` |
 | `new_part_studio` / `switch_part_studio` | more Part Studios in one document (e.g. one per part) |
 | `create_assembly` / `assembly_insert` | assemblies of parts, or of other assemblies as rigid sub-assemblies |

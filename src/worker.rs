@@ -23,6 +23,8 @@ pub enum Request {
     Interference { id: u64, items: Vec<(usize, crate::doc::BodyId, [f64; 12])> },
     Rebuild { id: u64, tag: usize, doc: Document, skip: Vec<FeatId> },
     Export { id: u64, doc: Document, format: String, path: String },
+    /// An assembly's placed parts as STEP (Part Studios from SetStudios), fused into one body with `single_body`.
+    ExportAssembly { id: u64, items: Vec<kernel::AsmExportItem>, name: String, path: String, single_body: bool },
     Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<kernel::ProjReq> },
     /// Mass properties, point classification or ray casting on a Part Studio's solids (agent tools).
     Query { id: u64, doc: Document, query: serde_json::Value },
@@ -34,6 +36,8 @@ pub enum Reply {
     Progress { id: u64, feature: FeatId },
     Rebuilt { id: u64, tag: usize, result: RebuildResult },
     Exported { id: u64, error: Option<String> },
+    /// Ok(note about what didn't go as asked) or the error.
+    AsmExported { id: u64, result: Result<Option<String>, String> },
     Projected { id: u64, tag: usize, key: String, views: Vec<kernel::ProjView> },
     Interference { id: u64, pairs: Vec<(usize, usize, f64)> },
     Queried { id: u64, result: Result<serde_json::Value, String> },
@@ -69,6 +73,10 @@ pub fn worker_main() {
                 let error = kernel::export(&doc, &format, &path).err();
                 send(&Reply::Exported { id, error });
             }
+            Request::ExportAssembly { id, items, name, path, single_body } => {
+                let result = kernel::export_assembly(&items, &name, &path, single_body);
+                send(&Reply::AsmExported { id, result });
+            }
             Request::Project { id, tag, key, doc, views } => {
                 let views = kernel::project(&doc, &views);
                 send(&Reply::Projected { id, tag, key, views });
@@ -93,6 +101,8 @@ pub enum Outcome {
     /// (part studio index, result)
     Rebuilt(usize, RebuildResult),
     Exported(Option<String>, String),
+    /// An assembly STEP export: Ok(note) or the error, and the path.
+    AsmExported(Result<Option<String>, String>, String),
     /// (part studio, request key, projections)
     Projected(usize, String, Vec<kernel::ProjView>),
     /// Overlapping instance pairs (indices into the request) and volumes.
@@ -290,6 +300,13 @@ impl KernelClient {
         self.export = Some((id, path));
     }
 
+    pub fn export_assembly(&mut self, items: Vec<kernel::AsmExportItem>, name: &str, path: String, single_body: bool) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&Request::ExportAssembly { id, items, name: name.into(), path: path.clone(), single_body });
+        self.export = Some((id, path));
+    }
+
     /// Process worker messages; returns finished results.
     pub fn poll(&mut self) -> Vec<Outcome> {
         let mut out = vec![];
@@ -324,6 +341,13 @@ impl KernelClient {
                     if let Some((eid, path)) = self.export.take() {
                         if eid == id {
                             out.push(Outcome::Exported(error, path));
+                        }
+                    }
+                }
+                Ev::Reply(Reply::AsmExported { id, result }) => {
+                    if let Some((eid, path)) = self.export.take() {
+                        if eid == id {
+                            out.push(Outcome::AsmExported(result, path));
                         }
                     }
                 }
@@ -416,6 +440,15 @@ impl KernelClient {
             _ => None,
         })?
         .map_or(Ok(()), Err)
+    }
+
+    pub fn export_assembly_blocking(&mut self, items: Vec<kernel::AsmExportItem>, name: &str, path: String, single_body: bool) -> Result<Option<String>, String> {
+        self.export_assembly(items, name, path, single_body);
+        self.wait_for(|o| match o {
+            Outcome::AsmExported(r, _) => Some(r),
+            Outcome::Exported(Some(e), _) => Some(Err(e)),
+            _ => None,
+        })?
     }
 
     pub fn interference_blocking(&mut self, items: Vec<(usize, crate::doc::BodyId, [f64; 12])>) -> Result<Vec<(usize, usize, f64)>, String> {
