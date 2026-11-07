@@ -1,7 +1,7 @@
 // Fit ladder coupon for the parts on hand: 608 and 625 bearings, 3/4/5 mm dowels, NEMA17 D-shaft.
 // Five columns, each one step looser (offsets on the DIAMETER). The first plate printed outer
 // contours 0.4 mm small (96 x 46 measured 95.6 x 45.6), so: holes nominal + 0.2 .. + 0.6 and
-// posts nominal + 0.2 .. - 0.2. The column number is the count of dots on the dowel block.
+// posts nominal + 0.6 .. + 0.2 (the Ø25 boss printed 24.5). The column number is the count of dots on the dowel block.
 let out = if ARGS.len() > 0 { ARGS[0] + "/" } else { "" };
 fn zcyl(x, y, z0, r, h) { cylinder(vec3(x, y, z0), vec3(0, 0, 1), r, h) }
 let T = 2.0;
@@ -9,7 +9,7 @@ let W = 136.0;  let L = 148.0;
 let adds = [];  let cuts = [];
 for i in 0..5 {
     let k = 0.2 + 0.1 * i;            // hole offset
-    let p = 0.2 - 0.1 * i;            // post offset
+    let p = 0.6 - 0.1 * i;            // post offset
     let x = 14.0 + 27.0 * i;
     // A: 608 outer race Ø22 into a bore (press)   (also the NEMA17 Ø22 pilot boss)
     adds.push(zcyl(x, 15, 0, 11.0 + k / 2.0 + 2.5, T + 7.0));
