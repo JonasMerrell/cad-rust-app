@@ -383,7 +383,7 @@ mod tests {
     #[test]
     fn one_bad_part_leaves_the_others() {
         let good = crate::parasolid::tests::cube().into_bytes();
-        let bad = b"**END_OF_HEADER\nT4 test17 SCH_1300000_130060 67 1 0 1 0".to_vec();
+        let bad = b"**END_OF_HEADER\nT4 test17 SCH_1300000_130060 199 1 0 1 0".to_vec();
         let files: Vec<(&str, u16, Vec<u8>, usize)> = vec![("a.x_t", 0, good.clone(), good.len()), ("b.x_t", 0, bad.clone(), bad.len())];
         let dir = std::env::temp_dir().join(format!("grabcad-test-bad-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
@@ -396,7 +396,7 @@ mod tests {
         // with only the bad one it's an error that says why
         std::fs::write(&p, zip(&files[1..])).unwrap();
         let e = read_models(&p).err().unwrap();
-        assert!(e.contains("b: ") && e.contains("type 67"), "{e}");
+        assert!(e.contains("b: ") && e.contains("type 199"), "{e}");
         let _ = std::fs::remove_dir_all(dir);
     }
 }
