@@ -107,6 +107,7 @@ can be expressions using its variables.
 | `s.shell(faces, t)` | hollow out, opening the given faces (`[]`: a closed hollow with a cavity inside); walls `t` thick inside the outer surface, or for negative `t` grown outside it (up to version 0.4.0 the sign was the other way round) |
 | `s.fillet(edges, r)`, `s.fillet(edges, r1, r2)`, `s.chamfer(edges, d)` | fillet or chamfer chosen edges in one operation |
 | `s.fillet(r)`, `s.chamfer(d)` | every edge |
+| `s.delete_faces(faces)` | defeature: remove faces (a hole, a fillet, a boss) and grow the neighbouring faces over the gap |
 
 ## Faces and edges
 

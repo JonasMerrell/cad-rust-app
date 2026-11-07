@@ -120,6 +120,7 @@ fn base_spec(t: u16) -> Option<String> {
                 56 => "blend_type:c surface:p*2 spine:p range:f*2 thumb_weight:f*2 boundary:p*2 start:p end:p",
                 59 => "boundary:n blend:p",
                 60 => "check:c true_offset:l surface:p offset:f scale:f",
+                67 => "section:p sweep:v scale:f",
                 68 => "profile:p base:v axis:v start:v end:v start_param:f end_param:f x_axis:v scale:f",
                 124 | 134 => "nurbs:p data:p",
                 133 => "basis:p point_1:v point_2:v parm_1:f parm_2:f",
@@ -740,7 +741,11 @@ impl Conv<'_> {
     fn face(&mut self, f: u32, pts: &mut Vec<DVec3>) -> Result<usize, String> {
         let xt = self.xt;
         let face = xt.node_of(f, &[14])?;
-        let (surf, surf_plus) = self.surface(face.ptr("surface"))?;
+        let blend = xt.node(face.ptr("surface")).filter(|n| n.t == 56);
+        let (surf, surf_plus) = match blend {
+            Some(b) => self.blend(face, b)?,
+            None => self.surface(face.ptr("surface"))?,
+        };
         let mut bounds = vec![];
         for l in xt.chain(face.ptr("loop"), "next") {
             let lp = xt.node_of(l, &[15])?;
@@ -765,8 +770,190 @@ impl Conv<'_> {
                 bounds.push(self.s.add(format!("FACE_BOUND('',#{el},.T.)")));
             }
         }
-        let same = if face.plus("sense") == surf_plus { ".T." } else { ".F." };
+        // a blend's surface is our own fit: its flag already says whether it faces the face's way
+        let same = if blend.is_some() { surf_plus } else { face.plus("sense") == surf_plus };
+        let same = if same { ".T." } else { ".F." };
         Ok(self.s.add(format!("ADVANCED_FACE('',({}),#{surf},{same})", refs(&bounds))))
+    }
+
+    /// A rolling-ball blend face: STEP has no such surface, so this fits a smooth B-spline through
+    /// the ball's arcs between the two blended surfaces, over the stretch of spine the face covers.
+    /// Returns the surface and whether its normal points the face's way.
+    fn blend(&mut self, face: &Node, n: &Node) -> Result<(usize, bool), String> {
+        let xt = self.xt;
+        let range = n.get("range");
+        let r = range.first().copied().unwrap_or(f64::NAN).abs();
+        if !r.is_finite() || r < 1e-9 {
+            return Err("blend without a radius".into());
+        }
+        let surfs = n.get("surface");
+        let (s1, s2) = match surfs {
+            [a, b, ..] => (xt.node(*a as u32).ok_or("blend without its surfaces")?, xt.node(*b as u32).ok_or("blend without its surfaces")?),
+            _ => return Err("blend without its surfaces".into()),
+        };
+        // the face's corners and loop polygons (unplaced), for its stretch of spine and its side
+        let mut loops: Vec<Vec<DVec3>> = vec![];
+        for l in xt.chain(face.ptr("loop"), "next") {
+            let lp = xt.node_of(l, &[15])?;
+            let mut poly = vec![];
+            for fin in xt.chain(lp.ptr("fin"), "forward") {
+                let fin = xt.node_of(fin, &[17])?;
+                if let Some(v) = xt.node(fin.ptr("vertex")).and_then(|v| xt.node(v.ptr("point"))) {
+                    poly.push(v.v3("pvec"));
+                }
+            }
+            loops.push(poly);
+        }
+        let corners: Vec<DVec3> = loops.iter().flatten().copied().collect();
+        let spine = self.spine(n.ptr("spine"), &corners)?;
+        let (nu, nv) = (spine.len(), 9);
+        let mut grid = Vec::with_capacity(nu * nv);
+        for c in &spine {
+            let (a, b) = (self.foot(s1, *c)? - *c, self.foot(s2, *c)? - *c);
+            let (la, lb) = (a.length(), b.length());
+            let (ua, ub) = (a / la, b / lb);
+            let th = ua.dot(ub).clamp(-1.0, 1.0).acos();
+            if !(1e-6..std::f64::consts::PI - 1e-6).contains(&th) || (la - r).abs() > r * 0.5 || (lb - r).abs() > r * 0.5 {
+                return Err("blend whose ball doesn't touch its surfaces".into());
+            }
+            for k in 0..nv {
+                let t = k as f64 / (nv - 1) as f64;
+                let d = (ua * ((1.0 - t) * th).sin() + ub * (t * th).sin()) / th.sin();
+                grid.push(self.p(*c + d * (la + (lb - la) * t)));
+            }
+        }
+        // the face's side: its outer loop runs anticlockwise seen from outside
+        let at = |i: usize, j: usize| grid[i.min(nu - 1) * nv + j.min(nv - 1)];
+        let (mi, mj) = (nu / 2, nv / 2);
+        let normal = (at(mi + 1, mj) - at(mi.saturating_sub(1), mj)).cross(at(mi, mj + 1) - at(mi, mj.saturating_sub(1)));
+        let outer = loops.iter().find(|l| l.len() >= 3).ok_or("blend face without corners")?;
+        let pl: Vec<DVec3> = outer.iter().map(|p| self.p(*p)).collect();
+        let mut newell = DVec3::ZERO;
+        for i in 0..pl.len() {
+            newell += pl[i].cross(pl[(i + 1) % pl.len()]);
+        }
+        let poles_v: Vec<Vec<DVec3>> = (0..nu).map(|i| catmull(&grid[i * nv..i * nv + nv])).collect();
+        let pv = poles_v[0].len();
+        let cols: Vec<Vec<DVec3>> = (0..pv).map(|j| catmull(&poles_v.iter().map(|row| row[j]).collect::<Vec<_>>())).collect();
+        let pu = cols[0].len();
+        let poles: Vec<DVec3> = (0..pu).flat_map(|i| cols.iter().map(move |c| c[i])).collect();
+        let (um, uk) = catmull_knots(nu);
+        let (vm, vk) = catmull_knots(nv);
+        let e = self.s.bspline_surface(3, 3, pu, pv, &poles, &[], &um, &vm, &uk, &vk);
+        Ok((e, normal.dot(newell) > 0.0))
+    }
+
+    /// The point of a surface a blend rests on (unplaced) nearest `p`: an analytic surface, or
+    /// another blend (seen as the tube its ball sweeps).
+    fn foot(&self, s: &Node, p: DVec3) -> Result<DVec3, String> {
+        if s.t != 56 {
+            return foot(s, p);
+        }
+        let r = s.get("range").first().copied().unwrap_or(f64::NAN).abs();
+        let mut n = self.xt.node(s.ptr("spine")).ok_or("blend without a spine")?;
+        if n.t == 133 {
+            n = self.xt.node(n.ptr("basis")).ok_or("blend without a spine")?;
+        }
+        let q = if n.t == 30 {
+            let (o, d) = (n.v3("pvec"), n.v3("direction").normalize_or_zero());
+            o + d * (p - o).dot(d)
+        } else {
+            let poly = self.spine(s.ptr("spine"), &[])?;
+            let mut best = (f64::INFINITY, poly[0]);
+            for w in poly.windows(2) {
+                let ab = w[1] - w[0];
+                let t = if ab.length_squared() > 0.0 { ((p - w[0]).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                let q = w[0] + ab * t;
+                if q.distance(p) < best.0 {
+                    best = (q.distance(p), q);
+                }
+            }
+            best.1
+        };
+        Ok(q + (p - q).try_normalize().ok_or("point on a blend's spine")? * r)
+    }
+
+    /// Ball centres (unplaced) along the stretch of a blend's spine next to `corners`.
+    fn spine(&self, c: u32, corners: &[DVec3]) -> Result<Vec<DVec3>, String> {
+        let xt = self.xt;
+        let mut n = xt.node(c).ok_or("blend without a spine")?;
+        if n.t == 133 {
+            n = xt.node(n.ptr("basis")).ok_or("blend without a spine")?;
+        }
+        let (poly, closed): (Vec<DVec3>, bool) = match n.t {
+            30 => {
+                let (o, d) = (n.v3("pvec"), n.v3("direction").normalize_or_zero());
+                let ts: Vec<f64> = corners.iter().map(|p| (*p - o).dot(d)).collect();
+                if ts.len() < 2 {
+                    return Err("straight blend without ends".into());
+                }
+                let (a, b) = (ts.iter().copied().fold(f64::INFINITY, f64::min), ts.iter().copied().fold(f64::NEG_INFINITY, f64::max));
+                (vec![o + d * a, o + d * b], false)
+            }
+            31 | 32 => ((0..256).map(|i| self.curve_point(c, i as f64 / 256.0 * std::f64::consts::TAU, 0)).collect::<Result<_, _>>()?, true),
+            38 => {
+                let chart = xt.node_of(n.ptr("chart"), &[40])?;
+                (chart.get("hvec").chunks(3).filter(|p| p.len() == 3).map(|p| DVec3::new(p[0], p[1], p[2])).collect(), false)
+            }
+            134 => {
+                let b = self.bspline(n.ptr("nurbs"))?;
+                ((0..=128).map(|i| b.eval(i as f64 / 128.0)).collect(), false)
+            }
+            t => return Err(format!("blend spine of type {t}")),
+        };
+        if poly.len() < 2 {
+            return Err("blend spine without points".into());
+        }
+        // arc length along the polyline, and each corner's place on it
+        let m = poly.len();
+        let seg = if closed { m } else { m - 1 };
+        let mut len = vec![0.0];
+        for i in 0..seg {
+            len.push(len[i] + poly[i].distance(poly[(i + 1) % m]));
+        }
+        let total = len[seg];
+        let place = |p: DVec3| -> f64 {
+            let mut best = (f64::INFINITY, 0.0);
+            for i in 0..seg {
+                let (a, b) = (poly[i], poly[(i + 1) % m]);
+                let ab = b - a;
+                let t = if ab.length_squared() > 0.0 { ((p - a).dot(ab) / ab.length_squared()).clamp(0.0, 1.0) } else { 0.0 };
+                let d = p.distance(a + ab * t);
+                if d < best.0 {
+                    best = (d, len[i] + t * (len[i + 1] - len[i]));
+                }
+            }
+            best.1
+        };
+        let mut ts: Vec<f64> = corners.iter().map(|p| place(*p)).collect();
+        ts.sort_by(f64::total_cmp);
+        let (a, b) = if ts.len() < 2 {
+            // a ring all the way round (or a face with no corners): the whole spine
+            (0.0, total)
+        } else if closed {
+            // the face covers the spine except its biggest gap between corners
+            let mut gap = (total - ts[ts.len() - 1] + ts[0], ts[ts.len() - 1], ts[0] + total);
+            for w in ts.windows(2) {
+                if w[1] - w[0] > gap.0 {
+                    gap = (w[1] - w[0], w[1], w[0] + total);
+                }
+            }
+            (gap.1, gap.2)
+        } else {
+            (ts[0], ts[ts.len() - 1])
+        };
+        // run a little past the face so its edges lie well inside the surface
+        let pad = (b - a) * 0.02 + 1e-7;
+        let (a, b) = if closed { (a - pad, b + pad) } else { ((a - pad).max(0.0), (b + pad).min(total)) };
+        let at = |s: f64| -> DVec3 {
+            let s = if closed { s.rem_euclid(total) } else { s.clamp(0.0, total) };
+            let i = len.partition_point(|&l| l <= s).clamp(1, seg) - 1;
+            let span = len[i + 1] - len[i];
+            let t = if span > 0.0 { (s - len[i]) / span } else { 0.0 };
+            poly[i].lerp(poly[(i + 1) % m], t)
+        };
+        let k = if corners.is_empty() { 256 } else { 24 };
+        Ok((0..=k).map(|i| at(a + (b - a) * i as f64 / k as f64)).collect())
     }
 
     fn vertex(&mut self, v: u32) -> Result<usize, String> {
@@ -798,8 +985,35 @@ impl Conv<'_> {
                 start = f.ptr("vertex");
             }
         }
-        let cid = edge.ptr("curve");
-        let (curve, plus) = self.curve(cid)?;
+        let mut cid = edge.ptr("curve");
+        let mut fin_curve = false;
+        if cid == 0 {
+            // a tolerant edge has no curve of its own: each fin carries a curve in its face
+            cid = std::iter::once(fin).chain(other).map(|f| f.ptr("curve")).find(|&c| c != 0).ok_or("edge without a curve")?;
+            fin_curve = true;
+        }
+        let (curve, mut plus) = match self.curve(cid) {
+            Ok(c) => c,
+            Err(e) => {
+                // a curve we can't follow (one lying on a blend, say): fall back on a fin's own curve
+                let alt = std::iter::once(fin).chain(other).map(|f| f.ptr("curve")).filter(|&c| c != 0 && c != cid).find_map(|c| self.curve(c).ok().map(|r| (c, r)));
+                let Some((c, r)) = alt else { return Err(e) };
+                cid = c;
+                fin_curve = true;
+                r
+            }
+        };
+        if fin_curve && start != end && start != 0 && end != 0 {
+            // which way the fin's curve runs isn't the edge's: compare its points with the edge's ends
+            let at = |v: u32| xt.node(v).and_then(|v| xt.node(v.ptr("point"))).map(|p| self.p(p.v3("pvec")));
+            if let (Some(a), Some(b), Ok(pts)) = (at(start), at(end), self.sample(cid)) {
+                let near = |q: DVec3| pts.iter().enumerate().min_by(|x, y| x.1.distance(q).total_cmp(&y.1.distance(q))).map(|(i, _)| i).unwrap_or(0);
+                let (i, j) = (near(a), near(b));
+                if i != j {
+                    plus = i < j;
+                }
+            }
+        }
         let (vs, ve) = match (start, end) {
             (0, 0) => {
                 // a closed edge (a full circle) has no vertices in Parasolid but needs one in STEP
@@ -913,7 +1127,8 @@ impl Conv<'_> {
             }
             _ => {
                 let b = self.bspline(xt.node_of(n.ptr("b_curve"), &[134])?.ptr("nurbs"))?;
-                let surf = xt.node_of(n.ptr("surface"), &[50, 51, 52, 53, 54])?;
+                let sid = n.ptr("surface");
+                let surf = xt.node_of(sid, &[50, 51, 52, 53, 54, 60, 67, 68, 124])?;
                 // a straight line in a plane's parameters needs only its ends
                 let steps = if surf.t == 50 && b.degree == 1 { b.poles.len() - 1 } else { 48 };
                 if steps == 0 {
@@ -922,10 +1137,128 @@ impl Conv<'_> {
                 let mut out = vec![];
                 for i in 0..=steps {
                     let uv = if surf.t == 50 && b.degree == 1 { DVec3::from_slice(&b.poles[i][..3]) } else { b.eval(i as f64 / steps as f64) };
-                    out.push(self.p(surface_point(surf, uv.x, uv.y)?));
+                    out.push(self.p(self.surface_point(sid, uv.x, uv.y, depth + 1)?));
                 }
                 Ok(out)
             }
+        }
+    }
+
+    /// Points (mm) along the STEP curve that `curve` writes for `c`, in that curve's own direction.
+    fn sample(&self, c: u32) -> Result<Vec<DVec3>, String> {
+        self.sample_at(c, 0)
+    }
+
+    fn sample_at(&self, c: u32, depth: usize) -> Result<Vec<DVec3>, String> {
+        if depth > NEST {
+            return Err("curve built on itself".into());
+        }
+        let n = self.xt.node_of(c, &[30, 31, 32, 38, 133, 134, 137])?;
+        Ok(match n.t {
+            30 => vec![self.p(n.v3("pvec")), self.p(n.v3("pvec") + n.v3("direction").normalize_or_zero() * 0.001)],
+            31 | 32 => {
+                let (o, z, x) = (n.v3("centre"), n.v3("normal").normalize_or_zero(), n.v3("x_axis").normalize_or_zero());
+                let y = z.cross(x);
+                let (ra, rb) = if n.t == 31 { (n.num("radius"), n.num("radius")) } else { (n.num("major"), n.num("minor")) };
+                (0..64).map(|i| i as f64 / 64.0 * std::f64::consts::TAU).map(|t| self.p(o + x * (ra * t.cos()) + y * (rb * t.sin()))).collect()
+            }
+            133 => self.sample_at(n.ptr("basis"), depth + 1)?,
+            _ => self.curve_points_at(c, depth)?,
+        })
+    }
+
+    /// A point (in metres, unplaced) on a curve at its own Parasolid parameter.
+    fn curve_point(&self, c: u32, t: f64, depth: usize) -> Result<DVec3, String> {
+        if depth > NEST {
+            return Err("curve built on itself".into());
+        }
+        let n = self.xt.node_of(c, &[30, 31, 32, 133, 134])?;
+        Ok(match n.t {
+            30 => n.v3("pvec") + n.v3("direction").normalize_or_zero() * t,
+            31 | 32 => {
+                let (o, z, x) = (n.v3("centre"), n.v3("normal").normalize_or_zero(), n.v3("x_axis").normalize_or_zero());
+                let (ra, rb) = if n.t == 31 { (n.num("radius"), n.num("radius")) } else { (n.num("major"), n.num("minor")) };
+                o + x * (ra * t.cos()) + z.cross(x) * (rb * t.sin())
+            }
+            133 => self.curve_point(n.ptr("basis"), t, depth + 1)?,
+            _ => self.bspline(n.ptr("nurbs"))?.eval_at(t),
+        })
+    }
+
+    /// A point (in metres, unplaced) on a surface at Parasolid parameters (u, v).
+    fn surface_point(&self, s: u32, u: f64, v: f64, depth: usize) -> Result<DVec3, String> {
+        if depth > NEST {
+            return Err("surface built on itself".into());
+        }
+        let xt = self.xt;
+        let n = xt.node(s).ok_or("missing surface")?;
+        match n.t {
+            50..=54 => surface_point(n, u, v),
+            67 => {
+                let c = self.curve_point(n.ptr("section"), u, depth + 1)?;
+                Ok(c + n.v3("sweep") * v)
+            }
+            68 => {
+                // the profile at u turned by v about the axis
+                let p = self.curve_point(n.ptr("profile"), u, depth + 1)?;
+                let (o, a) = (n.v3("base"), n.v3("axis").normalize_or_zero());
+                let r = p - o;
+                let along = a * a.dot(r);
+                let out = r - along;
+                Ok(o + along + out * v.cos() + a.cross(out) * v.sin())
+            }
+            60 => {
+                let b = n.ptr("surface");
+                let h = 1e-6;
+                let p = self.surface_point(b, u, v, depth + 1)?;
+                let du = self.surface_point(b, u + h, v, depth + 1)? - self.surface_point(b, u - h, v, depth + 1)?;
+                let dv = self.surface_point(b, u, v + h, depth + 1)? - self.surface_point(b, u, v - h, depth + 1)?;
+                let nrm = du.cross(dv).normalize_or_zero();
+                let nrm = if xt.node(b).map(|b| b.plus("orientation")).unwrap_or(true) { nrm } else { -nrm };
+                Ok(p + nrm * n.num("offset"))
+            }
+            124 => {
+                let un = xt.node_of(n.ptr("nurbs"), &[126])?;
+                let (ud, vd) = (un.num("u_degree") as usize, un.num("v_degree") as usize);
+                let (nu, nv) = (un.num("n_u_vertices") as usize, un.num("n_v_vertices") as usize);
+                let dim = un.num("vertex_dim") as usize;
+                let rational = un.ch("rational") == b'T';
+                let verts = xt.node_of(un.ptr("bspline_vertices"), &[45])?.get("vertices");
+                let list = |p: &str, q: &str, count: &str| -> Result<(Vec<usize>, Vec<f64>), String> {
+                    let nk = un.num(count);
+                    let used = |v: &[f64]| -> Vec<f64> { if nk.is_finite() && (nk as usize) <= v.len() { v[..nk as usize].to_vec() } else { v.to_vec() } };
+                    let m = used(xt.node_of(un.ptr(p), &[127])?.get("mult")).iter().map(|&m| m as usize).collect();
+                    Ok((m, used(xt.node_of(un.ptr(q), &[128])?.get("knots"))))
+                };
+                let (um, uk) = list("u_knot_mult", "u_knots", "n_u_knots")?;
+                let (vm, vk) = list("v_knot_mult", "v_knots", "n_v_knots")?;
+                if verts.len() < nu * nv * dim {
+                    return Err("B-spline surface without enough vertices".into());
+                }
+                let flat = |m: &[usize], k: &[f64]| -> Vec<f64> { k.iter().zip(m).flat_map(|(&k, &m)| std::iter::repeat_n(k, m)).collect() };
+                let (fu, fv) = (flat(&um, &uk), flat(&vm, &vk));
+                if fu.len() != nu + ud + 1 || fv.len() != nv + vd + 1 {
+                    return Err("periodic or odd B-spline surface".into());
+                }
+                // each row (fixed u index) is a curve in v; then the row points make a curve in u,
+                // in homogeneous coordinates so rational surfaces come out right
+                let mut col = vec![];
+                for i in 0..nu {
+                    let row: Vec<[f64; 4]> = verts[i * nv * dim..(i + 1) * nv * dim]
+                        .chunks(dim)
+                        .map(|q| {
+                            let w = if rational { q[dim - 1] } else { 1.0 };
+                            let c = |k: usize| if k < dim - usize::from(rational) { q[k] } else { 0.0 };
+                            // Parasolid stores rational vertices already multiplied by their weight
+                            [c(0), c(1), c(2), w]
+                        })
+                        .collect();
+                    col.push(deboor4(vd, &fv, &row, v));
+                }
+                let p = deboor4(ud, &fu, &col, u);
+                Ok(DVec3::new(p[0], p[1], p[2]) / p[3])
+            }
+            t => Err(format!("curves on surface type {t} aren't supported yet")),
         }
     }
 
@@ -936,8 +1269,13 @@ impl Conv<'_> {
         let dim = n.num("vertex_dim") as usize;
         let rational = n.ch("rational") == b'T';
         let verts = xt.node_of(n.ptr("bspline_vertices"), &[45])?.get("vertices");
-        let mults: Vec<usize> = xt.node_of(n.ptr("knot_mult"), &[127])?.get("mult").iter().map(|&m| m as usize).collect();
-        let knots = xt.node_of(n.ptr("knots"), &[128])?.get("knots").to_vec();
+        // the knot lists can be longer than the curve needs: n_knots says how much is used
+        let nk = n.num("n_knots");
+        let used = |v: &[f64]| -> Vec<f64> { if nk.is_finite() && (nk as usize) <= v.len() { v[..nk as usize].to_vec() } else { v.to_vec() } };
+        let mults: Vec<usize> = used(xt.node_of(n.ptr("knot_mult"), &[127])?.get("mult")).iter().map(|&m| m as usize).collect();
+        let knots = used(xt.node_of(n.ptr("knots"), &[128])?.get("knots"));
+        let nv = n.num("n_vertices");
+        let verts = if nv.is_finite() && (nv as usize) * dim <= verts.len() { &verts[..nv as usize * dim] } else { verts };
         Bspline::new(degree, dim, rational, verts, mults, knots)
     }
 
@@ -998,12 +1336,15 @@ impl Conv<'_> {
                 let dim = un.num("vertex_dim") as usize;
                 let rational = un.ch("rational") == b'T';
                 let verts = xt.node_of(un.ptr("bspline_vertices"), &[45])?.get("vertices");
-                let list = |p: &str, q: &str| -> Result<(Vec<usize>, Vec<f64>), String> {
-                    let m = xt.node_of(un.ptr(p), &[127])?.get("mult").iter().map(|&m| m as usize).collect();
-                    Ok((m, xt.node_of(un.ptr(q), &[128])?.get("knots").to_vec()))
+                // the knot lists can be longer than the surface needs: n_u_knots and n_v_knots say how much is used
+                let list = |p: &str, q: &str, count: &str| -> Result<(Vec<usize>, Vec<f64>), String> {
+                    let nk = un.num(count);
+                    let used = |v: &[f64]| -> Vec<f64> { if nk.is_finite() && (nk as usize) <= v.len() { v[..nk as usize].to_vec() } else { v.to_vec() } };
+                    let m = used(xt.node_of(un.ptr(p), &[127])?.get("mult")).iter().map(|&m| m as usize).collect();
+                    Ok((m, used(xt.node_of(un.ptr(q), &[128])?.get("knots"))))
                 };
-                let (um, uk) = list("u_knot_mult", "u_knots")?;
-                let (vm, vk) = list("v_knot_mult", "v_knots")?;
+                let (um, uk) = list("u_knot_mult", "u_knots", "n_u_knots")?;
+                let (vm, vk) = list("v_knot_mult", "v_knots", "n_v_knots")?;
                 let w = if rational { dim.max(4) } else { dim.max(3) };
                 let odd_mult = |m: &[usize], d: usize| m.iter().any(|&m| m == 0 || m > d + 1);
                 if nu < 2
@@ -1028,6 +1369,28 @@ impl Conv<'_> {
                     weights.push(wt);
                 }
                 self.s.bspline_surface(ud, vd, nu, nv, &poles, if rational { &weights } else { &[] }, &um, &vm, &uk, &vk)
+            }
+            67 => {
+                // a section curve moved along a vector: STEP's linear extrusion
+                let (c, _) = self.curve_at(n.ptr("section"), depth + 1)?;
+                let sweep = n.v3("sweep");
+                let len = self.len(sweep.length());
+                let d = self.d(sweep);
+                let d = self.s.dir(d);
+                let v = self.s.add(format!("VECTOR('',#{d},{})", real(len)));
+                self.s.add(format!("SURFACE_OF_LINEAR_EXTRUSION('',#{c},#{v})"))
+            }
+            68 => {
+                // a profile curve spun about an axis: STEP's surface of revolution
+                let (c, _) = self.curve_at(n.ptr("profile"), depth + 1)?;
+                let o = self.pt(n.v3("base"));
+                let a = self.d(n.v3("axis"));
+                let a = self.s.dir(a);
+                let ax = self.s.add(format!("AXIS1_PLACEMENT('',#{o},#{a})"));
+                let e = self.s.add(format!("SURFACE_OF_REVOLUTION('',#{c},#{ax})"));
+                // Parasolid runs u along the profile and v round the axis; STEP the other way
+                // round, so its normal points the opposite way
+                return Ok((e, !plus));
             }
             t => return Err(format!("surface type {t} isn't supported yet")),
         };
@@ -1118,10 +1481,21 @@ impl Bspline {
 
     /// The point at `t` from 0 to 1 along the curve's knot range (de Boor).
     fn eval(&self, t: f64) -> DVec3 {
-        let k: Vec<f64> = self.knots.iter().zip(&self.mults).flat_map(|(&k, &m)| std::iter::repeat_n(k, m)).collect();
+        let k = self.flat_knots();
         let p = self.degree;
         let (a, b) = (k[p], k[k.len() - p - 1]);
-        let u = a + (b - a) * t.clamp(0.0, 1.0);
+        self.eval_at(a + (b - a) * t.clamp(0.0, 1.0))
+    }
+
+    fn flat_knots(&self) -> Vec<f64> {
+        self.knots.iter().zip(&self.mults).flat_map(|(&k, &m)| std::iter::repeat_n(k, m)).collect()
+    }
+
+    /// The point at the curve's own parameter `u` (held to its knot range).
+    fn eval_at(&self, u: f64) -> DVec3 {
+        let k = self.flat_knots();
+        let p = self.degree;
+        let u = u.clamp(k[p], k[k.len() - p - 1]);
         let mut s = p;
         while s + 1 < k.len() - p - 1 && k[s + 1] <= u {
             s += 1;
@@ -1143,6 +1517,85 @@ impl Bspline {
         }
         d[p].0 / d[p].1
     }
+}
+
+/// The point of an analytic surface (unplaced) nearest `p`.
+fn foot(s: &Node, p: DVec3) -> Result<DVec3, String> {
+    Ok(match s.t {
+        50 => {
+            let n = s.v3("normal").normalize_or_zero();
+            p - n * (p - s.v3("pvec")).dot(n)
+        }
+        51 | 52 => {
+            let (o, a) = (s.v3("pvec"), s.v3("axis").normalize_or_zero());
+            let h = (p - o).dot(a);
+            let radial = p - o - a * h;
+            let out = radial.try_normalize().ok_or("point on a surface's axis")?;
+            if s.t == 51 {
+                o + a * h + out * s.num("radius")
+            } else {
+                // the cone's line in the half plane through p: radius r + t·sin at height t·cos
+                let (sin, cos) = (s.num("sin"), s.num("cos"));
+                let base = o + out * s.num("radius");
+                let dir = (out * sin + a * cos).normalize_or_zero();
+                base + dir * (p - base).dot(dir)
+            }
+        }
+        53 => {
+            let c = s.v3("centre");
+            c + (p - c).try_normalize().ok_or("point at a sphere's centre")? * s.num("radius")
+        }
+        54 => {
+            let (c, a) = (s.v3("centre"), s.v3("axis").normalize_or_zero());
+            let radial = (p - c) - a * (p - c).dot(a);
+            let ring = c + radial.try_normalize().ok_or("point on a torus's axis")? * s.num("major");
+            ring + (p - ring).try_normalize().ok_or("point on a torus's core")? * s.num("minor")
+        }
+        t => return Err(format!("blends on surface type {t} aren't supported yet")),
+    })
+}
+
+/// Bezier poles of a smooth cubic through `pts` (Catmull-Rom tangents, one span per gap).
+fn catmull(pts: &[DVec3]) -> Vec<DVec3> {
+    let n = pts.len();
+    let at = |i: isize| pts[i.clamp(0, n as isize - 1) as usize];
+    let mut poles = vec![pts[0]];
+    for i in 0..n as isize - 1 {
+        let (a, b) = (at(i), at(i + 1));
+        poles.push(a + (b - at(i - 1)) / 6.0);
+        poles.push(b - (at(i + 2) - a) / 6.0);
+        poles.push(b);
+    }
+    poles
+}
+
+/// The knots that go with `catmull`'s poles for `n` points.
+fn catmull_knots(n: usize) -> (Vec<usize>, Vec<f64>) {
+    let mut mults = vec![4];
+    mults.extend(std::iter::repeat_n(3, n - 2));
+    mults.push(4);
+    (mults, (0..n).map(|i| i as f64).collect())
+}
+
+/// de Boor's algorithm on homogeneous points, at parameter `u` (held to the knot range).
+fn deboor4(p: usize, k: &[f64], poles: &[[f64; 4]], u: f64) -> [f64; 4] {
+    let u = u.clamp(k[p], k[k.len() - p - 1]);
+    let mut s = p;
+    while s + 1 < k.len() - p - 1 && k[s + 1] <= u {
+        s += 1;
+    }
+    let mut d: Vec<[f64; 4]> = (0..=p).map(|j| poles[(s + j).saturating_sub(p).min(poles.len() - 1)]).collect();
+    for r in 1..=p {
+        for j in (r..=p).rev() {
+            let i = s + j - p;
+            let den = k[i + p + 1 - r] - k[i];
+            let al = if den.abs() < 1e-300 { 0.0 } else { (u - k[i]) / den };
+            for c in 0..4 {
+                d[j][c] = d[j - 1][c] * (1.0 - al) + d[j][c] * al;
+            }
+        }
+    }
+    d[p]
 }
 
 fn refs(ids: &[usize]) -> String {
@@ -1624,6 +2077,46 @@ pub(crate) mod tests {
         let c = to_step(&std::fs::read(&path).unwrap(), "probe").unwrap();
         eprintln!("parts {:?} skipped faces {}", c.parts, c.skipped);
         std::fs::write(format!("{path}.step"), c.step).unwrap();
+    }
+
+    #[test]
+    fn blend_fit_and_feet() {
+        // the Catmull-Rom poles make a cubic B-spline through every point, at whole-number knots
+        let pts = [DVec3::ZERO, DVec3::new(1.0, 2.0, 0.0), DVec3::new(3.0, 2.5, 1.0), DVec3::new(4.0, 0.0, 0.0)];
+        let poles: Vec<f64> = catmull(&pts).iter().flat_map(|p| p.to_array()).collect();
+        let (m, k) = catmull_knots(pts.len());
+        let b = Bspline::new(3, 3, false, &poles, m, k).unwrap();
+        for (i, p) in pts.iter().enumerate() {
+            assert!((b.eval_at(i as f64) - *p).length() < 1e-12);
+        }
+        // a bilinear patch in homogeneous points
+        let row = |y: f64| vec![[0.0, y, 0.0, 1.0], [2.0, y, 0.0, 1.0]];
+        let col = [deboor4(1, &[0.0, 0.0, 1.0, 1.0], &row(0.0), 0.25), deboor4(1, &[0.0, 0.0, 1.0, 1.0], &row(4.0), 0.25)];
+        let p = deboor4(1, &[0.0, 0.0, 1.0, 1.0], &col, 0.5);
+        assert_eq!(p, [0.5, 2.0, 0.0, 1.0]);
+        // the feet of a ball centre on a cylinder and a torus
+        let mut x = Writer { out: String::new() };
+        x.node(51, 1, &[("pvec", "0 0 0"), ("axis", "0 0 1"), ("radius", "2"), ("x_axis", "1 0 0")]);
+        x.node(54, 2, &[("centre", "0 0 0"), ("axis", "0 0 1"), ("major", "5"), ("minor", "1"), ("x_axis", "1 0 0")]);
+        let mut r = Reader { d: x.out.into_bytes(), p: 0, spaces: 0 };
+        let mut node = |t: u16| {
+            let fields = Rc::new(base(t).unwrap());
+            r.int().unwrap();
+            r.int().unwrap();
+            let vals = fields
+                .iter()
+                .map(|f| {
+                    let n = if f.n == 0 { 1 } else { f.n as usize } * f.code.width();
+                    (0..n).map(|_| if matches!(f.code, Code::Char | Code::Logical) { r.ch().map(|c| c as f64) } else { r.num() }).collect::<Result<Vec<_>, _>>().unwrap()
+                })
+                .collect();
+            Node { t, fields, vals }
+        };
+        let (cyl, tor) = (node(51), node(54));
+        assert!((foot(&cyl, DVec3::new(5.0, 0.0, 3.0)).unwrap() - DVec3::new(2.0, 0.0, 3.0)).length() < 1e-12);
+        assert!((foot(&tor, DVec3::new(0.0, 7.0, 0.0)).unwrap() - DVec3::new(0.0, 6.0, 0.0)).length() < 1e-12);
+        // swept surfaces are known to the reader
+        assert!(base(67).is_some());
     }
 
     #[test]
