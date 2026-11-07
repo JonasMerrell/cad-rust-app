@@ -2537,7 +2537,8 @@ fn circle_from_points(pts: &[DVec3]) -> Option<(DVec3, DVec3)> {
 /// and collect its edges as polylines.
 pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
     let m = mesh_body_level(shape, 0)?;
-    if m.faces.len() >= 1500 || m.surface || mesh_open_edges(&m).is_empty() {
+    // a mesh that ran out of time (and fell back to a coarse one) would only take longer again
+    if m.faces.len() >= 1500 || m.surface || ffi::extra::ex_mesh_timed_out() || mesh_open_edges(&m).is_empty() {
         return Ok(m);
     }
     // the mesher left gaps (it struggles with tiny edges): try more careful settings

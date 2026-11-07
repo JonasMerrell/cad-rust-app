@@ -10,6 +10,10 @@
 #include <BRepAlgoAPI_Common.hxx>
 #include <BRepMesh_IncrementalMesh.hxx>
 #include <IMeshTools_Parameters.hxx>
+#include <Message_ProgressIndicator.hxx>
+#include <Message_ProgressScope.hxx>
+#include <atomic>
+#include <chrono>
 #include <BRepTools.hxx>
 #include <BRepOffset_MakeOffset.hxx>
 #include <TopTools_IndexedDataMapOfShapeListOfShape.hxx>
@@ -417,6 +421,28 @@ inline std::unique_ptr<TopoDS_Shape> ex_feature_edges(const TopoDS_Shape &s, dou
 }
 
 // Triangulate with a linear and an angular limit (radians); replaces coarser meshes.
+inline bool &ex_mesh_timed_out_flag() {
+  static thread_local bool f = false;
+  return f;
+}
+
+// Whether the last ex_mesh on this thread ran out of time and fell back to a coarse mesh.
+inline bool ex_mesh_timed_out() { return ex_mesh_timed_out_flag(); }
+
+// A progress indicator that asks OCCT to stop after `secs` seconds.
+class ExMeshDeadline : public Message_ProgressIndicator {
+public:
+  explicit ExMeshDeadline(double secs) : end(std::chrono::steady_clock::now() + std::chrono::milliseconds((long long)(secs * 1000))) {}
+  Standard_Boolean UserBreak() override {
+    if (std::chrono::steady_clock::now() > end)
+      broken = true;
+    return broken;
+  }
+  void Show(const Message_ProgressScope &, const Standard_Boolean) override {}
+  std::chrono::steady_clock::time_point end;
+  std::atomic<bool> broken{false};
+};
+
 inline bool ex_mesh(const TopoDS_Shape &s, double linear, double angular) {
   try {
     // drop triangulations made earlier with other limits, or they would be kept;
@@ -443,7 +469,26 @@ inline bool ex_mesh(const TopoDS_Shape &s, double linear, double angular) {
       BRepMesh_IncrementalMesh m(todo, linear, Standard_False, angular, Standard_True);
       return m.IsDone();
     }
-    BRepMesh_IncrementalMesh m(s, linear, Standard_False, angular, Standard_True);
+    // some faces (dense knurls and helices from imports) can keep the mesher busy for
+    // minutes: give it a time limit, then mesh those coarsely instead of hanging the kernel
+    Handle(ExMeshDeadline) dl = new ExMeshDeadline(10.0);
+    ex_mesh_timed_out_flag() = false;
+    IMeshTools_Parameters p;
+    p.Deflection = linear;
+    p.Angle = angular;
+    p.InParallel = Standard_True;
+    {
+      BRepMesh_IncrementalMesh m(s, p, Message_ProgressIndicator::Start(dl));
+      if (!dl->broken)
+        return m.IsDone();
+    }
+    ex_mesh_timed_out_flag() = true;
+    BRepTools::Clean(s);
+    p.Deflection = linear * 5;
+    p.Angle = 0.5;
+    p.InternalVerticesMode = Standard_False;
+    p.ControlSurfaceDeflection = Standard_False;
+    BRepMesh_IncrementalMesh m(s, p);
     return m.IsDone();
   } catch (...) {
     return false;
