@@ -92,7 +92,7 @@ impl Session {
         Ok(())
     }
 
-    fn build_for_assembly(&mut self, ai: usize) -> R<()> {
+    pub(super) fn build_for_assembly(&mut self, ai: usize) -> R<()> {
         let a = self.ws.assemblies.get(ai).ok_or_else(|| format!("no assembly {ai}"))?;
         let studios: Vec<usize> = a.instances.iter().flat_map(|x| assembly::leaves(&self.ws.assemblies, x)).map(|l| l.studio).collect();
         for s in studios {
@@ -957,6 +957,7 @@ impl Session {
                 self.ws.assemblies[ai].explode_steps = out;
                 json!({"steps": self.ws.assemblies[ai].explode_steps.len()})
             }
+            "assembly_animation" => return self.anim_call(a),
             "assembly_info" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();

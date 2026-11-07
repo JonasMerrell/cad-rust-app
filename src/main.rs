@@ -4,6 +4,8 @@
 
 mod agent;
 mod app;
+mod asm_anim;
+mod asm_anim_ui;
 mod asm_ui;
 mod assembly;
 mod cam;

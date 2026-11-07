@@ -11,7 +11,8 @@ use glam::DVec3;
 use crate::assembly::{self, MateKind, Pose, RelationKind};
 use crate::drawing_ui::DocCtx;
 use crate::kernel::BodyMesh;
-use crate::web_export::{Drive, Joint, JointKind, Mesh, Part, Scene};
+use crate::asm_anim::Target;
+use crate::web_export::{Drive, Joint, JointKind, Mesh, MotionLink, Part, Scene, WebAnimation, WebClip, WebMotion};
 
 fn mesh_of(b: &BodyMesh) -> Mesh {
     let mut edges = vec![];
@@ -213,6 +214,7 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
             j.drive = Some(Drive { of: na, ratio, offset: vb - ratio * va });
         }
     }
+    motions_scene(asm, &mut scene, &joint_of_mate, &mut notes);
     // explode steps, in each node's parent frame
     for st in &asm.explode_steps {
         for id in &st.insts {
@@ -242,4 +244,51 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
         }
     }
     Ok((scene, parts.meshes, notes))
+}
+
+/// The assembly's motion sliders and animations, on the page's joints. Links to mates the page can't
+/// move (fastened in, closing a loop, a cylindrical's turn) are left out with a note.
+fn motions_scene(asm: &assembly::Assembly, scene: &mut Scene, joint_of_mate: &HashMap<u64, (usize, f64)>, notes: &mut Vec<String>) {
+    let index: HashMap<u64, usize> = asm.motions.iter().enumerate().map(|(k, m)| (m.id, k)).collect();
+    for m in &asm.motions {
+        let mut links = vec![];
+        for l in &m.links {
+            let (node, motion) = match l.target {
+                Target::Motion(id) => match index.get(&id) {
+                    Some(&k) => (None, Some(k)),
+                    None => continue,
+                },
+                Target::Mate(id) => match joint_of_mate.get(&id) {
+                    Some(&(n, _)) => {
+                        if scene.nodes[n].joint.as_ref().is_some_and(|j| j.drive.is_some()) {
+                            notes.push(format!("{}: follows a relation on the page, so motion {} doesn't move it there", asm.mates.iter().find(|x| x.id == id).map(|x| x.name.as_str()).unwrap_or("a mate"), m.name));
+                        }
+                        (Some(n), None)
+                    }
+                    None => {
+                        if let Some(x) = asm.mates.iter().find(|x| x.id == id) {
+                            notes.push(format!("motion {}: {} doesn't move on the page", m.name, x.name));
+                        }
+                        continue;
+                    }
+                },
+                Target::Turn(id) => {
+                    if let Some(x) = asm.mates.iter().find(|x| x.id == id) {
+                        notes.push(format!("motion {}: the page slides {} but doesn't turn it", m.name, x.name));
+                    }
+                    continue;
+                }
+            };
+            links.push(MotionLink { node, motion, from: l.from, to: l.to, start: l.start, end: l.end, ease: l.ease.key().into() });
+        }
+        scene.motions.push(WebMotion { name: m.name.clone(), value: m.value, links });
+    }
+    for a in &asm.animations {
+        let clips = a
+            .clips
+            .iter()
+            .filter_map(|c| Some(WebClip { motion: *index.get(&c.motion)?, start: c.start, length: c.length, from: c.from, to: c.to, ease: c.ease.key().into() }))
+            .collect();
+        scene.animations.push(WebAnimation { name: a.name.clone(), repeat: a.repeat.key().into(), autoplay: a.autoplay, clips });
+    }
 }
