@@ -39,6 +39,8 @@ pub struct Drag {
     pub moved: Vec2,
     /// Moving: the plane the grabbed point slides in (point, normal), world coordinates.
     pub plane: (DVec3, DVec3),
+    /// The grabbed point in the instance's own coordinates.
+    pub grab: DVec3,
 }
 
 pub type Snap = (Vec<Assembly>, Vec<Drawing>);
@@ -252,6 +254,7 @@ pub fn undo(app: &mut App) {
         app.asm.scene_dirty = true;
         app.dwg.dirty = true;
         prune_isolation(app);
+        refresh_failed(app);
     }
 }
 
@@ -263,6 +266,7 @@ pub fn redo(app: &mut App) {
         app.asm.scene_dirty = true;
         app.dwg.dirty = true;
         prune_isolation(app);
+        refresh_failed(app);
     }
 }
 
@@ -342,9 +346,16 @@ fn world_bbox(app: &App, x: &Instance) -> Option<(DVec3, DVec3)> {
 
 /// Solve the mates of the open assembly, holding `hold` still.
 pub fn solve(app: &mut App, hold: &[u64]) {
+    let suspects: Vec<u64> = app.asm.dialog.as_ref().map(|d| d.mate).into_iter().collect();
+    solve_suspect(app, hold, &suspects);
+}
+
+/// `solve`, where a conflict is first blamed on the mates in `suspects` (the one just made,
+/// edited or unsuppressed), which are then left unmet rather than pulling every part askew.
+pub fn solve_suspect(app: &mut App, hold: &[u64], suspects: &[u64]) {
     let Some(i) = asm_index(app) else { return };
     let centers: Vec<(u64, DVec3)> = app.ws.assemblies[i].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
-    let r = assembly::solve(&mut app.ws.assemblies[i], hold, &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO));
+    let r = assembly::solve_suspect(&mut app.ws.assemblies[i], hold, &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), &[], suspects);
     // mates whose geometry went away in a Part Studio edit stay failed
     let lost: Vec<u64> = app.asm.failed.iter().copied().filter(|m| app.asm.lost.contains(m)).collect();
     app.asm.failed = r.failed;
@@ -355,6 +366,34 @@ pub fn solve(app: &mut App, hold: &[u64]) {
     }
     app.asm.clash_stale = true;
     app.asm.scene_dirty = true;
+}
+
+/// Solve while an instance is dragged by a point of it (see `assembly::solve_drag`).
+fn solve_drag(app: &mut App, inst: u64, grab: DVec3) {
+    let Some(i) = asm_index(app) else { return };
+    let centers: Vec<(u64, DVec3)> = app.ws.assemblies[i].instances.iter().map(|x| (x.id, centroid_local(app, x))).collect();
+    let r = assembly::solve_drag(&mut app.ws.assemblies[i], &|x: &Instance| centers.iter().find(|c| c.0 == x.id).map(|c| c.1).unwrap_or(DVec3::ZERO), inst, grab);
+    app.asm.failed = r.failed;
+    for m in app.asm.lost.clone() {
+        if !app.asm.failed.contains(&m) {
+            app.asm.failed.push(m);
+        }
+    }
+    app.asm.clash_stale = true;
+    app.asm.scene_dirty = true;
+}
+
+/// Mark the mates that don't hold at the current poses (after an undo, a cancel or a load,
+/// which put poses back without solving), plus those whose geometry is gone.
+pub fn refresh_failed(app: &mut App) {
+    let Some(a) = asm(app) else { return };
+    let mut failed = assembly::failed_mates(a);
+    for m in app.asm.lost.iter().copied().filter(|m| a.mates.iter().any(|x| x.id == *m && !x.suppressed)) {
+        if !failed.contains(&m) {
+            failed.push(m);
+        }
+    }
+    app.asm.failed = failed;
 }
 
 /// After the parts change (a Part Studio rebuilt), move the mate connectors onto the new
@@ -376,6 +415,10 @@ fn follow_parts(app: &mut App) {
     if sig == app.asm.geom_sig {
         return;
     }
+    // a Part Studio still building (just opened): its connectors would all look lost
+    if leaves.iter().any(|l| !app.studio_bodies(l.studio).iter().any(|b| b.id == l.body)) {
+        return;
+    }
     let first = app.asm.geom_sig == 0;
     app.asm.geom_sig = sig;
     let meshes: std::collections::HashMap<(usize, crate::doc::BodyId), crate::kernel::BodyMesh> =
@@ -394,6 +437,8 @@ fn follow_parts(app: &mut App) {
         if !first {
             app.asm.clash_stale = true;
         }
+    } else {
+        refresh_failed(app);
     }
 }
 
@@ -485,6 +530,17 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
     });
 }
 
+/// Fix or free instances (undoable).
+fn set_fixed(app: &mut App, ids: &[u64], fixed: bool) {
+    checkpoint(app);
+    if let Some(a) = asm_mut(app) {
+        for x in a.instances.iter_mut().filter(|x| ids.contains(&x.id)) {
+            x.fixed = fixed;
+        }
+    }
+    app.asm.scene_dirty = true;
+}
+
 fn start_mate(app: &mut App, kind: MateKind) {
     if app.asm.dialog.is_some() {
         mate_ok(app);
@@ -519,6 +575,7 @@ fn mate_cancel(app: &mut App) {
         if asm_index(app) == Some(d.asm) && d.asm < app.ws.assemblies.len() {
             app.ws.assemblies[d.asm] = d.before;
             app.asm.undo.pop();
+            refresh_failed(app);
         }
     }
     app.asm.scene_dirty = true;
@@ -568,6 +625,8 @@ fn delete_selection(app: &mut App) {
     }
     app.asm.sel.clear();
     prune_isolation(app);
+    // the parts a deleted mate pulled askew settle again
+    solve(app, &[]);
     app.asm.scene_dirty = true;
 }
 
@@ -916,6 +975,8 @@ fn instances(app: &mut App, ui: &mut Ui) {
     let mut others: Option<Vec<u64>> = None;
     let mut show_every = false;
     let mut iso: Option<Option<Vec<u64>>> = None;
+    let mut fix: Option<(Vec<u64>, bool)> = None;
+    let fixed_ids: Vec<u64> = rows.iter().filter(|r| r.2).map(|r| r.0).collect();
     for (id, name, fixed, hidden, out_of_sight) in rows {
         let picked = app.asm.sel.contains(&id);
         let label = if fixed { format!("📌 {name}") } else { name };
@@ -964,7 +1025,16 @@ fn instances(app: &mut App, ui: &mut Ui) {
                 iso = Some(None);
                 ui.close();
             }
+            ui.separator();
+            let all_fixed = these.iter().all(|i| fixed_ids.contains(i));
+            if ui.button(format!("{}{what}", if all_fixed { "Unfix" } else { "Fix" })).on_hover_text("Fixed instances stay where they are when mates are solved").clicked() {
+                fix = Some((these.clone(), !all_fixed));
+                ui.close();
+            }
         });
+    }
+    if let Some((ids, on)) = fix {
+        set_fixed(app, &ids, on);
     }
     match iso {
         Some(Some(ids)) => isolate(app, ids),
@@ -994,7 +1064,10 @@ fn mates(app: &mut App, ui: &mut Ui) {
     let mut action = None;
     for (id, name, kind, suppressed) in rows {
         let failed = app.asm.failed.contains(&id);
-        let picked = app.asm.sel_mate == Some(id) || app.asm.dialog.as_ref().map(|d| d.mate == id).unwrap_or(false);
+        let picked = match &app.asm.dialog {
+            Some(d) => d.mate == id,
+            None => app.asm.sel_mate == Some(id),
+        };
         let col = if failed {
             theme::error_soft()
         } else if suppressed {
@@ -1046,13 +1119,14 @@ fn mates(app: &mut App, ui: &mut Ui) {
                     m.suppressed = !m.suppressed;
                 }
             }
-            solve(app, &[]);
+            solve_suspect(app, &[], &[id]);
         }
         Some(("delete", id)) => {
             checkpoint(app);
             if let Some(a) = asm_mut(app) {
                 a.mates.retain(|m| m.id != id);
             }
+            solve(app, &[]);
             app.asm.scene_dirty = true;
         }
         _ => {}
@@ -1470,6 +1544,9 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     if solve_now {
                         // the instance with fewer mates (or inserted later) moves to meet the other
                         let hold = asm(app).map(|a| assembly::mate_anchor(a, mid)).unwrap_or_default();
+                        if let Some(a) = asm_mut(app) {
+                            assembly::place_new_mate(a, mid, &hold);
+                        }
                         solve(app, &hold);
                     }
                     app.asm.scene_dirty = true;
@@ -1512,7 +1589,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     let back = app.camera.back.as_dvec3().normalize();
                     let world = [DVec3::Z, DVec3::Y, DVec3::X].into_iter().max_by(|a, b| a.dot(back).abs().partial_cmp(&b.dot(back).abs()).unwrap_or(std::cmp::Ordering::Equal)).unwrap_or(DVec3::Z);
                     let n = n.filter(|n| n.dot(back).abs() > 0.2).unwrap_or(world);
-                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO, plane: (p, n) });
+                    app.asm.drag = Some(Drag { inst: h.inst, start, rotate, moved: Vec2::ZERO, plane: (p, n), grab: start.inverse_apply(p) });
                 }
             }
         }
@@ -1522,10 +1599,15 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             d.moved += Vec2::new(delta.x, delta.y);
             let cam = app.camera.clone();
             let c_local = asm(app).and_then(|a| a.instance(d.inst)).map(|x| centroid_local(app, x)).unwrap_or(DVec3::ZERO);
+            // each frame moves the part on from where the mates last left it (not from where the
+            // drag started), so a part on a revolute swings round after the pointer step by step
+            // and one at a limit stays there however far the drag goes
+            let cur = asm(app).and_then(|a| a.instance(d.inst)).map(|x| x.pose).unwrap_or(d.start);
+            let mut target = None;
             let pose = if d.rotate {
-                let c = d.start.apply(c_local);
-                let w = (cam.up.as_dvec3() * d.moved.x as f64 + cam.right().as_dvec3() * d.moved.y as f64) * 0.01;
-                d.start.perturbed(w, DVec3::ZERO, c)
+                let c = cur.apply(c_local);
+                let w = (cam.up.as_dvec3() * delta.x as f64 + cam.right().as_dvec3() * delta.y as f64) * 0.01;
+                cur.perturbed(w, DVec3::ZERO, c)
             } else {
                 // the grabbed point follows the pointer across its plane
                 let (p0, n) = d.plane;
@@ -1536,15 +1618,15 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     (den.abs() > 1e-9).then(|| o + dir * ((p0 - o).dot(n) / den))
                 };
                 let now = ui.input(|i| i.pointer.latest_pos()).map(local);
-                let start = now.map(|q| q - d.moved);
-                let v = match (start.and_then(hit), now.and_then(hit)) {
-                    (Some(a), Some(b)) if (b - a).length() < 1e6 => b - a,
-                    _ => {
+                let t = match now.and_then(hit).filter(|t| (*t - p0).length() < 1e6) {
+                    Some(t) => t,
+                    None => {
                         let wpp = cam.wpp() as f64;
-                        cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp)
+                        d.start.apply(d.grab) + cam.right().as_dvec3() * (d.moved.x as f64 * wpp) - cam.up.as_dvec3() * (d.moved.y as f64 * wpp)
                     }
                 };
-                d.start.perturbed(DVec3::ZERO, v, DVec3::ZERO)
+                target = Some(t);
+                cur.perturbed(DVec3::ZERO, t - cur.apply(d.grab), DVec3::ZERO)
             };
             let id = d.inst;
             if let Some(a) = asm_mut(app) {
@@ -1552,7 +1634,18 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     x.pose = pose;
                 }
             }
-            solve(app, &[id]);
+            if d.rotate {
+                solve(app, &[id]);
+            } else {
+                solve_drag(app, id, d.grab);
+            }
+            if let (Some(t), Some(now)) = (target, asm(app).and_then(|a| a.instance(id)).map(|x| x.pose)) {
+                // still closing in on the pointer: keep going without waiting for the mouse
+                let (before, after) = ((t - cur.apply(d.grab)).length(), (t - now.apply(d.grab)).length());
+                if down && after > 0.05 && before - after > 1e-3 {
+                    ui.ctx().request_repaint();
+                }
+            }
             if down {
                 app.asm.drag = Some(d);
             }
@@ -1639,7 +1732,12 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
                     close = true;
                 }
                 if ui.button(if n > 1 { format!("Isolate {n} instances") } else { "Isolate".to_string() }).on_hover_text("I").clicked() {
-                    isolate(app, these);
+                    isolate(app, these.clone());
+                    close = true;
+                }
+                let all_fixed = asm(app).is_some_and(|a| these.iter().all(|id| a.instance(*id).is_some_and(|x| x.fixed)));
+                if ui.button(if all_fixed { "Unfix" } else { "Fix" }).on_hover_text("Fixed instances stay where they are when mates are solved").clicked() {
+                    set_fixed(app, &these, !all_fixed);
                     close = true;
                 }
                 ui.separator();
@@ -1737,22 +1835,24 @@ fn relations(app: &mut App, ui: &mut Ui) {
             _ => &[MateKind::Slider, MateKind::Cylindrical],
         };
         ui.label(RichText::new(kind.label()).strong());
-        let pick = |ui: &mut Ui, id: &str, label: &str, cur: &mut Option<u64>, want: &[MateKind]| {
+        let pick = |ui: &mut Ui, id: &str, label: &str, cur: &mut Option<u64>, want: &[MateKind], other: Option<u64>| {
             ui.horizontal(|ui| {
                 ui.label(RichText::new(label).color(theme::muted()).size(12.0));
                 let name = cur.and_then(|c| mates.iter().find(|m| m.0 == c)).map(|m| m.1.clone()).unwrap_or_else(|| "Choose…".into());
                 egui::ComboBox::from_id_salt(id).selected_text(name).show_ui(ui, |ui| {
                     for (mid, n, k) in &mates {
-                        if want.contains(k) && ui.selectable_label(*cur == Some(*mid), n).clicked() {
+                        // a mate can't drive itself
+                        if want.contains(k) && other != Some(*mid) && ui.selectable_label(*cur == Some(*mid), n).clicked() {
                             *cur = Some(*mid);
                         }
                     }
                 });
             });
         };
-        pick(ui, "rel-a", "Driving mate", &mut ma, want_a);
+        let other_b = if kind == RelationKind::Screw { None } else { mb };
+        pick(ui, "rel-a", "Driving mate", &mut ma, want_a, other_b);
         if kind != RelationKind::Screw {
-            pick(ui, "rel-b", "Driven mate", &mut mb, want_b);
+            pick(ui, "rel-b", "Driven mate", &mut mb, want_b, ma);
         }
         ui.horizontal(|ui| {
             let label = match kind {
@@ -1930,10 +2030,21 @@ fn mate_dialog(app: &mut App, ui: &mut Ui, rect: egui::Rect) {
     if changed {
         if let Some(a) = asm_mut(app) {
             if let Some(mm) = a.mates.iter_mut().find(|x| x.id == mid) {
-                if edited.kind != mm.kind {
-                    edited.name = mm.name.replace(mm.kind.label(), edited.kind.label());
+                *mm = edited.clone();
+            }
+            if let Some(k) = a.mates.iter().position(|x| x.id == mid).filter(|_| edited.kind != m.kind) {
+                // "Revolute 2" becomes the next free "Fastened n", not a second "Fastened 1"
+                let auto = |kind: MateKind, name: &str| name.strip_prefix(kind.label()).and_then(|r| r.trim().parse::<u32>().ok()).is_some();
+                if auto(m.kind, &m.name) {
+                    let used = |name: &str| a.mates.iter().any(|x| x.id != mid && x.name == name);
+                    let mut n = 1;
+                    while used(&format!("{} {n}", edited.kind.label())) {
+                        n += 1;
+                    }
+                    a.mates[k].name = format!("{} {n}", edited.kind.label());
+                } else {
+                    a.mates[k].name = m.name.replace(m.kind.label(), edited.kind.label());
                 }
-                *mm = edited;
             }
         }
         solve(app, &[]);
