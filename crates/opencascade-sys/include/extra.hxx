@@ -508,7 +508,14 @@ inline bool ex_mesh_careful(const TopoDS_Shape &s, double linear, double angular
     p.ControlSurfaceDeflection = Standard_True;
     p.MinSize = linear * 0.01;
     p.AllowQualityDecrease = level >= 2;
-    BRepMesh_IncrementalMesh m(s, p);
+    // finer passes can take minutes on big curved faces: give up on them after a while
+    Handle(ExMeshDeadline) dl = new ExMeshDeadline(4.0);
+    ex_mesh_timed_out_flag() = false;
+    BRepMesh_IncrementalMesh m(s, p, Message_ProgressIndicator::Start(dl));
+    if (dl->broken) {
+      ex_mesh_timed_out_flag() = true;
+      return false;
+    }
     return m.IsDone();
   } catch (...) {
     return false;

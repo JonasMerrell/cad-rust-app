@@ -2547,6 +2547,9 @@ pub fn mesh_body(shape: &Shape) -> R<BodyMesh> {
             if mesh_open_edges(&m2).is_empty() {
                 return Ok(m2);
             }
+        } else if ffi::extra::ex_mesh_timed_out() {
+            // finer levels would only take longer
+            break;
         }
     }
     Ok(m)
