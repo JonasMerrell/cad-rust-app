@@ -198,6 +198,11 @@ fn disclosure(ui: &mut Ui, open: bool) -> egui::Response {
     r
 }
 
+/// A row's leading word, in a fixed width so the values line up.
+fn lead(ui: &mut Ui, text: &str) -> egui::Response {
+    ui.add_sized([30.0, 18.0], egui::Label::new(small(text)))
+}
+
 fn small(text: &str) -> RichText {
     RichText::new(text).size(12.0).color(theme::muted())
 }
@@ -510,13 +515,15 @@ fn links_ui(ui: &mut Ui, a: &Assembly, m: &mut Motion, e: &mut Edit) {
                     }
                 };
                 ui.horizontal(|ui| {
-                    ui.label(small("from"));
+                    lead(ui, "from");
                     value(ui, &mut l.from, e);
-                    ui.label(small("to"));
+                });
+                ui.horizontal(|ui| {
+                    lead(ui, "to");
                     value(ui, &mut l.to, e);
                 });
                 ui.horizontal(|ui| {
-                    ui.label(small("while the slider goes"));
+                    lead(ui, "over").on_hover_text("The part of the slider's travel this joint moves in: spans one after another move joints in sequence");
                     if e.track(&pct(ui, &mut l.start)) {
                         e.sliders = true;
                     }
