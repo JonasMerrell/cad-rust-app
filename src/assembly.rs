@@ -121,6 +121,25 @@ pub fn leaves_shown(all: &[Assembly], inst: &Instance) -> Vec<(Leaf, bool)> {
     out
 }
 
+/// The parts in sight of assembly `ai` placed in its coordinates, for a STEP export:
+/// (studio, body, row-major 3x4 pose, name). Parts inside sub-assemblies are named after the
+/// instance with a number.
+pub fn export_items(all: &[Assembly], ai: usize) -> Vec<crate::kernel::AsmExportItem> {
+    let Some(a) = all.get(ai) else { return vec![] };
+    let mut out = vec![];
+    for x in a.instances.iter().filter(|x| !x.hidden) {
+        let ls = leaves(all, x);
+        let many = ls.len() > 1 || x.sub.is_some();
+        for (k, l) in ls.iter().enumerate() {
+            let p = x.pose.compose(&l.pose);
+            let (m, t) = (p.m(), p.t);
+            let name = if many { format!("{} {}", x.name, k + 1) } else { x.name.clone() };
+            out.push((l.studio, l.body, [m.x_axis.x, m.y_axis.x, m.z_axis.x, t[0], m.x_axis.y, m.y_axis.y, m.z_axis.y, t[1], m.x_axis.z, m.y_axis.z, m.z_axis.z, t[2]], name));
+        }
+    }
+    out
+}
+
 /// Whether assembly `k` is `target` or contains it at any depth (inserting it would loop).
 pub fn contains(all: &[Assembly], k: usize, target: usize) -> bool {
     fn rec(all: &[Assembly], k: usize, target: usize, depth: usize) -> bool {

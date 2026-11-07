@@ -1018,6 +1018,12 @@ impl App {
     }
 
     pub fn export(&mut self, format: &str) {
+        // in an assembly, STEP is the assembly itself (placed parts), not the open Part Studio
+        if format == "step" {
+            if let crate::workspace::Tab::Assembly(ai) = self.tab {
+                return self.export_assembly_step(ai, false);
+            }
+        }
         let ext = match format {
             "step" => "step",
             "iges" => "igs",
@@ -1028,6 +1034,26 @@ impl App {
         self.with_save_path(&format!("Export {}", ext.to_uppercase()), &ext.to_uppercase(), &[ext], &name, move |a, p| {
             a.kernel.export(&a.doc, &format, p.to_string_lossy().to_string());
             a.flash_info(format!("Exporting {}…", p.display()), None);
+        });
+    }
+
+    /// The assembly's parts in sight as STEP: each placed part separately, or with `single_body`
+    /// all of them fused into one solid (one compound when they can't be fused).
+    pub fn export_assembly_step(&mut self, ai: usize, single_body: bool) {
+        let Some(a) = self.ws.assemblies.get(ai) else { return };
+        let items = crate::assembly::export_items(&self.ws.assemblies, ai);
+        if items.is_empty() {
+            self.flash("There are no parts in sight to export", ToastKind::Info);
+            return;
+        }
+        let name = a.name.clone();
+        let file = if single_body { format!("{name} (one body).step") } else { format!("{name}.step") };
+        let title = if single_body { "Export STEP as one body" } else { "Export STEP" };
+        self.with_save_path(title, "STEP", &["step"], &file, move |a, p| {
+            let docs = a.studio_docs();
+            a.kernel.set_studios(docs);
+            a.kernel.export_assembly(items, &name, p.to_string_lossy().to_string(), single_body);
+            a.flash_info(if single_body { format!("Fusing the parts and exporting {}…", p.display()) } else { format!("Exporting {}…", p.display()) }, None);
         });
     }
 
@@ -1178,6 +1204,11 @@ impl App {
                         }
                     }
                 }
+                Outcome::AsmExported(r, path) => match r {
+                    Ok(None) => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
+                    Ok(Some(note)) => self.flash(format!("Exported {path}, but {note}"), ToastKind::Info),
+                    Err(e) => self.flash(format!("Export failed: {e}"), ToastKind::Error),
+                },
                 Outcome::Exported(err, path) => match err {
                     None => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
                     Some(e) => self.flash(format!("Export failed: {e}"), ToastKind::Error),
@@ -1521,8 +1552,18 @@ impl App {
             }
         }
         ui.menu_image_text_button(icons::image("export", 15.0).tint(theme::text()), "Export", |ui| {
-            for (a, l) in [("step", "STEP"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("web", "Web viewer (HTML)"), ("png", "Screenshot PNG")] {
-                if ui.button(l).clicked() {
+            let in_asm = matches!(self.tab, crate::workspace::Tab::Assembly(_));
+            for (a, l) in [("step", "STEP"), ("step-one", "STEP as one body"), ("iges", "IGES"), ("stl", "STL"), ("obj", "OBJ"), ("web", "Web viewer (HTML)"), ("png", "Screenshot PNG")] {
+                if a == "step-one" && !in_asm {
+                    continue;
+                }
+                let r = ui.button(l);
+                let r = match a {
+                    "step" if in_asm => r.on_hover_text("The assembly's parts in sight, each placed as a separate part"),
+                    "step-one" => r.on_hover_text("Every part in sight fused into one solid body (written as one compound if they can't be fused)"),
+                    _ => r,
+                };
+                if r.clicked() {
                     action = Some(a);
                     ui.close();
                 }
@@ -1595,6 +1636,11 @@ impl App {
             Some("quit") => self.guard(crate::session::Pending::Close),
             Some("import") => self.import_step(),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
+            Some("step-one") => {
+                if let crate::workspace::Tab::Assembly(ai) = self.tab {
+                    self.export_assembly_step(ai, true);
+                }
+            }
             Some("obj") => self.export_obj(),
             Some("web") => self.export_web(),
             Some("send") => self.send_to_slicer(),

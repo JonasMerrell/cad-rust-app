@@ -612,6 +612,30 @@ impl Session {
                 let format = str_arg(a, "format")?;
                 let path = str_arg(a, "path")?;
                 let ascii = a.get("ascii").and_then(|v| v.as_bool()).unwrap_or(false);
+                let single = a.get("single_body").and_then(|v| v.as_bool()).unwrap_or(false);
+                if let Some(ai) = a.get("assembly").and_then(|v| v.as_u64()) {
+                    let ai = ai as usize;
+                    if format != "step" {
+                        return Err("an assembly exports as STEP only".into());
+                    }
+                    let name = self.ws.assemblies.get(ai).map(|x| x.name.clone()).ok_or_else(|| format!("there is no assembly {ai}"))?;
+                    let items = crate::assembly::export_items(&self.ws.assemblies, ai);
+                    if items.is_empty() {
+                        return Err("the assembly has no parts in sight".into());
+                    }
+                    make_parent(&path)?;
+                    self.sync();
+                    self.kernel.set_studios(self.ws.studios.iter().map(|s| s.doc.clone()).collect());
+                    let note = self.kernel.export_assembly_blocking(items, &name, path.clone(), single).map_err(|e| format!("can't write {path}: {e}"))?;
+                    let mut v = json!({"exported": path, "single_body": single});
+                    if let Some(n) = note {
+                        v["note"] = json!(n);
+                    }
+                    return Ok((v, None));
+                }
+                if single {
+                    return Err("single_body needs an assembly".into());
+                }
                 match format.as_str() {
                     "stl" if !ascii => write_out(&path, stl_binary(&self.result))?,
                     "step" | "stl" | "iges" => {
@@ -1757,7 +1781,7 @@ pub(crate) fn tools() -> Value {
         {"name": "add_decal", "description": "Lay a PNG/JPEG image on a flat face (a label or logo), centred on face.point. width in mm (height keeps the image's proportions), angle turns it about the face normal. Shown in the editor; not exported.", "inputSchema": obj(json!({"image": {"type": "string"}, "face": {"type": "object"}, "width": {"type": "number"}, "angle": {"type": "number"}}), &["image", "face"])},
         {"name": "list_geometry", "description": "Faces and edges of the parts with refs ready for add_feature (fillet edges, shell faces, sketch on a face, …), plus normals, lengths and circle centres. Filters: type 'faces'|'edges', body [f,i], box [[xmin,ymin,zmin],[xmax,ymax,zmax]] (ref point inside), normal [x,y,z] (faces facing that way), planar true/false.", "inputSchema": obj(json!({"body": {"type": "array"}, "type": {"type": "string"}, "box": {"type": "array"}, "normal": {"type": "array"}, "planar": {"type": "boolean"}}), &[])},
         {"name": "render", "description": "Render a shaded PNG of the model. view: front, top, right, back, bottom, left, iso (= iso_front_right), iso_front_left, iso_back_right, iso_back_left, or any of those + '_below'. direction [x,y,z] (from the part towards the camera, front is -Y) overrides view. sketches: 'unused' (default: hide sketches a feature consumed), 'all' or 'none'. Returns the image; optionally saves it to path.", "inputSchema": obj(json!({"view": {"type": "string"}, "direction": {"type": "array"}, "sketches": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &[])},
-        {"name": "export", "description": "Export the parts: format step, iges, stl (binary; ascii:true for text) or obj.", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}}), &["format", "path"])},
+        {"name": "export", "description": "Export the parts of the active Part Studio: format step, iges, stl (binary; ascii:true for text) or obj. With assembly (index, format step): that assembly's parts in sight, each placed as its own part; single_body:true fuses them all into one solid body (if fusing fails they are written as one compound and the result has a note saying so).", "inputSchema": obj(json!({"format": {"type": "string"}, "path": {"type": "string"}, "ascii": {"type": "boolean"}, "assembly": {"type": "integer"}, "single_body": {"type": "boolean"}}), &["format", "path"])},
         {"name": "export_drawing", "description": "Export a drawing as pdf (all sheets), svg, dxf or png (one sheet: sheet 1, 2, …). With drawing (index from create_drawing) it exports that Drawing tab with its dimensions, notes and GD&T; without, a quick sheet with front, top, right and iso views of the active Part Studio (optional sheet size A4/A3/A2/A1/Letter/Tabloid, scale, title).", "inputSchema": obj(json!({"path": {"type": "string"}, "format": {"type": "string"}, "drawing": {"type": "integer"}, "sheet": {}, "scale": {"type": "number"}, "title": {"type": "string"}, "width": {"type": "integer"}}), &["path"])},
         {"name": "stock_size", "description": "The raw stock each part of the active Part Studio is machined from: the smallest standard plate, flat or square bar, or round bar (metric or imperial sizes) that holds it with a machining allowance, boxed square to the part's own faces; with its size, directions, stock mass and how much is machined away. stock {shape, standard, side, face} tries other settings without saving them (set_part stock saves them on a part). bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "stock": {"type": "object"}}), &[])},
         {"name": "mass_properties", "description": "Exact mass properties of the active Part Studio's parts: volume, mass, centre of gravity and inertia tensor about the centre of gravity (g·mm²), from each part's material (set_part) or a material or density (g/cm³) for all; with several parts also their total. bodies limits it to some parts.", "inputSchema": obj(json!({"bodies": {"type": "array"}, "material": {"type": "string"}, "density": {"type": "number"}}), &[])},

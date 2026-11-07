@@ -3199,6 +3199,95 @@ pub fn interference(items: &[(usize, BodyId, [f64; 12])]) -> Vec<(usize, usize, 
     out
 }
 
+// ------------------------------------------------------------------ assembly STEP
+
+/// One placed part of an assembly export: studio, body, row-major 3x4 pose, name.
+pub type AsmExportItem = (usize, BodyId, [f64; 12], String);
+
+/// The shape of a Part Studio body moved to an instance pose (row-major 3x4).
+fn placed(built: &mut HashMap<usize, Vec<Body>>, studios: &[Document], studio: usize, body: BodyId, m: &[f64; 12]) -> Option<Shape> {
+    let bodies = built.entry(studio).or_insert_with(|| studios.get(studio).map(build_bodies).unwrap_or_default());
+    let b = bodies.iter().find(|b| b.id == body)?;
+    let rot = DMat3::from_cols(DVec3::new(m[0], m[4], m[8]), DVec3::new(m[1], m[5], m[9]), DVec3::new(m[2], m[6], m[10]));
+    occ::transform(&b.shape, rot, DVec3::new(m[3], m[7], m[11])).ok()
+}
+
+/// Write the placed parts of an assembly as STEP. With `single_body` every solid is fused into
+/// one body (when that fails the parts go in as one compound instead). Returns a note for the
+/// user about anything that didn't go as asked, or None.
+pub fn export_assembly(items: &[AsmExportItem], name: &str, path: &str, single_body: bool) -> Result<Option<String>, String> {
+    let studios = STUDIOS.lock().map(|s| s.clone()).unwrap_or_default();
+    let mut built: HashMap<usize, Vec<Body>> = HashMap::new();
+    let mut parts: Vec<(Shape, String, Option<[u8; 3]>)> = vec![];
+    let mut missing = 0;
+    for (studio, body, m, n) in items {
+        match placed(&mut built, &studios, *studio, *body, m) {
+            Some(s) => {
+                let color = studios.get(*studio).and_then(|d| d.parts.get(&crate::doc::body_key(*body))).and_then(|p| p.color);
+                parts.push((s, n.clone(), color));
+            }
+            None => missing += 1,
+        }
+    }
+    if parts.is_empty() {
+        return Err("there are no parts to export".into());
+    }
+    let mut notes = vec![];
+    if missing > 0 {
+        notes.push(format!("{missing} part{} could not be built and {} left out", if missing == 1 { "" } else { "s" }, if missing == 1 { "was" } else { "were" }));
+    }
+    if !single_body {
+        let refs: Vec<(&Shape, String, Option<[u8; 3]>)> = parts.iter().map(|(s, n, c)| (s, n.clone(), *c)).collect();
+        occ::write_step_named(name, &refs, path)?;
+        return Ok((!notes.is_empty()).then(|| notes.join("; ")));
+    }
+    // one colour for the body when every part has the same one
+    let color = parts[0].2.filter(|c| parts.iter().all(|p| p.2 == Some(*c)));
+    let solids: Vec<Shape> = parts.iter().flat_map(|(s, _, _)| solids_of(s)).collect();
+    let surfaces = parts.iter().filter(|(s, _, _)| solids_of(s).is_empty()).count();
+    let fused = fuse_solids(&solids);
+    let body = match fused {
+        Ok(f) => {
+            if surfaces > 0 {
+                notes.push(format!("{surfaces} surface bod{} left out (only solids are fused)", if surfaces == 1 { "y was" } else { "ies were" }));
+            }
+            let n = solids_of(&f).len();
+            if n > 1 {
+                notes.push(format!("the fused body has {n} separate solid lumps because some parts don't touch"));
+            }
+            f
+        }
+        Err(e) => {
+            notes.push(format!("the parts could not be fused into one solid ({e}), so they were written as one compound body instead"));
+            let shapes: Vec<&Shape> = parts.iter().map(|(s, _, _)| s).collect();
+            occ::compound(&shapes)?
+        }
+    };
+    occ::write_step_named(name, &[(&body, name.to_string(), color)], path)?;
+    Ok((!notes.is_empty()).then(|| notes.join("; ")))
+}
+
+/// Boolean union of solids into one valid shape; tries again with a little fuzz when parts
+/// touch face to face and the exact fuse fails.
+fn fuse_solids(solids: &[Shape]) -> Result<Shape, String> {
+    match solids {
+        [] => Err("there are no solids".into()),
+        [one] => Ok(dup(one)),
+        [first, rest @ ..] => {
+            let tools: Vec<&Shape> = rest.iter().collect();
+            let mut last = String::new();
+            for fuzzy in [0.0, 1e-4, 1e-3] {
+                match occ::boolean_n(&[first], &tools, 0, fuzzy, true) {
+                    Ok(s) if !solids_of(&s).is_empty() && occ::is_valid(&s) => return Ok(s),
+                    Ok(_) => last = "the result was not a valid solid".into(),
+                    Err(e) => last = e,
+                }
+            }
+            Err(last)
+        }
+    }
+}
+
 // ------------------------------------------------------------------ drawings
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -4063,6 +4152,44 @@ mod derived_tests {
         assert_eq!(r.len(), 1);
         assert_eq!((r[0].0, r[0].1), (0, 1));
         assert!((r[0].2 - 500.0).abs() < 1e-6, "{}", r[0].2);
+    }
+
+    #[test]
+    fn assembly_exports_as_one_fused_body() {
+        let mut a = Document::default();
+        let mut s = Sketch::default();
+        let p: Vec<_> = [(0.0, 0.0), (10.0, 0.0), (10.0, 10.0), (0.0, 10.0)].iter().map(|&(x, y)| s.add_point(DVec2::new(x, y))).collect();
+        for i in 0..4 {
+            s.add_curve(Geom::Line { a: p[i], b: p[(i + 1) % 4] }, false);
+        }
+        let sk = a.insert("S".into(), Op::Sketch { plane: Ref::OriginPlane { plane: OriginPlane::Top }, sketch: s, frame: Frame::TOP });
+        let mut e = Op::new_default("extrude").unwrap();
+        if let Op::Extrude { profiles, .. } = &mut e {
+            profiles.push(Ref::Region { sketch: sk, point: [5.0, 5.0] });
+        }
+        let eid = a.insert("E".into(), e);
+        let at = |x: f64| [1.0, 0.0, 0.0, x, 0.0, 1.0, 0.0, 0.0, 0.0, 0.0, 1.0, 0.0];
+        let dir = std::env::temp_dir().join(format!("rcad-asm-step-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = |n: &str| dir.join(n).to_string_lossy().to_string();
+        let one = volume(&build_bodies(&a)[0].shape);
+        *STUDIOS.lock().unwrap() = vec![a];
+        // two overlapping boxes and one touching the second face to face: one solid
+        let items: Vec<AsmExportItem> = [0.0, 5.0, 15.0].iter().enumerate().map(|(i, x)| (0, (eid, 0), at(*x), format!("Box {i}"))).collect();
+        let note = export_assembly(&items, "Boxes", &path("one.step"), true).unwrap();
+        assert!(note.is_none(), "{note:?}");
+        let back = Shape::read_step(&path("one.step")).unwrap();
+        assert_eq!(solids_of(&back).len(), 1);
+        assert!((volume(&back) - 2.5 * one).abs() < 1e-3 * one, "{} vs {}", volume(&back), 2.5 * one);
+        // a part off on its own still fuses, as a second lump, and the user hears about it
+        let items: Vec<AsmExportItem> = [0.0, 30.0].iter().enumerate().map(|(i, x)| (0, (eid, 0), at(*x), format!("Box {i}"))).collect();
+        let note = export_assembly(&items, "Apart", &path("apart.step"), true).unwrap();
+        assert!(note.unwrap().contains("2 separate solid"));
+        // without single_body every part stays its own
+        let note = export_assembly(&items, "Parts", &path("parts.step"), false).unwrap();
+        assert!(note.is_none());
+        assert_eq!(solids_of(&Shape::read_step(&path("parts.step")).unwrap()).len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
 
