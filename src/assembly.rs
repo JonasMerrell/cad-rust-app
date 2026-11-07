@@ -446,6 +446,135 @@ fn mate_residuals(m: &Mate, a: (DVec3, DVec3, DVec3), b: (DVec3, DVec3, DVec3), 
     }
 }
 
+/// The rotation (world) that turns the second connector's frame `b` to where mate `m` wants
+/// it against the first's `a`: z along (or against, unflipped) the first's z, and for mates
+/// that fix the turn about the axis, x on the first's (rotated) x. Mates free to turn get the
+/// shortest turn of z; a half turn goes about the second's x (turning the part over).
+fn mate_rotation(m: &Mate, a: Frame3, b: Frame3) -> Option<DMat3> {
+    let (_, za, xt) = target_frame(m, a);
+    let (_, zb, xb) = b;
+    let zt = if m.flip { za } else { -za };
+    match m.kind {
+        MateKind::Ball => None,
+        MateKind::Fastened | MateKind::Slider => {
+            let ft = DMat3::from_cols(xt, zt.cross(xt), zt);
+            let fb = DMat3::from_cols(xb, zb.cross(xb), zb);
+            Some(orthonormalize(ft * fb.transpose()))
+        }
+        _ => {
+            let c = zb.dot(zt).clamp(-1.0, 1.0);
+            let axis = zb.cross(zt);
+            Some(if axis.length() > 1e-9 {
+                DMat3::from_axis_angle(axis.normalize(), c.acos())
+            } else if c > 0.0 {
+                DMat3::IDENTITY
+            } else {
+                DMat3::from_axis_angle(xb, std::f64::consts::PI)
+            })
+        }
+    }
+}
+
+/// Angle (radians) of a rotation matrix.
+fn rotation_angle(r: DMat3) -> f64 {
+    ((r.x_axis.x + r.y_axis.y + r.z_axis.z - 1.0) / 2.0).clamp(-1.0, 1.0).acos()
+}
+
+/// Turn parts that are far from what their mates want (a flipped axis, a part picked on a face
+/// pointing the wrong way, a 180° rotation) roughly into place before the iterative solve.
+/// Starting half a turn out the solve's gradient vanishes, so it would stop there.
+/// Instances are visited outward from the fixed and held ones, each moved once by the mate
+/// that reaches it first, so the parts already placed stay put and the ones hanging off a
+/// turned part follow it.
+fn prealign(asm: &mut Assembly, mates: &[Mate], hold: &[u64]) {
+    let n = asm.instances.len();
+    let idx = |asm: &Assembly, id: u64| asm.instances.iter().position(|i| i.id == id);
+    let mut depth: Vec<Option<usize>> = vec![None; n];
+    let mut queue = std::collections::VecDeque::new();
+    for (i, x) in asm.instances.iter().enumerate() {
+        if x.fixed || hold.contains(&x.id) {
+            depth[i] = Some(0);
+            queue.push_back(i);
+        }
+    }
+    let ends: Vec<(usize, usize, usize)> = mates
+        .iter()
+        .enumerate()
+        .filter_map(|(k, m)| Some((k, idx(asm, m.a?.inst)?, idx(asm, m.b?.inst)?)))
+        .filter(|e| e.1 != e.2)
+        .collect();
+    // tree edges: (mate, mover) in visiting order
+    let mut order: Vec<(usize, usize)> = vec![];
+    loop {
+        while let Some(i) = queue.pop_front() {
+            for &(k, ia, ib) in &ends {
+                let other = if ia == i { ib } else if ib == i { ia } else { continue };
+                if depth[other].is_none() {
+                    depth[other] = Some(depth[i].unwrap() + 1);
+                    order.push((k, other));
+                    queue.push_back(other);
+                }
+            }
+        }
+        // a group of parts with nothing fixed: its first mate's first part stays
+        let Some(&(_, ia, _)) = ends.iter().find(|e| depth[e.1].is_none() || depth[e.2].is_none()) else { break };
+        let root = if depth[ia].is_none() { ia } else { ends.iter().find(|e| depth[e.2].is_none()).unwrap().2 };
+        depth[root] = Some(0);
+        queue.push_back(root);
+    }
+    for (k, mover) in order {
+        let m = &mates[k];
+        let (Some(ca), Some(cb)) = (m.a.as_ref(), m.b.as_ref()) else { continue };
+        let (Some(fa), Some(fb)) = (asm.world(ca), asm.world(cb)) else { continue };
+        let Some(r) = mate_rotation(m, fa, fb) else { continue };
+        if rotation_angle(r) < 45f64.to_radians() {
+            continue;
+        }
+        // turning the second part by r, or the first by r⁻¹, gives the same relative frames
+        let b_moves = idx(asm, cb.inst) == Some(mover);
+        let (r, pivot) = if b_moves { (r, fb.0) } else { (r.transpose(), fa.0) };
+        let p = &mut asm.instances[mover].pose;
+        let t = r * (DVec3::from(p.t) - pivot) + pivot;
+        p.r = orthonormalize(r * p.m()).to_cols_array();
+        p.t = t.into();
+        // mates that hold a point bring it over too (the solve does the rest)
+        if matches!(m.kind, MateKind::Fastened | MateKind::Revolute) {
+            let (Some(fa), Some(fb)) = (asm.world(ca), asm.world(cb)) else { continue };
+            let d = target_frame(m, fa).0 - fb.0;
+            let p = &mut asm.instances[mover].pose;
+            p.t = (DVec3::from(p.t) + if b_moves { d } else { -d }).into();
+        }
+    }
+}
+
+/// Put the moving side of a newly made mate where the mate wants it: turned like `prealign`
+/// does and moved so the connectors meet (the solve then only has to settle the rest). Mates
+/// that leave the travel along the axis free (slider, cylindrical, planar) would otherwise
+/// leave the parts wherever they were, often inside each other. The side in `hold`, or the
+/// fixed one, stays.
+pub fn place_new_mate(asm: &mut Assembly, mate: u64, hold: &[u64]) {
+    let Some(m) = asm.mates.iter().find(|m| m.id == mate).cloned() else { return };
+    let (Some(ca), Some(cb)) = (m.a, m.b) else { return };
+    if ca.inst == cb.inst {
+        return;
+    }
+    let stays = |id: u64| hold.contains(&id) || asm.instance(id).map(|x| x.fixed).unwrap_or(true);
+    let b_moves = if !stays(cb.inst) { true } else if !stays(ca.inst) { false } else { return };
+    let mover = if b_moves { cb.inst } else { ca.inst };
+    let Some(ix) = asm.instances.iter().position(|x| x.id == mover) else { return };
+    let (Some(fa), Some(fb)) = (asm.world(&ca), asm.world(&cb)) else { return };
+    if let Some(r) = mate_rotation(&m, fa, fb) {
+        let (r, pivot) = if b_moves { (r, fb.0) } else { (r.transpose(), fa.0) };
+        let p = &mut asm.instances[ix].pose;
+        p.t = (r * (DVec3::from(p.t) - pivot) + pivot).into();
+        p.r = orthonormalize(r * p.m()).to_cols_array();
+    }
+    let (Some(fa), Some(fb)) = (asm.world(&ca), asm.world(&cb)) else { return };
+    let d = target_frame(&m, fa).0 - fb.0;
+    let p = &mut asm.instances[ix].pose;
+    p.t = (DVec3::from(p.t) + if b_moves { d } else { -d }).into();
+}
+
 pub struct SolveResult {
     pub ok: bool,
     /// Mates still not satisfied.
@@ -469,11 +598,82 @@ pub fn solve(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DV
 /// `solve` with mates held where `drives` puts them. A relation between driven mates is left
 /// to the drives (they already agree, and the relation only sees angles within a turn).
 pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive]) -> SolveResult {
+    solve_suspect(asm, hold, centers, drives, &[])
+}
+
+/// Solve while instance `inst` is dragged by its point `grab` (own coordinates): that point
+/// stays where the pointer put it as far as the mates allow, and the part turns about it
+/// freely, so a part on a revolute swings round after the pointer instead of sliding back.
+pub fn solve_drag(asm: &mut Assembly, centers: &dyn Fn(&Instance) -> DVec3, inst: u64, grab: DVec3) -> SolveResult {
+    solve_grab(asm, &[inst], centers, &[], &[], Some((inst, grab)))
+}
+
+/// `solve_driven`, and when the mates can't all be met, find the ones in conflict instead of
+/// letting the error spread over every part: leave out one mate at a time (those in `suspects`,
+/// the ones just made or edited, first, then the newest) and keep the first solve that meets
+/// all the others. The mates left out stay where they are, reported as failed.
+pub fn solve_suspect(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], suspects: &[u64]) -> SolveResult {
+    solve_grab(asm, hold, centers, drives, suspects, None)
+}
+
+fn solve_grab(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], suspects: &[u64], grab: Option<(u64, DVec3)>) -> SolveResult {
+    let start = (asm.instances.iter().map(|i| i.pose).collect::<Vec<_>>(), asm.turns.clone());
+    let restore = |asm: &mut Assembly, s: &(Vec<Pose>, std::collections::HashMap<u64, f64>)| {
+        for (i, p) in asm.instances.iter_mut().zip(&s.0) {
+            i.pose = *p;
+        }
+        asm.turns = s.1.clone();
+    };
+    solve_once(asm, hold, centers, drives, None, grab);
+    let failed = failed_mates(asm);
+    let active: Vec<u64> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some()).map(|m| m.id).collect();
+    if !failed.is_empty() && active.len() > 1 {
+        let full = (asm.instances.iter().map(|i| i.pose).collect::<Vec<_>>(), asm.turns.clone());
+        let mut order: Vec<u64> = suspects.iter().copied().filter(|id| active.contains(id)).collect();
+        let mut newest = active.clone();
+        newest.sort_unstable_by(|a, b| b.cmp(a));
+        for id in newest {
+            if !order.contains(&id) {
+                order.push(id);
+            }
+        }
+        for &drop in order.iter().take(3) {
+            restore(asm, &start);
+            solve_once(asm, hold, centers, drives, Some(drop), grab);
+            if failed_mates(asm).iter().all(|&f| f == drop) {
+                let failed = failed_mates(asm);
+                return SolveResult { ok: failed.is_empty(), failed };
+            }
+        }
+        restore(asm, &full);
+    }
+    SolveResult { ok: failed.is_empty(), failed }
+}
+
+/// Scale for turning an instance in the solve: about the distance from its centre to its mate
+/// connectors, so a turn costs as much as the sliding it causes where the part is mated (a
+/// fixed weight let long parts swing about rather than slide).
+fn turn_scale(asm: &Assembly, mates: &[Mate], i: usize, ctr: DVec3) -> f64 {
+    let id = asm.instances[i].id;
+    let mut r: f64 = 5.0;
+    for m in mates {
+        for c in [m.a, m.b].into_iter().flatten().filter(|c| c.inst == id) {
+            if let Some((o, _, _)) = asm.world(&c) {
+                r = r.max((o - ctr).length());
+            }
+        }
+    }
+    r.min(1e4)
+}
+
+fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], skip: Option<u64>, grab: Option<(u64, DVec3)>) {
     let free: Vec<usize> = (0..asm.instances.len()).filter(|&i| !asm.instances[i].fixed).collect();
     let n = free.len() * 6;
-    let mates: Vec<Mate> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some()).cloned().collect();
+    let mates: Vec<Mate> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some() && Some(m.id) != skip).cloned().collect();
+    prealign(asm, &mates, hold);
     let base: Vec<Pose> = asm.instances.iter().map(|i| i.pose).collect();
-    let ctr: Vec<DVec3> = asm.instances.iter().map(|i| i.pose.apply(centers(i))).collect();
+    // a dragged part turns about the grabbed point
+    let ctr: Vec<DVec3> = asm.instances.iter().map(|i| i.pose.apply(grab.filter(|g| g.0 == i.id).map(|g| g.1).unwrap_or_else(|| centers(i)))).collect();
     let idx_of = |id: u64| asm.instances.iter().position(|i| i.id == id);
 
     let poses_for = |x: &[f64]| -> Vec<Pose> {
@@ -542,9 +742,12 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
                 w[6 * k + j] = 1e4;
             }
         }
-        // rotations cost relative to part size
+        // turns cost relative to part size, well above sliding: a mate that only needs the part
+        // moved shouldn't swing it about; the dragged part turns freely about the grabbed point
+        let r = turn_scale(asm, &mates, i, ctr[i]);
+        let dragged = grab.is_some_and(|g| g.0 == asm.instances[i].id);
         for j in 0..3 {
-            w[6 * k + j] *= 100.0;
+            w[6 * k + j] = if dragged { 1.0 } else { w[6 * k + j] * 100.0 * r * r };
         }
     }
     let mut x = vec![0.0; n];
@@ -622,8 +825,6 @@ pub fn solve_driven(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance
         asm.instances[i].pose = p;
     }
     asm.turns = turns;
-    let failed = failed_mates(asm);
-    SolveResult { ok: failed.is_empty(), failed }
 }
 
 /// Mates whose conditions do not hold at the current poses (residual above tolerance).
@@ -936,6 +1137,162 @@ mod tests {
         assert!(r.ok, "{:?}", r.failed);
         let p = a.instances[1].pose;
         assert!((DVec3::from(p.t) - DVec3::new(0.0, 0.0, 10.0)).length() < 1e-5, "{:?}", p.t);
+    }
+
+    fn mate(id: u64, kind: MateKind, a: Connector, b: Connector) -> Mate {
+        Mate { id, name: format!("m{id}"), kind, a: Some(a), b: Some(b), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false }
+    }
+
+    fn conn(inst: u64, o: [f64; 3], z: [f64; 3]) -> Connector {
+        let zz = DVec3::from(z).normalize();
+        Connector { inst, origin: o, z: zz.into(), x: connector_x(o.into(), zz).into(), on: None }
+    }
+
+    #[test]
+    fn fastened_turns_a_part_picked_facing_the_same_way() {
+        // top face of both cubes picked: the second has to be turned over to sit face to face
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [30.0, 0.0, 0.0]));
+        a.mates.push(mate(3, MateKind::Fastened, conn(1, [5.0, 5.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [5.0, 5.0, 10.0], [0.0, 0.0, 1.0])));
+        let r = solve(&mut a, &[], &|_| DVec3::splat(5.0));
+        assert!(r.ok, "{:?}", r.failed);
+        let (ob, zb, _) = a.world(&a.mates[0].b.unwrap()).unwrap();
+        assert!((ob - DVec3::new(5.0, 5.0, 10.0)).length() < 1e-5, "{ob:?}");
+        assert!((zb + DVec3::Z).length() < 1e-5, "{zb:?}");
+    }
+
+    #[test]
+    fn flipping_a_mate_turns_the_part_over_and_back() {
+        for kind in [MateKind::Fastened, MateKind::Revolute, MateKind::Slider, MateKind::Cylindrical, MateKind::Planar] {
+            let mut a = Assembly::default();
+            a.instances.push(inst(1, true, [0.0; 3]));
+            a.instances.push(inst(2, false, [0.0, 0.0, 12.0]));
+            // a stack of two parts: a third fastened on top of the second follows it over
+            a.instances.push(inst(4, false, [0.0, 0.0, 25.0]));
+            a.mates.push(mate(3, kind, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+            a.mates.push(mate(5, MateKind::Fastened, conn(2, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(4, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+            assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok, "{kind:?}");
+            for flip in [true, false, true] {
+                a.mates[0].flip = flip;
+                let r = solve(&mut a, &[], &|_| DVec3::ZERO);
+                assert!(r.ok, "{kind:?} flip {flip}: {:?}", r.failed);
+                let (_, za, _) = a.world(&a.mates[0].a.unwrap()).unwrap();
+                let (_, zb, _) = a.world(&a.mates[0].b.unwrap()).unwrap();
+                assert!((zb - if flip { za } else { -za }).length() < 1e-5, "{kind:?} flip {flip}: {zb:?}");
+                // the third part stays on the second
+                let (_, z2, _) = a.world(&a.mates[1].a.unwrap()).unwrap();
+                let (_, z4, _) = a.world(&a.mates[1].b.unwrap()).unwrap();
+                assert!((z2 + z4).length() < 1e-5, "{kind:?} flip {flip}");
+            }
+        }
+    }
+
+    #[test]
+    fn fastened_rotation_of_half_a_turn() {
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 10.0]));
+        a.mates.push(mate(3, MateKind::Fastened, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        for deg in [180.0, 90.0, -90.0, 270.0, 0.0] {
+            a.mates[0].rotation = deg;
+            let r = solve(&mut a, &[], &|_| DVec3::ZERO);
+            assert!(r.ok, "{deg}: {:?}", r.failed);
+            let m = &a.mates[0];
+            let ang = mate_angle(m, a.world(&m.a.unwrap()).unwrap(), a.world(&m.b.unwrap()).unwrap());
+            assert!(ang.abs() < 1e-4, "{deg}: {ang}");
+        }
+    }
+
+    #[test]
+    fn flipping_moves_the_free_side_when_the_second_part_is_held() {
+        // the second part is fixed: the first turns over instead
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, false, [0.0, 0.0, 0.0]));
+        a.instances.push(inst(2, true, [0.0, 0.0, 10.0]));
+        a.mates.push(mate(3, MateKind::Fastened, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        a.mates[0].flip = true;
+        let r = solve(&mut a, &[], &|_| DVec3::ZERO);
+        assert!(r.ok, "{:?}", r.failed);
+        assert!(DMat3::from_cols_array(&a.instances[1].pose.r).abs_diff_eq(DMat3::IDENTITY, 1e-9), "the fixed part stays");
+        let (_, za, _) = a.world(&a.mates[0].a.unwrap()).unwrap();
+        assert!((za + DVec3::Z).length() < 1e-5, "{za:?}");
+    }
+
+    #[test]
+    fn a_conflicting_mate_is_left_unmet_instead_of_pulling_everything_askew() {
+        // a chain fixed → 2 (revolute) → 4 (fastened); then 4 fastened to the fixed part somewhere it can't reach
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 10.0]));
+        a.instances.push(inst(4, false, [0.0, 0.0, 30.0]));
+        a.mates.push(mate(3, MateKind::Revolute, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        a.mates.push(mate(5, MateKind::Fastened, conn(2, [0.0, 0.0, 20.0], [0.0, 0.0, 1.0]), conn(4, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        let good: Vec<Pose> = a.instances.iter().map(|i| i.pose).collect();
+        a.mates.push(mate(6, MateKind::Fastened, conn(1, [50.0, 0.0, 0.0], [1.0, 0.0, 0.0]), conn(4, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0])));
+        let r = solve(&mut a, &[], &|_| DVec3::ZERO);
+        assert_eq!(r.failed, vec![6]);
+        for (i, p) in a.instances.iter().zip(&good) {
+            assert!(DVec3::from(i.pose.t).abs_diff_eq(p.t.into(), 1e-6), "{} moved", i.id);
+        }
+    }
+
+    #[test]
+    fn a_revolute_far_from_the_part_centre_does_not_swing_it() {
+        // a long arm whose hole is 60 mm from its centre slides onto a pin rather than turning
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [20.0, 15.0, 10.0]));
+        a.mates.push(mate(3, MateKind::Revolute, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        assert!(solve(&mut a, &[], &|_| DVec3::new(60.0, 0.0, 2.0)).ok);
+        let x = DMat3::from_cols_array(&a.instances[1].pose.r).x_axis;
+        assert!(x.dot(DVec3::X) > 0.999, "turned to {x:?}");
+    }
+
+    #[test]
+    fn dragging_a_part_on_a_revolute_swings_it_round() {
+        // an arm 60 long on a pin; its far end is pulled round to +Y, a frame at a time
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 10.0]));
+        a.mates.push(mate(3, MateKind::Revolute, conn(1, [0.0, 0.0, 10.0], [0.0, 0.0, 1.0]), conn(2, [0.0, 0.0, 0.0], [0.0, 0.0, -1.0])));
+        let ctr = |_: &Instance| DVec3::new(30.0, 0.0, 2.0);
+        assert!(solve(&mut a, &[], &ctr).ok);
+        let grab = DVec3::new(60.0, 0.0, 5.0);
+        let target = DVec3::new(0.0, 60.0, 15.0);
+        for _ in 0..40 {
+            let p = a.instances[1].pose;
+            a.instances[1].pose = p.perturbed(DVec3::ZERO, target - p.apply(grab), DVec3::ZERO);
+            assert!(solve_drag(&mut a, &ctr, 2, grab).ok);
+        }
+        let end = a.instances[1].pose.apply(grab);
+        assert!((end - target).length() < 0.5, "{end:?}");
+        // and a limit holds it however far it is dragged
+        a.mates[0].limits = Some([-30.0, 30.0]);
+        for _ in 0..40 {
+            let p = a.instances[1].pose;
+            a.instances[1].pose = p.perturbed(DVec3::ZERO, DVec3::new(-60.0, 0.0, 15.0) - p.apply(grab), DVec3::ZERO);
+            solve_drag(&mut a, &ctr, 2, grab);
+        }
+        let m = &a.mates[0];
+        let ang = a.mate_turn(m, a.world(&m.a.unwrap()).unwrap(), a.world(&m.b.unwrap()).unwrap()).to_degrees();
+        assert!((ang.abs() - 30.0).abs() < 1e-3, "{ang}");
+    }
+
+    #[test]
+    fn a_new_slider_brings_the_faces_together() {
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 5.0, 3.0]));
+        // the first's front face (−Y at y = 0) and the second's +X side face (x = 20)
+        a.mates.push(mate(3, MateKind::Slider, conn(1, [30.0, 0.0, 5.0], [0.0, -1.0, 0.0]), conn(2, [20.0, 15.0, 7.0], [1.0, 0.0, 0.0])));
+        place_new_mate(&mut a, 3, &[1]);
+        assert!(solve(&mut a, &[1], &|_| DVec3::ZERO).ok);
+        let (ob, zb, _) = a.world(&a.mates[0].b.unwrap()).unwrap();
+        assert!((ob - DVec3::new(30.0, 0.0, 5.0)).length() < 1e-5, "{ob:?}");
+        assert!((zb - DVec3::Y).length() < 1e-5, "{zb:?}");
     }
 
     #[test]
