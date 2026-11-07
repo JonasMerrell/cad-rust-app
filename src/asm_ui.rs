@@ -1421,7 +1421,7 @@ fn build_scene(app: &App) -> SceneData {
     let dialog_conns: Vec<Connector> =
         app.asm.dialog.as_ref().and_then(|d| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.iter().chain(m.b.iter()).copied().collect()).unwrap_or_default();
     let mate_insts: Vec<u64> =
-        app.asm.sel_mate.and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
+        app.asm.sel_mate.filter(|_| app.asm.dialog.is_none()).and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
     for x in a.instances.iter().filter(|x| shown(app, x)) {
       for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
         let Some(part) = part else { continue };
@@ -1544,10 +1544,21 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
                     if solve_now {
                         // the instance with fewer mates (or inserted later) moves to meet the other
                         let hold = asm(app).map(|a| assembly::mate_anchor(a, mid)).unwrap_or_default();
+                        let before: Vec<Pose> = asm(app).map(|a| a.instances.iter().map(|x| x.pose).collect()).unwrap_or_default();
                         if let Some(a) = asm_mut(app) {
                             assembly::place_new_mate(a, mid, &hold);
                         }
                         solve(app, &hold);
+                        if app.asm.failed.contains(&mid) {
+                            // it can't be met with the other mates: leave the parts where they were,
+                            // not wherever the placing put them along the travel the others leave free
+                            if let Some(a) = asm_mut(app) {
+                                for (x, p) in a.instances.iter_mut().zip(&before) {
+                                    x.pose = *p;
+                                }
+                            }
+                            solve(app, &hold);
+                        }
                     }
                     app.asm.scene_dirty = true;
                 }
