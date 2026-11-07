@@ -28,6 +28,8 @@ mod fea;
 mod pcb;
 #[path = "agent_circuit.rs"]
 mod circuit;
+#[path = "agent_anim.rs"]
+mod anim;
 #[cfg(test)]
 pub(crate) use pcb::connect as pcb_connect;
 #[path = "agent_query.rs"]
@@ -1813,6 +1815,7 @@ pub(crate) fn tools() -> Value {
         v.extend(fea::tools());
         v.extend(pcb::tools());
         v.extend(circuit::tools());
+        v.extend(anim::tools());
         schema::complete(&mut v);
         Value::Array(v)
     })

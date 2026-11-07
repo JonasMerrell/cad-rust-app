@@ -77,6 +77,8 @@ pub struct AsmUi {
     pub motion: Option<Motion>,
     /// Viewport right-click menu: where it opened and the instance under the pointer.
     pub ctx: Option<(Pos2, Option<u64>)>,
+    /// Motion sliders and animation playback.
+    pub anim: crate::asm_anim_ui::AnimUi,
 }
 
 /// Playback of a circuit simulation's motors and servos in an assembly.
@@ -210,7 +212,7 @@ fn motion_ui(app: &mut App, ui: &mut Ui, ai: usize) {
     }
 }
 
-fn row_label(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn row_label(ui: &mut Ui, label: &str, add: impl FnOnce(&mut Ui)) {
     ui.horizontal(|ui| {
         ui.label(RichText::new(label).size(12.0).color(theme::muted()));
         add(ui);
@@ -314,7 +316,7 @@ fn parts_of<'a>(app: &'a App, inst: &Instance) -> Vec<Option<Part<'a>>> {
         .collect()
 }
 
-fn centroid_local(app: &App, inst: &Instance) -> DVec3 {
+pub(crate) fn centroid_local(app: &App, inst: &Instance) -> DVec3 {
     let (mut sum, mut w) = (DVec3::ZERO, 0.0);
     for p in parts_of(app, inst).into_iter().flatten() {
         let v = p.mesh.volume.abs().max(1e-9);
@@ -788,6 +790,7 @@ pub fn fit(app: &mut App) {
 
 pub fn sidebar(app: &mut App, ui: &mut Ui) {
     motion_tick(app, &ui.ctx().clone());
+    crate::asm_anim_ui::tick(app, &ui.ctx().clone());
     egui::ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| {
         if app.asm.insert_open {
             section(ui, "Insert", |ui| insert_panel(app, ui));
@@ -803,6 +806,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         if let Some(ai) = asm_index(app).filter(|ai| motion_data(app, *ai).is_some()) {
             section(ui, "Motion", |ui| motion_ui(app, ui, ai));
         }
+        if let Some(ai) = asm_index(app).filter(|ai| app.ws.assemblies.get(*ai).map(|a| !a.motions.is_empty() || !crate::asm_anim::movable_mates(a).is_empty()).unwrap_or(false)) {
+            section(ui, "Animation", |ui| crate::asm_anim_ui::section_ui(app, ui, ai));
+        }
         if app.asm.explode > 0.0 {
             section(ui, "Exploded view", |ui| explode_ui(app, ui));
         }
@@ -810,7 +816,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
     });
 }
 
-fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
+pub(crate) fn section(ui: &mut Ui, title: &str, add: impl FnOnce(&mut Ui)) {
     egui::Frame::new().inner_margin(Margin::same(10)).show(ui, |ui| {
         ui.set_width(ui.available_width());
         ui.label(RichText::new(title.to_uppercase()).color(theme::muted()).size(11.0).strong());
@@ -1021,6 +1027,10 @@ fn mates(app: &mut App, ui: &mut Ui) {
                 action = Some(("edit", id));
                 ui.close();
             }
+            if matches!(kind, MateKind::Slider | MateKind::Revolute | MateKind::Cylindrical) && ui.button("Animate").on_hover_text("Make a motion slider for this mate").clicked() {
+                action = Some(("animate", id));
+                ui.close();
+            }
             if ui.button(if suppressed { "Unsuppress" } else { "Suppress" }).clicked() {
                 action = Some(("suppress", id));
                 ui.close();
@@ -1037,6 +1047,11 @@ fn mates(app: &mut App, ui: &mut Ui) {
                 let before = app.ws.assemblies[i].clone();
                 checkpoint(app);
                 app.asm.dialog = Some(MateDialog { mate: id, asm: i, before, active: 0 });
+            }
+        }
+        Some(("animate", id)) => {
+            if let Some(i) = asm_index(app) {
+                crate::asm_anim_ui::new_motion_for(app, i, id);
             }
         }
         Some(("suppress", id)) => {

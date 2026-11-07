@@ -171,6 +171,52 @@ pub struct Tour {
     pub steps: Vec<TourStep>,
 }
 
+/// One joint (`node`) or motion (`motion`, an index into `Scene::motions`) a motion slider moves:
+/// `from` → `to` while the slider goes `start` → `end` (0..1). See asm_anim.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct MotionLink {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub node: Option<usize>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub motion: Option<usize>,
+    pub from: f64,
+    pub to: f64,
+    pub start: f64,
+    pub end: f64,
+    /// "linear" or "smooth"
+    pub ease: String,
+}
+
+/// A slider (0..1) moving several joints.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebMotion {
+    pub name: String,
+    #[serde(default)]
+    pub value: f64,
+    pub links: Vec<MotionLink>,
+}
+
+/// Motion `motion` running `from` → `to` between `start` and `start + length` s.
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebClip {
+    pub motion: usize,
+    pub start: f64,
+    pub length: f64,
+    pub from: f64,
+    pub to: f64,
+    pub ease: String,
+}
+
+#[derive(Clone, Debug, Serialize, Deserialize)]
+pub struct WebAnimation {
+    pub name: String,
+    /// "once", "loop" or "bounce"
+    pub repeat: String,
+    #[serde(default)]
+    pub autoplay: bool,
+    pub clips: Vec<WebClip>,
+}
+
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct Scene {
     pub title: String,
@@ -191,6 +237,10 @@ pub struct Scene {
     /// How layers start out: (layer, "show" | "ghost" | "hide").
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub layers: Vec<(String, String)>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motions: Vec<WebMotion>,
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<WebAnimation>,
 }
 
 impl Scene {
@@ -247,6 +297,24 @@ impl Scene {
         for t in &self.tours {
             if t.steps.iter().flat_map(|s| &s.values).any(|&(k, _)| k >= n || self.nodes[k].joint.is_none()) {
                 return Err(format!("tour {}: a step moves a node without a joint", t.name));
+            }
+        }
+        let nm = self.motions.len();
+        for m in &self.motions {
+            for l in &m.links {
+                let ok = match (l.node, l.motion) {
+                    (Some(k), None) => k < n && self.nodes[k].joint.is_some(),
+                    (None, Some(k)) => k < nm,
+                    _ => false,
+                };
+                if !ok {
+                    return Err(format!("motion {}: each link needs one jointed node or one motion", m.name));
+                }
+            }
+        }
+        for a in &self.animations {
+            if a.clips.iter().any(|c| c.motion >= nm) {
+                return Err(format!("animation {}: a clip's motion is out of range", a.name));
             }
         }
         Ok(())

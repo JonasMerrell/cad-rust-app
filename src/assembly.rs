@@ -311,6 +311,12 @@ pub struct Assembly {
     /// relations (a screw's travel, a gear of ratio ½) and limits past ±180° need whole turns.
     #[serde(default, skip_serializing_if = "std::collections::HashMap::is_empty")]
     pub turns: std::collections::HashMap<u64, f64>,
+    /// Sliders linked to joints (see asm_anim).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub motions: Vec<crate::asm_anim::Motion>,
+    /// Timelines of those motions.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub animations: Vec<crate::asm_anim::Animation>,
 }
 
 impl Assembly {
