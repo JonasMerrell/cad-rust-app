@@ -466,6 +466,14 @@ fn register_topology(e: &mut Engine) {
         }
         Ok(wrap(occ_err(occ::chamfer(&s.0, &es, num(&d)?).and_then(|x| occ::checked(x, "chamfer", " (distance too large for the part?)")))?))
     });
+    // defeature: take faces out and let the neighbouring faces grow over the gap
+    e.register_fn("delete_faces", |s: &mut S, faces: Array| -> Res<S> {
+        let fs = face_list(&Dynamic::from_array(faces))?;
+        if fs.is_empty() {
+            return Ok(s.clone());
+        }
+        Ok(wrap(occ_err(occ::delete_faces(&s.0, &fs).and_then(|x| occ::checked(x, "delete faces", " (the faces around them can't close the gap)")))?))
+    });
     // hollow out, removing the given faces (none: a closed hollow), walls `t` thick inside the
     // surface (negative: grown outside it)
     e.register_fn("shell", |s: &mut S, faces: Array, t: Dynamic| -> Res<S> {
