@@ -76,6 +76,13 @@ NEMA 8–23 steppers; and 2020–4080 T-slot extrusions. For anything else, its 
 search in your browser, and the STEP or ZIP you download goes in from the recent downloads list or by
 dropping it on the window.
 
+The **McMaster-Carr** tab works the same way: search (words or a part number) opens mcmaster.com, and
+the 3-D STEP you download is listed by part number and goes in named after it, in a Part Studio called
+`McMaster-Carr <part number>`. Approved McMaster-Carr API customers can instead save their API login and
+client certificate under **API settings** and insert a part by its number; McMaster grants API access on
+request (eCommerce@mcmaster.com). McMaster's terms don't allow sharing their CAD, or designs that include
+it, with others, so the Version control window and project export warn when a project holds some.
+
 ### Drawings
 
 <img alt="A drawing sheet with projected, isometric and section views, dimensions, a GD&T frame and a title block" src="docs/screenshots/drawing.png" width="100%">
@@ -312,6 +319,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/stock_size.rs` | raw stock for a part: smallest box or cylinder around it, rounded up to standard metric or imperial plate and bar sizes |
 | `src/stdparts.rs`, `src/stdparts_ui.rs` | standard parts library (dimension tables as custom feature scripts) and its window |
 | `src/grabcad.rs` | GrabCAD search link, ZIP reading, recent downloads |
+| `src/mcmaster.rs`, `src/mcmaster_ui.rs` | McMaster-Carr search link, download names, Product Information API (client certificate), the library tab |
 | `src/cam.rs` | CAM model: tools, presets, operations, setups |
 | `src/cam_paths.rs` | 2.5D toolpath generation (shadow slicing, offsets, holes) |
 | `src/cam_3d.rs` | 3D toolpaths: drop cutter, adaptive, parallel, waterline, scallop, pencil, deburr |

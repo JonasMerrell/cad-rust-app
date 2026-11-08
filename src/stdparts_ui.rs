@@ -1,5 +1,5 @@
-//! The parts library window of an assembly: standard parts (see `stdparts`) and models
-//! downloaded from GrabCAD (see `grabcad`).
+//! The parts library window of an assembly: standard parts (see `stdparts`), models
+//! downloaded from GrabCAD (see `grabcad`) and McMaster-Carr parts (see `mcmaster`).
 
 use std::time::{Duration, Instant};
 
@@ -12,14 +12,15 @@ use crate::theme;
 
 pub struct Lib {
     pub open: bool,
-    grabcad: bool,
+    tab: LibTab,
+    pub mc: crate::mcmaster_ui::State,
     search: String,
     std: usize,
     size: f64,
     length: String,
-    query: String,
-    downloads: Vec<(std::path::PathBuf, std::time::SystemTime)>,
-    scanned: Option<Instant>,
+    pub(crate) query: String,
+    pub(crate) downloads: Vec<(std::path::PathBuf, std::time::SystemTime)>,
+    pub(crate) scanned: Option<Instant>,
     /// Parts waiting for their Part Studio to build before they are inserted.
     pending: Vec<Pending>,
 }
@@ -29,7 +30,8 @@ impl Default for Lib {
         let s = &STANDARDS[0];
         Lib {
             open: false,
-            grabcad: false,
+            tab: LibTab::Standard,
+            mc: Default::default(),
             search: String::new(),
             std: 0,
             size: s.default.0,
@@ -40,6 +42,13 @@ impl Default for Lib {
             pending: vec![],
         }
     }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum LibTab {
+    Standard,
+    GrabCad,
+    McMaster,
 }
 
 struct Pending {
@@ -58,12 +67,17 @@ pub fn toggle(app: &mut App) {
 
 pub fn open_standard(app: &mut App) {
     app.asm.lib.open = true;
-    app.asm.lib.grabcad = false;
+    app.asm.lib.tab = LibTab::Standard;
 }
 
 pub fn open_grabcad(app: &mut App) {
     app.asm.lib.open = true;
-    app.asm.lib.grabcad = true;
+    app.asm.lib.tab = LibTab::GrabCad;
+}
+
+pub fn open_mcmaster(app: &mut App) {
+    app.asm.lib.open = true;
+    app.asm.lib.tab = LibTab::McMaster;
 }
 
 fn select(lib: &mut Lib, i: usize) {
@@ -125,8 +139,20 @@ pub fn import_into_assembly(app: &mut App, path: &std::path::Path) {
         };
         return app.flash(msg, ToastKind::Error);
     }
-    app.sync_ws();
     let name = path.file_stem().map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Import".into());
+    let label = path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default();
+    import_found(app, asm, found, &name, &label);
+}
+
+/// Put the model files of a download in a new Part Studio and insert them into assembly `asm`.
+/// A McMaster-Carr download (`<part number>_<description>`) goes in a `McMaster-Carr <part
+/// number>` studio and its part is named after the part number and description.
+pub fn import_found(app: &mut App, asm: usize, found: crate::grabcad::Found, name: &str, label: &str) {
+    app.sync_ws();
+    let (studio, name) = match crate::mcmaster::from_file_stem(name) {
+        Some((pn, desc)) => (crate::mcmaster::studio_name(&pn), crate::mcmaster::part_name(&pn, &desc)),
+        None => (name.to_string(), name.to_string()),
+    };
     let units = app.doc.units;
     let mut doc = crate::doc::Document { units, ..Default::default() };
     let mut feats = vec![];
@@ -134,14 +160,14 @@ pub fn import_into_assembly(app: &mut App, path: &std::path::Path) {
         let op = Op::Import { name: f.name.clone(), step: String::new(), format: f.format.into(), data: crate::import::pack(&f.bytes), scale: "1".into(), merge: true };
         feats.push(doc.insert(f.name.clone(), op));
     }
-    app.ws.studios.push(crate::workspace::Studio { name: name.clone(), doc });
+    app.ws.studios.push(crate::workspace::Studio { name: studio, doc });
     let si = app.ws.studios.len() - 1;
     rebuild(app, si);
     for fid in feats {
         let n = if found.files.len() == 1 { name.clone() } else { String::new() };
         app.asm.lib.pending.push(Pending { studio: si, feature: fid, body: None, name: n, asm });
     }
-    app.flash_info(format!("Importing {}…", path.file_name().map(|f| f.to_string_lossy().to_string()).unwrap_or_default()), Some(Duration::from_secs(3)));
+    app.flash_info(format!("Importing {label}…"), Some(Duration::from_secs(3)));
 }
 
 /// Insert parts whose Part Studio has finished building.
@@ -238,6 +264,7 @@ fn part_name(app: &App, studio: usize, b: BodyId, fallback: &str) -> String {
 
 pub fn window(app: &mut App, ctx: &egui::Context) {
     poll(app);
+    crate::mcmaster_ui::poll(app);
     if !app.asm.lib.open {
         return;
     }
@@ -245,6 +272,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     let mut insert: Option<(usize, f64, Option<f64>)> = None;
     let mut import: Option<std::path::PathBuf> = None;
     let mut choose = false;
+    let mut mc_act = None;
     egui::Window::new("Parts library")
         .open(&mut open)
         .default_size([520.0, 440.0])
@@ -254,14 +282,17 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
         .show(ctx, |ui| {
             let lib = &mut app.asm.lib;
             ui.horizontal(|ui| {
-                ui.selectable_value(&mut lib.grabcad, false, "Standard parts");
-                ui.selectable_value(&mut lib.grabcad, true, "GrabCAD");
+                ui.selectable_value(&mut lib.tab, LibTab::Standard, "Standard parts");
+                ui.selectable_value(&mut lib.tab, LibTab::GrabCad, "GrabCAD");
+                ui.selectable_value(&mut lib.tab, LibTab::McMaster, "McMaster-Carr");
             });
             ui.separator();
-            if lib.grabcad {
-                grabcad_tab(ui, lib, &mut import, &mut choose);
-            } else {
-                standard_tab(ui, lib, &mut insert);
+            match lib.tab {
+                LibTab::GrabCad => grabcad_tab(ui, lib, &mut import, &mut choose),
+                LibTab::Standard => standard_tab(ui, lib, &mut insert),
+                LibTab::McMaster => {
+                    egui::ScrollArea::vertical().id_salt("mc-tab").max_height(ui.ctx().content_rect().height() * 0.7).show(ui, |ui| mc_act = crate::mcmaster_ui::tab(ui, lib));
+                }
             }
         });
     if !open {
@@ -277,6 +308,7 @@ pub fn window(app: &mut App, ctx: &egui::Context) {
     if let Some(p) = import {
         import_into_assembly(app, &p);
     }
+    crate::mcmaster_ui::act(app, ctx, mc_act);
 }
 
 fn standard_tab(ui: &mut Ui, lib: &mut Lib, insert: &mut Option<(usize, f64, Option<f64>)>) {

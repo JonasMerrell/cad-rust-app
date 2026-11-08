@@ -449,7 +449,7 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "import", "Insert", "Insert parts from Part Studios", true, app.asm.insert_open, true).clicked() {
             app.asm.insert_open = !app.asm.insert_open;
         }
-        if app.tool_button(ui, "library", "Library", "Standard parts (screws, nuts, bearings, motors…) and models downloaded from GrabCAD", true, app.asm.lib.open, true).clicked() {
+        if app.tool_button(ui, "library", "Library", "Standard parts (screws, nuts, bearings, motors…), models downloaded from GrabCAD and McMaster-Carr parts", true, app.asm.lib.open, true).clicked() {
             crate::stdparts_ui::toggle(app);
         }
     });

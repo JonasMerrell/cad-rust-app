@@ -83,8 +83,12 @@ pub fn export_project(app: &mut App) {
         .and_then(|d| d.file_name().map(|s| s.to_string_lossy().into_owned()))
         .or_else(|| doc.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "project".into());
+    let mc_warn = crate::mcmaster::share_warning(&crate::mcmaster::parts_in(&app.ws));
     app.with_save_path("Export project", "Project archive (ZIP)", &["zip"], &format!("{name}.zip"), move |a, p| match crate::project::export(&doc, &p, true) {
-        Ok(n) => a.flash_info(format!("Exported the project ({n} file{}) to {}", if n == 1 { "" } else { "s" }, p.display()), Some(Duration::from_secs(4))),
+        Ok(n) => match &mc_warn {
+            Some(w) => a.flash(format!("Exported the project ({n} file{}) to {}. {w}", if n == 1 { "" } else { "s" }, p.display()), ToastKind::Info),
+            None => a.flash_info(format!("Exported the project ({n} file{}) to {}", if n == 1 { "" } else { "s" }, p.display()), Some(Duration::from_secs(4))),
+        },
         Err(e) => a.flash(format!("Could not export the project: {e}"), ToastKind::Error),
     });
 }
@@ -339,6 +343,7 @@ fn window(app: &mut App, ctx: &egui::Context) {
     let mut open = true;
     let mut act = None;
     let dirty = app.is_dirty();
+    let mc_warn = crate::mcmaster::share_warning(&crate::mcmaster::parts_in(&app.ws));
     egui::Window::new("Version control")
         .open(&mut open)
         .default_size([440.0, 640.0])
@@ -483,6 +488,9 @@ fn window(app: &mut App, ctx: &egui::Context) {
             });
 
             heading(ui, "GitHub");
+            if let Some(w) = &mc_warn {
+                ui.label(RichText::new(w).color(theme::error()).size(11.5));
+            }
             match &s.remote {
                 Some(r) => {
                     ui.horizontal_wrapped(|ui| {

@@ -45,6 +45,8 @@ mod circuit_solve;
 mod circuit_wave;
 mod circuit_wave_ui;
 mod circuit_ui;
+mod mcmaster;
+mod mcmaster_ui;
 mod mcu_cm0;
 mod mcu_rom;
 mod mcu_rp2040;
