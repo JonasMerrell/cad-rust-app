@@ -731,6 +731,58 @@ pub fn spawn(set: Settings, job: Job, ctx: egui::Context) -> std::sync::mpsc::Re
     rx
 }
 
+/// A BOM for Digi-Key's BOM Manager (digikey.com/BOM → Upload a BOM): one row per distinct part
+/// of the active variant, with the column names the BOM Manager recognises on its own. Parts
+/// with no Digi-Key or manufacturer number still get a row, described by value and package, so
+/// the BOM Manager can suggest a match. `boards` multiplies the quantities.
+pub fn bom_csv(p: &crate::pcb::Pcb, boards: u32) -> String {
+    let mut p = p.as_variant(&p.variant);
+    p.parts.retain(|x| !x.dnp);
+    let mut groups: Vec<([String; 6], Vec<String>)> = vec![];
+    for part in &p.parts {
+        let pkg = if part.package.is_empty() { part.footprint.clone() } else { part.package.clone() };
+        let desc = if part.description.is_empty() { format!("{} {}", part.value, pkg).trim().to_string() } else { part.description.clone() };
+        let key = [part.digikey.trim().to_string(), part.mpn.trim().to_string(), part.manufacturer.trim().to_string(), desc, part.value.clone(), pkg];
+        match groups.iter_mut().find(|g| {
+            // the same orderable part: by Digi-Key number, else MPN, else value and package
+            if !key[0].is_empty() || !g.0[0].is_empty() {
+                g.0[0].eq_ignore_ascii_case(&key[0])
+            } else if !key[1].is_empty() || !g.0[1].is_empty() {
+                g.0[1].eq_ignore_ascii_case(&key[1])
+            } else {
+                g.0[3] == key[3] && g.0[4] == key[4] && g.0[5] == key[5]
+            }
+        }) {
+            Some(g) => g.1.push(part.reference.clone()),
+            None => groups.push((key, vec![part.reference.clone()])),
+        }
+    }
+    for g in &mut groups {
+        g.1.sort_by(|a, b| crate::pcb::natural(a, b));
+    }
+    groups.sort_by(|a, b| crate::pcb::natural(&a.1[0], &b.1[0]));
+    let q = |s: &str| format!("\"{}\"", s.replace('"', "\"\""));
+    let mut out = String::from("Quantity,Digi-Key Part Number,Manufacturer Part Number,Manufacturer Name,Description,Reference Designator,Customer Reference,Value,Package\n");
+    for (k, refs) in groups {
+        let n = refs.len() as u32 * boards.max(1);
+        // the customer reference shows on the order and the reel labels: the first designators
+        let mut cref = refs.iter().take(4).cloned().collect::<Vec<_>>().join(" ");
+        if refs.len() > 4 {
+            cref += " …";
+        }
+        out += &format!("{n},{},{},{},{},{},{},{},{}\n", q(&k[0]), q(&k[1]), q(&k[2]), q(&k[3]), q(&refs.join(", ")), q(&cref), q(&k[4]), q(&k[5]));
+    }
+    out
+}
+
+/// Parts the Digi-Key BOM can't name exactly (no Digi-Key or manufacturer number), by reference.
+pub fn bom_unmatched(p: &crate::pcb::Pcb) -> Vec<String> {
+    let p = p.as_variant(&p.variant);
+    let mut v: Vec<String> = p.parts.iter().filter(|x| !x.dnp && x.digikey.trim().is_empty() && x.mpn.trim().is_empty()).map(|x| x.reference.clone()).collect();
+    v.sort_by(|a, b| crate::pcb::natural(a, b));
+    v
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -869,5 +921,25 @@ mod tests {
         assert_eq!(part_number_of(" 311-10.0KCRCT-ND "), "311-10.0KCRCT-ND");
         assert_eq!(encode("311-10.0KCRCT-ND"), "311-10.0KCRCT-ND");
         assert_eq!(encode("A/B #1"), "A%2FB%20%231");
+    }
+
+    #[test]
+    fn digikey_bom_groups_orderable_parts() {
+        let mut p = crate::pcb::tests::led_board();
+        let n = p.parts.len();
+        for (i, part) in p.parts.iter_mut().enumerate() {
+            part.digikey = if i == 0 { "311-330CRCT-ND".into() } else { String::new() };
+        }
+        let mut twin = p.parts[0].clone();
+        twin.id = 77;
+        twin.reference = "R9".into();
+        p.parts.push(twin);
+        let csv = bom_csv(&p, 5);
+        let lines: Vec<&str> = csv.lines().collect();
+        assert!(lines[0].starts_with("Quantity,Digi-Key Part Number,Manufacturer Part Number"));
+        let r = lines.iter().find(|l| l.contains("311-330CRCT-ND")).unwrap();
+        assert!(r.starts_with("10,") && r.contains("\"R1, R9\""), "{r}");
+        assert_eq!(lines.len(), 1 + n, "{csv}");
+        assert!(!bom_unmatched(&p).contains(&"R1".to_string()));
     }
 }

@@ -17,13 +17,13 @@ pub enum Sx {
 }
 
 impl Sx {
-    fn items(&self) -> &[Sx] {
+    pub fn items(&self) -> &[Sx] {
         match self {
             Sx::List(v) => v,
             Sx::Atom(_) => &[],
         }
     }
-    fn atom(&self) -> Option<&str> {
+    pub fn atom(&self) -> Option<&str> {
         match self {
             Sx::Atom(s) => Some(s),
             Sx::List(_) => None,
@@ -240,7 +240,7 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
         return Err("not a KiCad footprint".into());
     }
     let name = root.str(1).ok_or("footprint without a name")?.to_string();
-    let mut f = Footprint { name: name.clone(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44] };
+    let mut f = Footprint { name: name.clone(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44], model: None, source: String::new() };
     let mut court: Option<(P, P)> = None;
     let mut fab: Option<(P, P)> = None;
     let mut skipped_holes = 0;
@@ -345,7 +345,36 @@ pub fn footprint(root: &Sx, notes: &mut Vec<String>) -> Result<Footprint, String
     let tht = f.pads.iter().any(|p| p.drill > 0.0);
     let h = height_from_name(&name).unwrap_or(if tht { 2.5 } else { 1.0 });
     f.body = vec![Solid::Box { lo: [lo[0], lo[1], 0.0], hi: [hi[0], hi[1], h] }];
+    f.model = model_of(root);
     Ok(f)
+}
+
+/// The footprint's first shown 3D model, as a path into the KiCad 3D library without its
+/// extension (`${KICAD10_3DMODEL_DIR}/Lib.3dshapes/Name.wrl` → `Lib.3dshapes/Name`).
+pub fn model_of(root: &Sx) -> Option<pcb_lib::Model3d> {
+    for m in root.all("model") {
+        if m.flag("hide") {
+            continue;
+        }
+        let path = m.str(1)?.replace('\\', "/");
+        // the library's variable (any KiCad version's) or a path ending in Lib.3dshapes/Name
+        let rel = match path.find(".3dshapes/") {
+            Some(i) => {
+                let start = path[..i].rfind('/').map(|k| k + 1).unwrap_or(0);
+                path[start..].to_string()
+            }
+            None => continue,
+        };
+        let rel = match rel.rfind('.') {
+            Some(d) if rel[d..].len() <= 6 && !rel[d..].contains('/') => rel[..d].to_string(),
+            _ => rel,
+        };
+        let xyz = |name: &str| m.get(name).and_then(|l| l.get("xyz")).and_then(|v| Some([v.num(1)?, v.num(2)?, v.num(3)?]));
+        // KiCad 5 gave the offset as (at (xyz …)) in inches
+        let offset = xyz("offset").or_else(|| xyz("at").map(|v| v.map(|c| c * 25.4))).unwrap_or([0.0; 3]);
+        return Some(pcb_lib::Model3d { file: rel, offset, rotate: xyz("rotate").unwrap_or([0.0; 3]), scale: xyz("scale").unwrap_or([1.0; 3]) });
+    }
+    None
 }
 
 /// `…_H3.5mm…` or IPC names (`SOIC127P600X175-8N` → 1.75 mm).
@@ -386,22 +415,32 @@ pub fn symbols(root: &Sx, lib: &str, notes: &mut Vec<String>) -> Result<Vec<LibS
     for s in &all {
         let name = s.str(1).unwrap_or("").to_string();
         // an alias takes its drawing from the symbol it extends
-        let base = match s.get("extends").and_then(|e| e.str(1)) {
-            Some(b) => match by_name(b) {
-                Some(x) => x,
+        // (through every level: KiCad 10's INA281A2 extends INA281A1, which extends AD8211)
+        let mut chain: Vec<&Sx> = vec![s];
+        let mut missing = None;
+        while let Some(b) = chain.last().and_then(|c| c.get("extends")).and_then(|e| e.str(1)) {
+            match by_name(b) {
+                Some(x) if chain.len() < 16 && !chain.iter().any(|c| std::ptr::eq(*c, x)) => chain.push(x),
+                Some(_) => break,
                 None => {
-                    notes.push(format!("{name} extends {b}, which is not in the library"));
-                    continue;
+                    missing = Some(b.to_string());
+                    break;
                 }
-            },
-            None => s,
-        };
+            }
+        }
+        if let Some(b) = missing {
+            notes.push(format!("{name} extends {b}, which is not in the library"));
+            continue;
+        }
+        let base = *chain.last().unwrap();
         let base_name = base.str(1).unwrap_or("").to_string();
         let mut props = symbol_props(base);
-        for (k, v, at) in symbol_props(s) {
-            match props.iter_mut().find(|p| p.0 == k) {
-                Some(p) => *p = (k, v, at.or(p.2)),
-                None => props.push((k, v, at)),
+        for c in chain.iter().rev().skip(1) {
+            for (k, v, at) in symbol_props(c) {
+                match props.iter_mut().find(|p| p.0 == k) {
+                    Some(p) => *p = (k, v, at.or(p.2)),
+                    None => props.push((k, v, at)),
+                }
             }
         }
         let prop = |k: &str| props.iter().find(|p| p.0 == k).map(|p| p.1.clone()).unwrap_or_default();
@@ -411,6 +450,7 @@ pub fn symbols(root: &Sx, lib: &str, notes: &mut Vec<String>) -> Result<Vec<LibS
             prefix: prop("Reference").trim_end_matches('?').to_string(),
             value: { let v = prop("Value"); if v.is_empty() { name.clone() } else { v } },
             footprint: prop("Footprint"),
+            datasheet: prop("Datasheet"),
             fp_filters: prop("ki_fp_filters").split_whitespace().filter(|f| !f.contains(':')).map(String::from).collect(),
             pin_numbers: !base.get("pin_numbers").is_some_and(|l| l.flag("hide")),
             pin_names: !base.get("pin_names").is_some_and(|l| l.flag("hide")),

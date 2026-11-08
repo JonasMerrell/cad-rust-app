@@ -140,6 +140,9 @@ pub fn section_ui(app: &mut App, ui: &mut Ui) {
             app.pcb.dk.show_settings = !app.pcb.dk.show_settings;
             app.pcb.dk.draft = app.pcb.dk.settings().clone();
         }
+        if ui.button("Export BOM…").on_hover_text("A CSV for Digi-Key's BOM Manager (digikey.com/BOM → Upload): quantities, Digi-Key and manufacturer numbers, designators").clicked() {
+            export_bom(app);
+        }
         if app.pcb.dk.busy.is_some() {
             ui.spinner();
         }
@@ -295,5 +298,30 @@ pub fn placing_name(app: &App) -> Option<String> {
     match (&app.pcb.tool, &app.pcb.dk.placing) {
         (Tool::Place(_), Some(p)) => Some(format!("{} {}", p.manufacturer, p.mpn).trim().to_string()),
         _ => None,
+    }
+}
+
+/// Save the Digi-Key BOM Manager CSV for the PCB shown.
+fn export_bom(app: &mut App) {
+    let Some(pi) = (match app.tab {
+        crate::workspace::Tab::Pcb(i) if i < app.ws.pcbs.len() => Some(i),
+        _ => None,
+    }) else {
+        return;
+    };
+    let p = &app.ws.pcbs[pi];
+    let name: String = p.name.chars().map(|c| if c.is_ascii_alphanumeric() || c == '-' { c } else { '_' }).collect();
+    let Some(path) = rfd::FileDialog::new().set_file_name(format!("{name}-DigiKey-BOM.csv")).add_filter("CSV", &["csv"]).save_file() else { return };
+    let csv = crate::digikey::bom_csv(p, 1);
+    let missing = crate::digikey::bom_unmatched(p);
+    match std::fs::write(&path, csv) {
+        Ok(()) => {
+            let mut msg = format!("Saved {}: upload it at digikey.com/BOM", path.display());
+            if !missing.is_empty() {
+                msg += &format!(" · {} have no Digi-Key or manufacturer number, so the BOM Manager matches them by description", missing.join(", "));
+            }
+            app.flash_info(msg, Some(std::time::Duration::from_secs(8)));
+        }
+        Err(e) => app.flash(format!("Could not save {}: {e}", path.display()), crate::app::ToastKind::Error),
     }
 }

@@ -338,7 +338,20 @@ impl Session {
                         (Some(q), None) => q,
                         (None, sh) => free_sch_spot(&p, sh.unwrap_or(0)),
                     };
-                    let i = p.add_part(sym, x.get("footprint").and_then(|v| v.as_str()), x.get("value").and_then(|v| v.as_str()), sch).map_err(|e| format!("parts[{k}]: {e}"))?;
+                    // a KiCad library symbol ("Device:R", "MCU_RaspberryPi:RP2040") is loaded with
+                    // its footprint, or the "Lib:Name" footprint given
+                    let mut fp_arg = x.get("footprint").and_then(|v| v.as_str()).map(String::from);
+                    if sym.contains(':') && pcb_lib::symbol_kind(sym).is_none() && !p.symbols.iter().any(|s| s.key == sym) {
+                        crate::kicad_libs::ensure().map_err(|e| format!("parts[{k}]: {e}"))?;
+                        let kfp = fp_arg.clone().filter(|f| f.contains(':')).unwrap_or_default();
+                        crate::kicad_libs::add_symbol(&mut p, sym, &kfp).map_err(|e| format!("parts[{k}]: {e}"))?;
+                        if !kfp.is_empty() {
+                            fp_arg = None;
+                        }
+                    }
+                    // a KiCad footprint ("Lib:Name") is loaded by edit_part once the part exists
+                    let fp_now = fp_arg.filter(|f| pcb_lib::footprint(f).is_some());
+                    let i = p.add_part(sym, fp_now.as_deref(), x.get("value").and_then(|v| v.as_str()), sch).map_err(|e| format!("parts[{k}]: {e}"))?;
                     if let Some(r) = x.get("reference").and_then(|v| v.as_str()) {
                         if p.part_index(r).is_some_and(|j| j != i) {
                             return Err(format!("parts[{k}]: there is already a {r}"));
@@ -872,6 +885,29 @@ impl Session {
                 let errors: Vec<Value> = r.into_iter().flat_map(|r| r.features.iter()).filter_map(|f| f.error.clone().map(|e| json!({"feature": f.id, "error": e}))).collect();
                 json!({"studio": si, "name": self.ws.studios[si].name, "parts": r.map(|r| r.bodies.len()).unwrap_or(0), "errors": errors, "hint": "it is now the active Part Studio: render it, export it as STEP, or insert its parts into an assembly"})
             }
+            "kicad_search" => {
+                let q = a.get("query").and_then(|v| v.as_str()).unwrap_or("");
+                let limit = a.get("limit").and_then(|v| v.as_u64()).unwrap_or(15) as usize;
+                let ix = crate::kicad_libs::ensure()?;
+                let kind = a.get("kind").and_then(|v| v.as_str()).unwrap_or("symbol");
+                let credit = crate::kicad_libs::CREDIT;
+                if kind == "footprint" {
+                    // footprints that fit a symbol: its filters and pin count
+                    let (filters, pins) = match a.get("for_symbol").and_then(|v| v.as_str()) {
+                        Some(k) => {
+                            let s = crate::kicad_libs::find_symbol(&ix, k).ok_or_else(|| format!("no symbol {k} in the KiCad libraries"))?;
+                            (s.filters.clone(), Some(s.pins))
+                        }
+                        None => (vec![], None),
+                    };
+                    let hits = crate::kicad_libs::search_footprints(&ix, q, &filters, pins, limit);
+                    json!({"footprints": hits.into_iter().map(crate::kicad_libs::fp_json).collect::<Vec<_>>(), "libraries": credit})
+                } else {
+                    let power = a.get("power").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let hits = crate::kicad_libs::search_symbols(&ix, q, power, limit);
+                    json!({"symbols": hits.into_iter().map(crate::kicad_libs::sym_json).collect::<Vec<_>>(), "libraries": credit})
+                }
+            }
             "digikey_search" => {
                 let q = a.get("query").and_then(|v| v.as_str()).ok_or("give query: a part number or keywords")?;
                 let set = crate::digikey::load_settings();
@@ -960,11 +996,17 @@ fn edit_part(p: &mut Pcb, i: usize, x: &Value) -> R<()> {
         part.value = v.to_string();
     }
     if let Some(f) = x.get("footprint").and_then(|v| v.as_str()) {
-        if pcb_lib::footprint(f).is_none() {
-            return Err(format!("no footprint {f}; e.g. {}", pcb_lib::footprint_names().join(", ")));
+        if pcb_lib::footprint(f).is_none() && f.contains(':') {
+            // a KiCad library footprint
+            crate::kicad_libs::ensure()?;
+            crate::kicad_libs::set_footprint(p, i, f)?;
+        } else if pcb_lib::footprint(f).is_none() {
+            return Err(format!("no footprint {f}; e.g. {} (or a KiCad library footprint \"Lib:Name\", see kicad_search)", pcb_lib::footprint_names().join(", ")));
+        } else {
+            part.footprint = f.to_string();
         }
-        part.footprint = f.to_string();
     }
+    let part = &mut p.parts[i];
     if let Some(sym) = x.get("symbol").and_then(|v| v.as_str()) {
         if sym != part.symbol {
             let k = pcb_lib::kind_info(sym).ok_or_else(|| format!("no symbol {sym}; the symbols are {}", pcb_lib::symbol_keys()))?;
@@ -1221,7 +1263,7 @@ pub fn tools() -> Vec<Value> {
     let create = board;
     vec![
         json!({"name": "create_pcb", "description": "Add a PCB tab: a schematic and a two-layer board (default 50 × 40 mm from the origin). Workflow: pcb_add_parts, pcb_connect (nets by pin), pcb_edit auto_place (or parts with at/rot), pcb_edit zones (GND pour), pcb_route (autoroute), check_pcb, render_pcb, export_pcb (Gerber ZIP), pcb_3d (Part Studio for assemblies and STEP). Units mm, y up.", "inputSchema": obj(create, &[])}),
-        json!({"name": "pcb_add_parts", "description": format!("Add parts from the library. symbol: {}. Each part gets the next reference for its prefix (R1, C2, U1) unless reference is given, its library footprint and value unless given, and a spot beside the board until placed. Returns each part's reference and pins.", pcb_lib::SYMBOLS.iter().map(|s| format!("{} ({}, {})", s.key, s.name, s.footprint)).collect::<Vec<_>>().join(", ")), "inputSchema": obj(json!({"pcb": pcb, "parts": {"type": "array", "description": "parts to add", "items": {"type": "object", "properties": part_fields(json!({"symbol": {"type": "string", "description": "library symbol key"}, "reference": {"type": "string", "description": "reference designator, default the next free one"}})), "required": ["symbol"], "additionalProperties": false}}}), &["pcb", "parts"])}),
+        json!({"name": "pcb_add_parts", "description": format!("Add parts from the library. symbol: {}. Each part gets the next reference for its prefix (R1, C2, U1) unless reference is given, its library footprint and value unless given, and a spot beside the board until placed. Returns each part's reference and pins.", pcb_lib::SYMBOLS.iter().map(|s| format!("{} ({}, {})", s.key, s.name, s.footprint)).collect::<Vec<_>>().join(", ")), "inputSchema": obj(json!({"pcb": pcb, "parts": {"type": "array", "description": "parts to add", "items": {"type": "object", "properties": part_fields(json!({"symbol": {"type": "string", "description": "library symbol key, or a KiCad library symbol (\"Device:R\", \"Regulator_Linear:AMS1117-3.3\"; see kicad_search), loaded with its footprint; footprint may then be a KiCad \"Lib:Name\" too"}, "reference": {"type": "string", "description": "reference designator, default the next free one"}})), "required": ["symbol"], "additionalProperties": false}}}), &["pcb", "parts"])}),
         json!({"name": "pcb_connect", "description": "Connect pins into nets on the schematic: {\"nets\": {\"VCC\": [\"U1.8\", \"R1.1\"], \"GND\": [\"U1.1\", \"C1.2\"]}}. Pins are REF.PIN by number or by pin name. Each pin gets a short wire and a label (ground and supply ports for names like GND, VCC, +5V, 3V3); nets named by a port get the wider power track width. Returns the netlist.", "inputSchema": obj(json!({"pcb": pcb, "nets": {"type": "object", "additionalProperties": {"type": "array", "items": {"type": "string", "description": "REF.PIN"}, "description": "pins"}, "description": "net name → list of pins"}}), &["pcb", "nets"])}),
         json!({"name": "pcb_edit", "description": "Change a PCB tab: board size/outline/thickness/colour/rules, parts (place them with at/rot/side, change value or footprint, delete), schematic wires and labels, mounting holes, copper pours (zones), clear_routing, auto_place.", "inputSchema": obj(edit, &["pcb"])}),
         json!({"name": "pcb_route", "description": "Route the board. With no tracks: autoroute every unrouted connection (net: only that one), shortest first on every copper layer with through vias, keeping the clearance; reports what failed. tracks: [{points: [[x, y], …], layer: top | bottom | in1, in2, …, width, net (default the net under the first point)}] and vias: [{at, net}] add copper by hand (auto: true also autoroutes the rest). pairs routes differential pairs together; tune and match lengthen nets with meanders. Returns the unrouted count.", "inputSchema": obj(json!({"pcb": pcb, "auto": {"type": "boolean", "description": "autoroute (default when no tracks or vias are given)"}, "net": {"type": "string", "description": "autoroute only this net"}, "tracks": {"type": "array", "items": {"type": "object", "properties": {"points": pts("track path"), "layer": layer.clone(), "width": num("width mm (default from the rules)"), "net": {"type": "string", "description": "net (default the one under the first point)"}}, "required": ["points"], "additionalProperties": false}, "description": "tracks to add"}, "vias": {"type": "array", "items": {"type": "object", "properties": {"at": xy("via centre, mm"), "net": {"type": "string", "description": "net (default the one under it)"}, "span": {"type": "array", "items": layer.clone(), "minItems": 2, "maxItems": 2, "description": "blind or buried via: the two layers it joins, e.g. [\"top\", \"in1\"] (default: through all layers)"}, "d": num("pad diameter mm (default from the net's rules)"), "drill": num("drill mm (default from the net's rules)")}, "required": ["at"], "additionalProperties": false}, "description": "vias to add"}, "pairs": {"type": "array", "items": {"type": "string", "description": "pair name or all"}, "description": "route these differential pairs (rules.pairs) side by side at their gap, before any autorouting"}, "tune": {"type": "array", "items": {"type": "object", "properties": {"net": {"type": "string", "description": "net"}, "length": num("target routed length, mm")}, "required": ["net", "length"], "additionalProperties": false}, "description": "lengthen nets to a target with meanders on their straight tracks"}, "match": {"type": "string", "description": "tune every net of this length rule up to its longest"}}), &["pcb"])}),
@@ -1229,6 +1271,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "check_pcb", "description": "Design rule check of the board (issues): clearances per net class and shorts, track widths, via drills and rings, hole spacing, copper near or off the board edge, keepouts, silkscreen on pads, overlapping courtyards, colliding 3D bodies, part heights, dangling tracks, starved thermals, unrouted connections. And the electrical rule check of the schematic (erc): unconnected pins, one-pin nets, outputs driving each other, power pins with no supply, undriven inputs, no-connect marks on wired pins, dangling labels and wires, duplicate references, unknown footprints. Each issue has its rule id (turn checks off with pcb_edit rules.off). ok:true when there are no errors.", "inputSchema": obj(json!({"pcb": pcb}), &["pcb"])}),
         json!({"name": "render_pcb", "description": "PNG of the board (copper of both layers, pours, pads, silkscreen, outline and airwires; layer: the one drawn on top) or of the schematic.", "inputSchema": obj(json!({"pcb": pcb, "view": {"type": "string", "enum": ["board", "schematic"], "description": "default board"}, "sheet": {"type": "string", "description": "schematic: the sheet by name or number (default the first)"}, "layer": {"type": "string", "pattern": "^(top|bottom|in[0-9]+)$", "description": "copper layer drawn on top: top, bottom or in1, in2, …"}, "width": {"type": "integer", "description": "image width px (default 1000)"}, "path": {"type": "string", "description": "also save the PNG here"}}), &["pcb"])}),
         json!({"name": "export_pcb", "description": "Write the fabrication files: path ending .zip gets a ZIP of Gerbers (copper, mask, paste, silkscreen, edge cuts) and Excellon drill files as board makers such as JLCPCB take it, plus <name>-BOM.csv and <name>-CPL.csv (pick and place) beside it; any other path is a folder that gets every file. job: true (or outputs) runs the PCB's output job instead: every file in one .zip or folder, in gerbers/ (with a Gerber X2 job file and a drill drawing), assembly/ (BOM, pick and place), test/ (IPC-D-356A netlist), odb/ (ODB++) and a PDF of the schematic, assembly drawings and drill drawing.", "inputSchema": obj(json!({"pcb": pcb, "path": {"type": "string", "description": "output .zip or folder"}, "job": {"type": "boolean", "description": "run the output job (all outputs unless outputs turned some off)"}, "variant": {"type": "string", "description": "make this variant active first (\"\" for the base design): the BOM and pick and place follow it"}, "outputs": {"type": "object", "description": "turn job outputs on or off (kept with the PCB) and run the job", "properties": job_props}}), &["pcb", "path"])}),
+        json!({"name": "kicad_search", "description": "Search KiCad's official community libraries (about 23,000 symbols and 15,000 footprints, most with STEP 3D models; CC-BY-SA 4.0 with a design exception). Downloads them on first use (about 60 MB). Symbols come back as keys like \"Device:R\" or \"MCU_RaspberryPi:RP2040\" with their default footprint: give such a key as pcb_add_parts symbol (and optionally a \"Lib:Name\" footprint) to place it. Power symbols (power: true) are nets: use a power or ground label with that name instead.", "inputSchema": obj(json!({"query": {"type": "string", "description": "words to find in names, keywords and descriptions (\"opamp dual\", \"usb c receptacle\"), or Lib:Name"}, "kind": {"type": "string", "enum": ["symbol", "footprint"], "description": "what to search (default symbol)"}, "for_symbol": {"type": "string", "description": "with kind footprint: only footprints this symbol's filters and pin count accept"}, "power": {"type": "boolean", "description": "only power symbols"}, "limit": {"type": "integer", "description": "most results (default 15)"}}), &["query"])}),
         json!({"name": "digikey_search", "description": "Search Digi-Key for parts (needs the user's Digi-Key API client ID and secret in the PCB tab's Digi-Key settings), or search a CSV downloaded from digikey.com (search table, cart or list) with csv. Returns products with Digi-Key number, MPN, manufacturer, description, datasheet, package, stock, price and parameters, plus the symbol, value and footprint they would get.", "inputSchema": obj(json!({"query": {"type": "string", "description": "part number or keywords (\"10k 0805 1%\"); with csv, text to filter rows by (* for all)"}, "limit": {"type": "integer", "description": "most results (default 10)"}, "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["query"])}),
         json!({"name": "pcb_digikey", "description": "Use a Digi-Key part on a PCB: fill part reference's MPN, manufacturer, description, datasheet, Digi-Key number, package and BOM fields (and its value and footprint unless set_value is false), or with no reference add a new part from it (symbol, value and footprint from the product). Uses the API, or a CSV from digikey.com with csv.", "inputSchema": obj(json!({"pcb": pcb, "part_number": {"type": "string", "description": "Digi-Key or manufacturer part number, or a digikey.com product link"}, "reference": {"type": "string", "description": "the part to fill (default: add a new part)"}, "set_value": {"type": "boolean", "description": "also set the value and footprint from the product (default true)"}, "symbol": {"type": "string", "description": "new part: symbol key (default from the product's category)"}, "sch": xy("new part: schematic position"), "csv": {"type": "string", "description": "path of a CSV downloaded from digikey.com, instead of the API"}}), &["pcb", "part_number"])}),
         json!({"name": "pcb_library", "description": "The PCB's own part library. import: a KiCad footprint (.kicad_mod), symbol library (.kicad_sym), a folder (.pretty, .kicad_symdir or a download with both) or a ZIP (SnapEDA, Ultra Librarian, SamacSys and similar give KiCad ZIPs). Symbols become \"Library:Name\" keys with their pins, drawing and electrical pin types (used by the ERC); a symbol's footprint is linked when it was imported too. generate: IPC-7351B land patterns from datasheet dimensions (mm, nominal), named the IPC way (RESC2012X50N, SOIC127P600X175-8N, QFN50P400X400X90-17N): chip {family: chip, size: 0805, kind: R|C|L|D|LED} or {body: [L, W], lead, height}; sop/qfp {pins, pitch, body, span: [toe-to-toe x, y], lead (foot length), lead_w, height, ep}; son/qfn {pins, pitch, body, lead, lead_w, height, ep: [w, h] exposed pad}; bga {pitch, ball, rows, cols, height}. density M, N (default) or L.", "inputSchema": obj(json!({"pcb": pcb, "import": {"type": "string", "description": "KiCad file, folder or ZIP to import"}, "generate": {"type": "array", "description": "IPC-7351 footprints to generate", "items": {"type": "object", "properties": {

@@ -165,6 +165,14 @@ pub fn unzip(b: &[u8]) -> Result<Vec<(String, Vec<u8>)>, String> {
 /// Every entry of a ZIP by name, unpacked (`Some`) only when `want` says so. What is unpacked
 /// counts against `budget`; going over it is an error.
 fn unzip_entries(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize) -> Result<Vec<(String, Option<Vec<u8>>)>, String> {
+    let mut out = vec![];
+    unzip_each(b, want, budget, &mut |n, d| out.push((n, d)))?;
+    Ok(out)
+}
+
+/// Like `unzip`, one entry at a time: `each` gets every entry's name and, when `want` says so,
+/// its bytes (so a large archive needn't be unpacked into memory all at once).
+pub fn unzip_each(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize, each: &mut dyn FnMut(String, Option<Vec<u8>>)) -> Result<(), String> {
     let bad = || "the ZIP file is damaged or uses an unsupported format".to_string();
     let too_big = || format!("the ZIP unpacks to more than {} MB", MAX_UNPACKED >> 20);
     // end of central directory: the last "PK\5\6" within the final 64 KiB
@@ -172,7 +180,6 @@ fn unzip_entries(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize) -> R
     let eocd = (from..b.len().saturating_sub(21)).rev().find(|&i| b[i..i + 4] == *b"PK\x05\x06").ok_or_else(bad)?;
     let count = u16_at(b, eocd + 10).ok_or_else(bad)?;
     let mut p = u32_at(b, eocd + 16).ok_or_else(bad)?;
-    let mut out = vec![];
     for _ in 0..count {
         if b.get(p..p + 4) != Some(b"PK\x01\x02") {
             return Err(bad());
@@ -186,7 +193,7 @@ fn unzip_entries(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize) -> R
         let name = String::from_utf8_lossy(b.get(p + 46..p + 46 + nlen).ok_or_else(bad)?).replace('\\', "/");
         p += 46 + nlen + xlen + clen;
         if !want(&name) {
-            out.push((name, None));
+            each(name, None);
             continue;
         }
         if csize == 0xFFFF_FFFF || usize_ == 0xFFFF_FFFF {
@@ -212,9 +219,9 @@ fn unzip_entries(b: &[u8], want: &dyn Fn(&str) -> bool, budget: &mut usize) -> R
             m => return Err(format!("{name} is compressed with method {m}, which is not supported")),
         };
         *budget = budget.checked_sub(bytes.len()).ok_or_else(too_big)?;
-        out.push((name, Some(bytes)));
+        each(name, Some(bytes));
     }
-    Ok(out)
+    Ok(())
 }
 
 /// The user's Downloads folder.
