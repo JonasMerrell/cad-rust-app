@@ -1,0 +1,6 @@
+numpy
+scipy
+trimesh
+fast-simplification
+mujoco
+python-fcl
