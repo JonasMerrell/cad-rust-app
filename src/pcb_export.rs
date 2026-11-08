@@ -127,6 +127,27 @@ pub struct BoardView {
     pub silk: bool,
     pub zones: bool,
     pub air: bool,
+    /// What clicks can select (KiCad's selection filter).
+    pub pick: Pick,
+}
+
+/// The selection filter: which kinds of item a click picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pick {
+    pub parts: bool,
+    pub tracks: bool,
+    pub vias: bool,
+    pub zones: bool,
+    pub holes: bool,
+    pub keepouts: bool,
+    pub wires: bool,
+    pub labels: bool,
+}
+
+impl Default for Pick {
+    fn default() -> Self {
+        Pick { parts: true, tracks: true, vias: true, zones: true, holes: true, keepouts: true, wires: true, labels: true }
+    }
 }
 
 impl BoardView {
@@ -141,7 +162,7 @@ impl BoardView {
 
 impl Default for BoardView {
     fn default() -> Self {
-        BoardView { active: Layer::Top, top: true, bottom: true, inner: true, silk: true, zones: true, air: true }
+        BoardView { active: Layer::Top, top: true, bottom: true, inner: true, silk: true, zones: true, air: true, pick: Pick::default() }
     }
 }
 

@@ -1311,7 +1311,9 @@ impl App {
             self.guard(crate::session::Pending::New);
             return;
         }
-        if (!ctrl && pressed(Key::F1)) || ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"))) {
+        // in the PCB editors ? is KiCad's hotkey list of that view (F1 stays this one)
+        let pcb_keys = matches!(self.tab, crate::workspace::Tab::Pcb(_)) && self.pcb.view != crate::pcb_ui::View::Simulate;
+        if (!ctrl && pressed(Key::F1)) || (!pcb_keys && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?")))) {
             self.session.show_shortcuts = !self.session.show_shortcuts;
             return;
         }
