@@ -70,6 +70,12 @@ Insert parts and join them with fastened, revolute, slider, cylindrical, planar 
 them to see the mechanism move, explode it, section it and export the bill of materials. Gear, rack
 and screw relations carry motion from one mate to another.
 
+**Animation** turns that motion into something to show. A motion is a slider linked to joints: each
+link moves one mate between two values over part of the slider's travel, so one slider can drive
+several joints at their own rates, one after another, or drive other motions. A timeline then runs
+motions as clips, in sequence or overlapping, once, looped or back and forth, and the animation plays
+in the exported web page too.
+
 The **Library** inserts parametric standard parts: ISO/DIN socket, button, countersunk, hex and set
 screws; hex, thin and nyloc nuts; washers; dowel pins and shafts; ball, thrust and linear bearings;
 NEMA 8–23 steppers; and 2020–4080 T-slot extrusions. For anything else, its **GrabCAD** tab opens a
@@ -260,7 +266,7 @@ Pico controller firmware homes the steppers and runs a pick-and-place cycle in t
 - **Python:** [`python/`](python/README.md) builds `cadrust`, bindings with a FreeCAD-style API,
   offscreen renders, STEP assemblies and finite elements.
 - **Export:** STEP, IGES, STL, OBJ, PNG, G-code, and an interactive web page of an assembly whose
-  slider and revolute mates move within their limits. An assembly exports as STEP with its parts in
+  slider and revolute mates move within their limits and whose motions and animations play. An assembly exports as STEP with its parts in
   place, or (File → Export → STEP as one body) with every part fused into a single solid.
 
 ## Install
@@ -314,6 +320,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/worker.rs` | kernel worker process protocol |
 | `src/expr.rs` | expressions and units |
 | `src/assembly.rs`, `src/asm_ui.rs` | assemblies, the mate solver and the Assembly tab |
+| `src/asm_anim.rs`, `src/asm_anim_ui.rs` | motion sliders linked to mates, animation timelines and their sidebar section |
 | `src/drawing.rs`, `src/drawing_ui.rs`, `src/drawing_export.rs` | drawings, the Drawing tab and PDF/DXF/SVG export |
 | `src/web_export.rs`, `src/web_asm.rs` | interactive web page export |
 | `src/stock_size.rs` | raw stock for a part: smallest box or cylinder around it, rounded up to standard metric or imperial plate and bar sizes |
