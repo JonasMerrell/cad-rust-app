@@ -1077,6 +1077,11 @@ impl Pcb {
             sch: snap(sch, pcb_lib::GRID),
             ..Default::default()
         };
+        // a library symbol's description and datasheet go with the part (KiCad's `~` is none)
+        if let Some(l) = pcb_lib::lib_symbol(&k.key) {
+            p.description = l.description.clone();
+            p.datasheet = if l.datasheet == "~" { String::new() } else { l.datasheet.clone() };
+        }
         p.at = self.free_spot(&p);
         self.parts.push(p);
         Ok(self.parts.len() - 1)

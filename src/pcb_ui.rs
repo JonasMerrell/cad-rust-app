@@ -143,6 +143,8 @@ pub struct PcbUi {
     tab: Option<usize>,
     /// The trace solver's calculator and per-net report.
     pub(crate) trace: crate::pcb_trace_ui::TraceUi,
+    /// The KiCad library browser.
+    pub(crate) kicad: crate::kicad_lib_ui::KicadUi,
 }
 
 impl Default for PcbUi {
@@ -191,6 +193,7 @@ impl Default for PcbUi {
             field_new: Default::default(),
             tab: None,
             trace: Default::default(),
+            kicad: Default::default(),
         }
     }
 }
@@ -411,6 +414,12 @@ fn set_tool(app: &mut App, t: Tool) {
 }
 
 /// Start placing library symbol `key` on the schematic.
+/// Start placing labels of `kind` named `text` (KiCad's power symbols become supply and ground ports).
+pub(crate) fn start_label(app: &mut App, kind: LabelKind, text: &str) {
+    app.pcb.label_text[label_slot(kind)] = text.to_string();
+    set_tool(app, Tool::Label(kind));
+}
+
 pub(crate) fn start_place(app: &mut App, key: &str) {
     set_tool(app, Tool::Place(key.to_string()));
     app.pcb.place_rot = 0;
@@ -692,7 +701,7 @@ pub fn hint(app: &App) -> String {
         (_, Tool::Hole) => "Click to add a mounting hole".into(),
         (_, Tool::Keepout) => "Click the corners of the keepout, double-click or Enter to close it · tracks, vias and pours stay out".into(),
         (_, Tool::NoConnect) => "Click a pin to mark it as left open on purpose (click again to clear) · Esc when done".into(),
-        (View::Schematic, _) => "Add parts from the library, wire their pins (W), name nets (L) · B switches to the board".into(),
+        (View::Schematic, _) => "Add parts (A searches the KiCad libraries), wire their pins (W), name nets (L) · B switches to the board".into(),
         (View::Simulate, _) => crate::circuit_ui::hint(app),
         (View::Board, _) => "Drag parts onto the board (R rotates, F flips), then route (X) or autoroute · L changes layer · B back to the schematic".into(),
     }
@@ -772,6 +781,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         }
         if pressed(egui::Key::Q) {
             set_tool(app, Tool::NoConnect);
+        }
+        if pressed(egui::Key::A) {
+            crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Symbol);
         }
     } else {
         if pressed(egui::Key::X) {
@@ -1034,6 +1046,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 _ => None,
             };
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
+            if let Some(id) = ui.data_mut(|d| d.remove_temp::<u64>(egui::Id::new("kicad-fp-for"))) {
+                crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Footprint(id));
+            }
             if let Some((k, was)) = old {
                 if app.ws.pcbs[i].parts.get(k).is_some_and(|x| *x != was) {
                     // the same pins rearranged (turned, mirrored, renamed) must keep their joins, as
@@ -1076,6 +1091,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         section(ui, "Nets", |ui| nets_ui(app, ui));
     });
     crate::pcb_trace_ui::window(app, ui.ctx());
+    crate::kicad_lib_ui::window(app, ui.ctx());
     // edits made through edit() have their own undo step
     if app.ws.pcbs[i] != before && app.pcb.drag.is_none() {
         if app.pcb.steps == steps {
@@ -1141,6 +1157,16 @@ fn library_ui(app: &mut App, ui: &mut Ui) {
         }
     }
     ui.add_space(4.0);
+    if ui
+        .add_sized([ui.available_width(), 24.0], egui::Button::new(RichText::new("KiCad libraries…  A").strong()))
+        .on_hover_text("Search KiCad's ~23,000 symbols and ~15,000 footprints (with 3D models) and place them")
+        .clicked()
+    {
+        crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Symbol);
+    }
+    if ui.button("Power symbols…").on_hover_text("KiCad's power symbols: GND, +5V, +3V3, …").clicked() {
+        crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Power);
+    }
     ui.horizontal(|ui| {
         if ui.button("Import KiCad…").on_hover_text("Footprints (.kicad_mod), symbols (.kicad_sym) or a ZIP from SnapEDA, Ultra Librarian and the like").clicked() {
             if let Some(path) = app.open_file_dialog("KiCad library", &["kicad_mod", "kicad_sym", "zip", "KICAD_MOD", "KICAD_SYM", "ZIP"]) {
@@ -1386,6 +1412,12 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                         ui.selectable_value(&mut part.footprint, f.clone(), f);
                     }
                 });
+            });
+            row(ui, "", |ui| {
+                if ui.button("KiCad footprints…").on_hover_text("Pick a footprint from the KiCad libraries (those that fit this part first)").clicked() {
+                    let id = part.id;
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("kicad-fp-for"), id));
+                }
             });
             row(ui, "Package", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.package).desired_width(120.0).hint_text("supplier's name"));
@@ -2330,6 +2362,23 @@ fn paint(painter: &egui::Painter, xf: &Xf, list: &[Draw]) {
 }
 
 /// The ghost of the part being placed, as a part at the cursor.
+/// A drawing fitted into a box of `size` points (the library browser's previews).
+pub(crate) fn preview(ui: &mut Ui, list: &[Draw], size: egui::Vec2, board: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    // the editor's own backgrounds: schematic paper, dark board
+    let bg = if !board { Color32::from_rgb(250, 249, 244) } else if theme::is_dark() { Color32::from_rgb(14, 16, 20) } else { Color32::from_rgb(34, 38, 46) };
+    ui.painter().rect_filled(rect, 4.0, bg);
+    if list.is_empty() {
+        return resp;
+    }
+    let (lo, hi) = pcb_export::extent(list);
+    let w = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
+    let zoom = ((rect.width() - 24.0) / w[0] as f32).min((rect.height() - 24.0) / w[1] as f32).clamp(0.5, 200.0);
+    let xf = Xf { rect, zoom, center: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0] };
+    paint(&ui.painter_at(rect), &xf, list);
+    resp
+}
+
 fn ghost_part(key: &str, at: P, rot: u8, mirror: bool) -> Option<pcb::Part> {
     let k = pcb_lib::kind_info(key)?;
     Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value, symbol: k.key, footprint: k.footprint, sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })

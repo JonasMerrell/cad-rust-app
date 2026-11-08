@@ -816,10 +816,26 @@ pub fn model_params(part: &Part, setup: &SimSetup) -> Result<(String, Vec<(&'sta
 }
 
 /// The model for a part, from its symbol and value.
+/// KiCad's two-pin Device symbols simulate like the built-in ones (same pin order: 1 is the
+/// cathode on diodes): `Device:R_Small_US` → R, `Device:C_Polarized` → CP, `Device:LED` → LED.
+fn kicad_device(sym: &str) -> Option<&'static str> {
+    let name = sym.strip_prefix("Device:")?;
+    let base = name.split('_').next().unwrap_or(name);
+    Some(match base {
+        "R" => "R",
+        "C" if name.contains("Polarized") => "CP",
+        "C" => "C",
+        "L" => "L",
+        "D" if name == "D" || name.starts_with("D_Small") => "D",
+        "LED" if name == "LED" || name.starts_with("LED_Small") => "LED",
+        _ => return None,
+    })
+}
+
 fn base_model(part: &Part, setup: &SimSetup) -> Result<Model, String> {
     let val = || parse_si(&part.value).ok_or_else(|| format!("{}: {} is not a value (e.g. 10k, 100n)", part.reference, part.value));
     let pins = part.footprint().pin_numbers();
-    Ok(match part.symbol.as_str() {
+    Ok(match kicad_device(&part.symbol).unwrap_or(part.symbol.as_str()) {
         "R" => {
             let r = val()?;
             if r <= 0.0 {

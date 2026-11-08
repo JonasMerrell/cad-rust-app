@@ -185,7 +185,7 @@ pub fn generate(spec: &IpcSpec) -> Result<Footprint, String> {
     if !matches!(d, 'M' | 'N' | 'L') {
         return Err("density is M (most), N (nominal) or L (least)".into());
     }
-    let mut f = Footprint { name: String::new(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [36, 36, 40] };
+    let mut f = Footprint { name: String::new(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [36, 36, 40], model: None, source: String::new() };
     let need = |v: f64, what: &str| if v > 0.0 { Ok(()) } else { Err(format!("give {what}")) };
     let silk_w = 0.15;
     match s.family {

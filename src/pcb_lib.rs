@@ -265,6 +265,11 @@ pub struct LibSymbol {
     pub pin_names: bool,
     pub ref_at: P,
     pub value_at: P,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub datasheet: String,
+    /// Where the symbol came from and under what licence (KiCad libraries: CC-BY-SA 4.0).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
 }
 
 impl LibSymbol {
@@ -374,6 +379,30 @@ pub struct Footprint {
     pub court: (P, P),
     pub body: Vec<Solid>,
     pub color: [u8; 3],
+    /// A 3D model (STEP) for the 3D board, in place of `body`: KiCad library footprints name one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub model: Option<Model3d>,
+    /// Where the footprint came from and under what licence (KiCad libraries: CC-BY-SA 4.0).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub source: String,
+}
+
+/// A footprint's 3D model, placed the way KiCad places it: scaled, turned about x, then y, then
+/// z (KiCad's angles, which turn clockwise), then moved by `offset` (mm).
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+pub struct Model3d {
+    /// Path in the KiCad 3D library without the extension (`Resistor_SMD.3dshapes/R_0603_1608Metric`).
+    pub file: String,
+    #[serde(default)]
+    pub offset: [f64; 3],
+    #[serde(default)]
+    pub rotate: [f64; 3],
+    #[serde(default = "one3")]
+    pub scale: [f64; 3],
+}
+
+fn one3() -> [f64; 3] {
+    [1.0; 3]
 }
 
 impl Footprint {
@@ -435,7 +464,7 @@ pub fn is_builtin_footprint(name: &str) -> bool {
 
 /// Build a footprint from its name, or None for an unknown name.
 fn generated(name: &str) -> Option<Footprint> {
-    let mut f = Footprint { name: name.into(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44] };
+    let mut f = Footprint { name: name.into(), pads: vec![], silk: vec![], court: ([0.0; 2], [0.0; 2]), body: vec![], color: [40, 40, 44], model: None, source: String::new() };
     let body_rect;
     // two-terminal chips: pads along x, pad 1 on the left (the cathode for diodes and LEDs)
     let chip = |s: &str| -> Option<(f64, f64, f64, f64, f64, f64)> {

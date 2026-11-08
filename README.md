@@ -179,6 +179,16 @@ schematic pose, MPN, manufacturer, description, datasheet, Digi-Key number, your
 part number, product link or keywords through Digi-Key's API (with your own free API app's client ID
 and secret), or without keys from a table, cart or list CSV downloaded from digikey.com: use one for
 the selected part or place it as a new one, with its value, footprint and BOM data filled in.
+**Export BOM** writes a CSV that Digi-Key's BOM Manager reads as it is (also part of the output job).
+
+**KiCad libraries:** press A on the schematic to search KiCad's official libraries (about 23,000
+symbols and 15,000 footprints) by name, keyword or description, see the symbol and its footprint,
+pick another footprint from those that fit, and place it. "KiCad footprints…" in the selection does
+the same for a part's footprint, and the 3D board uses the footprints' KiCad STEP models. rCAD uses
+an installed KiCad's libraries, or downloads release 10.0.8 from gitlab.com/kicad/libraries into
+`~/.cache/cad-rust-app/kicad` on first use (about 60 MB, 470 MB unpacked). The libraries are © the
+KiCad Libraries Team and contributors under CC-BY-SA 4.0, with an exception that leaves designs
+made with them, and their outputs, free of the share-alike terms.
 
 ### Circuit and firmware simulation
 
@@ -323,6 +333,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb_route.rs` | the grid autorouter and automatic placement |
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
+| `src/kicad_libs.rs`, `src/kicad_lib_ui.rs` | KiCad library download, index, search and loading; the symbol and footprint choosers |
 | `src/digikey.rs`, `src/digikey_ui.rs` | Digi-Key API client and CSV import, products to parts, the PCB tab's Digi-Key section |
 | `src/circuit.rs` | circuit simulation setup, part models by value, the circuit built from the schematic, results and measurements |
 | `src/circuit_solve.rs` | the circuit solver: MNA with Newton-Raphson, variable-step BDF2 transient with events and an external pin driver, AC sweep |
