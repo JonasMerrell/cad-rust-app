@@ -544,9 +544,13 @@ if want(only, "Track") {
     studios.finish(d, ["track"], out);
 }
 
-// The track as it runs round the wheels, for the assembly (the band only: it isn't printed this way).
+// The track as it runs round the wheels, for the assembly, with its 42 grousers outside and lugs inside
+// at the 8 mm pitch on the band's mid-plane.
 // Its inner surface is the belt round the sprocket, road wheels and idler, 0.1 out
-fn belt(s, circles, grow) {
+fn belt(s, circles, grow) { belt_from(s, circles, grow, ()) }
+// the same, as a path for a curve pattern that starts (and ends) on the first circle at angle `start`
+// (degrees in the sketch, which must lie on that circle's wrap); without one it is a plain loop
+fn belt_from(s, circles, grow, start) {
     // circles in counter-clockwise order (x, z, r) round the outline; tangent n is outwards
     let n = circles.len();
     let tp = [];
@@ -559,11 +563,27 @@ fn belt(s, circles, grow) {
         let nx = ux * al.cos() - uz * al.sin(); let nz = ux * al.sin() + uz * al.cos();
         tp.push([[a[0] + ra * nx, a[1] + ra * nz], [b[0] + rb * nx, b[1] + rb * nz]]);
     }
+    let c0 = circles[0];
+    let r0 = c0[2] + grow;
+    let p0 = if start == () { () } else { [c0[0] + r0 * start.to_radians().cos(), c0[1] + r0 * start.to_radians().sin()] };
+    let refs = [];
+    let cv = |c| #{kind: "sketch_curve", sketch: s.id, curve: if "line" in c { c.line } else { c.arc }};
+    if p0 != () { refs.push(cv.call(s.arc([c0[0], c0[1]], p0, tp[0][0]))); }
     for i in 0..n {
-        s.line(tp[i][0], tp[i][1]);
+        refs.push(cv.call(s.line(tp[i][0], tp[i][1])));
         let c = circles[(i + 1) % n];
-        s.arc([c[0], c[1]], tp[i][1], tp[(i + 1) % n][0]);
+        let e = if i == n - 1 && p0 != () { p0 } else { tp[(i + 1) % n][0] };
+        refs.push(cv.call(s.arc([c[0], c[1]], tp[i][1], e)));
     }
+    refs
+}
+// a quadrilateral given in (along, out) coordinates from the point at angle a (degrees) on circle c,
+// radius r, going counter-clockwise
+fn wrap_quad(s, c, r, a, pts) {
+    let ca = a.to_radians().cos(); let sa = a.to_radians().sin();
+    let q = [];
+    for p in pts { q.push([c[0] + (r + p[1]) * ca - p[0] * sa, c[1] + (r + p[1]) * sa + p[0] * ca]); }
+    s.polygon(q);
 }
 if want(only, "Track (as fitted)") {
     studios.begin(d, "Track (as fitted)", [30, 30, 30], "");
@@ -572,6 +592,25 @@ if want(only, "Track (as fitted)") {
     belt(s, circles, 0.1);
     belt(s, circles, 0.1 + BAND);
     let band = f::ext(d, [f::region(s, 0.0, 1.1)], "y", TRACK_Y0, TRACK_Y0 + TRACK_W, "new", "Band");
+    // a lug sits in each sprocket pocket (the first pocket is at the top, then every 360/10°, one pitch
+    // along the pitch line); the grousers are half a pitch from them. Each seed sits at the start of its
+    // own pitch-line path, on the sprocket's wrap at the back.
+    let spr = circles[0];
+    let rp = SPR_R + 0.1 + BAND / 2.0;
+    let h = BAND / 2.0;
+    let la = 90.0 + 2.0 * 36.0;
+    let ga = la + 18.0;
+    let s = f::sketch_at(d, "y", TRACK_Y0, "Grouser");
+    wrap_quad(s, spr, rp, ga, [[-1.2, h - 0.3], [1.2, h - 0.3], [1.0, h + 1.0], [-1.0, h + 1.0]]);
+    let gr = f::ext(d, s, "y", TRACK_Y0, TRACK_Y0 + TRACK_W, "add", "Grouser");
+    // the lug, 4 long, 2.5 tall, its inner 6 mm of width (the 45° chamfer is left out)
+    let s = f::sketch_at(d, "y", TRACK_Y0 + TRACK_W / 2.0 - 3.0, "Lug");
+    wrap_quad(s, spr, rp, la, [[-2.0, -h + 0.2], [2.0, -h + 0.2], [2.0, -h - 2.5], [-2.0, -h - 2.5]]);
+    let lug = f::ext(d, s, "y", TRACK_Y0 + TRACK_W / 2.0 - 3.0, TRACK_Y0 + TRACK_W / 2.0 + 3.0, "add", "Lug");
+    let p = f::sketch_at(d, "y", TRACK_Y0, "Grouser path");
+    d.feature("curvePattern", #{kind: "feature", bodies: [#{kind: "feature", feature: gr}], path: belt_from(p, circles, 0.1 + h, ga), count: LUGS, align: true}, "Grousers");
+    let p = f::sketch_at(d, "y", TRACK_Y0, "Lug path");
+    d.feature("curvePattern", #{kind: "feature", bodies: [#{kind: "feature", feature: lug}], path: belt_from(p, circles, 0.1 + h, la), count: LUGS, align: true}, "Lugs");
     d.feature("mirror", #{kind: "part", bodies: [#{kind: "body", body: body_of(d, band)}], plane: #{kind: "origin_plane", plane: "Front"}}, "Right track");
     studios.finish(d, ["track L (as fitted)", "track R (as fitted)"], out);
 }

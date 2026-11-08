@@ -1920,6 +1920,35 @@ fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool)
     Ok(shape)
 }
 
+/// A packed STEP file (see `import::pack`) as one solid: its solids fused (a KiCad 3D model's
+/// body and leads), or the compound when they won't fuse. Cached, since scripts call it on
+/// every rebuild.
+pub fn packed_step_solid(data: &str) -> R<Shape> {
+    use std::hash::{Hash, Hasher};
+    static FUSED: std::sync::Mutex<Option<HashMap<u64, Shape>>> = std::sync::Mutex::new(None);
+    let mut h = std::collections::hash_map::DefaultHasher::new();
+    ("fused", data).hash(&mut h);
+    let key = h.finish();
+    if let Some(s) = FUSED.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&key)).map(dup)) {
+        return Ok(s);
+    }
+    let shape = imported_shape("", "step", data, 1.0, false)?;
+    let solids = solids_of(&shape);
+    let out = match solids.len() {
+        0 => return Err("the 3D model has no solids".into()),
+        1 => solids.into_iter().next().unwrap(),
+        _ => fuse_all(solids.iter().map(dup).collect()).unwrap_or(shape),
+    };
+    if let Ok(mut m) = FUSED.lock() {
+        let m = m.get_or_insert_with(HashMap::new);
+        if m.len() > 64 {
+            m.clear();
+        }
+        m.insert(key, dup(&out));
+    }
+    Ok(out)
+}
+
 /// Write `bytes` to a new file of its own in the temp folder for OCCT to read: created
 /// exclusively under a random name, so it never follows a link planted there or meets another
 /// reader's file.

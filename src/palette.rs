@@ -223,6 +223,7 @@ fn commands(app: &App) -> Vec<Cmd> {
         Tab::Assembly(_) => {
             v.push(cmd("Standard parts…", "Assembly", "library", None, "screw bolt nut washer bearing pin dowel motor stepper nema extrusion iso din content library", Action::Run(crate::stdparts_ui::open_standard)));
             v.push(cmd("Insert from GrabCAD…", "Assembly", "import", None, "download step zip model library", Action::Run(crate::stdparts_ui::open_grabcad)));
+            v.push(cmd("Insert from McMaster-Carr…", "Assembly", "import", None, "mcmaster carr mcmaster-carr part number catalog catalogue step download screw fastener", Action::Run(crate::stdparts_ui::open_mcmaster)));
             let label = if app.isolation.is_some() { "Exit isolate" } else { "Isolate selected instances" };
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
             v.push(cmd("Hide / show selected instances", "View", "eyeOff", Some("H"), "hide show visibility eye parts", Action::Run(crate::asm_ui::toggle_hide_selected)));

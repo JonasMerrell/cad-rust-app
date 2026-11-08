@@ -695,6 +695,8 @@ fn register_build(e: &mut Engine) {
     });
     e.register_fn("mirror", |s: &mut S, point: Dynamic, normal: Dynamic| -> Res<S> { Ok(wrap(occ_err(occ::mirror(&s.0, v3(&point)?, v3(&normal)?.normalize_or(DVec3::X)))?)) });
     e.register_fn("transform", |s: &mut S, m: Dynamic, t: Dynamic| -> Res<S> { Ok(wrap(occ_err(occ::transform(&s.0, m3_of(&m)?, v3(&t)?))?)) });
+    // a STEP file stored in the script (`import::pack`), e.g. a KiCad footprint's 3D model
+    e.register_fn("step_data", |data: ImmutableString| -> Res<S> { Ok(wrap(occ_err(crate::kernel::packed_step_solid(&data))?)) });
     e.register_fn("copy", |s: &mut S| -> Res<S> { Ok(wrap(occ_err(occ::translate(&s.0, DVec3::ZERO))?)) });
     e.register_fn("compound", |a: Array| -> Res<S> {
         let v = shapes(&a)?;

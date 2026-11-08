@@ -143,6 +143,14 @@ pub struct PcbUi {
     tab: Option<usize>,
     /// The trace solver's calculator and per-net report.
     pub(crate) trace: crate::pcb_trace_ui::TraceUi,
+    /// The KiCad library browser.
+    pub(crate) kicad: crate::kicad_lib_ui::KicadUi,
+    /// Annotate, footprint assignment, properties and hotkey windows.
+    pub(crate) tools: crate::pcb_tools_ui::ToolsUi,
+    /// M/G: the selection follows the mouse (a drag without the button held) until a click.
+    moving: bool,
+    /// The last library key placed, for Insert.
+    last_place: Option<String>,
 }
 
 impl Default for PcbUi {
@@ -191,6 +199,10 @@ impl Default for PcbUi {
             field_new: Default::default(),
             tab: None,
             trace: Default::default(),
+            kicad: Default::default(),
+            tools: Default::default(),
+            moving: false,
+            last_place: None,
         }
     }
 }
@@ -411,8 +423,15 @@ fn set_tool(app: &mut App, t: Tool) {
 }
 
 /// Start placing library symbol `key` on the schematic.
+/// Start placing labels of `kind` named `text` (KiCad's power symbols become supply and ground ports).
+pub(crate) fn start_label(app: &mut App, kind: LabelKind, text: &str) {
+    app.pcb.label_text[label_slot(kind)] = text.to_string();
+    set_tool(app, Tool::Label(kind));
+}
+
 pub(crate) fn start_place(app: &mut App, key: &str) {
     set_tool(app, Tool::Place(key.to_string()));
+    app.pcb.last_place = Some(key.to_string());
     app.pcb.place_rot = 0;
     app.pcb.place_mirror = false;
 }
@@ -692,17 +711,201 @@ pub fn hint(app: &App) -> String {
         (_, Tool::Hole) => "Click to add a mounting hole".into(),
         (_, Tool::Keepout) => "Click the corners of the keepout, double-click or Enter to close it · tracks, vias and pours stay out".into(),
         (_, Tool::NoConnect) => "Click a pin to mark it as left open on purpose (click again to clear) · Esc when done".into(),
-        (View::Schematic, _) => "Add parts from the library, wire their pins (W), name nets (L) · B switches to the board".into(),
+        (View::Schematic, _) => "Add parts (A searches the KiCad libraries), wire their pins (W), name nets (L) · B switches to the board".into(),
         (View::Simulate, _) => crate::circuit_ui::hint(app),
         (View::Board, _) => "Drag parts onto the board (R rotates, F flips), then route (X) or autoroute · L changes layer · B back to the schematic".into(),
     }
+}
+
+// ---------------------------------------------------------------- KiCad-style keys
+
+/// What M, G, E and ` act on: the selection, else what is under the cursor (then selected).
+fn sel_or_hover(app: &mut App) -> Option<Sel> {
+    if app.pcb.sel.is_some() {
+        return app.pcb.sel;
+    }
+    let pi = index(app)?;
+    let p = &app.ws.pcbs[pi];
+    let k = vi(app.pcb.view);
+    let tol = (6.0 / app.pcb.zoom[k].max(0.01)) as f64;
+    let h = app.pcb.hover;
+    let s = if app.pcb.view == View::Board { board_hit(p, &app.pcb.cache.pads, h, tol, app.pcb.layer, &app.pcb.show) } else { sch_hit(p, h, tol, &app.pcb.show.pick) };
+    app.pcb.sel = s;
+    s
+}
+
+/// Wire ends lying on `pts` (pins or sheet entries), to drag along with them.
+fn wire_ends(p: &Pcb, pts: &[P]) -> Vec<(usize, bool, P)> {
+    let mut ends = vec![];
+    for (k, w) in p.wires.iter().enumerate() {
+        if pts.iter().any(|q| pcb::dist(*q, w.a) < 1e-6) {
+            ends.push((k, false, w.a));
+        }
+        if pts.iter().any(|q| pcb::dist(*q, w.b) < 1e-6) {
+            ends.push((k, true, w.b));
+        }
+    }
+    ends
+}
+
+/// M or G: the selection follows the mouse until a click drops it (Esc or a right click puts it back).
+fn start_move(app: &mut App) {
+    let Some(pi) = index(app) else { return };
+    let Some(s) = sel_or_hover(app) else { return };
+    let p = &app.ws.pcbs[pi];
+    let at = app.pcb.hover;
+    let before = p.clone();
+    let drag = match (s, app.pcb.view) {
+        (Sel::Part(i), View::Schematic) => {
+            let pins: Vec<P> = p.sch_pins().into_iter().filter(|x| x.part == i).map(|x| x.at).collect();
+            Drag { from: at, orig: p.parts[i].sch, ends: wire_ends(p, &pins), before }
+        }
+        (Sel::Label(i), View::Schematic) => Drag { from: at, orig: p.labels[i].at, ends: vec![], before },
+        (Sel::Sheet(i), View::Schematic) => {
+            let sh = &p.sheet_symbols[i];
+            let pts: Vec<P> = (0..sh.entries.len()).map(|k| sh.entry_at(k)).collect();
+            Drag { from: at, orig: sh.at, ends: wire_ends(p, &pts), before }
+        }
+        (Sel::Part(i), View::Board) => Drag { from: at, orig: p.parts[i].at, ends: vec![], before },
+        (Sel::Hole(i), View::Board) => Drag { from: at, orig: p.board.holes[i].at, ends: vec![], before },
+        _ => {
+            app.flash_info("M moves parts, labels, sheets and holes", Some(Duration::from_secs(2)));
+            return;
+        }
+    };
+    app.pcb.drag = Some(drag);
+    app.pcb.moving = true;
+}
+
+/// Put a moving selection back where it was.
+fn cancel_move(app: &mut App) {
+    app.pcb.moving = false;
+    if let (Some(d), Some(pi)) = (app.pcb.drag.take(), index(app)) {
+        app.ws.pcbs[pi] = d.before;
+        app.pcb.dirty = true;
+    }
+}
+
+/// While moving: a click drops the selection there, a right click puts it back. True when the
+/// click was used.
+fn move_click(app: &mut App, clicked: bool, right: bool) -> bool {
+    if !app.pcb.moving {
+        return false;
+    }
+    if clicked {
+        app.pcb.moving = false;
+        finish_drag(app);
+        return true;
+    }
+    if right {
+        cancel_move(app);
+        return true;
+    }
+    false
+}
+
+/// Ctrl+D: a copy of the selected part (next reference), which then follows the mouse.
+fn duplicate_sel(app: &mut App) {
+    let Some(pi) = index(app) else { return };
+    let Some(Sel::Part(i)) = app.pcb.sel else { return };
+    let board = app.pcb.view == View::Board;
+    let mut new = None;
+    edit(app, |p| {
+        let mut q = p.parts[i].clone();
+        q.id = p.next_id.max(1);
+        p.next_id = q.id + 1;
+        q.reference = p.next_reference(crate::pcb_annotate::prefix(&q.reference));
+        if board {
+            q.at = pcb::add(q.at, [2.54, -2.54]);
+        } else {
+            q.sch = pcb::add(q.sch, [GRID * 4.0, -GRID * 4.0]);
+            q.at = p.free_spot(&q);
+        }
+        p.parts.push(q);
+        new = Some(p.parts.len() - 1);
+    });
+    let _ = pi;
+    if let Some(k) = new {
+        app.pcb.sel = Some(Sel::Part(k));
+        start_move(app);
+    }
+}
+
+/// `: highlight the net under the cursor (again on it, or on nothing, clears).
+fn highlight_hover(app: &mut App) {
+    let Some(pi) = index(app) else { return };
+    let p = &app.ws.pcbs[pi];
+    let c = &app.pcb.cache;
+    let h = app.pcb.hover;
+    let tol = (6.0 / app.pcb.zoom[vi(app.pcb.view)].max(0.01)) as f64;
+    let net = if app.pcb.view == View::Board {
+        pcb::copper_at(p, &c.nl, &c.pads, h, app.pcb.layer, tol).map(|x| x.net)
+    } else {
+        // a pin end or a wire
+        let pin = p.sch_pins().into_iter().find(|x| pcb::dist(x.at, h) < tol * 1.5).and_then(|x| c.nl.net_of(x.part, &x.num));
+        let wire = p.wires.iter().position(|w| pcb::seg_point(w.a, w.b, h) < tol).and_then(|w| c.nl.wire_net.get(w).copied().flatten());
+        pin.or(wire).map(|n| c.nl.nets[n].name.clone())
+    }
+    .filter(|n| !n.is_empty());
+    app.pcb.highlight = if net.is_some() && net == app.pcb.highlight { None } else { net };
 }
 
 pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     let (ctrl, _shift) = crate::app::key_mods(ctx);
     let pressed = |k: egui::Key| ctx.input(|i| i.key_pressed(k));
     if ctrl {
+        if pressed(egui::Key::D) && app.pcb.view != View::Simulate {
+            duplicate_sel(app);
+        }
+        if pressed(egui::Key::F1) {
+            app.pcb.tools.hotkeys = !app.pcb.tools.hotkeys;
+        }
         return;
+    }
+    // KiCad's keys, in both editors
+    if app.pcb.view != View::Simulate {
+        if pressed(egui::Key::Questionmark) || ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"))) {
+            app.pcb.tools.hotkeys = !app.pcb.tools.hotkeys;
+        }
+        if app.pcb.moving && pressed(egui::Key::Escape) {
+            cancel_move(app);
+            return;
+        }
+        if app.pcb.tool == Tool::Select && !app.pcb.moving && (pressed(egui::Key::M) || (pressed(egui::Key::G) && app.pcb.view == View::Board)) {
+            start_move(app);
+        }
+        if pressed(egui::Key::E) && sel_or_hover(app).is_some() {
+            app.pcb.tools.props = true;
+        }
+        if pressed(egui::Key::Backtick) {
+            highlight_hover(app);
+        }
+        if pressed(egui::Key::Home) {
+            fit(app);
+        }
+        if pressed(egui::Key::Insert) {
+            if let Some(k) = app.pcb.last_place.clone() {
+                set_view(app, View::Schematic);
+                start_place(app, &k);
+            }
+        }
+        if app.pcb.view == View::Board {
+            if pressed(egui::Key::PageUp) {
+                switch_layer(app, Layer::Top);
+            }
+            if pressed(egui::Key::PageDown) {
+                switch_layer(app, Layer::Bottom);
+            }
+            if pressed(egui::Key::Plus) || pressed(egui::Key::Equals) {
+                let next = next_layer(app, app.pcb.layer);
+                switch_layer(app, next);
+            }
+            if pressed(egui::Key::Minus) {
+                let layers = copper_layers(app);
+                let i = layers.iter().position(|x| *x == app.pcb.layer).unwrap_or(0);
+                switch_layer(app, layers[(i + layers.len() - 1) % layers.len()]);
+            }
+        }
     }
     let board = app.pcb.view == View::Board;
     if app.pcb.view == View::Simulate {
@@ -772,6 +975,9 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
         }
         if pressed(egui::Key::Q) {
             set_tool(app, Tool::NoConnect);
+        }
+        if pressed(egui::Key::A) {
+            crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Symbol);
         }
     } else {
         if pressed(egui::Key::X) {
@@ -1034,6 +1240,9 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
                 _ => None,
             };
             section(ui, "Selection", |ui| selection_ui(app, ui, s));
+            if let Some(id) = ui.data_mut(|d| d.remove_temp::<u64>(egui::Id::new("kicad-fp-for"))) {
+                crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Footprint(id));
+            }
             if let Some((k, was)) = old {
                 if app.ws.pcbs[i].parts.get(k).is_some_and(|x| *x != was) {
                     // the same pins rearranged (turned, mirrored, renamed) must keep their joins, as
@@ -1057,6 +1266,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
             section(ui, "Library", |ui| library_ui(app, ui));
             section(ui, "Sheets", |ui| sheets_ui(app, ui));
+            section(ui, "Selection filter", |ui| layers_ui(app, ui));
         }
         section(ui, "Variants", |ui| variants_ui(app, ui));
         if app.pcb.view != View::Board || matches!(app.pcb.sel, Some(Sel::Part(_))) {
@@ -1064,7 +1274,7 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
         }
         if app.pcb.view == View::Board {
             section(ui, "Board", |ui| board_ui(app, ui));
-            section(ui, "Layers", |ui| layers_ui(app, ui));
+            section(ui, "Appearance", |ui| layers_ui(app, ui));
             section(ui, "Lengths and pairs", |ui| lengths_ui(app, ui));
             section(ui, "Output job", |ui| output_job_ui(app, ui));
             section(ui, "Stackup", |ui| crate::pcb_trace_ui::stackup_ui(app, ui));
@@ -1074,8 +1284,11 @@ pub fn sidebar(app: &mut App, ui: &mut Ui) {
             }
         }
         section(ui, "Nets", |ui| nets_ui(app, ui));
+        section(ui, "Tools", |ui| crate::pcb_tools_ui::section_ui(app, ui));
     });
     crate::pcb_trace_ui::window(app, ui.ctx());
+    crate::kicad_lib_ui::window(app, ui.ctx());
+    crate::pcb_tools_ui::windows(app, ui.ctx());
     // edits made through edit() have their own undo step
     if app.ws.pcbs[i] != before && app.pcb.drag.is_none() {
         if app.pcb.steps == steps {
@@ -1141,6 +1354,16 @@ fn library_ui(app: &mut App, ui: &mut Ui) {
         }
     }
     ui.add_space(4.0);
+    if ui
+        .add_sized([ui.available_width(), 24.0], egui::Button::new(RichText::new("KiCad libraries…  A").strong()))
+        .on_hover_text("Search KiCad's ~23,000 symbols and ~15,000 footprints (with 3D models) and place them")
+        .clicked()
+    {
+        crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Symbol);
+    }
+    if ui.button("Power symbols…").on_hover_text("KiCad's power symbols: GND, +5V, +3V3, …").clicked() {
+        crate::kicad_lib_ui::open(app, crate::kicad_lib_ui::Mode::Power);
+    }
     ui.horizontal(|ui| {
         if ui.button("Import KiCad…").on_hover_text("Footprints (.kicad_mod), symbols (.kicad_sym) or a ZIP from SnapEDA, Ultra Librarian and the like").clicked() {
             if let Some(path) = app.open_file_dialog("KiCad library", &["kicad_mod", "kicad_sym", "zip", "KICAD_MOD", "KICAD_SYM", "ZIP"]) {
@@ -1290,7 +1513,7 @@ fn wizard_ui(app: &mut App, ui: &mut Ui, pi: usize) {
     }
 }
 
-fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
+pub(crate) fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
     let Some(pi) = index(app) else { return };
     let board = app.pcb.view == View::Board;
     let fps = pcb_lib::footprint_names();
@@ -1386,6 +1609,12 @@ fn selection_ui(app: &mut App, ui: &mut Ui, s: Sel) {
                         ui.selectable_value(&mut part.footprint, f.clone(), f);
                     }
                 });
+            });
+            row(ui, "", |ui| {
+                if ui.button("KiCad footprints…").on_hover_text("Pick a footprint from the KiCad libraries (those that fit this part first)").clicked() {
+                    let id = part.id;
+                    ui.data_mut(|d| d.insert_temp(egui::Id::new("kicad-fp-for"), id));
+                }
             });
             row(ui, "Package", |ui| {
                 ui.add(egui::TextEdit::singleline(&mut part.package).desired_width(120.0).hint_text("supplier's name"));
@@ -2151,15 +2380,70 @@ fn variants_ui(app: &mut App, ui: &mut Ui) {
     ui.label(RichText::new("Parts not fitted are crossed out, and left off the BOM, pick and place and 3D model.").color(theme::muted()).size(11.0));
 }
 
+/// KiCad's names for the copper layers (F.Cu, In1.Cu, …, B.Cu).
+pub(crate) fn kicad_layer_name(l: Layer) -> String {
+    match l {
+        Layer::Top => "F.Cu".into(),
+        Layer::Bottom => "B.Cu".into(),
+        Layer::In(k) => format!("In{k}.Cu"),
+    }
+}
+
+/// The Appearance panel, like KiCad's: copper layers with their colours (click to make one
+/// active), the other objects, and the selection filter.
 fn layers_ui(app: &mut App, ui: &mut Ui) {
-    let s = &mut app.pcb.show;
+    let Some(pi) = index(app) else { return };
+    if app.pcb.view == View::Board {
+        let layers = app.ws.pcbs[pi].board.copper_layers();
+        ui.label(RichText::new("Layers").strong().size(12.0));
+        for l in layers {
+            let active = app.pcb.layer == l;
+            ui.horizontal(|ui| {
+                let s = &mut app.pcb.show;
+                let mut vis = s.shows(l);
+                if ui.checkbox(&mut vis, "").on_hover_text(if matches!(l, Layer::In(_)) { "Show the inner layers" } else { "Show this layer" }).changed() {
+                    match l {
+                        Layer::Top => s.top = vis,
+                        Layer::Bottom => s.bottom = vis,
+                        Layer::In(_) => s.inner = vis,
+                    }
+                }
+                let [r, g, b] = pcb_export::layer_color(l);
+                let (rect, _) = ui.allocate_exact_size(egui::vec2(14.0, 14.0), Sense::hover());
+                ui.painter().rect_filled(rect, 2.0, egui::Color32::from_rgb(r, g, b));
+                let text = RichText::new(format!("{}  {}", kicad_layer_name(l), l.label())).size(12.5);
+                if ui.add(egui::Button::selectable(active, if active { text.strong() } else { text })).on_hover_text("Make this the active layer").clicked() {
+                    switch_layer(app, l);
+                }
+            });
+        }
+        ui.add_space(4.0);
+        ui.label(RichText::new("Objects").strong().size(12.0));
+        let s = &mut app.pcb.show;
+        ui.horizontal_wrapped(|ui| {
+            ui.checkbox(&mut s.silk, "Silkscreen");
+            ui.checkbox(&mut s.zones, "Pours");
+            ui.checkbox(&mut s.air, "Ratsnest");
+        });
+        ui.add_space(4.0);
+    }
+    ui.label(RichText::new("Selection filter").strong().size(12.0)).on_hover_text("What a click can pick");
+    let k = &mut app.pcb.show.pick;
     ui.horizontal_wrapped(|ui| {
-        ui.checkbox(&mut s.top, "Top");
-        ui.checkbox(&mut s.bottom, "Bottom");
-        ui.checkbox(&mut s.inner, "Inner");
-        ui.checkbox(&mut s.silk, "Silkscreen");
-        ui.checkbox(&mut s.zones, "Pours");
-        ui.checkbox(&mut s.air, "Ratsnest");
+        ui.checkbox(&mut k.parts, if app.pcb.view == View::Board { "Footprints" } else { "Symbols" });
+        if app.pcb.view == View::Board {
+            ui.checkbox(&mut k.tracks, "Tracks");
+            ui.checkbox(&mut k.vias, "Vias");
+            ui.checkbox(&mut k.zones, "Pours");
+            ui.checkbox(&mut k.holes, "Holes");
+            ui.checkbox(&mut k.keepouts, "Keepouts");
+        } else {
+            ui.checkbox(&mut k.wires, "Wires");
+            ui.checkbox(&mut k.labels, "Labels");
+        }
+        if *k != pcb_export::Pick::default() && ui.small_button("All").clicked() {
+            *k = pcb_export::Pick::default();
+        }
     });
 }
 
@@ -2231,6 +2515,13 @@ pub(crate) fn commands_list() -> Vec<(&'static str, &'static str, fn(&mut App))>
         ("Export Gerbers…", "export", export_fab),
         ("Run output job…", "export", run_output_job),
         ("3D board (Part Studio)", "cube", to_3d),
+        ("Add symbol from the KiCad libraries", "pcbSchematic", |a| {
+            set_view(a, View::Schematic);
+            crate::kicad_lib_ui::open(a, crate::kicad_lib_ui::Mode::Symbol)
+        }),
+        ("Annotate schematic", "pcbSchematic", |a| a.pcb.tools.annotate = true),
+        ("Assign footprints", "pcbBoard", |a| a.pcb.tools.assign = true),
+        ("PCB hotkeys", "pcbSchematic", |a| a.pcb.tools.hotkeys = true),
     ]
 }
 
@@ -2330,24 +2621,41 @@ fn paint(painter: &egui::Painter, xf: &Xf, list: &[Draw]) {
 }
 
 /// The ghost of the part being placed, as a part at the cursor.
+/// A drawing fitted into a box of `size` points (the library browser's previews).
+pub(crate) fn preview(ui: &mut Ui, list: &[Draw], size: egui::Vec2, board: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(size, Sense::hover());
+    // the editor's own backgrounds: schematic paper, dark board
+    let bg = if !board { Color32::from_rgb(250, 249, 244) } else if theme::is_dark() { Color32::from_rgb(14, 16, 20) } else { Color32::from_rgb(34, 38, 46) };
+    ui.painter().rect_filled(rect, 4.0, bg);
+    if list.is_empty() {
+        return resp;
+    }
+    let (lo, hi) = pcb_export::extent(list);
+    let w = [(hi[0] - lo[0]).max(1.0), (hi[1] - lo[1]).max(1.0)];
+    let zoom = ((rect.width() - 24.0) / w[0] as f32).min((rect.height() - 24.0) / w[1] as f32).clamp(0.5, 200.0);
+    let xf = Xf { rect, zoom, center: [(lo[0] + hi[0]) / 2.0, (lo[1] + hi[1]) / 2.0] };
+    paint(&ui.painter_at(rect), &xf, list);
+    resp
+}
+
 fn ghost_part(key: &str, at: P, rot: u8, mirror: bool) -> Option<pcb::Part> {
     let k = pcb_lib::kind_info(key)?;
     Some(pcb::Part { reference: format!("{}?", k.prefix), value: k.value, symbol: k.key, footprint: k.footprint, sch: at, sch_rot: rot, sch_mirror: mirror, ..Default::default() })
 }
 
 /// Hit-test the schematic at a world point.
-fn sch_hit(p: &Pcb, at: P, tol: f64) -> Option<Sel> {
-    for (i, l) in p.labels.iter().enumerate() {
+fn sch_hit(p: &Pcb, at: P, tol: f64, pick: &pcb_export::Pick) -> Option<Sel> {
+    for (i, l) in p.labels.iter().enumerate().filter(|_| pick.labels) {
         if pcb::dist(l.at, at) < tol * 1.5 || label_box_hit(l, at) {
             return Some(Sel::Label(i));
         }
     }
-    for (i, w) in p.wires.iter().enumerate() {
+    for (i, w) in p.wires.iter().enumerate().filter(|_| pick.wires) {
         if pcb::seg_point(w.a, w.b, at) < tol {
             return Some(Sel::Wire(i));
         }
     }
-    for (i, part) in p.parts.iter().enumerate().rev() {
+    for (i, part) in p.parts.iter().enumerate().rev().filter(|_| pick.parts) {
         let (lo, hi) = pcb_export::sch_bbox(part);
         if at[0] >= lo[0] - 0.5 && at[0] <= hi[0] + 0.5 && at[1] >= lo[1] - 0.5 && at[1] <= hi[1] + 0.5 {
             return Some(Sel::Part(i));
@@ -2390,16 +2698,16 @@ fn label_box_hit(l: &Label, at: P) -> bool {
 fn board_hit(p: &Pcb, pads: &[WPad], at: P, tol: f64, layer: Layer, show: &BoardView) -> Option<Sel> {
     let order: Vec<Layer> = layer_order(p, layer).into_iter().filter(|l| show.shows(*l)).collect();
     for (i, v) in p.board.vias.iter().enumerate() {
-        if pcb::dist(v.at, at) <= v.d / 2.0 + tol && order.iter().any(|l| v.on(*l)) {
+        if show.pick.vias && pcb::dist(v.at, at) <= v.d / 2.0 + tol && order.iter().any(|l| v.on(*l)) {
             return Some(Sel::Via(i));
         }
     }
-    for &l in &order {
+    for &l in order.iter().filter(|_| show.pick.parts) {
         if let Some(pad) = pads.iter().find(|x| x.layer.is_none_or(|pl| pl == l) && x.cu().contains(at)) {
             return Some(Sel::Part(pad.part));
         }
     }
-    for &l in &order {
+    for &l in order.iter().filter(|_| show.pick.tracks) {
         for (i, t) in p.board.tracks.iter().enumerate().filter(|(_, t)| t.layer == l) {
             if pcb::seg_point(t.a, t.b, at) <= t.width / 2.0 + tol {
                 return Some(Sel::Track(i));
@@ -2408,25 +2716,25 @@ fn board_hit(p: &Pcb, pads: &[WPad], at: P, tol: f64, layer: Layer, show: &Board
     }
     let near = if layer == Layer::Bottom { Layer::Bottom } else { Layer::Top };
     for side in [near, near.other()] {
-        for (i, part) in p.parts.iter().enumerate().rev().filter(|(_, x)| x.side() == side) {
+        for (i, part) in p.parts.iter().enumerate().rev().filter(|(_, x)| show.pick.parts && x.side() == side) {
             let (lo, hi) = p.court_world(part);
             if at[0] >= lo[0] && at[0] <= hi[0] && at[1] >= lo[1] && at[1] <= hi[1] {
                 return Some(Sel::Part(i));
             }
         }
     }
-    for (i, h) in p.board.holes.iter().enumerate() {
+    for (i, h) in p.board.holes.iter().enumerate().filter(|_| show.pick.holes) {
         if pcb::dist(h.at, at) <= h.d / 2.0 + tol {
             return Some(Sel::Hole(i));
         }
     }
-    for (i, z) in p.board.zones.iter().enumerate().filter(|(_, z)| show.zones && show.shows(z.layer)) {
+    for (i, z) in p.board.zones.iter().enumerate().filter(|(_, z)| show.pick.zones && show.zones && show.shows(z.layer)) {
         let n = z.outline.len();
         if (0..n).any(|k| pcb::seg_point(z.outline[k], z.outline[(k + 1) % n], at) < tol * 2.0) {
             return Some(Sel::Zone(i));
         }
     }
-    for (i, k) in p.board.keepouts.iter().enumerate() {
+    for (i, k) in p.board.keepouts.iter().enumerate().filter(|_| show.pick.keepouts) {
         let n = k.outline.len();
         if (0..n).any(|j| pcb::seg_point(k.outline[j], k.outline[(j + 1) % n], at) < tol * 2.0) || (n >= 3 && pcb::inside(&k.outline, at)) {
             return Some(Sel::Keepout(i));
@@ -2804,11 +3112,14 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
             }
         }
         _ => {
+            if move_click(app, clicked, right) {
+                return;
+            }
             let p = &app.ws.pcbs[pi];
-            if resp.drag_started_by(egui::PointerButton::Primary) {
+            if !app.pcb.moving && resp.drag_started_by(egui::PointerButton::Primary) {
                 let start = resp.interact_pointer_pos().map(|s| xf.w(s));
                 if let Some(at) = start {
-                    if let Some(Sel::Part(i)) = sch_hit(p, at, tol) {
+                    if let Some(Sel::Part(i)) = sch_hit(p, at, tol, &app.pcb.show.pick) {
                         app.pcb.sel = Some(Sel::Part(i));
                         let pins: Vec<P> = p.sch_pins().into_iter().filter(|x| x.part == i).map(|x| x.at).collect();
                         let mut ends = vec![];
@@ -2822,11 +3133,11 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                         }
                         // (the undo step is recorded when the drag ends, if it moved anything)
                         app.pcb.drag = Some(Drag { from: at, orig: p.parts[i].sch, ends, before: p.clone() });
-                    } else if let Some(Sel::Label(i)) = sch_hit(p, at, tol) {
+                    } else if let Some(Sel::Label(i)) = sch_hit(p, at, tol, &app.pcb.show.pick) {
                         app.pcb.sel = Some(Sel::Label(i));
                         // (the undo step is recorded when the drag ends, if it moved anything)
                         app.pcb.drag = Some(Drag { from: at, orig: p.labels[i].at, ends: vec![], before: p.clone() });
-                    } else if let Some(Sel::Sheet(i)) = sch_hit(p, at, tol) {
+                    } else if let Some(Sel::Sheet(i)) = sch_hit(p, at, tol, &app.pcb.show.pick) {
                         app.pcb.sel = Some(Sel::Sheet(i));
                         let s = &p.sheet_symbols[i];
                         let pts: Vec<P> = (0..s.entries.len()).map(|k| s.entry_at(k)).collect();
@@ -2843,7 +3154,7 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                     }
                 }
             }
-            if let (Some(d), Some(h), true) = (&app.pcb.drag, hover, resp.dragged_by(egui::PointerButton::Primary)) {
+            if let (Some(d), Some(h), true) = (&app.pcb.drag, hover, resp.dragged_by(egui::PointerButton::Primary) || app.pcb.moving) {
                 let delta = pcb::snap(pcb::sub(h, d.from), GRID);
                 let target = pcb::add(d.orig, delta);
                 let ends = d.ends.clone();
@@ -2880,19 +3191,19 @@ fn sch_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Op
                 }
                 app.pcb.dirty = true;
             }
-            if resp.drag_stopped() {
+            if resp.drag_stopped() && !app.pcb.moving {
                 finish_drag(app);
             }
             if double {
                 // a sheet symbol opens its sheet
-                if let Some(Sel::Sheet(i)) = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol)) {
+                if let Some(Sel::Sheet(i)) = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol, &app.pcb.show.pick)) {
                     let k = app.ws.pcbs[pi].sheet_symbols[i].sheet;
                     open_sheet(app, k);
                     return;
                 }
             }
             if clicked {
-                app.pcb.sel = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol));
+                app.pcb.sel = hover.and_then(|h| sch_hit(&app.ws.pcbs[pi], h, tol, &app.pcb.show.pick));
                 // a wire shows its whole net; clicking anything else clears that
                 let nl = &app.pcb.cache.nl;
                 app.pcb.highlight = match app.pcb.sel {
@@ -3053,8 +3364,11 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
             }
         }
         _ => {
+            if move_click(app, clicked, right) {
+                return;
+            }
             let p = &app.ws.pcbs[pi];
-            if resp.drag_started_by(egui::PointerButton::Primary) {
+            if !app.pcb.moving && resp.drag_started_by(egui::PointerButton::Primary) {
                 // what was under the pointer when the button went down, not where it is now
                 let origin = resp.ctx.input(|i| i.pointer.press_origin()).or_else(|| resp.interact_pointer_pos());
                 if let Some(at) = origin.map(|s| xf.w(s)) {
@@ -3073,7 +3387,7 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                     }
                 }
             }
-            if let (Some(d), Some(h), true) = (&app.pcb.drag, hover, resp.dragged_by(egui::PointerButton::Primary)) {
+            if let (Some(d), Some(h), true) = (&app.pcb.drag, hover, resp.dragged_by(egui::PointerButton::Primary) || app.pcb.moving) {
                 let target = pcb::snap(pcb::add(d.orig, pcb::sub(h, d.from)), 0.05);
                 let p = &mut app.ws.pcbs[pi];
                 match app.pcb.sel {
@@ -3083,7 +3397,7 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                 }
                 app.pcb.dirty = true;
             }
-            if resp.drag_stopped() {
+            if resp.drag_stopped() && !app.pcb.moving {
                 finish_drag(app);
             }
             if clicked {
@@ -3316,6 +3630,11 @@ mod tests {
         // with the top layer hidden the track can't be picked
         let hidden = BoardView { top: false, ..BoardView::default() };
         assert_eq!(board_hit(&p, &pads, mid, 0.1, Layer::Top, &hidden), None);
+        // the selection filter: with footprints off, a click on the pad picks the track under it
+        let no_parts = BoardView { pick: pcb_export::Pick { parts: false, ..Default::default() }, ..BoardView::default() };
+        assert_eq!(board_hit(&p, &pads, r1, 0.1, Layer::Top, &no_parts), Some(Sel::Track(0)));
+        let no_tracks = BoardView { pick: pcb_export::Pick { tracks: false, ..Default::default() }, ..BoardView::default() };
+        assert_eq!(board_hit(&p, &pads, mid, 0.1, Layer::Top, &no_tracks), None);
     }
 
     #[test]

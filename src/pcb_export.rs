@@ -127,6 +127,27 @@ pub struct BoardView {
     pub silk: bool,
     pub zones: bool,
     pub air: bool,
+    /// What clicks can select (KiCad's selection filter).
+    pub pick: Pick,
+}
+
+/// The selection filter: which kinds of item a click picks.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct Pick {
+    pub parts: bool,
+    pub tracks: bool,
+    pub vias: bool,
+    pub zones: bool,
+    pub holes: bool,
+    pub keepouts: bool,
+    pub wires: bool,
+    pub labels: bool,
+}
+
+impl Default for Pick {
+    fn default() -> Self {
+        Pick { parts: true, tracks: true, vias: true, zones: true, holes: true, keepouts: true, wires: true, labels: true }
+    }
 }
 
 impl BoardView {
@@ -141,7 +162,7 @@ impl BoardView {
 
 impl Default for BoardView {
     fn default() -> Self {
-        BoardView { active: Layer::Top, top: true, bottom: true, inner: true, silk: true, zones: true, air: true }
+        BoardView { active: Layer::Top, top: true, bottom: true, inner: true, silk: true, zones: true, air: true, pick: Pick::default() }
     }
 }
 
@@ -1009,6 +1030,7 @@ pub fn export(p: &Pcb, path: &std::path::Path) -> Result<Vec<String>, String> {
     let files: Vec<(String, Vec<u8>)> = gerbers(p).into_iter().map(|(n, s)| (n, s.into_bytes())).collect();
     let bom = bom_csv(p).into_bytes();
     let cpl = cpl_csv(p).into_bytes();
+    let dk = crate::digikey::bom_csv(p, 1).into_bytes();
     let mut written = vec![];
     let write = |q: &std::path::Path, data: &[u8]| -> Result<(), String> {
         if let Some(dir) = q.parent().filter(|d| !d.as_os_str().is_empty()) {
@@ -1020,13 +1042,13 @@ pub fn export(p: &Pcb, path: &std::path::Path) -> Result<Vec<String>, String> {
         write(path, &zip(&files))?;
         written.push(path.display().to_string());
         let stem = path.with_extension("");
-        for (suffix, data) in [("-BOM.csv", &bom), ("-CPL.csv", &cpl)] {
+        for (suffix, data) in [("-BOM.csv", &bom), ("-CPL.csv", &cpl), ("-DigiKey-BOM.csv", &dk)] {
             let q = std::path::PathBuf::from(format!("{}{suffix}", stem.display()));
             write(&q, data)?;
             written.push(q.display().to_string());
         }
     } else {
-        for (n, data) in files.iter().chain([("BOM.csv".to_string(), bom), ("CPL.csv".to_string(), cpl)].iter()) {
+        for (n, data) in files.iter().chain([("BOM.csv".to_string(), bom), ("CPL.csv".to_string(), cpl), ("DigiKey-BOM.csv".to_string(), dk)].iter()) {
             let q = path.join(n);
             write(&q, data)?;
             written.push(q.display().to_string());
@@ -1084,7 +1106,25 @@ fn board_script(p: &Pcb) -> String {
     )
 }
 
-fn footprint_script(fp: &pcb_lib::Footprint) -> String {
+/// The rotation KiCad gives a footprint's 3D model: about x, then y, then z, each clockwise.
+pub fn model_matrix(m: &pcb_lib::Model3d) -> glam::DMat3 {
+    let r = m.rotate.map(f64::to_radians);
+    glam::DMat3::from_rotation_z(-r[2]) * glam::DMat3::from_rotation_y(-r[1]) * glam::DMat3::from_rotation_x(-r[0])
+}
+
+/// The body script of a footprint: its 3D model when `model` holds the packed STEP file, else
+/// the footprint's stand-in boxes and cylinders.
+fn footprint_script(fp: &pcb_lib::Footprint, model: Option<&str>) -> String {
+    if let (Some(data), Some(m)) = (model, &fp.model) {
+        let r = model_matrix(m).transpose();
+        let row = |v: glam::DVec3| format!("[{}, {}, {}]", num(v.x), num(v.y), num(v.z));
+        let mut s = format!("// {} 3D model {}.step from the KiCad libraries ({}).\n", fp.name, m.file, crate::kicad_libs::CREDIT);
+        let _ = writeln!(s, "let s = step_data(\"{data}\");");
+        let _ = writeln!(s, "s = s.transform([{}, {}, {}], vec3({}, {}, {}));", row(r.x_axis), row(r.y_axis), row(r.z_axis), num(m.offset[0]), num(m.offset[1]), num(m.offset[2]));
+        s += "if bottom { s = s.mirror(vec3(0, 0, 0), vec3(1, 0, 0)).mirror(vec3(0, 0, 0), vec3(0, 0, 1)); }\n";
+        s += "s.rotate(vec3(0, 0, 0), vec3(0, 0, 1), rot).translate(vec3(x, y, if bottom { 0.0 } else { thickness }))\n";
+        return s;
+    }
     let mut s = format!("// {} body for PCB tabs (a simple stand-in shape).\nlet parts = [];\n", fp.name);
     for b in &fp.body {
         match b {
@@ -1222,6 +1262,26 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
     v.insert(PCB_KEY.to_string(), p.uid.clone());
     let mask = p.board.mask_rgb();
     upsert(doc, "Board", BOARD_DEF, v, mask);
+    // footprints' 3D models (KiCad library footprints name one): fetched once each; after a
+    // download fails (offline) the rest keep their stand-in boxes rather than wait in turn
+    let mut models: std::collections::HashMap<String, Option<String>> = Default::default();
+    let mut offline = false;
+    for part in p.parts.iter().filter(|x| !x.dnp) {
+        let Some(m) = part.footprint().model else { continue };
+        if models.contains_key(&m.file) {
+            continue;
+        }
+        let got = match crate::kicad_libs::model_step(&m.file, !offline) {
+            Ok(b) => Some(crate::import::pack(&b)),
+            Err(e) => {
+                offline |= e.contains("couldn't reach");
+                eprintln!("3D model {}: {e}", m.file);
+                None
+            }
+        };
+        models.insert(m.file.clone(), got);
+    }
+    let model_data = |models: &std::collections::HashMap<String, Option<String>>, fp: &pcb_lib::Footprint| -> Option<String> { models.get(&fp.model.as_ref()?.file).cloned().flatten() };
     for part in p.parts.iter().filter(|x| !x.dnp) {
         let fp = part.footprint();
         let def = fp_def_name(&fp.name);
@@ -1231,7 +1291,7 @@ pub fn to_studio(ws: &mut crate::workspace::Workspace, pi: usize) -> Result<usiz
                 name: def.clone(),
                 params: vec![pd("x", "number", "0"), pd("y", "number", "0"), pd("rot", "number", "0"), pd("bottom", "bool", "false"), pd("thickness", "number", "1.6")],
                 selection: String::new(),
-                source: footprint_script(&fp),
+                source: footprint_script(&fp, model_data(&models, &fp).as_deref()),
             },
         );
         let mut v = std::collections::BTreeMap::new();

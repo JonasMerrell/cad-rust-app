@@ -17,6 +17,8 @@ use crate::pcb_lib::P;
 pub struct OutJob {
     pub gerbers: bool,
     pub bom: bool,
+    /// A BOM for Digi-Key's BOM Manager.
+    pub digikey: bool,
     pub cpl: bool,
     pub ipc356: bool,
     pub drill_map: bool,
@@ -28,7 +30,7 @@ pub struct OutJob {
 
 impl Default for OutJob {
     fn default() -> Self {
-        OutJob { gerbers: true, bom: true, cpl: true, ipc356: true, drill_map: true, pdf: true, odb: true, variants: false }
+        OutJob { gerbers: true, bom: true, digikey: true, cpl: true, ipc356: true, drill_map: true, pdf: true, odb: true, variants: false }
     }
 }
 
@@ -37,9 +39,10 @@ impl OutJob {
         *self == OutJob::default()
     }
     /// The outputs by name, for the agent and the sidebar.
-    pub const NAMES: [(&'static str, &'static str); 8] = [
+    pub const NAMES: [(&'static str, &'static str); 9] = [
         ("gerbers", "Gerbers, drills and the X2 job file"),
         ("bom", "Bill of materials (CSV)"),
+        ("digikey", "Digi-Key BOM (CSV for digikey.com BOM Manager)"),
         ("cpl", "Pick and place (CSV)"),
         ("ipc356", "IPC-D-356A netlist for electrical test"),
         ("drill_map", "Drill drawing (Gerber)"),
@@ -51,6 +54,7 @@ impl OutJob {
         Some(match name {
             "gerbers" => &mut self.gerbers,
             "bom" => &mut self.bom,
+            "digikey" => &mut self.digikey,
             "cpl" => &mut self.cpl,
             "ipc356" => &mut self.ipc356,
             "drill_map" => &mut self.drill_map,
@@ -887,6 +891,9 @@ pub fn outputs(p: &Pcb, job: &OutJob) -> Vec<(String, Vec<u8>)> {
     if job.bom {
         files.push((format!("assembly/{base}-BOM.csv"), pcb_export::bom_csv(p).into_bytes()));
     }
+    if job.digikey {
+        files.push((format!("assembly/{base}-DigiKey-BOM.csv"), crate::digikey::bom_csv(p, 1).into_bytes()));
+    }
     if job.cpl {
         files.push((format!("assembly/{base}-CPL.csv"), pcb_export::cpl_csv(p).into_bytes()));
     }
@@ -918,6 +925,9 @@ pub fn outputs(p: &Pcb, job: &OutJob) -> Vec<(String, Vec<u8>)> {
             dirs.push(dir.clone());
             if job.bom {
                 files.push((format!("assembly/{dir}/{base}-{dir}-BOM.csv"), pcb_export::bom_csv(&q).into_bytes()));
+            }
+            if job.digikey {
+                files.push((format!("assembly/{dir}/{base}-{dir}-DigiKey-BOM.csv"), crate::digikey::bom_csv(&q, 1).into_bytes()));
             }
             if job.cpl {
                 files.push((format!("assembly/{dir}/{base}-{dir}-CPL.csv"), pcb_export::cpl_csv(&q).into_bytes()));

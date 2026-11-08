@@ -82,6 +82,13 @@ NEMA 8–23 steppers; and 2020–4080 T-slot extrusions. For anything else, its 
 search in your browser, and the STEP or ZIP you download goes in from the recent downloads list or by
 dropping it on the window.
 
+The **McMaster-Carr** tab works the same way: search (words or a part number) opens mcmaster.com, and
+the 3-D STEP you download is listed by part number and goes in named after it, in a Part Studio called
+`McMaster-Carr <part number>`. Approved McMaster-Carr API customers can instead save their API login and
+client certificate under **API settings** and insert a part by its number; McMaster grants API access on
+request (eCommerce@mcmaster.com). McMaster's terms don't allow sharing their CAD, or designs that include
+it, with others, so the Version control window and project export warn when a project holds some.
+
 ### Drawings
 
 <img alt="A drawing sheet with projected, isometric and section views, dimensions, a GD&T frame and a title block" src="docs/screenshots/drawing.png" width="100%">
@@ -185,6 +192,16 @@ schematic pose, MPN, manufacturer, description, datasheet, Digi-Key number, your
 part number, product link or keywords through Digi-Key's API (with your own free API app's client ID
 and secret), or without keys from a table, cart or list CSV downloaded from digikey.com: use one for
 the selected part or place it as a new one, with its value, footprint and BOM data filled in.
+**Export BOM** writes a CSV that Digi-Key's BOM Manager reads as it is (also part of the output job).
+
+**KiCad libraries:** press A on the schematic to search KiCad's official libraries (about 23,000
+symbols and 15,000 footprints) by name, keyword or description, see the symbol and its footprint,
+pick another footprint from those that fit, and place it. "KiCad footprints…" in the selection does
+the same for a part's footprint, and the 3D board uses the footprints' KiCad STEP models. rCAD uses
+an installed KiCad's libraries, or downloads release 10.0.8 from gitlab.com/kicad/libraries into
+`~/.cache/cad-rust-app/kicad` on first use (about 60 MB, 470 MB unpacked). The libraries are © the
+KiCad Libraries Team and contributors under CC-BY-SA 4.0, with an exception that leaves designs
+made with them, and their outputs, free of the share-alike terms.
 
 ### Circuit and firmware simulation
 
@@ -309,6 +326,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/stock_size.rs` | raw stock for a part: smallest box or cylinder around it, rounded up to standard metric or imperial plate and bar sizes |
 | `src/stdparts.rs`, `src/stdparts_ui.rs` | standard parts library (dimension tables as custom feature scripts) and its window |
 | `src/grabcad.rs` | GrabCAD search link, ZIP reading, recent downloads |
+| `src/mcmaster.rs`, `src/mcmaster_ui.rs` | McMaster-Carr search link, download names, Product Information API (client certificate), the library tab |
 | `src/cam.rs` | CAM model: tools, presets, operations, setups |
 | `src/cam_paths.rs` | 2.5D toolpath generation (shadow slicing, offsets, holes) |
 | `src/cam_3d.rs` | 3D toolpaths: drop cutter, adaptive, parallel, waterline, scallop, pencil, deburr |
@@ -330,6 +348,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb_route.rs` | the grid autorouter and automatic placement |
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
+| `src/kicad_libs.rs`, `src/kicad_lib_ui.rs` | KiCad library download, index, search and loading; the symbol and footprint choosers |
 | `src/digikey.rs`, `src/digikey_ui.rs` | Digi-Key API client and CSV import, products to parts, the PCB tab's Digi-Key section |
 | `src/circuit.rs` | circuit simulation setup, part models by value, the circuit built from the schematic, results and measurements |
 | `src/circuit_solve.rs` | the circuit solver: MNA with Newton-Raphson, variable-step BDF2 transient with events and an external pin driver, AC sweep |

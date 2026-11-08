@@ -1011,7 +1011,11 @@ impl App {
         match built.and_then(|(s, m, notes)| crate::web_export::write(&s, &m, &p, true).map(|w| (w, notes))) {
             Ok((w, notes)) => {
                 let extra = if notes.is_empty() { String::new() } else { format!(" ({})", notes.join("; ")) };
-                self.flash_info(format!("Exported {} ({:.1} MB){extra}", p.display(), w.bytes as f64 / 1e6), Some(Duration::from_secs(5)))
+                match crate::mcmaster::share_warning(&crate::mcmaster::parts_in(&self.ws)) {
+                    // a web page is made for sharing: say so where it can't be
+                    Some(warn) => self.flash(format!("Exported {} ({:.1} MB){extra}. {warn}", p.display(), w.bytes as f64 / 1e6), ToastKind::Info),
+                    None => self.flash_info(format!("Exported {} ({:.1} MB){extra}", p.display(), w.bytes as f64 / 1e6), Some(Duration::from_secs(5))),
+                }
             }
             Err(e) => self.flash(format!("Could not export: {e}"), ToastKind::Error),
         }
@@ -1311,7 +1315,9 @@ impl App {
             self.guard(crate::session::Pending::New);
             return;
         }
-        if (!ctrl && pressed(Key::F1)) || ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?"))) {
+        // in the PCB editors ? is KiCad's hotkey list of that view (F1 stays this one)
+        let pcb_keys = matches!(self.tab, crate::workspace::Tab::Pcb(_)) && self.pcb.view != crate::pcb_ui::View::Simulate;
+        if (!ctrl && pressed(Key::F1)) || (!pcb_keys && ctx.input(|i| i.events.iter().any(|e| matches!(e, egui::Event::Text(t) if t == "?")))) {
             self.session.show_shortcuts = !self.session.show_shortcuts;
             return;
         }

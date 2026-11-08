@@ -3561,6 +3561,7 @@ dependencies = [
  "opencascade-sys",
  "rfd",
  "rhai",
+ "rustls",
  "serde",
  "serde_json",
  "serde_yaml",
@@ -3568,6 +3569,7 @@ dependencies = [
  "ttf-parser",
  "ureq",
  "usvg",
+ "webpki-roots 0.26.11",
  "windows-sys 0.61.2",
 ]
 
