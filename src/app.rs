@@ -142,6 +142,8 @@ pub struct App {
     pub viewport_rect: egui::Rect,
     pub nav: Option<crate::viewport::Nav>,
     pub first_fit: bool,
+    /// Import features just added whose parts take their names and colours from the file once built.
+    pub name_imports: Vec<doc::FeatId>,
     pub ws: crate::workspace::Workspace,
     pub tab: crate::workspace::Tab,
     pub cur_studio: usize,
@@ -246,6 +248,7 @@ impl App {
             viewport_rect: egui::Rect::NOTHING,
             nav: None,
             first_fit: true,
+            name_imports: vec![],
             ws: crate::workspace::Workspace::default(),
             tab: crate::workspace::Tab::Studio(0),
             cur_studio: 0,
@@ -930,7 +933,8 @@ impl App {
                     self.checkpoint();
                     for m in f.files {
                         let op = Op::Import { name: m.name.clone(), step: String::new(), format: m.format.into(), data: crate::import::pack(&m.bytes), scale: "1".into(), merge: true };
-                        self.doc.insert(m.name, op);
+                        let id = self.doc.insert(m.name, op);
+                        self.name_imports.push(id);
                     }
                     self.first_fit = true;
                     self.changed();
@@ -950,7 +954,8 @@ impl App {
             Ok((format, bytes)) => {
                 self.checkpoint();
                 let op = Op::Import { name: name.clone(), step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale: "1".into(), merge: true };
-                self.doc.insert(name, op);
+                let id = self.doc.insert(name, op);
+                self.name_imports.push(id);
                 self.first_fit = true;
                 self.changed();
             }
@@ -1194,6 +1199,14 @@ impl App {
                     // a clean document stays clean
                     if clean && self.content_hash() != self.session.saved_hash {
                         self.mark_saved();
+                    }
+                    // parts of a new import take the names and colours their file gives them
+                    if !self.name_imports.is_empty() {
+                        let built: Vec<doc::FeatId> = self.name_imports.iter().copied().filter(|id| r.features.iter().any(|f| f.id == *id)).collect();
+                        for id in &built {
+                            self.doc.adopt_file_props(*id, &r.bodies);
+                        }
+                        self.name_imports.retain(|id| !built.contains(id) && self.doc.feature(*id).is_some());
                     }
                     self.result = r;
                     self.print_cache.borrow_mut().clear();

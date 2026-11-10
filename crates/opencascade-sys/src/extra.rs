@@ -109,5 +109,6 @@ mod inner {
         pub fn ex_ordered(w: &TopoDS_Shape, kind: i32) -> UniquePtr<TopTools_IndexedMapOfShape>;
         pub fn ex_write_stl(s: &TopoDS_Shape, path: &str, linear: f64, angular: f64) -> bool;
         pub fn ex_step_parts(path: &str, deflection: f64, names: &mut Vec<String>) -> Vec<f64>;
+        pub fn ex_read_step_named(path: &str, names: &mut Vec<String>, colours: &mut Vec<f64>) -> UniquePtr<TopoDS_Shape>;
     }
 }
