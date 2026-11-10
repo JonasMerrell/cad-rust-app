@@ -84,7 +84,12 @@ pub fn export_project(app: &mut App) {
         .or_else(|| doc.file_stem().map(|s| s.to_string_lossy().into_owned()))
         .unwrap_or_else(|| "project".into());
     let mc_warn = crate::mcmaster::share_warning(&crate::mcmaster::parts_in(&app.ws));
-    app.with_save_path("Export project", "Project archive (ZIP)", &["zip"], &format!("{name}.zip"), move |a, p| match crate::project::export(&doc, &p, true) {
+    app.with_save_path("Export project", "Project archive (ZIP)", &["zip"], &format!("{name}.zip"), move |a, p| match {
+        // the built geometry goes in too (see `build_cache`), so the project opens without a rebuild
+        crate::build_cache::saved(a, &doc);
+        crate::build_cache::wait_written(Duration::from_secs(60));
+        crate::project::export(&doc, &p, true)
+    } {
         Ok(n) => match &mc_warn {
             Some(w) => a.flash(format!("Exported the project ({n} file{}) to {}. {w}", if n == 1 { "" } else { "s" }, p.display()), ToastKind::Info),
             None => a.flash_info(format!("Exported the project ({n} file{}) to {}", if n == 1 { "" } else { "s" }, p.display()), Some(Duration::from_secs(4))),

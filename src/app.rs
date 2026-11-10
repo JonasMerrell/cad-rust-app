@@ -645,6 +645,7 @@ impl App {
 
     pub fn new_document(&mut self) {
         let units = self.doc.units;
+        self.kernel.cache_dirs = crate::build_cache::dirs_for(None);
         self.load_workspace(crate::workspace::Workspace::default());
         self.doc.units = units;
         self.path = None;
@@ -865,6 +866,8 @@ impl App {
         }
         match std::fs::read_to_string(&p).map_err(|e| e.to_string()).and_then(|s| crate::workspace::Workspace::from_json(&s)) {
             Ok(ws) => {
+                // Part Studios built before (and unchanged since) are read back, not rebuilt
+                self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(&p));
                 self.load_workspace(ws);
                 crate::home::touch(self, &p);
                 self.path = Some(p);
@@ -895,6 +898,8 @@ impl App {
         let json = serde_json::to_string_pretty(&self.ws).map_err(|e| e.to_string());
         match json.and_then(|j| crate::session::write_atomic(&p, j.as_bytes()).map_err(|e| e.to_string())) {
             Ok(()) => {
+                self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(&p));
+                crate::build_cache::saved(self, &p);
                 let committed = crate::vcs_ui::after_save(self, &p);
                 let secs = if committed.is_empty() { 2 } else { 4 };
                 self.flash_info(format!("Saved {}{committed}", p.display()), Some(Duration::from_secs(secs)));
@@ -1149,11 +1154,13 @@ impl App {
         for o in self.kernel.poll() {
             match o {
                 Outcome::Rebuilt(tag, r) if tag != self.cur_studio => {
+                    self.cache_built(&r);
                     self.studio_results.insert(tag, r);
                     self.asm.scene_dirty = true;
                     self.dwg.dirty = true;
                 }
-                Outcome::Rebuilt(_, r) => {
+                Outcome::Rebuilt(_, mut r) => {
+                    self.cache_built(&r);
                     // Part Studios deriving from this one need rebuilding too
                     let cur = self.cur_studio;
                     for i in 0..self.ws.studios.len() {
@@ -1177,7 +1184,13 @@ impl App {
                         }
                     }
                     // and the persistent names of picked faces and edges (neither)
+                    let built_from = r.key != 0 && r.key == self.cur_cache_key();
                     self.doc.apply_ref_updates(&r.refs);
+                    if built_from {
+                        // the frames and names just taken in come from this very geometry: it is the
+                        // document's geometry now too (no rebuild follows), so save it under that
+                        r.key = self.cur_cache_key();
+                    }
                     // a clean document stays clean
                     if clean && self.content_hash() != self.session.saved_hash {
                         self.mark_saved();
@@ -1242,6 +1255,35 @@ impl App {
             self.kernel.set_studios(docs);
             self.kernel.rebuild(cur, &self.doc);
         }
+    }
+
+    /// Keep a studio's freshly built geometry for next time (see `build_cache`), while the
+    /// document has no unsaved changes: geometry built mid-edit is stored when it is saved.
+    fn cache_built(&self, r: &RebuildResult) {
+        if self.path.is_some() && !self.is_dirty() {
+            if let Some(dir) = self.kernel.cache_dirs.first() {
+                crate::build_cache::store(dir, r);
+            }
+        }
+    }
+
+    /// Rebuild every Part Studio from its features, not from geometry saved with the document.
+    pub fn rebuild_all(&mut self) {
+        let docs = self.studio_docs();
+        crate::build_cache::forget(&self.kernel.cache_dirs, &crate::build_cache::keys(&docs));
+        self.studio_results.clear();
+        self.kernel.invalidate();
+        self.dirty_model = true;
+        // switch_tab asks for the other studios when the tab shown needs them
+        let t = self.tab;
+        self.tab = crate::workspace::Tab::Studio(self.cur_studio);
+        self.switch_tab(t);
+        self.flash_info("Rebuilding every Part Studio", Some(Duration::from_secs(3)));
+    }
+
+    /// The build-cache key of the live Part Studio as it is now.
+    fn cur_cache_key(&self) -> u64 {
+        crate::build_cache::key(&self.doc, || serde_json::to_string(&self.studio_docs()).unwrap_or_default())
     }
 
     pub fn fit_view(&mut self) {

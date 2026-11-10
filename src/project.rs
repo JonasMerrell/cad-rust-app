@@ -204,6 +204,12 @@ pub fn export(doc: &Path, to: &Path, history: bool) -> Result<usize, String> {
             let file = doc.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or_default();
             entries.push((format!("{stem}/"), vec![]));
             entries.push((format!("{stem}/{file}"), data));
+            // its built geometry from the user cache, so the imported project opens without rebuilding
+            let cached = crate::build_cache::entries_for(doc);
+            if !cached.is_empty() {
+                entries.push((format!("{stem}/{}/", crate::build_cache::DIR), vec![]));
+                entries.extend(cached.into_iter().map(|(name, b)| (format!("{stem}/{}/{name}", crate::build_cache::DIR), b)));
+            }
         }
     }
     let files = entries.iter().filter(|(p, _)| !p.ends_with('/')).count();

@@ -905,6 +905,7 @@ fn recover_prompt(app: &mut App, ctx: &egui::Context) {
             app.session.recover.clear();
             match std::fs::read_to_string(&file).map_err(|e| e.to_string()).and_then(|s| Workspace::from_json(&s)) {
                 Ok(ws) => {
+                    app.kernel.cache_dirs = crate::build_cache::dirs_for(orig.as_deref());
                     app.load_workspace(ws);
                     app.path = orig;
                     // unsaved until the user saves it
