@@ -97,6 +97,10 @@ pub struct RebuildResult {
     /// editor to store in the document (`Document::apply_ref_updates`).
     #[serde(default)]
     pub refs: Vec<crate::doc::RefUpdate>,
+    /// Build-cache key of the document this was built from (`build_cache::key`); 0 when unknown
+    /// or when features were skipped. Set by the editor's side, not sent by the kernel.
+    #[serde(skip)]
+    pub key: u64,
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]

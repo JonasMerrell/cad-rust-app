@@ -6,7 +6,8 @@
 
 use std::io::{BufRead, BufReader, Write};
 use std::process::{Child, ChildStdin, Command, Stdio};
-use std::sync::mpsc::{Receiver, TryRecvError, channel};
+use std::path::PathBuf;
+use std::sync::mpsc::{Receiver, Sender, TryRecvError, channel};
 
 use serde::{Deserialize, Serialize};
 
@@ -144,6 +145,16 @@ pub struct KernelClient {
     studios: Vec<Document>,
     studios_json: String,
     ctx: Option<egui::Context>,
+    /// Build-cache key of the rebuild in flight (0 when it skips features).
+    inflight_key: u64,
+    /// Where built geometry is looked up (`build_cache::dirs_for`); empty turns the cache off.
+    pub cache_dirs: Vec<PathBuf>,
+    /// Cached results being read: (request id, tag, key, document to rebuild if the entry is bad).
+    cache_pending: Vec<(u64, usize, u64, Document)>,
+    cache_tx: Sender<(u64, Option<RebuildResult>)>,
+    cache_rx: Receiver<(u64, Option<RebuildResult>)>,
+    /// Rebuilds in flight whose result a cached one has replaced.
+    dropped: Vec<u64>,
 }
 
 impl KernelClient {
@@ -157,9 +168,35 @@ impl KernelClient {
     }
 
     fn with_ctx(ctx: Option<egui::Context>) -> Self {
-        let mut k = KernelClient { proc: None, state: KernelState::Loading, next_id: 1, inflight: None, queued: vec![], stale_before: 0, export: None, querying: None, crashes: 0, crashed: vec![], ctx, studios: vec![], studios_json: String::new() };
+        let mut k = Self::idle(ctx);
         k.spawn();
         k
+    }
+
+    /// A client with no worker started yet.
+    fn idle(ctx: Option<egui::Context>) -> Self {
+        let (cache_tx, cache_rx) = channel();
+        KernelClient {
+            proc: None,
+            state: KernelState::Loading,
+            next_id: 1,
+            inflight: None,
+            queued: vec![],
+            stale_before: 0,
+            export: None,
+            querying: None,
+            crashes: 0,
+            crashed: vec![],
+            ctx,
+            studios: vec![],
+            studios_json: String::new(),
+            inflight_key: 0,
+            cache_dirs: vec![],
+            cache_pending: vec![],
+            cache_tx,
+            cache_rx,
+            dropped: vec![],
+        }
     }
 
     fn spawn(&mut self) {
@@ -231,6 +268,7 @@ impl KernelClient {
         self.stale_before = self.next_id;
         self.queued.clear();
         self.crashed.clear();
+        self.cache_pending.clear();
     }
 
     /// A rebuild reply arrived: finish the request in flight and keep the result unless stale.
@@ -238,7 +276,12 @@ impl KernelClient {
         if self.inflight.as_ref().map(|f| f.0) == Some(id) {
             self.inflight = None;
             self.state = KernelState::Ready;
-            if id >= self.stale_before {
+            log::info!("Part Studio {tag} built by the kernel");
+            let replaced = self.dropped.contains(&id);
+            self.dropped.retain(|d| *d != id);
+            if id >= self.stale_before && !replaced {
+                let mut result = result;
+                result.key = self.inflight_key;
                 out.push(Outcome::Rebuilt(tag, result));
             }
             self.start_next();
@@ -249,8 +292,47 @@ impl KernelClient {
         self.inflight.is_some() || self.export.is_some()
     }
 
+    /// The build-cache key of `doc` as a rebuild now would see it.
+    pub fn cache_key(&self, doc: &Document) -> u64 {
+        crate::build_cache::key(doc, || self.studios_json.clone())
+    }
+
     /// Ask for a rebuild of part studio `tag`; a newer request replaces a queued one for the same tag.
+    /// Geometry built before (see `build_cache`) is read back instead when the cache has it.
     pub fn rebuild(&mut self, tag: usize, doc: &Document) {
+        // a newer request replaces one still reading the cache
+        self.cache_pending.retain(|p| p.1 != tag);
+        if !self.cache_dirs.is_empty() {
+            let key = self.cache_key(doc);
+            if let Some(path) = crate::build_cache::find(&self.cache_dirs, key) {
+                self.queued.retain(|q| q.0 != tag);
+                if let Some(f) = self.inflight.as_ref().filter(|f| f.1 == tag) {
+                    self.dropped.push(f.0);
+                }
+                let id = self.next_id;
+                self.next_id += 1;
+                self.cache_pending.push((id, tag, key, doc.clone()));
+                let (tx, ctx) = (self.cache_tx.clone(), self.ctx.clone());
+                std::thread::spawn(move || {
+                    let t = std::time::Instant::now();
+                    let r = crate::build_cache::load(&path, key);
+                    log::info!("Part Studio {tag}: built geometry read from {} in {:?}", path.display(), t.elapsed());
+                    if r.is_none() {
+                        log::warn!("ignoring a damaged build cache entry {}", path.display());
+                        let _ = std::fs::remove_file(&path);
+                    }
+                    let _ = tx.send((id, r));
+                    if let Some(c) = ctx {
+                        c.request_repaint();
+                    }
+                });
+                return;
+            }
+        }
+        self.rebuild_now(tag, doc);
+    }
+
+    fn rebuild_now(&mut self, tag: usize, doc: &Document) {
         if self.inflight.is_some() || self.state == KernelState::Loading {
             self.queued.retain(|q| q.0 != tag);
             self.queued.push((tag, doc.clone()));
@@ -275,6 +357,7 @@ impl KernelClient {
         }
         let id = self.next_id;
         self.next_id += 1;
+        self.inflight_key = if skip.is_empty() { self.cache_key(&doc) } else { 0 };
         self.send(&Request::Rebuild { id, tag, doc: doc.clone(), skip: skip.clone() });
         self.inflight = Some((id, tag, doc, skip, None));
         self.state = KernelState::Busy;
@@ -310,6 +393,15 @@ impl KernelClient {
     /// Process worker messages; returns finished results.
     pub fn poll(&mut self) -> Vec<Outcome> {
         let mut out = vec![];
+        // cached geometry read back
+        while let Ok((id, r)) = self.cache_rx.try_recv() {
+            let Some(i) = self.cache_pending.iter().position(|p| p.0 == id) else { continue };
+            let (_, tag, _, doc) = self.cache_pending.remove(i);
+            match r {
+                Some(r) => out.push(Outcome::Rebuilt(tag, r)),
+                None => self.rebuild_now(tag, &doc),
+            }
+        }
         loop {
             let ev = match &self.proc {
                 Some(p) => match p.rx.try_recv() {
@@ -365,7 +457,7 @@ impl KernelClient {
                     }
                     // (a stale request is not retried)
                     let stale_before = self.stale_before;
-                    let retry = self.inflight.take().filter(|f| f.0 >= stale_before);
+                    let retry = self.inflight.take().filter(|f| f.0 >= stale_before && !self.dropped.contains(&f.0));
                     if self.crashes > 50 {
                         self.state = KernelState::Error;
                         return out;
@@ -495,7 +587,9 @@ mod tests {
     use super::*;
 
     fn client() -> KernelClient {
-        KernelClient { proc: None, state: KernelState::Ready, next_id: 1, inflight: None, queued: vec![], stale_before: 0, export: None, querying: None, crashes: 0, crashed: vec![], ctx: None, studios: vec![], studios_json: String::new() }
+        let mut k = KernelClient::idle(None);
+        k.state = KernelState::Ready;
+        k
     }
 
     #[test]
@@ -517,5 +611,50 @@ mod tests {
         let id = k.inflight.as_ref().unwrap().0;
         k.on_rebuilt(id, 0, RebuildResult::default(), &mut out);
         assert!(matches!(out.as_slice(), [Outcome::Rebuilt(0, _)]));
+    }
+
+    #[test]
+    fn cached_geometry_replaces_a_rebuild() {
+        let dir = std::env::temp_dir().join(format!("rcad-worker-cache-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        let mut k = client();
+        let old = Document::default();
+        let mut doc = Document::default();
+        doc.variables.push(crate::doc::Variable { name: "w".into(), expr: "5".into() });
+        // an older version of studio 0 is being built when the cached one is asked for
+        k.rebuild(0, &old);
+        let old_id = k.inflight.as_ref().unwrap().0;
+        let mut cached = RebuildResult::default();
+        cached.bodies.push(kernel::BodyMesh { name: "From the cache".into(), ..Default::default() });
+        cached.key = k.cache_key(&doc);
+        crate::build_cache::store_now(&dir, &cached).unwrap();
+        k.cache_dirs = vec![dir.clone()];
+        k.rebuild(0, &doc);
+        assert!(k.inflight.is_some() && k.cache_pending.len() == 1, "read from the cache, not queued");
+        let mut out = vec![];
+        let start = std::time::Instant::now();
+        while out.is_empty() && start.elapsed() < std::time::Duration::from_secs(10) {
+            out = k.poll();
+            std::thread::sleep(std::time::Duration::from_millis(5));
+        }
+        match out.as_slice() {
+            [Outcome::Rebuilt(0, r)] => {
+                assert_eq!(r.bodies[0].name, "From the cache");
+                assert_eq!(r.key, cached.key);
+            }
+            _ => panic!("expected the cached result"),
+        }
+        // the older build finishing afterwards must not replace it
+        let mut late = vec![];
+        k.on_rebuilt(old_id, 0, RebuildResult::default(), &mut late);
+        assert!(late.is_empty());
+        // a document the cache doesn't have goes to the kernel, and its result gets its key
+        let mut other = doc.clone();
+        other.variables[0].expr = "6".into();
+        k.rebuild(0, &other);
+        let id = k.inflight.as_ref().unwrap().0;
+        k.on_rebuilt(id, 0, RebuildResult::default(), &mut late);
+        assert!(matches!(late.as_slice(), [Outcome::Rebuilt(0, r)] if r.key == crate::build_cache::key(&other, String::new)));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 }
