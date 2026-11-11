@@ -59,6 +59,7 @@ mod pcb_export;
 mod pcb_fab;
 mod pcb_ipc;
 mod pcb_kicad;
+mod kicad_legacy;
 mod kicad_libs;
 mod kicad_lib_ui;
 mod pcb_annotate;

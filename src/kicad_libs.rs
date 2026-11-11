@@ -28,6 +28,18 @@ the licence's share-alike terms. Sharing the library files themselves, or change
 the CC-BY-SA licence and its credit.";
 pub const LICENSE_URL: &str = "https://www.kicad.org/libraries/license/";
 
+/// Digi-Key's KiCad library: about 1,000 orderable parts, each symbol with its footprint and
+/// Digi-Key and manufacturer part numbers (KiCad 5 format, no longer updated by Digi-Key).
+pub const DK_ZIP: &str = "https://codeload.github.com/Digi-Key/digikey-kicad-library/zip/refs/heads/master";
+pub const DK_HOME: &str = "https://github.com/Digi-Key/digikey-kicad-library";
+pub const DK_CREDIT: &str = "Digi-Key KiCad Library © Digi-Key Corporation, CC-BY-SA 4.0";
+pub const DK_LICENSE: &str = "Digi-Key's KiCad library is licensed under CC-BY-SA 4.0, with an exception: designs \
+     made with it, and the files generated from them, are not covered by the licence.";
+/// The footprint library name Digi-Key's symbols refer to.
+pub const DK_FOOTPRINTS: &str = "digikey-footprints";
+/// Marks index entries that come from Digi-Key's library (`SymEntry::file`).
+const DK_FILE: &str = "digikey:";
+
 /// Where a source's symbols, footprints and 3D models are.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Root {
@@ -63,11 +75,22 @@ pub struct SymEntry {
     /// The symbol it takes its drawing from, if any.
     #[serde(default)]
     pub extends: String,
+    /// Order numbers, for libraries that carry them (Digi-Key's).
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub digikey: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub mpn: String,
+    #[serde(default, skip_serializing_if = "String::is_empty")]
+    pub manufacturer: String,
 }
 
 impl SymEntry {
     pub fn key(&self) -> String {
         format!("{}:{}", self.lib, self.name)
+    }
+    /// From Digi-Key's KiCad library.
+    pub fn from_digikey(&self) -> bool {
+        self.file.starts_with(DK_FILE)
     }
 }
 
@@ -172,6 +195,27 @@ fn downloaded() -> Option<Root> {
         return None;
     }
     share_root(&d, format!("KiCad {VERSION} libraries (downloaded)"))
+}
+
+/// Digi-Key's library: `RCAD_DIGIKEY_LIB_DIR` (a checkout of the repository), else the download
+/// in the cache once it is complete.
+pub fn digikey_dir() -> Option<PathBuf> {
+    let ok = |d: &Path| d.join("digikey-symbols").is_dir() && d.join(format!("{DK_FOOTPRINTS}.pretty")).is_dir();
+    if let Some(d) = std::env::var_os("RCAD_DIGIKEY_LIB_DIR").map(PathBuf::from) {
+        if ok(&d) {
+            return Some(d);
+        }
+    }
+    let d = cache_dir()?.join("digikey-kicad-library");
+    (d.join("complete").exists() && ok(&d)).then_some(d)
+}
+
+/// The index's label: the KiCad root's, and whether Digi-Key's library is in it.
+fn ix_label(root: &Root) -> String {
+    match digikey_dir() {
+        Some(_) => format!("{} + Digi-Key library", root.label),
+        None => root.label.clone(),
+    }
 }
 
 /// Where the libraries are: `RCAD_KICAD_DIR` (a share/kicad-like folder), the downloaded release
@@ -279,6 +323,67 @@ pub fn download(p: &Shared) -> Result<(), String> {
     Ok(())
 }
 
+/// Download Digi-Key's KiCad library (about 10 MB from GitHub) into the cache, then re-index.
+pub fn download_digikey(p: &Shared) -> Result<(), String> {
+    let dir = cache_dir().ok_or("no cache folder (HOME is not set)")?.join("digikey-kicad-library");
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).map_err(|e| format!("{}: {e}", dir.display()))?;
+    set(p, "Downloading Digi-Key's KiCad library", 0.05);
+    let zip = get(DK_ZIP, 200 << 20, &mut |got, total| {
+        let f = total.map(|t| got as f32 / t as f32).unwrap_or(((got as f32) / 12e6).min(0.95));
+        set(p, &format!("Downloading Digi-Key's KiCad library ({:.0} MB)", got as f64 / 1e6), 0.05 + 0.7 * f);
+    })?;
+    set(p, "Unpacking Digi-Key's KiCad library", 0.8);
+    let mut budget = 1usize << 30;
+    let mut err = None;
+    let keep = |n: &str| {
+        let rel = n.split_once('/').map(|x| x.1).unwrap_or(n);
+        (rel.starts_with("digikey-symbols/") && (rel.ends_with(".lib") || rel.ends_with(".dcm"))) || (rel.starts_with("digikey-footprints.pretty/") && rel.ends_with(".kicad_mod")) || rel == "LICENSE.md"
+    };
+    crate::grabcad::unzip_each(&zip, &keep, &mut budget, &mut |name, data| {
+        let Some(data) = data else { return };
+        let rel = name.split_once('/').map(|x| x.1).unwrap_or(&name);
+        if rel.contains("..") || rel.starts_with('/') {
+            return;
+        }
+        let path = dir.join(rel);
+        if let Some(parent) = path.parent() {
+            let _ = std::fs::create_dir_all(parent);
+        }
+        if let Err(e) = std::fs::write(&path, data) {
+            err.get_or_insert(format!("{}: {e}", path.display()));
+        }
+    })?;
+    if let Some(e) = err {
+        return Err(e);
+    }
+    std::fs::write(dir.join("complete"), "master").map_err(|e| e.to_string())?;
+    if digikey_dir().is_none() {
+        return Err("the Digi-Key library download is incomplete".into());
+    }
+    if let Some(root) = root() {
+        build_index(&root, p)?;
+    }
+    Ok(())
+}
+
+/// `download_digikey` on a worker thread.
+pub fn start_digikey() -> Shared {
+    let p: Shared = Arc::default();
+    let q = p.clone();
+    std::thread::spawn(move || {
+        let r = download_digikey(&q);
+        if let Ok(mut g) = q.lock() {
+            g.finished = true;
+            g.done = 1.0;
+            if let Err(e) = r {
+                g.error = Some(e);
+            }
+        }
+    });
+    p
+}
+
 /// Start `download` (or, with libraries already present, an index build) on a worker thread.
 pub fn start(download_too: bool) -> Shared {
     let p: Shared = Arc::default();
@@ -314,7 +419,7 @@ fn index_cell() -> &'static Mutex<Option<Arc<Index>>> {
 fn index_path(root: &Root) -> Option<PathBuf> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
-    (root.symbols.to_string_lossy(), root.footprints.to_string_lossy(), 2u32).hash(&mut h);
+    (root.symbols.to_string_lossy(), root.footprints.to_string_lossy(), 3u32, digikey_dir()).hash(&mut h);
     cache_dir().map(|d| d.join(format!("index-{:016x}.json", h.finish())))
 }
 
@@ -322,12 +427,13 @@ fn index_path(root: &Root) -> Option<PathBuf> {
 pub fn index() -> Option<Arc<Index>> {
     let root = root()?;
     let cell = index_cell();
-    if let Some(i) = cell.lock().ok()?.as_ref().filter(|i| i.label == root.label) {
+    let label = ix_label(&root);
+    if let Some(i) = cell.lock().ok()?.as_ref().filter(|i| i.label == label) {
         return Some(i.clone());
     }
     let text = std::fs::read(index_path(&root)?).ok()?;
     let ix: Index = serde_json::from_slice(&text).ok()?;
-    if ix.label != root.label {
+    if ix.label != label {
         return None;
     }
     let ix = Arc::new(ix);
@@ -392,13 +498,16 @@ fn index_symbols(root_sx: &Sx, lib: &str, file: &str, out: &mut Vec<SymEntry>) {
             datasheet: prop(s, "Datasheet"),
             file: file.to_string(),
             extends,
+            digikey: prop(s, "Digi-Key_PN"),
+            mpn: prop(s, "MPN"),
+            manufacturer: prop(s, "Manufacturer"),
         });
     }
 }
 
 /// Index every symbol and footprint under `root` and save the index in the cache.
 pub fn build_index(root: &Root, p: &Shared) -> Result<Arc<Index>, String> {
-    let mut ix = Index { label: root.label.clone(), ..Default::default() };
+    let mut ix = Index { label: ix_label(root), ..Default::default() };
     set(p, "Indexing the KiCad symbols", 0.9);
     let mut files = vec![];
     files_with(&root.symbols, "kicad_sym", 1, &mut files);
@@ -411,6 +520,20 @@ pub fn build_index(root: &Root, p: &Shared) -> Result<Arc<Index>, String> {
             None => f.file_stem().unwrap_or_default().to_string_lossy().into_owned(),
         };
         index_symbols(&sx, &lib, &rel, &mut ix.symbols);
+    }
+    // Digi-Key's library (KiCad 5 files), when it is there
+    if let Some(d) = digikey_dir() {
+        set(p, "Indexing Digi-Key's KiCad library", 0.93);
+        let mut libs = vec![];
+        files_with(&d.join("digikey-symbols"), "lib", 0, &mut libs);
+        for f in &libs {
+            let Ok(text) = std::fs::read_to_string(f) else { continue };
+            let docs = std::fs::read_to_string(f.with_extension("dcm")).map(|t| crate::kicad_legacy::docs(&t)).unwrap_or_default();
+            let Ok(sx) = crate::kicad_legacy::library(&text, &docs) else { continue };
+            let lib = f.file_stem().unwrap_or_default().to_string_lossy().into_owned();
+            let file = format!("{DK_FILE}{}", f.file_name().unwrap_or_default().to_string_lossy());
+            index_symbols(&sx, &lib, &file, &mut ix.symbols);
+        }
     }
     // a derived symbol's pins and filters are its base's
     let base: std::collections::HashMap<(String, String), (u32, Vec<String>)> = ix.symbols.iter().map(|s| ((s.lib.clone(), s.name.clone()), (s.pins, s.filters.clone()))).collect();
@@ -429,6 +552,10 @@ pub fn build_index(root: &Root, p: &Shared) -> Result<Arc<Index>, String> {
     set(p, "Indexing the KiCad footprints", 0.95);
     let mut files = vec![];
     files_with(&root.footprints, "kicad_mod", 1, &mut files);
+    let dk = digikey_dir();
+    if let Some(d) = &dk {
+        files_with(&d.join(format!("{DK_FOOTPRINTS}.pretty")), "kicad_mod", 0, &mut files);
+    }
     for f in &files {
         let Ok(text) = std::fs::read_to_string(f) else { continue };
         let Ok(sx) = pcb_kicad::parse(&text) else { continue };
@@ -482,7 +609,13 @@ pub fn ensure() -> Result<Arc<Index>, String> {
 
 /// A search result for the agent.
 pub fn sym_json(s: &SymEntry) -> serde_json::Value {
-    serde_json::json!({"key": s.key(), "description": s.desc, "keywords": s.keys, "footprint": s.fp, "footprint_filters": s.filters, "pins": s.pins, "power": s.power, "datasheet": s.datasheet})
+    let mut v = serde_json::json!({"key": s.key(), "description": s.desc, "keywords": s.keys, "footprint": s.fp, "footprint_filters": s.filters, "pins": s.pins, "power": s.power, "datasheet": s.datasheet});
+    if !s.digikey.is_empty() {
+        v["digikey"] = s.digikey.clone().into();
+        v["mpn"] = s.mpn.clone().into();
+        v["manufacturer"] = s.manufacturer.clone().into();
+    }
+    v
 }
 
 pub fn fp_json(f: &FpEntry) -> serde_json::Value {
@@ -538,7 +671,7 @@ pub fn search_symbols<'a>(ix: &'a Index, q: &str, power_only: bool, limit: usize
             if let Some((l, n)) = q.trim().split_once(':') {
                 return (s.lib.eq_ignore_ascii_case(l) && s.name.to_lowercase().starts_with(&n.to_lowercase())).then_some((u32::MAX - s.name.len() as u32, s));
             }
-            score(&w, &s.name, &s.lib, &[&s.desc, &s.keys]).map(|k| (k, s))
+            score(&w, &s.name, &s.lib, &[&s.desc, &s.keys, &s.digikey, &s.mpn, &s.manufacturer]).map(|k| (k, s))
         })
         .collect();
     if !w.is_empty() {
@@ -590,6 +723,18 @@ pub fn find_footprint<'a>(ix: &'a Index, key: &str) -> Option<&'a FpEntry> {
 
 /// The symbol `s` as an rCAD library symbol, with what it extends.
 pub fn load_symbol(root: &Root, ix: &Index, s: &SymEntry) -> Result<LibSymbol, String> {
+    if let Some(file) = s.file.strip_prefix(DK_FILE) {
+        let d = digikey_dir().ok_or("Digi-Key's KiCad library isn't downloaded")?;
+        let path = d.join("digikey-symbols").join(file);
+        let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
+        let docs = std::fs::read_to_string(path.with_extension("dcm")).map(|t| crate::kicad_legacy::docs(&t)).unwrap_or_default();
+        let sx = crate::kicad_legacy::library(&text, &docs)?;
+        let mut notes = vec![];
+        let mut v = pcb_kicad::symbols(&sx, &s.lib, &mut notes)?;
+        let mut sym = v.drain(..).find(|x| x.name() == s.name).ok_or_else(|| if notes.is_empty() { format!("{} could not be read", s.key()) } else { notes.join("; ") })?;
+        sym.source = DK_CREDIT.into();
+        return Ok(sym);
+    }
     let mut chain = vec![s.clone()];
     while let Some(b) = chain.last().filter(|c| !c.extends.is_empty()).and_then(|c| ix.symbols.iter().find(|x| x.lib == c.lib && x.name == c.extends)) {
         if chain.len() > 8 || chain.iter().any(|c| c.name == b.name) {
@@ -623,11 +768,15 @@ pub fn load_symbol(root: &Root, ix: &Index, s: &SymEntry) -> Result<LibSymbol, S
 
 /// The footprint `lib:name` from the library.
 pub fn load_footprint(root: &Root, f: &FpEntry) -> Result<Footprint, String> {
-    let path = root.footprints.join(format!("{}.pretty", f.lib)).join(format!("{}.kicad_mod", f.name));
+    let dir = match (f.lib == DK_FOOTPRINTS).then(digikey_dir).flatten() {
+        Some(d) => d,
+        None => root.footprints.clone(),
+    };
+    let path = dir.join(format!("{}.pretty", f.lib)).join(format!("{}.kicad_mod", f.name));
     let text = std::fs::read_to_string(&path).map_err(|e| format!("{}: {e}", path.display()))?;
     let mut notes = vec![];
     let mut fp = pcb_kicad::footprint(&pcb_kicad::parse(&text)?, &mut notes)?;
-    fp.source = CREDIT.into();
+    fp.source = if f.lib == DK_FOOTPRINTS { DK_CREDIT.into() } else { CREDIT.into() };
     Ok(fp)
 }
 
