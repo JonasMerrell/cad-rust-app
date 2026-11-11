@@ -278,6 +278,14 @@ fn commands(app: &App) -> Vec<Cmd> {
     v.push(cmd("New project…", "File", "folder", None, "project folder create start git", Action::Run(crate::vcs_ui::new_project)));
     v.push(cmd("Export project (ZIP)…", "File", "export", None, "project zip archive share backup send", Action::Run(crate::vcs_ui::export_project)));
     v.push(cmd("Import project (ZIP)…", "File", "download", None, "project zip archive unpack open", Action::Run(crate::vcs_ui::import_project)));
+    v.push(cmd(
+        if app.session.prefs.group_tabs { "Ungroup tabs (own order)" } else { "Group tabs by type" },
+        "View",
+        "configurations",
+        None,
+        "tab bar bottom group sort kind type part studios assemblies drawings order",
+        Action::Run(|a| a.toggle_group_tabs()),
+    ));
     v.push(cmd("Rebuild all Part Studios", "File", "history", None, "regenerate rebuild recompute refresh cache saved geometry", Action::Run(|a| a.rebuild_all())));
     v.push(cmd("Design with Claude", "Claude", "chat", Some("Ctrl+L"), "ai chat natural language assistant agent", Action::Run(crate::claude_ui::toggle)));
     v.push(cmd("Undo", "Edit", "undo", Some("Ctrl+Z"), "", Action::Run(|a| a.undo())));
