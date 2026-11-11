@@ -78,7 +78,7 @@ pub struct AsmUi {
     /// Playing back the mates a PCB simulation moved.
     pub motion: Option<Motion>,
     /// Viewport right-click menu: where it opened and the instance under the pointer.
-    pub ctx: Option<(Pos2, Option<u64>)>,
+    pub ctx: Option<(Pos2, Option<(u64, usize)>)>,
     /// Motion sliders and animation playback.
     pub anim: crate::asm_anim_ui::AnimUi,
     /// GPU-ready copies of the part meshes drawn, by (studio, body), with the fingerprint of the
@@ -819,6 +819,47 @@ pub fn isolate(app: &mut App, ids: Vec<u64>) {
     app.asm.scene_dirty = true;
 }
 
+/// What an instance opens: its Part Studio with the part selected, or for a sub-assembly the
+/// part `leaf` inside it (when given) or else the sub-assembly's own tab.
+pub fn open_target(app: &App, inst: u64, leaf: Option<usize>) -> Option<Tab> {
+    let x = asm(app)?.instance(inst)?;
+    match (x.sub, leaf) {
+        (None, _) => Some(Tab::Studio(x.studio)),
+        (Some(_), Some(l)) => assembly::leaves_shown(&app.ws.assemblies, x).get(l).map(|(lf, _)| Tab::Studio(lf.studio)),
+        (Some(k), None) => Some(Tab::Assembly(k)),
+    }
+}
+
+/// Open the Part Studio an instance comes from with its part selected (see `open_target`).
+pub fn open_part(app: &mut App, inst: u64, leaf: Option<usize>) {
+    let Some(x) = asm(app).and_then(|a| a.instance(inst)).cloned() else { return };
+    let body = match (x.sub, leaf) {
+        (None, _) => Some(x.body),
+        (Some(_), Some(l)) => assembly::leaves_shown(&app.ws.assemblies, &x).get(l).map(|(lf, _)| lf.body),
+        (Some(_), None) => None,
+    };
+    let Some(t) = open_target(app, inst, leaf) else { return };
+    let exists = match t {
+        Tab::Studio(i) => i < app.ws.studios.len(),
+        Tab::Assembly(i) => i < app.ws.assemblies.len(),
+        _ => false,
+    };
+    if !exists {
+        app.flash("The source of this instance is gone", ToastKind::Info);
+        return;
+    }
+    app.switch_tab(t);
+    if let Some(b) = body {
+        if app.result.bodies.iter().any(|r| r.id == b) {
+            app.picks = vec![crate::doc::Ref::Body { body: b }];
+            app.parts_open = true;
+            app.scene_dirty = true;
+        } else {
+            app.flash("That part is no longer in its Part Studio", ToastKind::Info);
+        }
+    }
+}
+
 /// Isolate the selected instances, or end the isolation if one is on.
 pub fn toggle_isolate(app: &mut App) {
     if app.isolation.is_some() {
@@ -1068,6 +1109,7 @@ fn instances(app: &mut App, ui: &mut Ui) {
     let mut show_every = false;
     let mut iso: Option<Option<Vec<u64>>> = None;
     let mut fix: Option<(Vec<u64>, bool)> = None;
+    let mut open: Option<u64> = None;
     let fixed_ids: Vec<u64> = rows.iter().filter(|r| r.2).map(|r| r.0).collect();
     for (id, name, fixed, hidden, out_of_sight) in rows {
         let picked = app.asm.sel.contains(&id);
@@ -1092,7 +1134,16 @@ fn instances(app: &mut App, ui: &mut Ui) {
             app.asm.sel_mate = None;
             app.asm.scene_dirty = true;
         }
+        if r.double_clicked() {
+            open = Some(id);
+        }
         r.context_menu(|ui| {
+            let sub = asm(app).and_then(|a| a.instance(id)).is_some_and(|x| x.sub.is_some());
+            if ui.button(if sub { "Open sub-assembly" } else { "Open part" }).on_hover_text(if sub { "Go to the sub-assembly's tab (double-click)" } else { "Go to its Part Studio with the part selected (double-click)" }).clicked() {
+                open = Some(id);
+                ui.close();
+            }
+            ui.separator();
             let n = these.len();
             let what = if n > 1 { format!(" {n} instances") } else { String::new() };
             if ui.button(format!("{}{what}", if hidden { "Show" } else { "Hide" })).on_hover_text("H").clicked() {
@@ -1141,6 +1192,9 @@ fn instances(app: &mut App, ui: &mut Ui) {
     }
     if show_every {
         show_all(app);
+    }
+    if let Some(id) = open {
+        open_part(app, id, None);
     }
 }
 
@@ -1716,7 +1770,7 @@ fn viewport_inner(app: &mut App, ui: &mut Ui) {
 
     if resp.secondary_clicked() && app.asm.dialog.is_none() && app.asm.measure.is_none() {
         if let Some(p) = resp.interact_pointer_pos().or(resp.hover_pos()) {
-            app.asm.ctx = Some((p, app.asm.hover.map(|h| h.inst)));
+            app.asm.ctx = Some((p, app.asm.hover.map(|h| (h.inst, h.leaf))));
         }
     }
 
@@ -1848,6 +1902,12 @@ fn viewport_inner(app: &mut App, ui: &mut Ui) {
     }
     mate_dialog(app, ui, rect);
     viewport_menu(app, ui);
+    // double-click a part: open it in its Part Studio
+    if resp.double_clicked_by(egui::PointerButton::Primary) && app.asm.dialog.is_none() && app.asm.measure.is_none() && app.asm.ctx.is_none() {
+        if let Some(h) = app.asm.hover {
+            open_part(app, h.inst, Some(h.leaf));
+        }
+    }
 }
 
 /// Right-click in the viewport: hide, show and isolate.
@@ -1857,8 +1917,11 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
         app.asm.ctx = None;
         return;
     }
-    let target = target.filter(|id| asm(app).is_some_and(|a| a.instance(*id).is_some()));
+    let target = target.filter(|(id, _)| asm(app).is_some_and(|a| a.instance(*id).is_some()));
+    let leaf = target.map(|t| t.1);
+    let target = target.map(|t| t.0);
     let mut close = false;
+    let mut open: Option<(u64, Option<usize>)> = None;
     let area = egui::Area::new(egui::Id::new("asm-ctx-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::menu(ui.style()).fill(theme::panel_2()).show(ui, |ui| {
             ui.set_min_width(200.0);
@@ -1868,6 +1931,21 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
                 // the selected instances when the clicked one is among them, else just that one
                 let these = if app.asm.sel.contains(&id) { app.asm.sel.clone() } else { vec![id] };
                 let n = these.len();
+                let sub = asm(app).and_then(|a| a.instance(id)).is_some_and(|x| x.sub.is_some());
+                // inside a sub-assembly, say which part the click landed on
+                let part = match (sub, leaf.and_then(|l| open_target(app, id, Some(l)))) {
+                    (true, Some(Tab::Studio(k))) => app.ws.studios.get(k).map(|s| format!("Open part: {}", s.name)),
+                    _ => None,
+                };
+                if ui.button(part.unwrap_or_else(|| "Open part".into())).on_hover_text("Go to its Part Studio with the part selected (double-click)").clicked() {
+                    open = Some((id, leaf));
+                    close = true;
+                }
+                if sub && ui.button("Open sub-assembly").clicked() {
+                    open = Some((id, None));
+                    close = true;
+                }
+                ui.separator();
                 if ui.button(if n > 1 { format!("Hide {n} instances") } else { "Hide".to_string() }).on_hover_text("H").clicked() {
                     set_hidden(app, &these, true);
                     close = true;
@@ -1909,6 +1987,9 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
     let clicked_elsewhere = ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && !ui.input(|i| i.pointer.secondary_pressed());
     if close || clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.asm.ctx = None;
+    }
+    if let Some((id, leaf)) = open {
+        open_part(app, id, leaf);
     }
 }
 
