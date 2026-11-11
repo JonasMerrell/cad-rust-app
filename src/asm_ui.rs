@@ -9,7 +9,7 @@ use crate::app::{App, ToastKind};
 use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose, Relation, RelationKind};
 use crate::drawing::Drawing;
 use crate::icons;
-use crate::render::{MeshVertex, SceneData, ViewportCallback};
+use crate::render::{ObjDraw, ObjMesh, SceneData, ViewportCallback};
 use crate::theme::{self, vp};
 use crate::workspace::Tab;
 
@@ -81,6 +81,21 @@ pub struct AsmUi {
     pub ctx: Option<(Pos2, Option<u64>)>,
     /// Motion sliders and animation playback.
     pub anim: crate::asm_anim_ui::AnimUi,
+    /// GPU-ready copies of the part meshes drawn, by (studio, body), with the fingerprint of the
+    /// mesh they were made from.
+    pub meshes: std::cell::RefCell<std::collections::HashMap<(usize, crate::doc::BodyId), (MeshSig, Arc<ObjMesh>)>>,
+    /// Last hover pick: pointer, camera and scene it was made for, and its result.
+    pick_cache: Option<(Vec2, (Vec3, Vec3, Vec3, f32, Vec2), u64, Option<Hit>)>,
+    /// Realistic lighting and dark theme as last drawn (their colours are in the scene).
+    look: Option<(bool, bool)>,
+}
+
+/// Fingerprint of a part mesh: where its data lives plus its sizes and exact mass properties.
+pub type MeshSig = (usize, usize, usize, usize, u64, u64, [u64; 6]);
+
+fn mesh_sig(m: &crate::kernel::BodyMesh) -> MeshSig {
+    let b = m.bbox;
+    (m.positions.as_ptr() as usize, m.positions.len(), m.indices.len(), m.edges.len(), m.volume.to_bits(), m.area.to_bits(), [b[0][0], b[0][1], b[0][2], b[1][0], b[1][1], b[1][2]].map(f64::to_bits))
 }
 
 /// Playback of a circuit simulation's motors and servos in an assembly.
@@ -274,6 +289,20 @@ pub fn redo(app: &mut App) {
 
 /// The pose an instance is drawn and picked at (moved outwards in an exploded view).
 fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
+    display_pose_in(app, a, inst, explode_centre(app, a))
+}
+
+/// The centre a plain exploded view pushes the instances away from (None when not needed).
+fn explode_centre(app: &App, a: &Assembly) -> Option<DVec3> {
+    if app.asm.explode <= 0.0 || !a.explode_steps.is_empty() {
+        return None;
+    }
+    let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
+    Some(cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64)
+}
+
+/// `display_pose` with the explode centre worked out once for all instances.
+fn display_pose_in(app: &App, a: &Assembly, inst: &Instance, centre: Option<DVec3>) -> Pose {
     if app.asm.explode <= 0.0 {
         return inst.pose;
     }
@@ -288,16 +317,73 @@ fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
         }
         return p;
     }
-    let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
-    let c = cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64;
+    let c = centre.unwrap_or(DVec3::ZERO);
     let mine = inst.pose.apply(centroid_local(app, inst));
     let mut p = inst.pose;
     p.t = (DVec3::from(p.t) + (mine - c) * app.asm.explode as f64).into();
     p
 }
 
+/// A part in sight in the assembly, at its displayed world pose.
+struct Placed<'a> {
+    studio: usize,
+    inst: u64,
+    leaf: usize,
+    pose: Pose,
+    mesh: &'a crate::kernel::BodyMesh,
+    color: Color32,
+}
+
+/// Every part in sight of assembly `a` at its displayed pose (worked out once per pick or
+/// scene, not again for every part).
+fn placed<'a>(app: &'a App, a: &Assembly) -> Vec<Placed<'a>> {
+    let centre = explode_centre(app, a);
+    let mut out = vec![];
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
+        let dp = display_pose_in(app, a, x, centre);
+        for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
+            let Some(part) = part else { continue };
+            out.push(Placed { studio: part.studio, inst: x.id, leaf, pose: dp.compose(&part.local), mesh: part.mesh, color: part.color });
+        }
+    }
+    out
+}
+
+/// Where a ray (in the part's coordinates) enters its mesh's bounding box, if it does.
+fn ray_box(o: DVec3, d: DVec3, m: &crate::kernel::BodyMesh) -> Option<f64> {
+    let pad = 1e-3 + 1e-6 * (DVec3::from(m.bbox[1]) - DVec3::from(m.bbox[0])).length();
+    let (lo, hi) = (DVec3::from(m.bbox[0]) - pad, DVec3::from(m.bbox[1]) + pad);
+    let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
+    for k in 0..3 {
+        if d[k].abs() < 1e-15 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+        } else {
+            let (a, b) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+    }
+    (t1 >= t0.max(0.0)).then_some(t0.max(0.0))
+}
+
+/// Whether screen point `s` comes within `r` pixels of a part's bounding box on screen.
+fn near_on_screen(cam: &crate::camera::Camera, p: &Placed, s: Vec2, r: f32) -> bool {
+    let b = p.mesh.bbox;
+    let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for c in 0..8 {
+        let w = p.pose.apply(DVec3::new(b[c & 1][0], b[(c >> 1) & 1][1], b[(c >> 2) & 1][2]));
+        let q = cam.project(w.as_vec3());
+        lo = lo.min(q);
+        hi = hi.max(q);
+    }
+    s.x >= lo.x - r && s.x <= hi.x + r && s.y >= lo.y - r && s.y <= hi.y + r
+}
+
 /// A part drawn for an instance: its mesh, pose inside the instance and colour.
 struct Part<'a> {
+    studio: usize,
     local: Pose,
     mesh: &'a crate::kernel::BodyMesh,
     color: Color32,
@@ -315,7 +401,7 @@ fn parts_of<'a>(app: &'a App, inst: &Instance) -> Vec<Option<Part<'a>>> {
             }
             let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body)?;
             let color = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
-            Some(Part { local: l.pose, mesh, color })
+            Some(Part { studio: l.studio, local: l.pose, mesh, color })
         })
         .collect()
 }
@@ -1302,21 +1388,14 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- viewport
 
-fn world_tri(inst: &Instance, m: &crate::kernel::BodyMesh, t: &[u32]) -> [DVec3; 3] {
-    let v = |i: u32| inst.pose.apply(DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64));
-    [v(t[0]), v(t[1]), v(t[2])]
-}
-
 fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let a = asm(app)?;
     let cam = &app.camera;
+    let parts = placed(app, a);
     // edges first: the nearest one on screen that no part hides
     let mut near: Vec<(f32, DVec3, Hit)> = vec![];
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
-        let m = part.mesh;
-        let pose = display_pose(app, a, x).compose(&part.local);
+    for part in parts.iter().filter(|p| near_on_screen(cam, p, s, 6.0)) {
+        let (m, pose) = (part.mesh, &part.pose);
         for (ei, e) in m.edges.iter().enumerate() {
             let world: Vec<DVec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64)))).collect();
             let pts: Vec<Vec2> = world.iter().map(|p| cam.project(p.as_vec3())).collect();
@@ -1327,59 +1406,58 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
                 if dist < 6.0 {
                     // the view is orthographic, so the screen parameter carries over to the 3D point
                     let at = world[k] + (world[k + 1] - world[k]) * t as f64;
-                    near.push((dist, at, Hit { inst: x.id, leaf, face: None, edge: Some(ei), local: e.mid }));
+                    near.push((dist, at, Hit { inst: part.inst, leaf: part.leaf, face: None, edge: Some(ei), local: e.mid }));
                 }
             }
         }
-      }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, _, h)) = near.into_iter().find(|(_, p, _)| !occluded(app, a, *p)) {
+    if let Some((_, _, h)) = near.into_iter().find(|(_, p, _)| !occluded_by(cam, &parts, *p)) {
         return Some(h);
     }
     let (o, d) = cam.ray(s);
     let (o, d) = (o.as_dvec3(), d.as_dvec3());
     let mut best: Option<(f64, Hit)> = None;
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
-        let m = part.mesh;
+    for part in &parts {
+        let (m, pose) = (part.mesh, &part.pose);
         // ray into the part's coordinates
-        let pose = display_pose(app, a, x).compose(&part.local);
         let lo = pose.inverse_apply(o);
         let ld = pose.inverse_dir(d);
+        // parts the ray misses, or only meets behind the nearest hit so far, are skipped whole
+        match ray_box(lo, ld, m) {
+            Some(t) if best.as_ref().map(|b| t <= b.0).unwrap_or(true) => {}
+            _ => continue,
+        }
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
             if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
                 if best.as_ref().map(|b| tt < b.0).unwrap_or(true) {
-                    best = Some((tt, Hit { inst: x.id, leaf, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
+                    best = Some((tt, Hit { inst: part.inst, leaf: part.leaf, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
                 }
             }
         }
-      }
     }
     best.map(|b| b.1)
 }
 
 /// Whether a shown part lies in front of world point `p` (an edge behind another part).
-fn occluded(app: &App, a: &Assembly, p: DVec3) -> bool {
-    let cam = &app.camera;
+fn occluded_by(cam: &crate::camera::Camera, parts: &[Placed], p: DVec3) -> bool {
     let (o, d) = cam.ray(cam.project(p.as_vec3()));
     let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
     let depth = (p - o).dot(d);
     // the faces that end at the edge meet the ray at its own depth: a few pixels of slack
     let slack = cam.wpp() as f64 * 3.0;
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-        for part in parts_of(app, x).into_iter().flatten() {
-            let m = part.mesh;
-            let pose = display_pose(app, a, x).compose(&part.local);
-            let (lo, ld) = (pose.inverse_apply(o), pose.inverse_dir(d));
-            for t in m.indices.chunks(3) {
-                let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
-                if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
-                    if tt < depth - slack {
-                        return true;
-                    }
+    for part in parts {
+        let (m, pose) = (part.mesh, &part.pose);
+        let (lo, ld) = (pose.inverse_apply(o), pose.inverse_dir(d));
+        if !ray_box(lo, ld, m).is_some_and(|t| t < depth - slack) {
+            continue;
+        }
+        for t in m.indices.chunks(3) {
+            let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
+            if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
+                if tt < depth - slack {
+                    return true;
                 }
             }
         }
@@ -1437,40 +1515,42 @@ fn build_scene(app: &App) -> SceneData {
         app.asm.dialog.as_ref().and_then(|d| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.iter().chain(m.b.iter()).copied().collect()).unwrap_or_default();
     let mate_insts: Vec<u64> =
         app.asm.sel_mate.filter(|_| app.asm.dialog.is_none()).and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
+    let mut cache = app.asm.meshes.borrow_mut();
+    let mut used = std::collections::HashMap::new();
+    let finish = if app.realistic { 2.0 } else { 0.0 };
+    let (edge_col, hover_col, picked_col) = (crate::viewport::rgba(vp::edge(), 1.0), crate::viewport::rgba(vp::hover(), 1.0), crate::viewport::rgba(vp::picked(), 1.0));
+    for part in placed(app, a) {
         let m = part.mesh;
-        let sel = app.asm.sel.contains(&x.id) || mate_insts.contains(&x.id);
-        let base = part.color;
-        let hov_face = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.face);
-        let pose = display_pose(app, a, x).compose(&part.local);
-        let rot = pose.m().as_mat3();
-        for (ti, t) in m.indices.chunks(3).enumerate() {
-            let fi = m.tri_face[ti] as usize;
-            let col = if hov_face == Some(fi) {
-                vp::hover()
-            } else if sel {
-                vp::picked()
-            } else {
-                base
-            };
-            for &i in t {
-                let i = i as usize;
-                let p = pose.apply(DVec3::new(m.positions[3 * i] as f64, m.positions[3 * i + 1] as f64, m.positions[3 * i + 2] as f64));
-                let n = rot * Vec3::new(m.normals[3 * i], m.normals[3 * i + 1], m.normals[3 * i + 2]);
-                s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0), finish: if app.realistic { 2.0 } else { 0.0 } });
-            }
+        let key = (part.studio, m.id);
+        let sig = mesh_sig(m);
+        // the GPU copy of the mesh, made once and shared by every instance of the part
+        let obj = match cache.get(&key).filter(|c| c.0 == sig).or_else(|| used.get(&key).filter(|c: &&(MeshSig, Arc<ObjMesh>)| c.0 == sig)) {
+            Some(c) => c.1.clone(),
+            None => Arc::new(ObjMesh::from_body(m)),
+        };
+        used.insert(key, (sig, obj.clone()));
+        let sel = app.asm.sel.contains(&part.inst) || mate_insts.contains(&part.inst);
+        let hov = app.asm.hover.filter(|h| h.inst == part.inst && h.leaf == part.leaf);
+        let (r, t) = (part.pose.m(), DVec3::from(part.pose.t));
+        let model = glam::DMat4::from_cols(r.x_axis.extend(0.0), r.y_axis.extend(0.0), r.z_axis.extend(0.0), t.extend(1.0)).as_mat4();
+        s.objects.push(ObjDraw {
+            mesh: obj,
+            model,
+            color: if sel { picked_col } else { crate::viewport::rgba(part.color, 1.0) },
+            hover_face: hov.and_then(|h| h.face).map(|f| f as i32).unwrap_or(-1),
+            hover_color: hover_col,
+            finish,
+            edge_color: edge_col,
+            edge_width: 1.4,
+        });
+        // the hovered edge, thicker and on top
+        if let Some(e) = hov.and_then(|h| h.edge).and_then(|ei| m.edges.get(ei)) {
+            let pts: Vec<Vec3> = e.pts.iter().map(|p| part.pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
+            s.polyline(&pts, 3.0, hover_col, true);
         }
-        let hov_edge = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.edge);
-        for (ei, e) in m.edges.iter().enumerate() {
-            let pts: Vec<Vec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
-            let hov = hov_edge == Some(ei);
-            s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::hover() } else { vp::edge() }, 1.0), hov);
-        }
-        let _ = world_tri;
-      }
     }
+    *cache = used;
+    drop(cache);
     // mate connectors being picked
     let size = (app.camera.wpp() * 28.0) as f64;
     for c in &dialog_conns {
@@ -1492,6 +1572,26 @@ fn build_scene(app: &App) -> SceneData {
 }
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
+    let t0 = std::time::Instant::now();
+    viewport_inner(app, ui);
+    perf_note(t0);
+}
+
+/// With RCAD_PERF set, print each frame's assembly viewport time (picking, solving and making
+/// the scene; not the GPU's drawing) and the time since the frame before, in milliseconds.
+fn perf_note(t0: std::time::Instant) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !*ON.get_or_init(|| std::env::var_os("RCAD_PERF").is_some()) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let gap = LAST.lock().unwrap().replace(now).map(|l| (now - l).as_secs_f64() * 1e3).unwrap_or(0.0);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    eprintln!("rcad-perf {ms} work {:.3} frame {gap:.1}", (now - t0).as_secs_f64() * 1e3);
+}
+
+fn viewport_inner(app: &mut App, ui: &mut Ui) {
     crate::stdparts_ui::window(app, &ui.ctx().clone());
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -1504,7 +1604,14 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let before = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height);
     let free = app.asm.hover.is_none() && app.asm.dialog.is_none() && app.asm.measure.is_none();
     crate::viewport::navigate(app, ui, &resp, free);
-    if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
+    let look = Some((app.realistic, theme::is_dark()));
+    if app.asm.look != look {
+        app.asm.look = look;
+        app.asm.scene_dirty = true;
+    }
+    // the parts are drawn by the GPU from any view: only the mate connectors of an open mate
+    // dialog are sized to the screen and need the scene made again when the view moves
+    if app.asm.dialog.is_some() && before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
         app.asm.scene_dirty = true;
     }
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
@@ -1516,7 +1623,19 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
 
     // hover
     if app.nav.is_none() && app.asm.drag.is_none() {
-        let h = resp.hover_pos().and_then(|p| pick(app, local(p)));
+        // picking runs again only when the pointer, the view or the scene changed
+        let cam = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height, app.camera.size);
+        let h = match resp.hover_pos().map(local) {
+            None => None,
+            Some(p) => match &app.asm.pick_cache {
+                Some((q, c, v, h)) if *q == p && *c == cam && *v == app.scene.version => *h,
+                _ => {
+                    let h = pick(app, p);
+                    app.asm.pick_cache = Some((p, cam, app.scene.version, h));
+                    h
+                }
+            },
+        };
         if h != app.asm.hover {
             app.asm.hover = h;
             app.asm.scene_dirty = true;
