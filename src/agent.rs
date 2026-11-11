@@ -606,8 +606,13 @@ impl Session {
                 let merge = a.get("merge_faces").and_then(|m| m.as_bool()).unwrap_or(true);
                 let id = self.doc.insert(name.clone(), Op::Import { name, step: String::new(), format: format.into(), data: crate::import::pack(&bytes), scale, merge });
                 self.rebuild()?;
+                // the parts take the names and colours the file gives them
+                let named = self.doc.adopt_file_props(id, &self.result.bodies);
                 let mut v = self.status();
                 v["feature_id"] = json!(id);
+                if named > 0 {
+                    v["named_from_file"] = json!(named);
+                }
                 v
             }
             "export" => {

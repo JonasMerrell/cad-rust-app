@@ -1930,7 +1930,7 @@ inline bool ex_write_step_assembly(const TopTools_ListOfShape &shapes, rust::Sli
       TDF_Label l = is_asm[i] ? st->NewShape() : st->AddShape(list[i], Standard_False);
       TDataStd_Name::Set(l, TCollection_ExtendedString(std::string(names[i]).c_str(), Standard_True));
       if (colors[3 * i] >= 0)
-        ct->SetColor(l, Quantity_Color(colors[3 * i], colors[3 * i + 1], colors[3 * i + 2], Quantity_TOC_RGB), XCAFDoc_ColorGen);
+        ct->SetColor(l, Quantity_Color(colors[3 * i], colors[3 * i + 1], colors[3 * i + 2], Quantity_TOC_sRGB), XCAFDoc_ColorGen);
       labels[i] = l;
     }
     for (size_t i = 0; i < n; i++) {
@@ -2135,4 +2135,132 @@ inline rust::Vec<double> ex_step_parts(rust::Str path, double deflection, rust::
   }
   names.clear();
   return rust::Vec<double>();
+}
+
+#include <TopTools_DataMapOfShapeInteger.hxx>
+
+/// Read a STEP file as one shape, exactly as the plain reader gives it (the same solids in the same order),
+/// and name and colour each of its solids from the file's products and styles. For every solid of the
+/// shape, in `TopExp::MapShapes` order, `names` gets its product's name ("" when it has none) and the
+/// returned list r g b (0–1 sRGB; -1 when it has no colour). Null on failure (`ex_last_error`).
+inline std::unique_ptr<TopoDS_Shape> ex_read_step_named(rust::Str path, rust::Vec<rust::String> &names, rust::Vec<double> &colours) {
+  try {
+    OCC_CATCH_SIGNALS
+    Handle(TDocStd_Document) doc = new TDocStd_Document("XmlXCAF");
+    STEPCAFControl_Reader r;
+    r.SetNameMode(Standard_True);
+    r.SetColorMode(Standard_True);
+    if (r.ReadFile(std::string(path).c_str()) != IFSelect_RetDone) {
+      ex_err_slot() = "could not read the STEP file";
+      return nullptr;
+    }
+    if (!r.Transfer(doc)) {
+      ex_err_slot() = "could not read the STEP file's shapes";
+      return nullptr;
+    }
+    TopoDS_Shape one = r.ChangeReader().OneShape();
+    if (one.IsNull()) {
+      ex_err_slot() = "the STEP file has no shapes";
+      return nullptr;
+    }
+    Handle(XCAFDoc_ShapeTool) st = XCAFDoc_DocumentTool::ShapeTool(doc->Main());
+    Handle(XCAFDoc_ColorTool) ct = XCAFDoc_DocumentTool::ColorTool(doc->Main());
+    auto name_of = [](const TDF_Label &l) {
+      Handle(TDataStd_Name) n;
+      if (!l.FindAttribute(TDataStd_Name::GetID(), n))
+        return std::string();
+      const TCollection_ExtendedString &e = n->Get();
+      std::vector<char> buf(e.LengthOfCString() + 1, '\0');
+      Standard_PCharacter p = buf.data();
+      e.ToUTF8CString(p);
+      return std::string(buf.data());
+    };
+    auto colour_of = [&](const TDF_Label &l, const TopoDS_Shape &s, Quantity_Color &c) {
+      return ct->GetColor(l, XCAFDoc_ColorGen, c) || ct->GetColor(l, XCAFDoc_ColorSurf, c) || (!s.IsNull() && (ct->GetColor(s, XCAFDoc_ColorGen, c) || ct->GetColor(s, XCAFDoc_ColorSurf, c)));
+    };
+    // what each solid of the file is: (name, has colour, colour), keyed by the placed solid and by its bare shape
+    std::vector<std::tuple<std::string, bool, Quantity_Color>> info;
+    TopTools_DataMapOfShapeInteger placed, bare;
+    std::function<void(const TDF_Label &, const TopLoc_Location &, const std::string &, bool, Quantity_Color)> walk =
+        [&](const TDF_Label &l, const TopLoc_Location &loc, const std::string &inst, bool has_col, Quantity_Color col) {
+          TDF_Label target = l;
+          TopLoc_Location here = loc;
+          if (XCAFDoc_ShapeTool::IsReference(l)) {
+            XCAFDoc_ShapeTool::GetReferredShape(l, target);
+            here = loc * XCAFDoc_ShapeTool::GetLocation(l);
+          }
+          Quantity_Color c;
+          if (colour_of(l, TopoDS_Shape(), c) || colour_of(target, XCAFDoc_ShapeTool::GetShape(target), c)) {
+            has_col = true;
+            col = c;
+          }
+          if (XCAFDoc_ShapeTool::IsAssembly(target)) {
+            TDF_LabelSequence ch;
+            XCAFDoc_ShapeTool::GetComponents(target, ch);
+            for (int i = 1; i <= ch.Length(); i++)
+              walk(ch.Value(i), here, name_of(ch.Value(i)), has_col, col);
+            return;
+          }
+          TopoDS_Shape s = XCAFDoc_ShapeTool::GetShape(target);
+          if (s.IsNull())
+            return;
+          // the product's name; the instance's when the product has none
+          std::string nm = name_of(target);
+          if (nm.empty())
+            nm = inst;
+          TopTools_IndexedMapOfShape solids;
+          TopExp::MapShapes(s, TopAbs_SOLID, solids);
+          for (int i = 1; i <= solids.Extent(); i++) {
+            const TopoDS_Shape &so = solids.FindKey(i);
+            Quantity_Color sc = col;
+            bool sh = has_col;
+            Quantity_Color c2;
+            if (ct->GetColor(so, XCAFDoc_ColorGen, c2) || ct->GetColor(so, XCAFDoc_ColorSurf, c2)) {
+              sh = true;
+              sc = c2;
+            }
+            int k = (int)info.size();
+            info.emplace_back(solids.Extent() > 1 && !nm.empty() ? nm + " " + std::to_string(i) : nm, sh, sc);
+            TopoDS_Shape at = so.Located(here * so.Location());
+            placed.Bind(at, k);
+            TopoDS_Shape b = so.Located(TopLoc_Location());
+            if (!bare.IsBound(b))
+              bare.Bind(b, k);
+          }
+        };
+    TDF_LabelSequence roots;
+    st->GetFreeShapes(roots);
+    for (int i = 1; i <= roots.Length(); i++)
+      walk(roots.Value(i), TopLoc_Location(), name_of(roots.Value(i)), false, Quantity_Color());
+    TopTools_IndexedMapOfShape all;
+    TopExp::MapShapes(one, TopAbs_SOLID, all);
+    for (int i = 1; i <= all.Extent(); i++) {
+      const TopoDS_Shape &so = all.FindKey(i);
+      int k = -1;
+      if (placed.IsBound(so))
+        k = placed.Find(so);
+      else {
+        TopoDS_Shape b = so.Located(TopLoc_Location());
+        if (bare.IsBound(b))
+          k = bare.Find(b);
+      }
+      double rr = -1.0, gg = -1.0, bb = -1.0;
+      if (k >= 0) {
+        names.push_back(rust::String(std::get<0>(info[k])));
+        if (std::get<1>(info[k]))
+          std::get<2>(info[k]).Values(rr, gg, bb, Quantity_TOC_sRGB);
+      } else {
+        names.push_back(rust::String(""));
+      }
+      colours.push_back(rr);
+      colours.push_back(gg);
+      colours.push_back(bb);
+    }
+    return std::unique_ptr<TopoDS_Shape>(new TopoDS_Shape(one));
+  } catch (const Standard_Failure &e) {
+    ex_err_slot() = e.GetMessageString() ? e.GetMessageString() : "OpenCascade failed reading the STEP file";
+  } catch (...) {
+    ex_err_slot() = "OpenCascade failed reading the STEP file";
+  }
+  return nullptr;
 }
