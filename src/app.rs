@@ -168,6 +168,7 @@ pub struct App {
     /// The Claude chat panel.
     pub claude: crate::claude_ui::ClaudeUi,
     pub vcs: crate::vcs_ui::VcsUi,
+    pub github: crate::github_ui::GithubUi,
     /// The start screen with recent documents.
     pub home: crate::home::HomeUi,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
@@ -271,6 +272,7 @@ impl App {
             script_editor: None,
             claude: Default::default(),
             vcs: Default::default(),
+            github: Default::default(),
             home: Default::default(),
             awaiting_sketch_plane: false,
             was_narrow: None,

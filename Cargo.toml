@@ -41,7 +41,7 @@ webpki-roots = "0.26"
 faer = { version = "0.24", default-features = false, features = ["std", "rayon", "sparse-linalg"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_System_Console"] }
+windows-sys = { version = "0.61", features = ["Win32_System_Console", "Win32_Foundation", "Win32_Security_Cryptography"] }
 
 [profile.release]
 incremental = true
