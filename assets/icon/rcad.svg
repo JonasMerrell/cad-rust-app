@@ -1,0 +1,16 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a7be4"/><stop offset="1" stop-color="#134fa3"/></linearGradient>
+<clipPath id="tc"><rect x="16" y="16" width="480" height="480" rx="108"/></clipPath></defs>
+<rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+<g clip-path="url(#tc)" stroke="#fff" stroke-opacity=".09" stroke-width="2"><line x1="40" y1="16" x2="40" y2="496"/><line x1="88" y1="16" x2="88" y2="496"/><line x1="136" y1="16" x2="136" y2="496"/><line x1="184" y1="16" x2="184" y2="496"/><line x1="232" y1="16" x2="232" y2="496"/><line x1="280" y1="16" x2="280" y2="496"/><line x1="328" y1="16" x2="328" y2="496"/><line x1="376" y1="16" x2="376" y2="496"/><line x1="424" y1="16" x2="424" y2="496"/><line x1="472" y1="16" x2="472" y2="496"/><line x1="16" y1="40" x2="496" y2="40"/><line x1="16" y1="88" x2="496" y2="88"/><line x1="16" y1="136" x2="496" y2="136"/><line x1="16" y1="184" x2="496" y2="184"/><line x1="16" y1="232" x2="496" y2="232"/><line x1="16" y1="280" x2="496" y2="280"/><line x1="16" y1="328" x2="496" y2="328"/><line x1="16" y1="376" x2="496" y2="376"/><line x1="16" y1="424" x2="496" y2="424"/><line x1="16" y1="472" x2="496" y2="472"/></g>
+<g transform="translate(256 262) scale(0.84) translate(-295.5 -257)">
+<line x1="30" y1="316" x2="536" y2="316" stroke="#fff" stroke-opacity=".35" stroke-width="5" stroke-dasharray="14 12"/>
+<g fill="none" stroke="#fff" stroke-width="24" stroke-linecap="round" stroke-linejoin="round">
+<path d="M84 316 V270 A42 42 0 0 1 126 228"/>
+<path transform="translate(24 0)" d="M231 215 A58 58 0 1 0 231 297"/>
+<path transform="translate(40 0)" d="M256 316 L300 198 L344 316 M271 276 H329"/>
+<path transform="translate(56 0)" d="M370 198 H392 A59 59 0 0 1 392 316 H370 Z"/>
+</g>
+<g stroke="#bcd8ff" stroke-width="5" fill="none"><path d="M84 384 H507 M84 370 v28 M507 370 v28"/></g>
+<path d="M84 384 l16 -7 v14 z M507 384 l-16 -7 v14 z" fill="#bcd8ff"/>
+<circle cx="84" cy="316" r="13" fill="#ffb020"/><circle cx="126" cy="228" r="13" fill="#ffb020"/><circle cx="255" cy="215" r="13" fill="#ffb020"/><circle cx="255" cy="297" r="13" fill="#ffb020"/><circle cx="296" cy="316" r="13" fill="#ffb020"/><circle cx="384" cy="316" r="13" fill="#ffb020"/><circle cx="340" cy="198" r="10" fill="#ffffff" stroke="#1a6fd9" stroke-width="5"/><circle cx="426" cy="198" r="10" fill="#ffffff" stroke="#1a6fd9" stroke-width="5"/><circle cx="426" cy="316" r="10" fill="#ffffff" stroke="#1a6fd9" stroke-width="5"/></g></svg>

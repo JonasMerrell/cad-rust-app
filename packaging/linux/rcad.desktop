@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=rCAD
+GenericName=CAD
+Comment=Parametric CAD, CAM, simulation and PCB design
+Exec=rcad %f
+Icon=rcad
+Terminal=false
+Categories=Graphics;Engineering;3DGraphics;
+StartupWMClass=rcad
