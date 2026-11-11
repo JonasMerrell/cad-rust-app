@@ -32,13 +32,16 @@ pub enum JointKind {
     Revolute,
 }
 
-/// A joint that follows another: value = ratio · value(of) + offset (a screw turning with its nut's travel).
+/// A joint that follows another: value = ratio · value(of) + offset (a screw turning with its nut's travel),
+/// plus ratio₂ · value(of₂) when it follows two (a CoreXY motor pulley turning with both axes).
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Drive {
     pub of: usize,
     pub ratio: f64,
     #[serde(default)]
     pub offset: f64,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub also: Option<(usize, f64)>,
 }
 
 /// How a node moves in its parent's frame: along `axis` (mm) or about it through `origin` (degrees).

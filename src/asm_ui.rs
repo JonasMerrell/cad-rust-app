@@ -60,7 +60,9 @@ pub struct AsmUi {
     /// Mates whose geometry could not be found after the parts changed.
     pub lost: Vec<u64>,
     /// Relation being made: (kind, first mate, second mate, ratio, reverse).
-    pub relation: Option<(RelationKind, Option<u64>, Option<u64>, f64, bool)>,
+    /// The relation being made: kind, driving mate, driven mate, ratio, reverse, and for a belt
+    /// the second slider and whether it counts negative.
+    pub relation: Option<(RelationKind, Option<u64>, Option<u64>, f64, bool, Option<u64>, bool)>,
     /// Last interference check: instance id pairs and overlap volume; None while running.
     pub clashes: Option<Vec<(u64, u64, f64)>>,
     pub clash_ids: Vec<u64>,
@@ -469,14 +471,16 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
                 RelationKind::Gear => "Gear relation between two revolute mates",
                 RelationKind::Rack => "Rack and pinion: a revolute mate drives a slider",
                 RelationKind::Screw => "Screw: a cylindrical mate's turning drives its travel",
+                RelationKind::Belt => "Belt: a pulley's revolute mate drives one slider, or two (X ± Y) for CoreXY",
             };
             let icon = match k {
                 RelationKind::Gear => "relGear",
                 RelationKind::Rack => "relRack",
                 RelationKind::Screw => "relScrew",
+                RelationKind::Belt => "relRack",
             };
             if app.tool_button(ui, icon, k.label(), tip, false, app.asm.relation.map(|r| r.0 == k).unwrap_or(false), true).clicked() {
-                app.asm.relation = Some((k, None, None, if k == RelationKind::Screw { 2.0 } else { 1.0 }, false));
+                app.asm.relation = Some((k, None, None, if k == RelationKind::Screw { 2.0 } else { 1.0 }, false, None, false));
             }
         }
     });
@@ -1849,11 +1853,11 @@ fn clashes_ui(app: &mut App, ui: &mut Ui) {
 
 fn relations(app: &mut App, ui: &mut Ui) {
     // the one being made
-    if let Some((kind, mut ma, mut mb, mut ratio, mut reverse)) = app.asm.relation {
+    if let Some((kind, mut ma, mut mb, mut ratio, mut reverse, mut mc, mut reverse_c)) = app.asm.relation {
         let Some(a) = asm(app) else { return };
         let mates: Vec<(u64, String, MateKind)> = a.mates.iter().map(|m| (m.id, m.name.clone(), m.kind)).collect();
         let want_a: &[MateKind] = match kind {
-            RelationKind::Gear | RelationKind::Rack => &[MateKind::Revolute, MateKind::Cylindrical],
+            RelationKind::Gear | RelationKind::Rack | RelationKind::Belt => &[MateKind::Revolute, MateKind::Cylindrical],
             RelationKind::Screw => &[MateKind::Cylindrical],
         };
         let want_b: &[MateKind] = match kind {
@@ -1880,10 +1884,16 @@ fn relations(app: &mut App, ui: &mut Ui) {
         if kind != RelationKind::Screw {
             pick(ui, "rel-b", "Driven mate", &mut mb, want_b, ma);
         }
+        if kind == RelationKind::Belt {
+            pick(ui, "rel-c", "Second slider (optional)", &mut mc, want_b, mb);
+            if mc.is_some() {
+                ui.checkbox(&mut reverse_c, "Second slider counts negative (X − Y)");
+            }
+        }
         ui.horizontal(|ui| {
             let label = match kind {
                 RelationKind::Gear => "Ratio",
-                RelationKind::Rack => "Pitch radius (mm)",
+                RelationKind::Rack | RelationKind::Belt => "Pitch radius (mm)",
                 RelationKind::Screw => "Pitch (mm/turn)",
             };
             ui.label(RichText::new(label).color(theme::muted()).size(12.0));
@@ -1898,7 +1908,9 @@ fn relations(app: &mut App, ui: &mut Ui) {
                 if let Some(asm) = asm_mut(app) {
                     let id = asm.new_id();
                     let n = asm.relations.iter().filter(|r| r.kind == kind).count() + 1;
-                    let mut r = Relation { id, name: format!("{} {n}", kind.label()), kind, a: ma.unwrap(), b: mb, ratio, reverse, phase: 0.0 };
+                    let c = if kind == RelationKind::Belt { mc.filter(|c| Some(*c) != mb) } else { None };
+                    let mut r =
+                        Relation { id, name: format!("{} {n}", kind.label()), kind, a: ma.unwrap(), b: mb, ratio, reverse, phase: 0.0, c, reverse_c: c.is_some() && reverse_c };
                     r.phase = assembly::relation_phase(asm, &r);
                     asm.relations.push(r);
                 }
@@ -1908,7 +1920,7 @@ fn relations(app: &mut App, ui: &mut Ui) {
                 done = true;
             }
         });
-        app.asm.relation = if done { None } else { Some((kind, ma, mb, ratio, reverse)) };
+        app.asm.relation = if done { None } else { Some((kind, ma, mb, ratio, reverse, mc, reverse_c)) };
         ui.separator();
     }
     let Some(a) = asm(app) else { return };

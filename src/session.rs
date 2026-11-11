@@ -1000,7 +1000,7 @@ pub fn prune_orphans(a: &mut crate::assembly::Assembly) -> usize {
     let n = a.mates.len();
     a.mates.retain(|m| [&m.a, &m.b].iter().all(|c| c.map(|c| ids.contains(&c.inst)).unwrap_or(true)));
     let mates: HashSet<u64> = a.mates.iter().map(|m| m.id).collect();
-    a.relations.retain(|r| mates.contains(&r.a) && r.b.map(|b| mates.contains(&b)).unwrap_or(true));
+    a.relations.retain(|r| r.mates().all(|m| mates.contains(&m)));
     for s in &mut a.explode_steps {
         s.insts.retain(|i| ids.contains(i));
     }

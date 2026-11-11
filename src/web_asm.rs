@@ -199,6 +199,33 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
     // relations: one joint follows another
     for r in &asm.relations {
         let sign = if r.reverse { -1.0 } else { 1.0 };
+        if r.kind == RelationKind::Belt {
+            // the pulley follows the slider(s): θa° = (travel b ± travel c − phase) / (ratio · sign) · 180/π
+            let (Some(&(na, va)), Some(&(nb, vb))) = (joint_of_mate.get(&r.a), r.b.and_then(|b| joint_of_mate.get(&b))) else {
+                notes.push(format!("{}: one of its mates doesn't move on the page", r.name));
+                continue;
+            };
+            let c = match r.c {
+                Some(c) => match joint_of_mate.get(&c) {
+                    Some(&(nc, vc)) => Some((nc, vc, if r.reverse_c { -1.0 } else { 1.0 })),
+                    None => {
+                        notes.push(format!("{}: one of its mates doesn't move on the page", r.name));
+                        continue;
+                    }
+                },
+                None => None,
+            };
+            if r.ratio == 0.0 || scene.nodes[na].joint.as_ref().map(|j| j.drive.is_some()).unwrap_or(true) {
+                continue;
+            }
+            let k = 180.0 / std::f64::consts::PI / (sign * r.ratio);
+            let also = c.map(|(nc, _, s)| (nc, s * k));
+            let offset = va - k * vb - c.map(|(_, vc, s)| s * k * vc).unwrap_or(0.0);
+            if let Some(j) = scene.nodes[na].joint.as_mut() {
+                j.drive = Some(Drive { of: nb, ratio: k, offset, also });
+            }
+            continue;
+        }
         let (Some(&(na, va)), Some(&(nb, vb))) = (joint_of_mate.get(&r.a), r.b.and_then(|b| joint_of_mate.get(&b))) else {
             if r.kind != RelationKind::Screw {
                 notes.push(format!("{}: one of its mates doesn't move on the page", r.name));
@@ -208,10 +235,10 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
         let ratio = match r.kind {
             RelationKind::Gear => -sign * r.ratio,
             RelationKind::Rack => sign * r.ratio * std::f64::consts::PI / 180.0,
-            RelationKind::Screw => continue,
+            RelationKind::Screw | RelationKind::Belt => continue,
         };
         if let Some(j) = scene.nodes[nb].joint.as_mut() {
-            j.drive = Some(Drive { of: na, ratio, offset: vb - ratio * va });
+            j.drive = Some(Drive { of: na, ratio, offset: vb - ratio * va, also: None });
         }
     }
     motions_scene(asm, &mut scene, &joint_of_mate, &mut notes);
