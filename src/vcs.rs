@@ -3,8 +3,14 @@
 //! opened again, and the repository can be published to GitHub and pushed or pulled.
 //!
 //! Everything runs the `git` program, so the user's own git settings and sign-ins (SSH keys,
-//! credential managers) apply. GitHub calls use a personal access token, kept in
-//! `~/.config/cad-rust-app/github.json` or taken from `GITHUB_TOKEN`, `GH_TOKEN` or `gh auth token`.
+//! credential managers) apply. GitHub calls use a token from "Sign in with GitHub" (the OAuth
+//! device flow) or a pasted personal access token, kept in `~/.config/cad-rust-app/github.json`
+//! (encrypted for the Windows user with DPAPI there), else `GITHUB_TOKEN`, `GH_TOKEN` or
+//! `gh auth token`.
+//!
+//! Sync keeps a project the same on several computers: pull on open, push after each commit, and
+//! when both sides have commits a merge that is kept only if every document still reads, else a
+//! choice between this computer's version and GitHub's (the other stays in the history).
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -45,6 +51,8 @@ pub struct Status {
     pub behind: u32,
     /// Commit on every save.
     pub autocommit: bool,
+    /// Pull when the document opens and push after each commit (see `sync`).
+    pub sync: bool,
 }
 
 // ------------------------------------------------------------ running git
@@ -166,7 +174,7 @@ pub fn init(file: &Path, who: &Identity) -> Result<Status, String> {
 fn keep_imported(key: &str) -> bool {
     matches!(
         key,
-        "core.repositoryformatversion" | "core.filemode" | "core.ignorecase" | "core.symlinks" | "core.precomposeunicode" | "core.logallrefupdates" | "extensions.objectformat" | "rcad.autocommit" | "user.name" | "user.email" | "remote.origin.url" | "remote.origin.fetch"
+        "core.repositoryformatversion" | "core.filemode" | "core.ignorecase" | "core.symlinks" | "core.precomposeunicode" | "core.logallrefupdates" | "extensions.objectformat" | "rcad.autocommit" | "rcad.sync" | "user.name" | "user.email" | "remote.origin.url" | "remote.origin.fetch"
     ) || (key.starts_with("branch.") && (key.ends_with(".remote") || key.ends_with(".merge")))
 }
 
@@ -282,8 +290,16 @@ pub fn history(root: &Path, rel: &str, max: usize) -> Vec<Commit> {
     let n = format!("-n{max}");
     let fmt = "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e";
     let out = if rel.is_empty() { git(root, &["log", &n, fmt]) } else { git(root, &["log", &n, "--follow", fmt, "--", rel]) };
-    out.unwrap_or_default()
-        .split(END)
+    parse_log(&out.unwrap_or_default())
+}
+
+/// The commits in a range such as `origin/main..HEAD`, newest first (at most 50).
+fn log_range(root: &Path, range: &str) -> Vec<Commit> {
+    parse_log(&git(root, &["log", "-n50", "--format=%H%x1f%h%x1f%an%x1f%at%x1f%s%x1e", range]).unwrap_or_default())
+}
+
+fn parse_log(out: &str) -> Vec<Commit> {
+    out.split(END)
         .filter_map(|e| {
             let f: Vec<&str> = e.trim_start_matches('\n').split(SEP).collect();
             (f.len() == 5).then(|| Commit { hash: f[0].into(), short: f[1].into(), author: f[2].into(), time: f[3].parse().unwrap_or(0), subject: f[4].into() })
@@ -331,11 +347,17 @@ pub fn status(file: &Path) -> Option<Status> {
         s.ahead = it.next().unwrap_or(0);
     }
     s.autocommit = git(&root, &["config", "--bool", "rcad.autocommit"]).map(|v| v.trim() == "true").unwrap_or(false);
+    s.sync = s.remote.is_some() && git(&root, &["config", "--bool", "rcad.sync"]).map(|v| v.trim() == "true").unwrap_or(false);
     Some(s)
 }
 
 pub fn set_autocommit(root: &Path, on: bool) -> Result<(), String> {
     git(root, &["config", "rcad.autocommit", if on { "true" } else { "false" }]).map(|_| ())
+}
+
+/// Turn automatic sync with the remote on or off.
+pub fn set_sync(root: &Path, on: bool) -> Result<(), String> {
+    git(root, &["config", "rcad.sync", if on { "true" } else { "false" }]).map(|_| ())
 }
 
 /// Point `origin` at `url`.
@@ -372,15 +394,167 @@ pub fn push(root: &Path, token: Option<&str>) -> Result<String, String> {
     Ok(format!("Pushed {branch} to {}", short_remote(remote.trim())))
 }
 
-/// Bring in the remote's commits when that is a fast-forward (never a merge).
-pub fn pull(root: &Path, token: Option<&str>) -> Result<String, String> {
-    let remote = git(root, &["remote", "get-url", "origin"]).map_err(|_| "the project has no remote".to_string())?;
-    let branch = git(root, &["symbolic-ref", "--short", "-q", "HEAD"]).map_err(|_| "not on a branch".to_string())?;
-    let branch = branch.trim();
-    let before = git(root, &["rev-parse", "-q", "--verify", "HEAD"]).unwrap_or_default();
-    git_env(root, &["pull", "--ff-only", "origin", branch], &auth_env(token, remote.trim())).map_err(|e| friendly(&e))?;
-    let after = git(root, &["rev-parse", "-q", "--verify", "HEAD"]).unwrap_or_default();
-    Ok(if before == after { "Already up to date".into() } else { format!("Pulled the latest {branch} from {}", short_remote(remote.trim())) })
+// ------------------------------------------------------------ sync
+
+/// What a sync did.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Synced {
+    UpToDate,
+    /// Brought in commits from the remote (and pushed this copy's, when it had some).
+    Pulled(String),
+    /// Sent this copy's commits.
+    Pushed(String),
+    /// Both sides had commits and they were combined.
+    Merged(String),
+    /// Both sides changed the project in ways that can't be combined: the user picks one.
+    Diverged(Divergence),
+}
+
+/// Commits only this copy has and commits only the remote has.
+#[derive(Clone, Debug, PartialEq, Default)]
+pub struct Divergence {
+    pub mine: Vec<Commit>,
+    pub theirs: Vec<Commit>,
+}
+
+fn branch_of(root: &Path) -> Result<String, String> {
+    git(root, &["symbolic-ref", "--short", "-q", "HEAD"]).map(|b| b.trim().to_string()).map_err(|_| "not on a branch".to_string())
+}
+
+fn origin_of(root: &Path) -> Result<String, String> {
+    git(root, &["remote", "get-url", "origin"]).map(|u| u.trim().to_string()).map_err(|_| "the project has no remote".to_string())
+}
+
+/// Fetch the branch from `origin`. Ok(false) when the remote doesn't have the branch yet.
+fn fetch(root: &Path, token: Option<&str>, branch: &str) -> Result<bool, String> {
+    let remote = origin_of(root)?;
+    let refspec = format!("+refs/heads/{branch}:refs/remotes/origin/{branch}");
+    match git_env(root, &["fetch", "-q", "origin", &refspec], &auth_env(token, &remote)) {
+        Ok(_) => Ok(true),
+        Err(e) if e.contains("couldn't find remote ref") || e.contains("could not find remote ref") => Ok(false),
+        Err(e) => Err(friendly(&e)),
+    }
+}
+
+/// (commits only the remote has, commits only this copy has).
+fn counts(root: &Path, branch: &str) -> (u32, u32) {
+    let c = git(root, &["rev-list", "--left-right", "--count", &format!("origin/{branch}...HEAD")]).unwrap_or_default();
+    let mut it = c.split_whitespace().map(|n| n.parse().unwrap_or(0));
+    (it.next().unwrap_or(0), it.next().unwrap_or(0))
+}
+
+/// Files git tracks that have changes not committed (a merge would need them out of the way).
+fn uncommitted(root: &Path) -> Vec<String> {
+    git(root, &["status", "--porcelain", "-z", "--untracked-files=no"]).unwrap_or_default().split('\0').filter(|e| e.len() > 3).map(|e| e[3..].to_string()).collect()
+}
+
+/// The rCAD documents a merge changed that no longer read: every `.json` changed between the
+/// commit before the merge and the merge that was a document before.
+fn broken_documents(root: &Path, before: &str) -> Vec<String> {
+    let names = git(root, &["diff", "-z", "--name-only", before, "HEAD"]).unwrap_or_default();
+    names
+        .split('\0')
+        .filter(|n| n.to_ascii_lowercase().ends_with(".json"))
+        .filter(|n| git(root, &["show", &format!("{before}:{n}")]).is_ok_and(|t| is_document(&t)))
+        .filter(|n| std::fs::read_to_string(root.join(n)).map_err(|e| e.to_string()).and_then(|t| Workspace::from_json(&t)).is_err())
+        .map(String::from)
+        .collect()
+}
+
+/// Whether a file's text is an rCAD document.
+pub fn is_document(text: &str) -> bool {
+    text.trim_start().starts_with('{') && text.contains("\"cad-rust-app/workspace")
+}
+
+/// Bring this copy and the remote together: pull what the remote has, push what this copy has,
+/// and when both have commits merge them (kept only when git merges cleanly and every document
+/// still reads). The document's saved changes must be committed first.
+pub fn sync(root: &Path, token: Option<&str>, who: &Identity) -> Result<Synced, String> {
+    let remote = origin_of(root)?;
+    let branch = branch_of(root)?;
+    let has_commits = git_ok(root, &["rev-parse", "-q", "--verify", "HEAD"]);
+    if !fetch(root, token, &branch)? {
+        // a new (empty) repository: send it everything
+        if !has_commits {
+            return Ok(Synced::UpToDate);
+        }
+        push(root, token)?;
+        return Ok(Synced::Pushed(format!("Pushed {branch} to {}", short_remote(&remote))));
+    }
+    let upstream = format!("origin/{branch}");
+    if git(root, &["rev-parse", "--abbrev-ref", "@{upstream}"]).is_err() {
+        let _ = git(root, &["branch", "-q", &format!("--set-upstream-to={upstream}")]);
+    }
+    if !has_commits {
+        // a fresh copy of a repository whose first commits came after it was cloned
+        git(root, &["checkout", "-q", "-B", &branch, &upstream]).map_err(|e| friendly(&e))?;
+        return Ok(Synced::Pulled(format!("Pulled the latest {branch} from {}", short_remote(&remote))));
+    }
+    let (behind, ahead) = counts(root, &branch);
+    if behind == 0 && ahead == 0 {
+        return Ok(Synced::UpToDate);
+    }
+    if behind == 0 {
+        push(root, token)?;
+        return Ok(Synced::Pushed(format!("Pushed {ahead} commit{} to {}", if ahead == 1 { "" } else { "s" }, short_remote(&remote))));
+    }
+    let dirty = uncommitted(root);
+    if !dirty.is_empty() {
+        return Err(format!("the remote has new commits, but {} has changes that aren't committed: commit them first", dirty.join(", ")));
+    }
+    let n = format!("{behind} commit{}", if behind == 1 { "" } else { "s" });
+    if ahead == 0 {
+        git(root, &["merge", "-q", "--ff-only", &upstream]).map_err(|e| friendly(&e))?;
+        return Ok(Synced::Pulled(format!("Pulled {n} from {}", short_remote(&remote))));
+    }
+    ensure_identity(root, who)?;
+    let before = git(root, &["rev-parse", "HEAD"])?.trim().to_string();
+    let msg = format!("Combine changes from {}", short_remote(&remote));
+    if git(root, &["merge", "-q", "--no-ff", "--no-edit", "-m", &msg, &upstream]).is_err() {
+        let _ = git(root, &["merge", "--abort"]);
+        return Ok(Synced::Diverged(divergence(root, &branch)));
+    }
+    if !broken_documents(root, &before).is_empty() {
+        // git merged the text, but the result isn't a document any more
+        git(root, &["reset", "-q", "--hard", &before])?;
+        return Ok(Synced::Diverged(divergence(root, &branch)));
+    }
+    push(root, token)?;
+    Ok(Synced::Merged(format!("Combined {n} from {} with {ahead} of this computer's and pushed", short_remote(&remote))))
+}
+
+/// What each side has that the other doesn't (after a fetch).
+pub fn divergence(root: &Path, branch: &str) -> Divergence {
+    Divergence { mine: log_range(root, &format!("origin/{branch}..HEAD")), theirs: log_range(root, &format!("HEAD..origin/{branch}")) }
+}
+
+/// Settle a divergence: keep this computer's version (`mine`) or the remote's, then push. Both
+/// sides' commits stay in the history (it is a merge whose files are one side's), so the other
+/// version can still be opened from History.
+pub fn resolve(root: &Path, token: Option<&str>, who: &Identity, mine: bool) -> Result<String, String> {
+    let remote = origin_of(root)?;
+    let branch = branch_of(root)?;
+    fetch(root, token, &branch)?;
+    let dirty = uncommitted(root);
+    if !dirty.is_empty() {
+        return Err(format!("{} has changes that aren't committed: commit them first", dirty.join(", ")));
+    }
+    ensure_identity(root, who)?;
+    let upstream = format!("origin/{branch}");
+    let short = short_remote(&remote);
+    if mine {
+        git(root, &["merge", "-q", "-s", "ours", "--no-edit", "-m", &format!("Keep this computer's version over {short}'s"), &upstream])?;
+    } else {
+        git(root, &["merge", "-q", "-s", "ours", "--no-commit", &upstream])?;
+        // the files as the remote has them
+        if let Err(e) = git(root, &["read-tree", "-u", "--reset", &upstream]) {
+            let _ = git(root, &["merge", "--abort"]);
+            return Err(e);
+        }
+        git(root, &["commit", "-q", "--no-edit", "-m", &format!("Keep {short}'s version over this computer's")])?;
+    }
+    push(root, token)?;
+    Ok(if mine { format!("Kept this computer's version and pushed it to {short}") } else { format!("Took {short}'s version (yours is still in History)") })
 }
 
 /// git's error messages for the usual push and pull failures, said plainly.
@@ -527,7 +701,10 @@ pub struct GhUser {
 }
 
 fn token_file() -> Option<PathBuf> {
-    let base = std::env::var_os("XDG_CONFIG_HOME").map(PathBuf::from).or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))?;
+    let base = std::env::var_os("XDG_CONFIG_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|h| PathBuf::from(h).join(".config")))
+        .or_else(|| std::env::var_os("APPDATA").map(PathBuf::from))?;
     Some(base.join("cad-rust-app").join("github.json"))
 }
 
@@ -539,10 +716,24 @@ pub enum TokenSource {
     GhCli,
 }
 
+/// The saved token: `protected` (Windows: encrypted for the user with DPAPI) or `token`.
+fn saved_token() -> Option<String> {
+    saved_token_in(&token_file()?)
+}
+
+fn saved_token_in(file: &Path) -> Option<String> {
+    let v: Value = std::fs::read_to_string(file).ok().and_then(|s| serde_json::from_str(&s).ok())?;
+    if let Some(p) = v["protected"].as_str() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD.decode(p).ok()?;
+        return protect::unprotect(&bytes).and_then(|b| String::from_utf8(b).ok()).filter(|t| !t.is_empty());
+    }
+    v["token"].as_str().filter(|t| !t.is_empty()).map(String::from)
+}
+
 /// The GitHub token to use: the saved one, then `GITHUB_TOKEN`/`GH_TOKEN`, then the GitHub CLI's.
 pub fn token() -> Option<(String, TokenSource)> {
-    let saved = token_file().and_then(|p| std::fs::read_to_string(p).ok()).and_then(|s| serde_json::from_str::<Value>(&s).ok()).and_then(|v| v["token"].as_str().map(String::from));
-    if let Some(t) = saved.filter(|t| !t.is_empty()) {
+    if let Some(t) = saved_token() {
         return Some((t, TokenSource::Saved));
     }
     for var in ["GITHUB_TOKEN", "GH_TOKEN"] {
@@ -564,15 +755,26 @@ pub fn token() -> Option<(String, TokenSource)> {
     (!t.is_empty()).then_some((t, TokenSource::GhCli))
 }
 
-/// Save the token (readable only by the user); an empty one signs out.
+/// Save the token (readable only by the user, and on Windows encrypted for them); an empty one
+/// signs out.
 pub fn save_token(token: &str) -> Result<(), String> {
-    let p = token_file().ok_or("no config folder")?;
+    save_token_in(&token_file().ok_or("no config folder")?, token)
+}
+
+fn save_token_in(p: &Path, token: &str) -> Result<(), String> {
     if token.is_empty() {
-        let _ = std::fs::remove_file(&p);
+        let _ = std::fs::remove_file(p);
         return Ok(());
     }
-    std::fs::create_dir_all(p.parent().unwrap()).map_err(|e| e.to_string())?;
-    let body = serde_json::to_string_pretty(&json!({ "token": token })).unwrap();
+    std::fs::create_dir_all(p.parent().ok_or("no config folder")?).map_err(|e| e.to_string())?;
+    let body = match protect::protect(token.as_bytes()) {
+        Some(b) => {
+            use base64::Engine;
+            json!({ "protected": base64::engine::general_purpose::STANDARD.encode(b) })
+        }
+        None => json!({ "token": token }),
+    };
+    let body = serde_json::to_string_pretty(&body).unwrap();
     let mut o = std::fs::OpenOptions::new();
     o.write(true).create(true).truncate(true);
     #[cfg(unix)]
@@ -581,20 +783,77 @@ pub fn save_token(token: &str) -> Result<(), String> {
         o.mode(0o600);
     }
     use std::io::Write;
-    o.open(&p).and_then(|mut f| f.write_all(body.as_bytes())).map_err(|e| e.to_string())
+    o.open(p).and_then(|mut f| f.write_all(body.as_bytes())).map_err(|e| e.to_string())?;
+    #[cfg(unix)]
+    {
+        // a file left from before with looser permissions
+        use std::os::unix::fs::PermissionsExt;
+        let _ = std::fs::set_permissions(p, std::fs::Permissions::from_mode(0o600));
+    }
+    Ok(())
+}
+
+/// Encryption of the saved token for the signed-in user: DPAPI on Windows; elsewhere the file's
+/// permissions (0600) protect it, as with git's and the GitHub CLI's own stores.
+#[cfg(windows)]
+mod protect {
+    use windows_sys::Win32::Foundation::LocalFree;
+    use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData};
+
+    fn run(data: &[u8], encrypt: bool) -> Option<Vec<u8>> {
+        let input = CRYPT_INTEGER_BLOB { cbData: data.len() as u32, pbData: data.as_ptr() as *mut u8 };
+        let mut out = CRYPT_INTEGER_BLOB { cbData: 0, pbData: std::ptr::null_mut() };
+        // SAFETY: the input blob points at `data`, which outlives the call; the output is
+        // allocated by Windows, copied, then freed with LocalFree as the API requires
+        let ok = unsafe {
+            if encrypt {
+                CryptProtectData(&input, std::ptr::null(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            } else {
+                CryptUnprotectData(&input, std::ptr::null_mut(), std::ptr::null(), std::ptr::null(), std::ptr::null(), CRYPTPROTECT_UI_FORBIDDEN, &mut out)
+            }
+        };
+        if ok == 0 || out.pbData.is_null() {
+            return None;
+        }
+        let v = unsafe { std::slice::from_raw_parts(out.pbData, out.cbData as usize).to_vec() };
+        unsafe { LocalFree(out.pbData as _) };
+        Some(v)
+    }
+
+    pub fn protect(data: &[u8]) -> Option<Vec<u8>> {
+        run(data, true)
+    }
+
+    pub fn unprotect(data: &[u8]) -> Option<Vec<u8>> {
+        run(data, false)
+    }
+}
+
+#[cfg(not(windows))]
+mod protect {
+    pub fn protect(_: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
+
+    pub fn unprotect(_: &[u8]) -> Option<Vec<u8>> {
+        None
+    }
 }
 
 fn api_base() -> String {
     std::env::var("RCAD_GITHUB_API").unwrap_or_else(|_| "https://api.github.com".into()).trim_end_matches('/').to_string()
 }
 
-fn http() -> ureq::Agent {
-    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout(Duration::from_secs(60)).try_proxy_from_env(true).build()
+fn http(url: &str) -> ureq::Agent {
+    // a mock server on this computer is reached directly (ureq's proxy setting ignores NO_PROXY)
+    let local = ["http://127.0.0.1", "http://localhost", "http://[::1]"].iter().any(|l| url.starts_with(l));
+    ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(15)).timeout(Duration::from_secs(60)).try_proxy_from_env(!local).build()
 }
 
 fn gh_request(method: &str, path: &str, token: &str) -> ureq::Request {
-    http()
-        .request(method, &format!("{}{path}", api_base()))
+    let url = format!("{}{path}", api_base());
+    http(&url)
+        .request(method, &url)
         .set("Authorization", &format!("Bearer {token}"))
         .set("Accept", "application/vnd.github+json")
         .set("X-GitHub-Api-Version", "2022-11-28")
@@ -643,12 +902,238 @@ pub fn repo_name(stem: &str) -> String {
     if s.is_empty() || s.chars().all(|c| c == '.') { "rcad-project".into() } else { s }
 }
 
-/// Publish: create the GitHub repository, make it `origin` and push to it.
+/// Publish: create the GitHub repository, make it `origin`, push to it and sync it from now on.
 pub fn publish(root: &Path, token: &str, name: &str, private: bool) -> Result<String, String> {
     let url = gh_create_repo(token, name, private, "Made with rCAD")?;
     set_remote(root, &url)?;
     push(root, Some(token))?;
+    let _ = set_sync(root, true);
+    // the topic marks it as an rCAD project in "Open from GitHub" (best effort)
+    let _ = gh_request("PUT", &format!("/repos/{}/topics", short_remote(&url)), token).set("Content-Type", "application/json").send_string(&json!({ "names": ["rcad"] }).to_string());
     Ok(url)
+}
+
+// ------------------------------------------------------------ signing in with GitHub
+
+/// The OAuth app "Sign in with GitHub" goes through (its client ID is public; the device flow
+/// needs no secret). `RCAD_GITHUB_CLIENT_ID` replaces it, at build time or when running.
+const CLIENT_ID: &str = "Ov23lixuAY2jCxeSAEkT";
+
+pub fn client_id() -> Option<String> {
+    std::env::var("RCAD_GITHUB_CLIENT_ID").ok().or_else(|| option_env!("RCAD_GITHUB_CLIENT_ID").map(String::from)).or_else(|| Some(CLIENT_ID.to_string())).map(|s| s.trim().to_string()).filter(|s| !s.is_empty())
+}
+
+fn web_base() -> String {
+    std::env::var("RCAD_GITHUB_WEB").unwrap_or_else(|_| "https://github.com".into()).trim_end_matches('/').to_string()
+}
+
+/// A device-flow sign-in under way: the user enters `user_code` at `verification_uri`.
+#[derive(Clone, Debug)]
+pub struct DeviceCode {
+    pub device_code: String,
+    pub user_code: String,
+    pub verification_uri: String,
+    /// Seconds between polls.
+    pub interval: u64,
+    pub expires_in: u64,
+}
+
+fn oauth_post(path: &str, form: &[(&str, &str)]) -> Result<Value, String> {
+    let url = format!("{}{path}", web_base());
+    let r = http(&url)
+        .post(&url)
+        .set("Accept", "application/json")
+        .set("User-Agent", concat!("rcad/", env!("CARGO_PKG_VERSION")))
+        .send_form(form)
+        .map_err(gh_error)?;
+    json_of(r)
+}
+
+/// Start signing in: GitHub hands out a code for the user to enter in their browser.
+pub fn device_start(client_id: &str) -> Result<DeviceCode, String> {
+    let v = oauth_post("/login/device/code", &[("client_id", client_id), ("scope", "repo")])?;
+    if let Some(e) = v["error"].as_str() {
+        return Err(device_error(e, &v));
+    }
+    Ok(DeviceCode {
+        device_code: v["device_code"].as_str().ok_or("GitHub sent no device code")?.to_string(),
+        user_code: v["user_code"].as_str().ok_or("GitHub sent no code")?.to_string(),
+        verification_uri: v["verification_uri"].as_str().unwrap_or("https://github.com/login/device").to_string(),
+        interval: v["interval"].as_u64().unwrap_or(5).max(1),
+        expires_in: v["expires_in"].as_u64().unwrap_or(900),
+    })
+}
+
+/// Where a device-flow sign-in stands.
+#[derive(Clone, Debug, PartialEq)]
+pub enum DevicePoll {
+    /// Not approved yet.
+    Waiting,
+    /// Ask less often (GitHub adds 5 seconds to the interval).
+    SlowDown,
+    /// Approved: the token.
+    Token(String),
+}
+
+/// Ask whether the user has approved the sign-in yet.
+pub fn device_poll(client_id: &str, device_code: &str) -> Result<DevicePoll, String> {
+    let v = oauth_post("/login/oauth/access_token", &[("client_id", client_id), ("device_code", device_code), ("grant_type", "urn:ietf:params:oauth:grant-type:device_code")])?;
+    if let Some(t) = v["access_token"].as_str() {
+        return Ok(DevicePoll::Token(t.to_string()));
+    }
+    match v["error"].as_str() {
+        Some("authorization_pending") => Ok(DevicePoll::Waiting),
+        Some("slow_down") => Ok(DevicePoll::SlowDown),
+        Some(e) => Err(device_error(e, &v)),
+        None => Err("GitHub sent an unreadable answer".into()),
+    }
+}
+
+fn device_error(e: &str, v: &Value) -> String {
+    match e {
+        "expired_token" => "the code expired: start again".into(),
+        "access_denied" => "the sign-in was cancelled on GitHub".into(),
+        "device_flow_disabled" => "GitHub: device flow isn't enabled for rCAD's OAuth app".into(),
+        "incorrect_client_credentials" => "GitHub doesn't know rCAD's OAuth app (check RCAD_GITHUB_CLIENT_ID)".into(),
+        _ => format!("GitHub: {}", v["error_description"].as_str().unwrap_or(e)),
+    }
+}
+
+// ------------------------------------------------------------ projects on GitHub
+
+/// A repository the signed-in account can open.
+#[derive(Clone, Debug, PartialEq)]
+pub struct GhRepo {
+    /// "owner/name".
+    pub full_name: String,
+    pub name: String,
+    pub private: bool,
+    pub description: String,
+    pub clone_url: String,
+    /// When it was last pushed to, as GitHub writes it (ISO 8601).
+    pub pushed: String,
+    /// Published from rCAD (its "rcad" topic or description).
+    pub rcad: bool,
+}
+
+/// The account's repositories (its own, its organisations' and ones it collaborates on), most
+/// recently pushed first, rCAD projects before the rest.
+pub fn gh_repos(token: &str) -> Result<Vec<GhRepo>, String> {
+    let mut all = vec![];
+    for page in 1..=5 {
+        let path = format!("/user/repos?per_page=100&sort=pushed&affiliation=owner,collaborator,organization_member&page={page}");
+        let v = json_of(gh_request("GET", &path, token).call().map_err(gh_error)?)?;
+        let list = v.as_array().cloned().unwrap_or_default();
+        let n = list.len();
+        for r in list {
+            let description = r["description"].as_str().unwrap_or_default().to_string();
+            let topics = r["topics"].as_array().map(|t| t.iter().any(|t| t.as_str() == Some("rcad"))).unwrap_or(false);
+            all.push(GhRepo {
+                full_name: r["full_name"].as_str().unwrap_or_default().to_string(),
+                name: r["name"].as_str().unwrap_or_default().to_string(),
+                private: r["private"].as_bool().unwrap_or(false),
+                rcad: topics || description == "Made with rCAD",
+                description,
+                clone_url: r["clone_url"].as_str().unwrap_or_default().to_string(),
+                pushed: r["pushed_at"].as_str().unwrap_or_default().to_string(),
+            });
+        }
+        if n < 100 {
+            break;
+        }
+    }
+    all.retain(|r| !r.clone_url.is_empty());
+    // stable: keeps the pushed order within each group
+    all.sort_by_key(|r| !r.rcad);
+    Ok(all)
+}
+
+/// The rCAD document in a project folder: the one named after the folder, else the only (or
+/// first, by name) document at its top.
+pub fn find_document(dir: &Path) -> Option<PathBuf> {
+    let name = dir.file_name()?.to_string_lossy().into_owned();
+    let named = dir.join(format!("{name}.json"));
+    if std::fs::read_to_string(&named).is_ok_and(|t| is_document(&t)) {
+        return Some(named);
+    }
+    let mut docs: Vec<PathBuf> = std::fs::read_dir(dir)
+        .ok()?
+        .filter_map(|e| e.ok().map(|e| e.path()))
+        .filter(|p| p.extension().is_some_and(|e| e.eq_ignore_ascii_case("json")))
+        .filter(|p| std::fs::read_to_string(p).is_ok_and(|t| is_document(&t)))
+        .collect();
+    docs.sort();
+    docs.into_iter().next()
+}
+
+/// What opening a GitHub project gave.
+#[derive(Clone, Debug, PartialEq)]
+pub enum Cloned {
+    /// The project's document.
+    Document(PathBuf),
+    /// The repository is empty: a new document is to be saved at this path (and pushed).
+    Empty(PathBuf),
+}
+
+fn same_remote(a: &str, b: &str) -> bool {
+    let n = |u: &str| u.trim().trim_end_matches('/').trim_end_matches(".git").to_ascii_lowercase();
+    n(a) == n(b) || short_remote(a).eq_ignore_ascii_case(&short_remote(b))
+}
+
+/// Clone a project from GitHub (or any git URL) into `parent` and find its document. A folder
+/// there that is already a copy of it is used as it is (the caller syncs it).
+pub fn clone_project(url: &str, token: Option<&str>, parent: &Path) -> Result<Cloned, String> {
+    let url = url.trim();
+    if url.is_empty() {
+        return Err("enter the repository's URL".into());
+    }
+    let tail = url.trim_end_matches('/').trim_end_matches(".git");
+    let name = crate::project::clean_name(tail.rsplit(['/', ':']).next().unwrap_or("project"));
+    std::fs::create_dir_all(parent).map_err(|e| format!("could not make {}: {e}", parent.display()))?;
+    let mut dir = parent.join(&name);
+    let mut n = 2;
+    while dir.exists() {
+        let theirs = git(&dir, &["remote", "get-url", "origin"]).ok().filter(|_| dir.join(".git").exists());
+        if theirs.is_some_and(|u| same_remote(&u, url)) {
+            return match find_document(&dir) {
+                Some(d) => Ok(Cloned::Document(d)),
+                None if !git_ok(&dir, &["rev-parse", "-q", "--verify", "HEAD"]) => Ok(Cloned::Empty(dir.join(format!("{name}.json")))),
+                None => Err(format!("{} has no rCAD document", dir.display())),
+            };
+        }
+        dir = parent.join(format!("{name} {n}"));
+        n += 1;
+    }
+    let target = dir.to_string_lossy().into_owned();
+    git_env(parent, &["clone", "-q", "--", url, target.as_str()], &auth_env(token, url)).map_err(|e| {
+        let _ = std::fs::remove_dir_all(&dir);
+        if e.contains("not found") || e.contains("Repository not found") { format!("GitHub has no repository {} that this account can open", short_remote(url)) } else { friendly(&e) }
+    })?;
+    let _ = git(&dir, &["config", "rcad.autocommit", "true"]);
+    let _ = git(&dir, &["config", "rcad.sync", "true"]);
+    if !git_ok(&dir, &["rev-parse", "-q", "--verify", "HEAD"]) {
+        // the remote's HEAD names a branch it doesn't have (a bare repository made by hand):
+        // check out its main branch, or the first one
+        let remotes = git(&dir, &["for-each-ref", "--format=%(refname:strip=3)", "refs/remotes/origin"]).unwrap_or_default();
+        let names: Vec<&str> = remotes.lines().map(str::trim).filter(|n| !n.is_empty() && *n != "HEAD").collect();
+        if let Some(b) = ["main", "master"].into_iter().find(|b| names.contains(b)).or(names.first().copied()) {
+            let _ = git(&dir, &["checkout", "-q", "-B", b, &format!("origin/{b}")]);
+        }
+    }
+    if let Some(c) = TRACKED.get() {
+        c.lock().unwrap().clear();
+    }
+    if let Some(d) = find_document(&dir) {
+        return Ok(Cloned::Document(d));
+    }
+    if !git_ok(&dir, &["rev-parse", "-q", "--verify", "HEAD"]) {
+        // empty: rCAD starts the project, on "main" like the ones it makes
+        let _ = git(&dir, &["symbolic-ref", "HEAD", "refs/heads/main"]);
+        let file = dir.file_name().map(|s| s.to_string_lossy().into_owned()).unwrap_or(name);
+        return Ok(Cloned::Empty(dir.join(format!("{file}.json"))));
+    }
+    let _ = std::fs::remove_dir_all(&dir);
+    Err(format!("{} has no rCAD document (a .json saved by rCAD at its top)", short_remote(url)))
 }
 
 #[cfg(test)]
@@ -742,9 +1227,216 @@ mod tests {
         let sb = status(&fb).unwrap();
         commit(&sb.root, &sb.rel, "two planes", false, &who()).unwrap().unwrap();
         push(&sb.root, None).unwrap();
-        assert_eq!(pull(&s.root, None).unwrap(), "Pulled the latest main from ".to_string() + dir.join("remote").to_str().unwrap());
+        assert_eq!(sync(&s.root, None, &who()).unwrap(), Synced::Pulled(format!("Pulled 1 commit from {}", dir.join("remote").to_str().unwrap())));
         let ws = Workspace::from_json(&std::fs::read_to_string(&file).unwrap()).unwrap();
         assert_eq!(ws.studios[0].doc.features.len(), 2);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    /// Two copies of one project with a shared remote, each with its own commit since.
+    fn two_copies(name: &str, a_planes: &[&str], b_planes: &[&str]) -> (PathBuf, PathBuf, PathBuf) {
+        let dir = scratch(name);
+        let bare = dir.join("remote.git");
+        git(&dir, &["init", "-q", "--bare", bare.to_str().unwrap()]).unwrap();
+        let a = dir.join("a").join("p.json");
+        std::fs::create_dir_all(a.parent().unwrap()).unwrap();
+        std::fs::write(&a, ws_with(&["P1", "P2", "P3"]).to_json()).unwrap();
+        let s = init(&a, &who()).unwrap();
+        set_remote(&s.root, bare.to_str().unwrap()).unwrap();
+        set_sync(&s.root, true).unwrap();
+        assert!(matches!(sync(&s.root, None, &who()).unwrap(), Synced::Pushed(_)));
+        let b = match clone_project(bare.to_str().unwrap(), None, &dir.join("b")).unwrap() {
+            Cloned::Document(d) => d,
+            other => panic!("{other:?}"),
+        };
+        assert!(status(&b).unwrap().sync && status(&b).unwrap().autocommit);
+        std::fs::write(&b, ws_with(b_planes).to_json()).unwrap();
+        commit(&status(&b).unwrap().root, "p.json", "b", false, &who()).unwrap().unwrap();
+        assert!(matches!(sync(&status(&b).unwrap().root, None, &who()).unwrap(), Synced::Pushed(_)));
+        std::fs::write(&a, ws_with(a_planes).to_json()).unwrap();
+        commit(&s.root, "p.json", "a", false, &who()).unwrap().unwrap();
+        (dir, a, b)
+    }
+
+    fn planes(file: &Path) -> Vec<String> {
+        Workspace::from_json(&std::fs::read_to_string(file).unwrap()).unwrap().studios[0].doc.features.iter().map(|f| f.name.clone()).collect()
+    }
+
+    #[test]
+    fn sync_merges_changes_that_dont_overlap() {
+        if version().is_none() {
+            return;
+        }
+        // a renames the first plane, b the last: far enough apart in the text to merge
+        let (dir, a, _) = two_copies("merge", &["Q1", "P2", "P3"], &["P1", "P2", "Q3"]);
+        let root = status(&a).unwrap().root;
+        assert!(matches!(sync(&root, None, &who()).unwrap(), Synced::Merged(_)));
+        assert_eq!(planes(&a), ["Q1", "P2", "Q3"]);
+        let s = status(&a).unwrap();
+        assert!(s.ahead == 0 && s.behind == 0, "pushed");
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn sync_conflict_then_keep_either_side() {
+        if version().is_none() {
+            return;
+        }
+        for mine in [true, false] {
+            let (dir, a, b) = two_copies(if mine { "keep-mine" } else { "keep-theirs" }, &["A1", "P2", "P3"], &["B1", "P2", "P3"]);
+            let root = status(&a).unwrap().root;
+            match sync(&root, None, &who()).unwrap() {
+                Synced::Diverged(d) => {
+                    assert_eq!(d.mine.len(), 1);
+                    assert_eq!(d.theirs.len(), 1);
+                    assert_eq!(d.theirs[0].subject, "b");
+                }
+                other => panic!("{other:?}"),
+            }
+            // nothing was left half merged
+            assert!(uncommitted(&root).is_empty());
+            assert_eq!(planes(&a), ["A1", "P2", "P3"]);
+            resolve(&root, None, &who(), mine).unwrap();
+            assert_eq!(planes(&a)[0], if mine { "A1" } else { "B1" });
+            let s = status(&a).unwrap();
+            assert!(s.ahead == 0 && s.behind == 0);
+            // the other copy pulls the outcome (a fast-forward)
+            let rb = status(&b).unwrap().root;
+            assert!(matches!(sync(&rb, None, &who()).unwrap(), Synced::Pulled(_)));
+            assert_eq!(planes(&b), planes(&a));
+            // both versions are in the history
+            assert!(history(&root, "p.json", 10).iter().any(|c| c.subject == "a") && history(&root, "p.json", 10).iter().any(|c| c.subject == "b"));
+            let _ = std::fs::remove_dir_all(&dir);
+        }
+    }
+
+    #[test]
+    fn a_merge_that_breaks_the_document_is_undone() {
+        if version().is_none() {
+            return;
+        }
+        let (dir, a, b) = two_copies("broken", &["Q1", "P2", "P3"], &["P1", "P2", "Q3"]);
+        // b's copy also breaks the JSON far from a's change
+        let rb = status(&b).unwrap().root;
+        let text = std::fs::read_to_string(&b).unwrap();
+        let cut = text.rfind('}').unwrap();
+        std::fs::write(&b, format!("{}{}", &text[..cut], "\n")).unwrap();
+        commit(&rb, "p.json", "broken", false, &who()).unwrap().unwrap();
+        sync(&rb, None, &who()).unwrap();
+        let root = status(&a).unwrap().root;
+        let before = git(&root, &["rev-parse", "HEAD"]).unwrap();
+        assert!(matches!(sync(&root, None, &who()).unwrap(), Synced::Diverged(_)));
+        assert_eq!(git(&root, &["rev-parse", "HEAD"]).unwrap(), before);
+        assert_eq!(planes(&a), ["Q1", "P2", "P3"]);
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn cloning_an_empty_repository_and_an_existing_copy() {
+        if version().is_none() {
+            return;
+        }
+        let dir = scratch("empty");
+        let bare = dir.join("Gear box.git");
+        git(&dir, &["init", "-q", "--bare", bare.to_str().unwrap()]).unwrap();
+        let projects = dir.join("projects");
+        let doc = match clone_project(bare.to_str().unwrap(), None, &projects).unwrap() {
+            Cloned::Empty(p) => p,
+            other => panic!("{other:?}"),
+        };
+        assert_eq!(doc, projects.join("Gear box").join("Gear box.json"));
+        // what saving the new document there does
+        std::fs::write(&doc, ws_with(&["A"]).to_json()).unwrap();
+        let s = status(&doc).unwrap();
+        assert_eq!(s.branch, "main");
+        commit(&s.root, &s.rel, "first", false, &who()).unwrap().unwrap();
+        assert!(matches!(sync(&s.root, None, &who()).unwrap(), Synced::Pushed(_)));
+        // opening it again finds the copy instead of making "Gear box 2"
+        assert_eq!(clone_project(bare.to_str().unwrap(), None, &projects).unwrap(), Cloned::Document(doc.clone()));
+        // a repository without a document
+        let other = dir.join("other.git");
+        git(&dir, &["init", "-q", "--bare", other.to_str().unwrap()]).unwrap();
+        let tmp = dir.join("tmp");
+        git(&dir, &["clone", "-q", other.to_str().unwrap(), tmp.to_str().unwrap()]).unwrap();
+        std::fs::write(tmp.join("README.md"), "hi").unwrap();
+        commit(&tmp, "README.md", "readme", false, &who()).unwrap();
+        git(&tmp, &["push", "-q", "origin", "HEAD"]).unwrap();
+        assert!(clone_project(other.to_str().unwrap(), None, &projects).unwrap_err().contains("no rCAD document"));
+        assert!(!projects.join("other").exists());
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[test]
+    fn device_flow_and_repos_against_a_mock() {
+        // a one-request-at-a-time HTTP server answering from a script
+        use std::io::{BufRead, BufReader, Write};
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+        let base = format!("http://{}", listener.local_addr().unwrap());
+        let answers = vec![
+            r#"{"device_code":"dc","user_code":"ABCD-1234","verification_uri":"https://github.com/login/device","interval":1,"expires_in":900}"#,
+            r#"{"error":"authorization_pending"}"#,
+            r#"{"error":"slow_down"}"#,
+            r#"{"access_token":"gho_x","token_type":"bearer","scope":"repo"}"#,
+            r#"[{"full_name":"jo/misc","name":"misc","private":false,"description":"","clone_url":"https://github.com/jo/misc.git","pushed_at":"2026-11-10T21:59:29Z","topics":[]},{"full_name":"jo/arm","name":"arm","private":true,"description":"Made with rCAD","clone_url":"https://github.com/jo/arm.git","pushed_at":"2026-11-01T00:00:00Z","topics":["rcad"]}]"#,
+        ];
+        let server = std::thread::spawn(move || {
+            let mut seen = vec![];
+            for body in answers {
+                let (mut c, _) = listener.accept().unwrap();
+                let mut r = BufReader::new(c.try_clone().unwrap());
+                let mut line = String::new();
+                r.read_line(&mut line).unwrap();
+                let mut len = 0;
+                loop {
+                    let mut h = String::new();
+                    r.read_line(&mut h).unwrap();
+                    if h.trim().is_empty() {
+                        break;
+                    }
+                    if let Some(v) = h.to_ascii_lowercase().strip_prefix("content-length:") {
+                        len = v.trim().parse().unwrap();
+                    }
+                }
+                let mut b = vec![0; len];
+                std::io::Read::read_exact(&mut r, &mut b).unwrap();
+                seen.push(format!("{} {}", line.trim(), String::from_utf8_lossy(&b)));
+                write!(c, "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+            }
+            seen
+        });
+        // SAFETY: only this test reads these variables
+        unsafe {
+            std::env::set_var("RCAD_GITHUB_WEB", &base);
+            std::env::set_var("RCAD_GITHUB_API", &base);
+        }
+        let code = device_start("cid").unwrap();
+        assert_eq!(code.user_code, "ABCD-1234");
+        assert_eq!(device_poll("cid", &code.device_code).unwrap(), DevicePoll::Waiting);
+        assert_eq!(device_poll("cid", &code.device_code).unwrap(), DevicePoll::SlowDown);
+        assert_eq!(device_poll("cid", &code.device_code).unwrap(), DevicePoll::Token("gho_x".into()));
+        let repos = gh_repos("gho_x").unwrap();
+        assert_eq!(repos.iter().map(|r| r.full_name.as_str()).collect::<Vec<_>>(), ["jo/arm", "jo/misc"]);
+        assert!(repos[0].rcad && repos[0].private && !repos[1].rcad);
+        let seen = server.join().unwrap();
+        assert!(seen[0].starts_with("POST /login/device/code") && seen[0].contains("client_id=cid") && seen[0].contains("scope=repo"), "{}", seen[0]);
+        assert!(seen[1].contains("grant_type=urn%3Aietf%3Aparams%3Aoauth%3Agrant-type%3Adevice_code"), "{}", seen[1]);
+        assert!(seen[4].starts_with("GET /user/repos?per_page=100"), "{}", seen[4]);
+    }
+
+    #[test]
+    fn saved_token_round_trip() {
+        let dir = scratch("token");
+        let f = dir.join("cad-rust-app").join("github.json");
+        save_token_in(&f, "ghp_secret").unwrap();
+        assert_eq!(saved_token_in(&f).as_deref(), Some("ghp_secret"));
+        assert!(!std::fs::read_to_string(&f).unwrap().contains("protected") || cfg!(windows));
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::PermissionsExt;
+            assert_eq!(std::fs::metadata(&f).unwrap().permissions().mode() & 0o777, 0o600);
+        }
+        save_token_in(&f, "").unwrap();
+        assert!(saved_token_in(&f).is_none());
         let _ = std::fs::remove_dir_all(&dir);
     }
 

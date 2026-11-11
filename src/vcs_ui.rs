@@ -1,6 +1,8 @@
 //! The Version control window: track a document with git, commit (by hand or on every save),
 //! browse its history, see what each commit changed, open an earlier version, and publish the
-//! project to GitHub, push and pull. The git work itself is in `vcs.rs`.
+//! project to GitHub, and keep it in sync there (pull on open, push after each commit, a choice
+//! when both sides changed). The git work itself is in `vcs.rs`; the GitHub account and Open
+//! from GitHub windows are in `github_ui.rs`.
 
 use std::path::PathBuf;
 use std::sync::mpsc::{Receiver, channel};
@@ -15,12 +17,13 @@ use crate::vcs::{self, Commit, GhUser, Identity, Status, TokenSource};
 use crate::workspace::Workspace;
 
 /// What a background job (network calls) came back with.
-enum Done {
-    Note(String),
-    /// What happened, and the document the pull was for.
-    Pulled(String, PathBuf),
+pub(crate) enum Done {
     Published(String),
     Account(Option<(GhUser, TokenSource)>),
+    /// A sync of the document's repository, and the document.
+    Synced(vcs::Synced, PathBuf),
+    /// A divergence settled (message, document, whether the files changed).
+    Resolved(String, PathBuf, bool),
 }
 
 #[derive(Default)]
@@ -31,7 +34,7 @@ pub struct VcsUi {
     pub status: Option<Status>,
     history: Vec<Commit>,
     /// The installed git's version, once looked up (None inside: no git).
-    git: Option<Option<String>>,
+    pub(crate) git: Option<Option<String>>,
     message: String,
     all_files: bool,
     /// The next save commits even with commit-on-save off (the Commit button saved first).
@@ -45,16 +48,25 @@ pub struct VcsUi {
     repo: String,
     repo_for: Option<PathBuf>,
     private: bool,
-    token_input: String,
-    account: Option<(GhUser, TokenSource)>,
-    account_checked: bool,
-    account_rx: Option<Receiver<Done>>,
+    pub(crate) account: Option<(GhUser, TokenSource)>,
+    pub(crate) account_checked: bool,
+    pub(crate) account_rx: Option<Receiver<Done>>,
     /// A push, pull or publish under way: what it is, and where its result arrives.
     busy: Option<(String, Receiver<Result<Done, String>>)>,
     /// The last result, shown in the window (text, is an error).
     note: Option<(String, bool)>,
     /// The New project window: name, parent folder, track with git.
     new_project: Option<(String, String, bool)>,
+    /// The document last synced when opened (so each document syncs once when it opens).
+    synced_for: Option<PathBuf>,
+    /// Sync once the job under way is done (a save committed while it ran).
+    sync_pending: bool,
+    /// A document saved while a job ran: commit it once that is done.
+    commit_after_busy: Option<PathBuf>,
+    /// This copy and the remote both have commits that couldn't be merged.
+    diverged: Option<vcs::Divergence>,
+    /// The last sync failed on its own (opening, after a save): said once, not every time.
+    auto_failed: bool,
 }
 
 // ------------------------------------------------------------ projects
@@ -182,8 +194,17 @@ fn identity(app: &App) -> Identity {
 }
 
 /// After a save to `p`: commit it when the repository commits on save (or the Commit button
-/// asked for it). Returns a note for the "Saved" message.
+/// asked for it), then sync it when it syncs. Returns a note for the "Saved" message.
 pub fn after_save(app: &mut App, p: &std::path::Path) -> String {
+    if app.vcs.busy.is_some() {
+        // a sync may be merging into the folder right now: commit once it is done
+        app.vcs.commit_after_busy = Some(p.to_path_buf());
+        return " · commits once the sync under way is done".into();
+    }
+    commit_saved(app, p)
+}
+
+fn commit_saved(app: &mut App, p: &std::path::Path) -> String {
     let forced = std::mem::take(&mut app.vcs.commit_next_save);
     let Some(s) = vcs::status(p) else {
         app.vcs.shown_for = None;
@@ -197,7 +218,12 @@ pub fn after_save(app: &mut App, p: &std::path::Path) -> String {
     let msg = if typed.trim().is_empty() { vcs::save_message(&s.root, &s.rel, &app.ws) } else { typed };
     let who = identity(app);
     let note = match vcs::commit(&s.root, &s.rel, &msg, app.vcs.all_files, &who) {
-        Ok(Some(c)) => format!(" · committed “{}”", c.subject),
+        Ok(Some(c)) => {
+            if s.sync {
+                app.vcs.sync_pending = true;
+            }
+            format!(" · committed “{}”{}", c.subject, if s.sync { ", syncing" } else { "" })
+        }
         Ok(None) => String::new(),
         Err(e) => {
             app.vcs.note = Some((format!("Could not commit: {e}"), true));
@@ -208,6 +234,34 @@ pub fn after_save(app: &mut App, p: &std::path::Path) -> String {
     note
 }
 
+/// Sync the open document's repository in the background: commit its saved changes first
+/// (when it commits on save), then pull, merge and push (see `vcs::sync`).
+pub fn sync_now(app: &mut App) {
+    let Some(path) = app.path.clone() else { return };
+    if app.vcs.busy.is_some() {
+        app.vcs.sync_pending = true;
+        return;
+    }
+    let Some(s) = vcs::status(&path) else { return };
+    if s.remote.is_none() {
+        return;
+    }
+    if s.changed && s.autocommit && !app.is_dirty() {
+        let msg = vcs::save_message(&s.root, &s.rel, &app.ws);
+        let who = identity(app);
+        if let Err(e) = vcs::commit(&s.root, &s.rel, &msg, false, &who) {
+            app.vcs.note = Some((format!("Could not commit: {e}"), true));
+            return;
+        }
+    }
+    let who = identity(app);
+    let root = s.root.clone();
+    run(app, "Syncing with GitHub…", move || {
+        let token = vcs::token().map(|(t, _)| t);
+        vcs::sync(&root, token.as_deref(), &who).map(|r| Done::Synced(r, path))
+    });
+}
+
 /// Runs every frame: keeps the status in step with the open document, takes in background
 /// results and shows the window.
 pub fn frame(app: &mut App, ctx: &egui::Context) {
@@ -215,6 +269,30 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
         refresh(app);
     }
     poll(app);
+    if app.vcs.busy.is_some() {
+        ctx.request_repaint_after(Duration::from_millis(250));
+    }
+    // a document opens: bring in what was pushed from elsewhere
+    if app.path.is_some() && app.vcs.synced_for != app.path {
+        app.vcs.synced_for = app.path.clone();
+        app.vcs.diverged = None;
+        app.vcs.auto_failed = false;
+        if app.vcs.status.as_ref().is_some_and(|s| s.sync) && !app.is_dirty() {
+            sync_now(app);
+        }
+    }
+    if app.vcs.busy.is_none() {
+        if let Some(p) = app.vcs.commit_after_busy.take() {
+            let note = commit_saved(app, &p);
+            if !note.is_empty() {
+                app.flash_info(format!("Saved {}{note}", p.display()), Some(Duration::from_secs(3)));
+            }
+        }
+        if std::mem::take(&mut app.vcs.sync_pending) {
+            sync_now(app);
+        }
+    }
+    crate::github_ui::frame(app, ctx);
     // not in the document's thumbnail
     if app.vcs.open && !crate::home::hide_hover(app) {
         window(app, ctx);
@@ -229,30 +307,63 @@ fn poll(app: &mut App) {
             app.vcs.account_rx = None;
         }
     }
-    let Some((_, rx)) = &app.vcs.busy else { return };
+    let Some((what, rx)) = &app.vcs.busy else { return };
     let Ok(r) = rx.try_recv() else { return };
+    let what = what.clone();
     app.vcs.busy = None;
     match r {
-        Ok(Done::Note(m)) => app.vcs.note = Some((m, false)),
         Ok(Done::Published(url)) => app.vcs.note = Some((format!("Published to {}", vcs::short_remote(&url)), false)),
-        Ok(Done::Pulled(m, doc)) => {
-            app.vcs.note = Some((m.clone(), false));
-            // the document on disk is newer now: open it again if it is still the one open, asking
-            // first about changes made while the pull ran
-            if m != "Already up to date" && app.path.as_ref() == Some(&doc) {
-                app.guard(crate::session::Pending::OpenPath(doc));
-                app.flash_info(m, Some(Duration::from_secs(3)));
+        Ok(Done::Account(_)) => {}
+        Ok(Done::Synced(r, doc)) => {
+            app.vcs.auto_failed = false;
+            match r {
+                vcs::Synced::UpToDate => app.vcs.note = Some(("Up to date with GitHub".into(), false)),
+                vcs::Synced::Pushed(m) => app.vcs.note = Some((m, false)),
+                vcs::Synced::Pulled(m) | vcs::Synced::Merged(m) => {
+                    app.vcs.diverged = None;
+                    app.vcs.note = Some((m.clone(), false));
+                    reload(app, doc, m);
+                }
+                vcs::Synced::Diverged(d) => {
+                    app.vcs.diverged = Some(d);
+                    app.vcs.note = None;
+                    app.vcs.open = true;
+                    app.flash("This project changed on GitHub and here in ways that can't be combined: pick a version in Version control", ToastKind::Info);
+                }
             }
         }
-        Ok(Done::Account(_)) => {}
-        Err(e) => app.vcs.note = Some((e, true)),
+        Ok(Done::Resolved(m, doc, changed)) => {
+            app.vcs.diverged = None;
+            app.vcs.note = Some((m.clone(), false));
+            if changed {
+                reload(app, doc, m);
+            }
+        }
+        Err(e) => {
+            if what.starts_with("Syncing") && !app.vcs.open {
+                // said once as a toast (offline, say), then only in the window
+                if !std::mem::replace(&mut app.vcs.auto_failed, true) {
+                    app.flash(format!("Could not sync with GitHub: {e}"), ToastKind::Info);
+                }
+            }
+            app.vcs.note = Some((e, true));
+        }
     }
     refresh(app);
 }
 
+/// The document on disk is newer: open it again if it is still the one open, asking first about
+/// changes made in the meantime.
+fn reload(app: &mut App, doc: PathBuf, m: String) {
+    if app.path.as_ref() == Some(&doc) && doc.exists() {
+        app.guard(crate::session::Pending::OpenPath(doc));
+        app.flash_info(m, Some(Duration::from_secs(3)));
+    }
+}
+
 /// Look up the GitHub account in the background (the token may come from `gh`, and the user
 /// from the API).
-fn check_account(app: &mut App) {
+pub(crate) fn check_account(app: &mut App) {
     app.vcs.account_checked = true;
     let (tx, rx) = channel();
     app.vcs.account_rx = Some(rx);
@@ -330,12 +441,12 @@ enum Act {
     Select(String),
     CompareNow(String),
     OpenCommit(String),
-    Push,
-    Pull,
+    Sync,
+    SetSync(bool),
+    Keep(bool),
     Publish,
     Connect,
-    SignIn,
-    SignOut,
+    Account,
 }
 
 fn window(app: &mut App, ctx: &egui::Context) {
@@ -506,18 +617,57 @@ fn window(app: &mut App, ctx: &egui::Context) {
                             }
                         }
                     });
-                    ui.horizontal(|ui| {
-                        let ahead = if !s.upstream { " (not pushed yet)".to_string() } else if s.ahead > 0 { format!(" ({} commit{})", s.ahead, if s.ahead == 1 { "" } else { "s" }) } else { String::new() };
-                        let idle = v.busy.is_none() && s.has_commits;
-                        if ui.add_enabled(idle, egui::Button::new(format!("Push{ahead}"))).on_hover_text("Send the commits to the remote").clicked() {
-                            act = Some(Act::Push);
+                    let idle = v.busy.is_none();
+                    match &v.diverged {
+                        Some(d) => {
+                            Frame::new().fill(theme::panel_2()).corner_radius(4).inner_margin(Margin::same(8)).show(ui, |ui| {
+                                ui.label(RichText::new("This computer and GitHub both have new commits, and they can't be combined automatically.").strong());
+                                let list = |ui: &mut Ui, title: &str, cs: &[Commit]| {
+                                    ui.label(RichText::new(title).size(11.5).color(theme::muted()));
+                                    for c in cs.iter().take(4) {
+                                        ui.label(RichText::new(format!("• {} · {} · {}", c.subject, c.author, when(c.time))).size(11.5));
+                                    }
+                                    if cs.len() > 4 {
+                                        ui.label(RichText::new(format!("  and {} more", cs.len() - 4)).size(11.5).color(theme::muted()));
+                                    }
+                                };
+                                list(ui, "Only on GitHub:", &d.theirs[..]);
+                                list(ui, "Only on this computer:", &d.mine[..]);
+                                ui.add_space(4.0);
+                                ui.horizontal(|ui| {
+                                    if ui.add_enabled(idle && !dirty, egui::Button::new("Keep this computer's")).on_hover_text("Push this computer's version; GitHub's stays in History").clicked() {
+                                        act = Some(Act::Keep(true));
+                                    }
+                                    if ui.add_enabled(idle && !dirty, egui::Button::new("Keep GitHub's")).on_hover_text("Open GitHub's version; this computer's stays in History").clicked() {
+                                        act = Some(Act::Keep(false));
+                                    }
+                                });
+                                ui.label(RichText::new("Either way both versions stay in the history, so the other one can still be opened from there.").size(11.0).color(theme::muted()));
+                            });
                         }
-                        let pull_ok = idle && s.upstream && !dirty && !s.changed;
-                        let tip = if dirty || s.changed { "Commit your changes before pulling" } else { "Bring in commits made elsewhere (only when this copy has none of its own)" };
-                        if ui.add_enabled(pull_ok, egui::Button::new(if s.behind > 0 { format!("Pull ({})", s.behind) } else { "Pull".into() })).on_hover_text(tip).on_disabled_hover_text(tip).clicked() {
-                            act = Some(Act::Pull);
+                        None => {
+                            ui.horizontal(|ui| {
+                                let mut counts = vec![];
+                                if !s.upstream && s.has_commits {
+                                    counts.push("not pushed yet".to_string());
+                                }
+                                if s.ahead > 0 {
+                                    counts.push(format!("↑{}", s.ahead));
+                                }
+                                if s.behind > 0 {
+                                    counts.push(format!("↓{}", s.behind));
+                                }
+                                let label = if counts.is_empty() { "Sync now".to_string() } else { format!("Sync now ({})", counts.join(" ")) };
+                                if ui.add_enabled(idle, egui::Button::new(label)).on_hover_text("Pull what was pushed from elsewhere and push this computer's commits").clicked() {
+                                    act = Some(Act::Sync);
+                                }
+                                let mut auto = s.sync;
+                                if ui.checkbox(&mut auto, "Sync automatically").on_hover_text("Pull when the document opens and push after each commit").changed() {
+                                    act = Some(Act::SetSync(auto));
+                                }
+                            });
                         }
-                    });
+                    }
                 }
                 None => {
                     ui.label(RichText::new("Not on GitHub yet.").color(theme::muted()));
@@ -528,7 +678,7 @@ fn window(app: &mut App, ctx: &egui::Context) {
                     });
                     let signed_in = v.account.is_some();
                     let b = ui.add_enabled(signed_in && v.busy.is_none() && s.has_commits && !v.repo.trim().is_empty(), egui::Button::new("Publish to GitHub"));
-                    if b.on_disabled_hover_text("Sign in to GitHub below first").clicked() {
+                    if b.on_disabled_hover_text("Sign in to GitHub first (Sign in… below)").clicked() {
                         act = Some(Act::Publish);
                     }
                     egui::CollapsingHeader::new(RichText::new("Or use an existing repository").size(12.0)).id_salt("vcs-existing").show(ui, |ui| {
@@ -550,40 +700,20 @@ fn window(app: &mut App, ctx: &egui::Context) {
             note_ui(ui, &v.note);
 
             // the account
-            match &v.account {
-                Some((u, src)) => {
-                    ui.horizontal_wrapped(|ui| {
-                        let from = match src {
-                            TokenSource::Saved => "",
-                            TokenSource::Env => " (token from the environment)",
-                            TokenSource::GhCli => " (from the GitHub CLI)",
-                        };
-                        ui.label(RichText::new(format!("Signed in as {}{from}", u.login)).color(theme::muted()).size(11.5));
-                        if *src == TokenSource::Saved && ui.small_button("Sign out").clicked() {
-                            act = Some(Act::SignOut);
-                        }
-                    });
+            ui.add_space(4.0);
+            ui.horizontal_wrapped(|ui| {
+                let who = match &v.account {
+                    Some((u, TokenSource::Saved)) => format!("Signed in to GitHub as {}", u.login),
+                    Some((u, TokenSource::Env)) => format!("Signed in to GitHub as {} (token from the environment)", u.login),
+                    Some((u, TokenSource::GhCli)) => format!("Signed in to GitHub as {} (from the GitHub CLI)", u.login),
+                    None if v.account_rx.is_some() => "Checking the GitHub sign-in…".into(),
+                    None => "Not signed in to GitHub: Push and Pull use git's own sign-in".into(),
+                };
+                ui.label(RichText::new(who).color(theme::muted()).size(11.5));
+                if ui.small_button(if v.account.is_some() { "Account…" } else { "Sign in…" }).clicked() {
+                    act = Some(Act::Account);
                 }
-                None if v.account_rx.is_some() => {
-                    ui.label(RichText::new("Checking the GitHub sign-in…").color(theme::muted()).size(11.5));
-                }
-                None => {
-                    egui::CollapsingHeader::new(RichText::new("Sign in to GitHub").size(12.0)).id_salt("vcs-signin").default_open(s.remote.is_none()).show(ui, |ui| {
-                        ui.label(
-                            RichText::new("Paste a personal access token with the \"repo\" scope. Without one, Push and Pull use git's own sign-in (an SSH key or credential manager).")
-                                .color(theme::muted())
-                                .size(11.5),
-                        );
-                        ui.hyperlink_to("Create a token on GitHub", "https://github.com/settings/tokens/new?scopes=repo&description=rCAD");
-                        ui.horizontal(|ui| {
-                            ui.add(egui::TextEdit::singleline(&mut v.token_input).password(true).hint_text("ghp_… or github_pat_…").desired_width(230.0));
-                            if ui.add_enabled(!v.token_input.trim().is_empty() && v.busy.is_none(), egui::Button::new("Sign in")).clicked() {
-                                act = Some(Act::SignIn);
-                            }
-                        });
-                    });
-                }
-            }
+            });
         });
     if !open {
         app.vcs.open = false;
@@ -709,13 +839,33 @@ fn act_on(app: &mut App, a: Act) {
                 Err(e) => app.flash(format!("Could not open that version: {e}"), ToastKind::Error),
             }
         }
-        Act::Push => {
-            let Some(root) = app.vcs.status.as_ref().map(|s| s.root.clone()) else { return };
-            run(app, "Pushing…", move || vcs::push(&root, token().as_deref()).map(Done::Note));
+        Act::Sync => {
+            if app.is_dirty() {
+                // saving commits, and the commit syncs
+                app.vcs.commit_next_save = true;
+                app.vcs.sync_pending = true;
+                app.save(false);
+            } else {
+                sync_now(app);
+            }
         }
-        Act::Pull => {
+        Act::SetSync(on) => {
+            if let Some(s) = &app.vcs.status {
+                if let Err(e) = vcs::set_sync(&s.root, on) {
+                    app.vcs.note = Some((e, true));
+                }
+            }
+            refresh(app);
+            if on {
+                sync_now(app);
+            }
+        }
+        Act::Keep(mine) => {
             let Some(root) = app.vcs.status.as_ref().map(|s| s.root.clone()) else { return };
-            run(app, "Pulling…", move || vcs::pull(&root, token().as_deref()).map(|m| Done::Pulled(m, path)));
+            let who = identity(app);
+            run(app, if mine { "Pushing this computer's version…" } else { "Taking GitHub's version…" }, move || {
+                vcs::resolve(&root, token().as_deref(), &who, mine).map(|m| Done::Resolved(m, path, !mine))
+            });
         }
         Act::Publish => {
             let Some(root) = app.vcs.status.as_ref().map(|s| s.root.clone()) else { return };
@@ -728,36 +878,16 @@ fn act_on(app: &mut App, a: Act) {
         Act::Connect => {
             if let Some(s) = app.vcs.status.clone() {
                 app.vcs.note = match vcs::set_remote(&s.root, &app.vcs.remote_url) {
-                    Ok(()) => Some(("Connected: push to send your commits there".into(), false)),
+                    Ok(()) => {
+                        let _ = vcs::set_sync(&s.root, true);
+                        app.vcs.synced_for = None; // syncs next frame
+                        Some(("Connected: it syncs there from now on".into(), false))
+                    }
                     Err(e) => Some((e, true)),
                 };
             }
             refresh(app);
         }
-        Act::SignIn => {
-            let t = app.vcs.token_input.trim().to_string();
-            let (tx, rx) = channel();
-            app.vcs.note = None;
-            app.vcs.busy = Some(("Signing in…".into(), rx));
-            let (atx, arx) = channel();
-            app.vcs.account_rx = Some(arx);
-            std::thread::spawn(move || match vcs::gh_user(&t).and_then(|u| vcs::save_token(&t).map(|_| u)) {
-                Ok(u) => {
-                    let _ = tx.send(Ok(Done::Note(format!("Signed in to GitHub as {}", u.login))));
-                    let _ = atx.send(Done::Account(Some((u, TokenSource::Saved))));
-                }
-                Err(e) => {
-                    let _ = tx.send(Err(e));
-                    let _ = atx.send(Done::Account(None));
-                }
-            });
-            app.vcs.token_input.clear();
-        }
-        Act::SignOut => {
-            let _ = vcs::save_token("");
-            app.vcs.account = None;
-            // a token from the environment or the GitHub CLI may still apply
-            check_account(app);
-        }
+        Act::Account => crate::github_ui::open_account(app),
     }
 }

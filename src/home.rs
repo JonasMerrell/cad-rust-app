@@ -244,6 +244,7 @@ enum Action {
     New,
     NewProject,
     ImportProject,
+    OpenGithub,
     Open,
     OpenPath(PathBuf),
     Forget(PathBuf),
@@ -277,6 +278,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
                 if ui.add(egui::Button::image(icons::image(icon, 17.0).tint(theme::text()))).on_hover_text(tip).clicked() {
                     app.set_dark(ui.ctx(), !app.dark);
                 }
+                crate::github_ui::chip(app, ui);
             });
         });
     });
@@ -304,6 +306,9 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
                             }
                             if action_button(ui, "folder", "Open…", false).on_hover_text("Ctrl+O").clicked() {
                                 action = Some(Action::Open);
+                            }
+                            if action_button(ui, "branch", "Open from GitHub…", false).on_hover_text("Open a project pushed to GitHub, from this or another computer").clicked() {
+                                action = Some(Action::OpenGithub);
                             }
                             if action_button(ui, "download", "Import project…", false).on_hover_text("Unpack a project exported as a ZIP").clicked() {
                                 action = Some(Action::ImportProject);
@@ -350,6 +355,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
         Some(Action::New) => app.guard(crate::session::Pending::New),
         Some(Action::NewProject) => crate::vcs_ui::new_project(app),
         Some(Action::ImportProject) => crate::vcs_ui::import_project(app),
+        Some(Action::OpenGithub) => crate::github_ui::open_repos(app),
         Some(Action::Open) => app.guard(crate::session::Pending::Open),
         Some(Action::OpenPath(p)) => app.guard(crate::session::Pending::OpenPath(p)),
         Some(Action::Forget(p)) => forget(app, &p),

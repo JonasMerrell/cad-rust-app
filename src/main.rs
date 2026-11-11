@@ -100,6 +100,7 @@ mod stdparts_ui;
 mod text;
 mod theme;
 mod units_switch;
+mod github_ui;
 mod vcs;
 mod vcs_ui;
 mod viewport;
