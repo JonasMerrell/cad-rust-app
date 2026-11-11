@@ -268,15 +268,20 @@ pub enum RelationKind {
     Rack,
     /// One cylindrical mate a: travel = ratio (pitch) · turns
     Screw,
+    /// A belt round pulley a (revolute) moving slider b, and slider c too when given:
+    /// ratio (pitch radius) · θa = travel b ± travel c. Two of them, one per motor, with the
+    /// same two sliders and opposite signs on c, make a CoreXY drive.
+    Belt,
 }
 
 impl RelationKind {
-    pub const ALL: [RelationKind; 3] = [RelationKind::Gear, RelationKind::Rack, RelationKind::Screw];
+    pub const ALL: [RelationKind; 4] = [RelationKind::Gear, RelationKind::Rack, RelationKind::Screw, RelationKind::Belt];
     pub fn label(self) -> &'static str {
         match self {
             RelationKind::Gear => "Gear",
             RelationKind::Rack => "Rack and pinion",
             RelationKind::Screw => "Screw",
+            RelationKind::Belt => "Belt",
         }
     }
 }
@@ -295,6 +300,19 @@ pub struct Relation {
     /// Value of the relation when it was made, so parts don't jump.
     #[serde(default)]
     pub phase: f64,
+    /// Belt: the second slider the belt moves (CoreXY: the other axis).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub c: Option<u64>,
+    /// Belt: the second slider counts negative (travel b − travel c).
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub reverse_c: bool,
+}
+
+impl Relation {
+    /// The mates the relation couples.
+    pub fn mates(&self) -> impl Iterator<Item = u64> + '_ {
+        std::iter::once(self.a).chain(self.b).chain(self.c)
+    }
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -401,6 +419,17 @@ fn relation_value(r: &Relation, mates: &[Mate], frames: &dyn Fn(&Mate) -> Option
             mate_slide(mb, a2, b2) - sign * r.ratio * angle(ma, a1, b1) - r.phase
         }
         RelationKind::Screw => mate_slide(ma, a1, b1) - sign * r.ratio * angle(ma, a1, b1) / std::f64::consts::TAU - r.phase,
+        RelationKind::Belt => {
+            let mb = mates.iter().find(|m| Some(m.id) == r.b)?;
+            let (a2, b2) = frames(mb)?;
+            let mut travel = mate_slide(mb, a2, b2);
+            if let Some(c) = r.c {
+                let mc = mates.iter().find(|m| m.id == c)?;
+                let (a3, b3) = frames(mc)?;
+                travel += if r.reverse_c { -1.0 } else { 1.0 } * mate_slide(mc, a3, b3);
+            }
+            travel - sign * r.ratio * angle(ma, a1, b1) - r.phase
+        }
     })
 }
 
@@ -697,7 +726,7 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
         Some((p.apply(c.origin.into()), p.dir(c.z.into()).normalize(), p.dir(c.x.into()).normalize()))
     };
     let driven = |id: u64| drives.iter().any(|d| d.mate == id);
-    let relations: Vec<Relation> = asm.relations.iter().filter(|r| !(driven(r.a) && r.b.map(driven).unwrap_or(true))).cloned().collect();
+    let relations: Vec<Relation> = asm.relations.iter().filter(|r| !r.mates().all(driven)).cloned().collect();
     let active: std::cell::RefCell<Vec<(u64, f64)>> = std::cell::RefCell::new(vec![]);
     // turning mates' angles at the start, counted past ±180°: each evaluation is taken as the
     // nearest angle to it (the solver's steps are far smaller than half a turn)
@@ -1444,6 +1473,72 @@ mod tests {
         x.pose = x.pose.perturbed(DVec3::Z * deg.to_radians(), DVec3::ZERO, c);
     }
 
+    fn slider(id: u64, ia: u64, ib: u64, at: [f64; 3], dir: [f64; 3]) -> Mate {
+        let x = if dir[0].abs() > 0.5 { [0.0, 1.0, 0.0] } else { [1.0, 0.0, 0.0] };
+        let ca = Connector { inst: ia, origin: at, z: dir, x, on: None };
+        let cb = Connector { inst: ib, origin: [0.0, 0.0, 0.0], z: dir.map(|v| -v), x, on: None };
+        Mate { id, name: format!("s{id}"), kind: MateKind::Slider, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false }
+    }
+
+    #[test]
+    fn corexy_belts_turn_both_motors() {
+        // base 1; gantry 2 slides in X on it; toolhead 3 slides in Y on the gantry; motors 4 and 5 turn on the base
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 0.0, 0.0]));
+        a.instances.push(inst(3, false, [0.0, 0.0, 0.0]));
+        a.instances.push(inst(4, false, [-50.0, 0.0, 5.0]));
+        a.instances.push(inst(5, false, [-50.0, 80.0, 5.0]));
+        a.mates.push(slider(10, 1, 2, [0.0; 3], [1.0, 0.0, 0.0]));
+        a.mates.push(slider(11, 2, 3, [0.0; 3], [0.0, 1.0, 0.0]));
+        a.mates.push(revolute(12, 4, [-50.0, 0.0, 5.0]));
+        a.mates.push(revolute(13, 5, [-50.0, 80.0, 5.0]));
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        let r = 40.0 / std::f64::consts::TAU; // GT2 20T: 40 mm a turn
+        for (id, m, rc) in [(20, 12, false), (21, 13, true)] {
+            let mut rel = Relation { id, name: format!("b{id}"), kind: RelationKind::Belt, a: m, b: Some(10), ratio: r, reverse: false, phase: 0.0, c: Some(11), reverse_c: rc };
+            rel.phase = relation_phase(&a, &rel);
+            a.relations.push(rel);
+        }
+        let mate = |a: &Assembly, id: u64| a.mates.iter().find(|m| m.id == id).unwrap().clone();
+        let frames = |a: &Assembly, m: &Mate| (a.world(m.a.as_ref().unwrap()).unwrap(), a.world(m.b.as_ref().unwrap()).unwrap());
+        let slide = |a: &Assembly, id: u64| {
+            let m = mate(a, id);
+            let (fa, fb) = frames(a, &m);
+            mate_slide(&m, fa, fb)
+        };
+        let turned = |a: &Assembly, id: u64| {
+            let m = mate(a, id);
+            let (fa, fb) = frames(a, &m);
+            a.mate_turn(&m, fa, fb)
+        };
+        // drag the toolhead 10 in X and 4 in Y: the gantry follows in X, and the motors turn (X + Y) / r and (X − Y) / r
+        for k in 1..=10 {
+            let x = a.instances.iter_mut().find(|x| x.id == 3).unwrap();
+            let target = DVec3::new(1.0, 0.4, 0.0) * k as f64;
+            x.pose = x.pose.perturbed(DVec3::ZERO, target - DVec3::from(x.pose.t), DVec3::ZERO);
+            let res = solve_drag(&mut a, &|_| DVec3::ZERO, 3, DVec3::ZERO);
+            assert!(res.ok, "{:?}", res.failed);
+        }
+        let (sx, sy) = (slide(&a, 10), slide(&a, 11));
+        assert!((sx - 10.0).abs() < 0.05 && (sy - 4.0).abs() < 0.05, "{sx} {sy}");
+        let (ta, tb) = (turned(&a, 12), turned(&a, 13));
+        assert!((ta - (sx + sy) / r).abs() < 1e-3, "motor A {ta} vs {}", (sx + sy) / r);
+        assert!((tb - (sx - sy) / r).abs() < 1e-3, "motor B {tb} vs {}", (sx - sy) / r);
+        // turn motor A alone with motor B held: the toolhead moves diagonally (X and Y by the same amount)
+        let (x0, y0) = (sx, sy);
+        let held = turned(&a, 13);
+        let res = solve_driven(
+            &mut a,
+            &[],
+            &|_| DVec3::ZERO,
+            &[Drive { mate: 12, angle: Some((ta + 0.5).to_degrees()), slide: None }, Drive { mate: 13, angle: Some(held.to_degrees()), slide: None }],
+        );
+        assert!(res.ok, "{:?}", res.failed);
+        let (dx, dy) = (slide(&a, 10) - x0, slide(&a, 11) - y0);
+        assert!((dx - 0.25 * r).abs() < 1e-3 && (dy - 0.25 * r).abs() < 1e-3, "{dx} {dy} vs {}", 0.25 * r);
+    }
+
     #[test]
     fn gear_relation_and_limits() {
         let mut a = Assembly::default();
@@ -1453,7 +1548,7 @@ mod tests {
         a.mates.push(revolute(10, 2, [0.0, 0.0, 5.0]));
         a.mates.push(revolute(11, 3, [30.0, 0.0, 5.0]));
         assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
-        let mut rel = Relation { id: 20, name: "g".into(), kind: RelationKind::Gear, a: 10, b: Some(11), ratio: 2.0, reverse: false, phase: 0.0 };
+        let mut rel = Relation { id: 20, name: "g".into(), kind: RelationKind::Gear, a: 10, b: Some(11), ratio: 2.0, reverse: false, phase: 0.0, c: None, reverse_c: false };
         rel.phase = relation_phase(&a, &rel);
         a.relations.push(rel);
         turn(&mut a, 2, 20.0);
@@ -1485,7 +1580,7 @@ mod tests {
         m.kind = MateKind::Cylindrical;
         a.mates.push(m);
         assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
-        let mut rel = Relation { id: 20, name: "s".into(), kind: RelationKind::Screw, a: 10, b: None, ratio: 2.0, reverse: false, phase: 0.0 };
+        let mut rel = Relation { id: 20, name: "s".into(), kind: RelationKind::Screw, a: 10, b: None, ratio: 2.0, reverse: false, phase: 0.0, c: None, reverse_c: false };
         rel.phase = relation_phase(&a, &rel);
         a.relations.push(rel);
         let slide = |a: &Assembly| {

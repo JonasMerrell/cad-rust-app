@@ -930,16 +930,41 @@ impl Session {
                     "gear" => RelationKind::Gear,
                     "rack" => RelationKind::Rack,
                     "screw" => RelationKind::Screw,
-                    _ => return Err("kind: gear, rack or screw".into()),
+                    "belt" => RelationKind::Belt,
+                    _ => return Err("kind: gear, rack, screw or belt".into()),
                 };
                 let ma = id_arg(a, "mate_a")?;
                 let mb = a.get("mate_b").and_then(|v| v.as_u64());
+                let mc = a.get("mate_c").and_then(|v| v.as_u64());
+                let reverse_c = a.get("reverse_c").and_then(|v| v.as_bool()).unwrap_or(false);
+                {
+                    let asm = &self.ws.assemblies[ai];
+                    let kind_of = |id: u64| asm.mates.iter().find(|m| m.id == id).map(|m| m.kind).ok_or_else(|| format!("there is no mate {id}"));
+                    for id in std::iter::once(ma).chain(mb).chain(mc) {
+                        kind_of(id)?;
+                    }
+                    if kind == RelationKind::Belt {
+                        if !matches!(kind_of(ma)?, MateKind::Revolute | MateKind::Cylindrical) {
+                            return Err("belt: mate_a is the pulley, a revolute or cylindrical mate".into());
+                        }
+                        for id in mb.into_iter().chain(mc) {
+                            if !matches!(kind_of(id)?, MateKind::Slider | MateKind::Cylindrical) {
+                                return Err(format!("belt: mate {id} must be a slider or cylindrical mate"));
+                            }
+                        }
+                        if mb.is_none() {
+                            return Err("belt: give mate_b, the slider the belt moves (and mate_c for a second one)".into());
+                        }
+                    } else if mc.is_some() {
+                        return Err("mate_c is for belt relations".into());
+                    }
+                }
                 let ratio = a.get("ratio").and_then(|v| v.as_f64()).unwrap_or(1.0);
                 let reverse = a.get("reverse").and_then(|v| v.as_bool()).unwrap_or(false);
                 let asm = &mut self.ws.assemblies[ai];
                 let id = asm.new_id();
                 let n = asm.relations.iter().filter(|r| r.kind == kind).count() + 1;
-                let mut r = Relation { id, name: format!("{} {n}", kind.label()), kind, a: ma, b: mb, ratio, reverse, phase: 0.0 };
+                let mut r = Relation { id, name: format!("{} {n}", kind.label()), kind, a: ma, b: mb, ratio, reverse, phase: 0.0, c: mc, reverse_c };
                 r.phase = assembly::relation_phase(asm, &r);
                 asm.relations.push(r);
                 json!({"relation": id})
