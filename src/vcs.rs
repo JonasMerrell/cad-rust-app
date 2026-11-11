@@ -1088,7 +1088,7 @@ pub fn clone_project(url: &str, token: Option<&str>, parent: &Path) -> Result<Cl
         return Err("enter the repository's URL".into());
     }
     let tail = url.trim_end_matches('/').trim_end_matches(".git");
-    let name = crate::project::clean_name(tail.rsplit(['/', ':']).next().unwrap_or("project"));
+    let name = crate::project::clean_name(tail.rsplit(['/', '\\', ':']).next().unwrap_or("project"));
     std::fs::create_dir_all(parent).map_err(|e| format!("could not make {}: {e}", parent.display()))?;
     let mut dir = parent.join(&name);
     let mut n = 2;
