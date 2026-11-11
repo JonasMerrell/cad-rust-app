@@ -182,7 +182,8 @@ adjustable bond factor; see
 
 A PCB tab holds a schematic and a two-layer board that share the same parts. Wire symbols from the
 library, name nets with labels and power ports, then place footprints by hand or automatically and
-route them with 45° tracks and vias or with the autorouter. Copper pours, a ratsnest and a design
+route them with 45° tracks and vias or with the autorouter. While you route by hand, other nets'
+tracks and vias are pushed out of the way (push and shove, ported from KiCad's router). Copper pours, a ratsnest and a design
 rule check are there, and the output is a Gerber and Excellon ZIP for board makers such as JLCPCB,
 BOM and pick-and-place CSVs, and a **3D board** Part Studio to put in your assemblies or export as STEP.
 
@@ -346,6 +347,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb.rs` | PCB model: parts, schematic wires and labels, the netlist, board copper, ratsnest, copper pours and the design rule check |
 | `src/pcb_lib.rs` | schematic symbols, footprints and the silkscreen stroke font |
 | `src/pcb_route.rs` | the grid autorouter and automatic placement |
+| `src/pcb_shove.rs` | push and shove for interactive routing, ported from KiCad's router (GPL-3.0-or-later notices kept) |
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
 | `src/kicad_libs.rs`, `src/kicad_lib_ui.rs` | KiCad library download, index, search and loading; the symbol and footprint choosers |

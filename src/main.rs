@@ -66,6 +66,7 @@ mod pcb_tools_ui;
 mod pcb_lib;
 mod pcb_route;
 mod pcb_sheet;
+mod pcb_shove;
 mod pcb_tune;
 mod pcb_trace;
 mod pcb_trace_ui;

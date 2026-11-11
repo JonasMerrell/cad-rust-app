@@ -119,6 +119,11 @@ pub struct PcbUi {
     /// The walkaround grid for the net being routed (net, width, board edit count) and the last path.
     walk: Option<(crate::pcb_route::Walk, String, f64, u64)>,
     walk_path: Option<(P, P, Layer, Option<Vec<P>>)>,
+    /// Interactive routing pushes other nets' tracks and vias aside (KiCad's push and shove).
+    shove: bool,
+    /// The last shove preview: (from, to, layer, board edit count, the pushed board or None when
+    /// it can't be done).
+    shove_path: Option<(P, P, Layer, u64, Option<crate::pcb_shove::Shoved>)>,
     /// Counts board changes, so the walkaround grid is rebuilt after one.
     cache_gen: u64,
     /// The issue last picked in a check list (view index, issue index), drawn bolder.
@@ -183,6 +188,8 @@ impl Default for PcbUi {
             walkaround: true,
             walk: None,
             walk_path: None,
+            shove: true,
+            shove_path: None,
             cache_gen: 0,
             issue_shown: None,
             lib_search: String::new(),
@@ -2111,6 +2118,7 @@ fn board_ui(app: &mut App, ui: &mut Ui) {
 
 fn lengths_ui(app: &mut App, ui: &mut Ui) {
     let Some(pi) = index(app) else { return };
+    ui.checkbox(&mut app.pcb.shove, "Push and shove").on_hover_text("While routing by hand, other nets' tracks and vias are pushed out of the way (KiCad's shove router); where they can't be, the track walks round");
     ui.checkbox(&mut app.pcb.walkaround, "Walkaround routing").on_hover_text("While routing by hand, the track flows round other nets' copper to the cursor");
     let nets: Vec<String> = app.pcb.cache.nl.nets.iter().map(|n| n.name.clone()).collect();
     let mut route_pair: Option<pcb::DiffPair> = None;
@@ -3244,9 +3252,27 @@ fn walk_preview(app: &mut App, pi: usize, h: P, tol: f64) {
     let Some(r) = &app.pcb.route else {
         app.pcb.walk = None;
         app.pcb.walk_path = None;
+        app.pcb.shove_path = None;
         return;
     };
     let (net, width, layer, from) = (r.net.clone(), r.width, r.layer, *r.pts.last().unwrap());
+    // push and shove first: the plain 45° bend, with other copper pushed out of its way
+    if app.pcb.shove {
+        let c = &app.pcb.cache;
+        let to = pcb::copper_at(&app.ws.pcbs[pi], &c.nl, &c.pads, h, layer, tol).filter(|x| x.net == net && pcb::dist(x.at, from) > 1e-6).map(|x| x.at).unwrap_or_else(|| route_end(from, h, ROUTE_GRID, tol));
+        let fresh = app.pcb.shove_path.as_ref().is_some_and(|s| s.0 == from && pcb::dist(s.1, to) < 0.05 && s.2 == layer && s.3 == app.pcb.cache_gen);
+        if !fresh {
+            let head = route45(from, to);
+            let pad_nets: Vec<String> = c.pads.iter().map(|x| x.net.map(|n| c.nl.nets[n].name.clone()).unwrap_or_default()).collect();
+            let s = (head.len() >= 2).then(|| crate::pcb_shove::shove(&app.ws.pcbs[pi], &c.pads, &pad_nets, &crate::pcb_shove::Head { pts: &head, width, layer, net: &net })).flatten();
+            app.pcb.shove_path = Some((from, to, layer, app.pcb.cache_gen, s));
+        }
+        if app.pcb.shove_path.as_ref().is_some_and(|s| s.4.is_some()) || !app.pcb.walkaround {
+            return;
+        }
+    } else {
+        app.pcb.shove_path = None;
+    }
     let stale = app.pcb.walk.as_ref().is_none_or(|w| w.1 != net || (w.2 - width).abs() > 1e-9 || w.3 != app.pcb.cache_gen || w.0.layer() != layer);
     if stale {
         app.pcb.walk = Some((crate::pcb_route::Walk::new(&app.ws.pcbs[pi], &net, width, layer), net.clone(), width, app.pcb.cache_gen));
@@ -3262,12 +3288,19 @@ fn walk_preview(app: &mut App, pi: usize, h: P, tol: f64) {
     app.pcb.walk_path = Some((from, to, layer, path));
 }
 
+/// The shove preview for a route from `start` to `end` on `layer`, when it pushed something aside
+/// and the board hasn't changed since.
+fn shove_for(app: &App, start: P, end: P, layer: Layer) -> Option<crate::pcb_shove::Shoved> {
+    let s = app.pcb.shove_path.as_ref().filter(|s| app.pcb.shove && s.0 == start && s.2 == layer && s.3 == app.pcb.cache_gen && pcb::dist(s.1, end) < 0.1)?;
+    s.4.clone().filter(|x| x.moved > 0)
+}
+
 fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: Option<P>, tol: f64, clicked: bool, double: bool, right: bool) {
     let tool = app.pcb.tool.clone();
     match tool {
         Tool::Route => {
             let Some(h) = hover else { return };
-            if app.pcb.walkaround {
+            if app.pcb.walkaround || app.pcb.shove {
                 walk_preview(app, pi, h, tol);
             }
             if clicked {
@@ -3300,18 +3333,23 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                         let target = pcb::copper_at(p, &c.nl, &c.pads, h, rl, tol).filter(|x| x.net == net && pcb::dist(x.at, start) > 1e-6);
                         // copper of another net under the cursor would be a short
                         let other = pcb::copper_at(p, &c.nl, &c.pads, h, rl, 0.0).filter(|x| x.net != net || (x.pad && x.net.is_empty()));
-                        if let (None, Some(o)) = (&target, other) {
+                        // (unless the shove preview pushes it out of the way)
+                        let pushed = target.is_none() && shove_for(app, start, route_end(start, h, ROUTE_GRID, tol), rl).is_some();
+                        if let (None, Some(o), false) = (&target, other, pushed) {
                             let what = if o.net.is_empty() { "a pad with no net".to_string() } else { format!("{} copper", o.net) };
                             let msg = format!("That is {what}: a {} track can't end there", if net.is_empty() { "no-net" } else { &net });
                             app.flash_info(msg, Some(Duration::from_secs(3)));
                             return;
                         }
                         let end = target.as_ref().map(|x| x.at).unwrap_or_else(|| route_end(start, h, ROUTE_GRID, tol));
-                        // the walkaround path when there is one to this point, else a 45° bend
+                        // the shoved board when other copper was pushed aside for this point, else
+                        // the walkaround path when there is one, else a 45° bend
+                        let shoved = shove_for(app, start, end, rl);
                         let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == rl && pcb::dist(w.1, end) < 0.1).and_then(|w| w.3.clone());
                         let path = match walked {
                             // a click on the last corner (the second click of a double-click) adds nothing
                             _ if pcb::dist(start, end) <= 1e-6 => vec![],
+                            _ if shoved.is_some() => route45(start, end),
                             Some(mut w) => {
                                 *w.last_mut().unwrap() = end;
                                 tidy_walk(start, end, w)
@@ -3319,6 +3357,10 @@ fn board_input(app: &mut App, pi: usize, resp: &egui::Response, xf: &Xf, hover: 
                             None => route45(start, end),
                         };
                         edit(app, |p| {
+                            if let Some(s) = shoved.filter(|s| s.moved > 0 && path.len() >= 2) {
+                                p.board.tracks = s.tracks;
+                                p.board.vias = s.vias;
+                            }
                             for s in path.windows(2).filter(|s| pcb::dist(s[0], s[1]) > 1e-6) {
                                 p.board.tracks.push(Track { a: s[0], b: s[1], width: w, layer: rl, net: net.clone() });
                             }
@@ -3552,8 +3594,32 @@ fn board_overlay(app: &App, pi: usize, painter: &egui::Painter, xf: &Xf) {
         let col = pcb_export::layer_color(r.layer);
         let col = Color32::from_rgba_unmultiplied(col[0], col[1], col[2], 170);
         let start = *r.pts.last().unwrap();
+        // pushed copper: where it was, covered over, and where it goes
+        let shoved = app.pcb.shove_path.as_ref().filter(|s| app.pcb.shove && s.0 == start && s.2 == r.layer && s.3 == app.pcb.cache_gen).and_then(|s| s.4.as_ref().filter(|x| x.moved > 0).map(|x| (s.1, x)));
+        if let Some((_, s)) = shoved {
+            let b = &app.ws.pcbs[pi].board;
+            let under = Color32::from_rgba_unmultiplied(pcb_export::colors::BOARD[0], pcb_export::colors::BOARD[1], pcb_export::colors::BOARD[2], 225);
+            for t in b.tracks.iter().filter(|t| !s.tracks.contains(t)) {
+                painter.line_segment([xf.s(t.a), xf.s(t.b)], Stroke::new((t.width as f32 * xf.zoom).max(1.5) + 1.0, under));
+            }
+            for v in b.vias.iter().filter(|v| !s.vias.contains(v)) {
+                painter.circle_filled(xf.s(v.at), v.d as f32 / 2.0 * xf.zoom + 0.5, under);
+            }
+            for t in s.tracks.iter().filter(|t| !b.tracks.contains(t)) {
+                let c = pcb_export::layer_color(t.layer);
+                painter.line_segment([xf.s(t.a), xf.s(t.b)], Stroke::new((t.width as f32 * xf.zoom).max(1.5), Color32::from_rgba_unmultiplied(c[0], c[1], c[2], 200)));
+            }
+            for v in s.vias.iter().filter(|v| !b.vias.contains(v)) {
+                let c = pcb_export::colors::PAD;
+                painter.circle_filled(xf.s(v.at), v.d as f32 / 2.0 * xf.zoom, Color32::from_rgb(c[0], c[1], c[2]));
+                painter.circle_filled(xf.s(v.at), v.drill as f32 / 2.0 * xf.zoom, Color32::from_rgb(20, 20, 20));
+            }
+        }
         let walked = app.pcb.walk_path.as_ref().filter(|w| app.pcb.walkaround && w.0 == start && w.2 == r.layer).and_then(|w| w.3.clone().map(|p| tidy_walk(start, w.1, p)));
-        let path = walked.unwrap_or_else(|| route45(start, route_end(start, h, ROUTE_GRID, (6.0 / xf.zoom) as f64)));
+        let path = match shoved {
+            Some((to, _)) => route45(start, to),
+            None => walked.unwrap_or_else(|| route45(start, route_end(start, h, ROUTE_GRID, (6.0 / xf.zoom) as f64))),
+        };
         let wpx = (r.width as f32 * xf.zoom).max(1.5);
         for s in path.windows(2) {
             painter.line_segment([xf.s(s[0]), xf.s(s[1])], Stroke::new(wpx, col));
