@@ -228,6 +228,13 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
             v.push(cmd("Hide / show selected instances", "View", "eyeOff", Some("H"), "hide show visibility eye parts", Action::Run(crate::asm_ui::toggle_hide_selected)));
             v.push(cmd("Show all instances", "View", "eye", Some("Shift+H"), "unhide show hidden visibility eye parts", Action::Run(crate::asm_ui::show_all)));
+            if app.asm.sel.len() == 1 {
+                v.push(cmd("Open selected part", "Assembly", "partStudio", None, "edit go to part studio source sub-assembly jump", Action::Run(|a| {
+                    if let Some(&id) = a.asm.sel.first() {
+                        crate::asm_ui::open_part(a, id, None);
+                    }
+                })));
+            }
         }
         Tab::Sim(_) => {
             v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
