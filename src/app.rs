@@ -3096,10 +3096,15 @@ impl App {
 
     fn tabs_ui(&mut self, ui: &mut Ui) {
         use crate::workspace::Tab;
-        // in the order the user arranged them
-        let tabs: Vec<(Tab, String, &str)> = self
-            .ws
-            .tabs()
+        // in the order the user arranged them, or each kind together when grouped
+        let grouped = self.session.prefs.group_tabs;
+        let order = if grouped { self.ws.tabs_grouped() } else { self.ws.tabs() };
+        let mut per_kind = [0usize; 6];
+        for t in &order {
+            per_kind[t.kind()] += 1;
+        }
+        let folded = self.session.prefs.folded_groups.clone();
+        let tabs: Vec<(Tab, String, &str)> = order
             .into_iter()
             .map(|t| match t {
                 Tab::Studio(i) => (t, self.ws.studios[i].name.clone(), "partStudio"),
@@ -3117,6 +3122,8 @@ impl App {
         let dragging: Option<Tab> = ui.ctx().data(|d| d.get_temp(drag_id));
         let mut tab_rects: Vec<(Tab, egui::Rect)> = vec![];
         let mut action: Option<(&str, Tab)> = None;
+        let mut fold: Option<usize> = None;
+        let mut toggle_group = false;
         ui.horizontal(|ui| {
             ui.spacing_mut().item_spacing.x = 0.0;
             ui.menu_image_button(icons::image("plus", 16.0).tint(theme::text()), |ui| {
@@ -3147,13 +3154,42 @@ impl App {
             })
             .response
             .on_hover_text("Add a Part Studio, Assembly, Drawing, Manufacture, Simulation or PCB tab");
+            ui.add_space(2.0);
+            let tip = if grouped { "Tabs are grouped by type: click to go back to your own order" } else { "Group tabs by type (Part Studios, Assemblies, Drawings, ...)" };
+            if group_toggle(ui, grouped).on_hover_text(tip).clicked() {
+                toggle_group = true;
+            }
             ui.add_space(6.0);
             // tabs scroll sideways when they don't fit (phones)
             let reserve = if self.phone { 115.0 } else { 220.0 };
             egui::ScrollArea::horizontal().max_width((ui.available_width() - reserve).max(80.0)).show(ui, |ui| {
                 ui.horizontal(|ui| {
                     ui.spacing_mut().item_spacing.x = 0.0;
+                    let mut last_kind = None;
+                    let mut in_kind = 0usize;
                     for (t, name, icon) in tabs {
+                        let k = t.kind();
+                        if last_kind != Some(k) {
+                            in_kind = 0;
+                        } else {
+                            in_kind += 1;
+                        }
+                        if grouped && last_kind != Some(k) {
+                            if last_kind.is_some() {
+                                ui.add_space(4.0);
+                            }
+                            let open = !folded.contains(&k);
+                            let hr = group_header(ui, Tab::kind_label(k), per_kind[k], open);
+                            let hint = if open { "Fold this group (the open tab stays shown)" } else { "Show this group's tabs" };
+                            if hr.on_hover_text(hint).clicked() {
+                                fold = Some(k);
+                            }
+                        }
+                        last_kind = Some(k);
+                        // a folded group still shows the tab that is open
+                        if grouped && folded.contains(&k) && self.tab != t {
+                            continue;
+                        }
                         if let Some((rt, text)) = &mut self.renaming_tab {
                             if *rt == t {
                                 let r = ui.add(egui::TextEdit::singleline(text).desired_width(140.0));
@@ -3181,7 +3217,8 @@ impl App {
                         if r.drag_started() {
                             ui.ctx().data_mut(|d| d.insert_temp(drag_id, t));
                         }
-                        let pos = tab_rects.len() - 1;
+                        // Move left/right stay inside the group when grouped
+                        let (pos, n_here) = if grouped { (in_kind, per_kind[k]) } else { (tab_rects.len() - 1, n_tabs) };
                         r.context_menu(|ui| {
                             if ui.button("Rename").clicked() {
                                 action = Some(("rename", t));
@@ -3195,8 +3232,14 @@ impl App {
                                 action = Some(("move-left", t));
                                 ui.close();
                             }
-                            if pos + 1 < n_tabs && ui.button("Move right").clicked() {
+                            if pos + 1 < n_here && ui.button("Move right").clicked() {
                                 action = Some(("move-right", t));
+                                ui.close();
+                            }
+                            ui.separator();
+                            let mut g = grouped;
+                            if ui.checkbox(&mut g, "Group by type").clicked() {
+                                toggle_group = true;
                                 ui.close();
                             }
                             if ui.button(RichText::new("Delete").color(theme::error_soft())).clicked() {
@@ -3207,7 +3250,11 @@ impl App {
                     }
                     // a dragged tab: show where it goes, and move it there on release
                     if let Some(dt) = dragging {
-                        if let Some(p) = ui.ctx().pointer_interact_pos() {
+                        // grouped: a tab moves only among the tabs of its own kind
+                        if grouped {
+                            tab_rects.retain(|(t, _)| t.kind() == dt.kind());
+                        }
+                        if let Some(p) = ui.ctx().pointer_interact_pos().filter(|_| !tab_rects.is_empty()) {
                             let from = tab_rects.iter().position(|(t, _)| *t == dt);
                             let to = tab_rects.iter().position(|(_, r)| p.x < r.center().x).unwrap_or(tab_rects.len());
                             if let (Some(from), Some(x)) = (from, tab_rects.get(to).map(|(_, r)| r.left()).or(tab_rects.last().map(|(_, r)| r.right()))) {
@@ -3270,8 +3317,24 @@ impl App {
         }
         if let Some((t, by)) = drop_at {
             if by != 0 {
-                self.ws.move_tab(t, by);
+                if grouped {
+                    self.ws.move_tab_in_kind(t, by);
+                } else {
+                    self.ws.move_tab(t, by);
+                }
             }
+        }
+        if toggle_group {
+            self.toggle_group_tabs();
+        }
+        if let Some(k) = fold {
+            let f = &mut self.session.prefs.folded_groups;
+            if let Some(i) = f.iter().position(|x| *x == k) {
+                f.remove(i);
+            } else {
+                f.push(k);
+            }
+            self.session.prefs_dirty();
         }
         if let Some(i) = self.restore_version.take() {
             self.sync_ws();
@@ -3285,6 +3348,12 @@ impl App {
                 Err(e) => self.flash(format!("Could not restore: {e}"), ToastKind::Error),
             }
         }
+    }
+
+    /// Group the bottom bar's tabs by type, or go back to the user's own order (kept as it was).
+    pub fn toggle_group_tabs(&mut self) {
+        self.session.prefs.group_tabs = !self.session.prefs.group_tabs;
+        self.session.prefs_dirty();
     }
 
     /// Show `ws` in place of the open workspace (an earlier version of it), as one undoable step:
@@ -3363,7 +3432,12 @@ impl App {
             }
             "move-left" | "move-right" => {
                 self.ws_checkpoint(format!("move “{}”", name_of(&self.ws, t).unwrap_or_default()), None, false);
-                self.ws.move_tab(t, if a == "move-left" { -1 } else { 1 });
+                let by = if a == "move-left" { -1 } else { 1 };
+                if self.session.prefs.group_tabs {
+                    self.ws.move_tab_in_kind(t, by);
+                } else {
+                    self.ws.move_tab(t, by);
+                }
                 self.ws_mark();
             }
             "version" => {
@@ -3886,6 +3960,36 @@ fn tab_button(ui: &mut Ui, icon: &str, name: &str, active: bool) -> egui::Respon
     let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 18.0, rect.center().y), egui::vec2(15.0, 15.0));
     icons::image(icon, 15.0).tint(if active { theme::accent() } else { col }).paint_at(ui, ir);
     ui.painter().galley(egui::pos2(rect.left() + 32.0, rect.center().y - g.size().y / 2.0), g, col);
+    resp
+}
+
+/// The bottom bar's "group by type" switch: a small icon button, lit while tabs are grouped.
+fn group_toggle(ui: &mut Ui, on: bool) -> egui::Response {
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(28.0, 32.0), Sense::click());
+    let pill = rect.shrink2(egui::vec2(2.0, 5.0));
+    if on {
+        ui.painter().rect_filled(pill, CornerRadius::same(8), theme::lerp(theme::canvas(), theme::accent(), 0.18));
+    } else if resp.hovered() {
+        ui.painter().rect_filled(pill, CornerRadius::same(8), theme::lerp(theme::canvas(), theme::panel(), 0.5));
+    }
+    let ir = egui::Rect::from_center_size(rect.center(), egui::vec2(15.0, 15.0));
+    icons::image("configurations", 15.0).tint(if on { theme::accent() } else { theme::muted() }).paint_at(ui, ir);
+    resp
+}
+
+/// A group's header in the grouped tab bar: chevron, kind and count; a click folds the group.
+fn group_header(ui: &mut Ui, label: &str, n: usize, open: bool) -> egui::Response {
+    let text = format!("{label} {n}");
+    let g = ui.painter().layout_no_wrap(text, egui::FontId::new(11.0, theme::medium()), theme::muted());
+    let w = g.size().x + 30.0;
+    let (rect, resp) = ui.allocate_exact_size(egui::vec2(w, 32.0), Sense::click());
+    let p = ui.painter();
+    let chip = rect.shrink2(egui::vec2(2.0, 7.0));
+    let fill = if resp.hovered() { theme::lerp(theme::canvas(), theme::panel(), 0.7) } else { theme::lerp(theme::canvas(), theme::panel(), 0.35) };
+    p.rect_filled(chip, CornerRadius::same(9), fill);
+    let ir = egui::Rect::from_center_size(egui::pos2(rect.left() + 13.0, rect.center().y), egui::vec2(12.0, 12.0));
+    icons::image(if open { "chevronDown" } else { "chevronRight" }, 12.0).tint(theme::muted()).paint_at(ui, ir);
+    ui.painter().galley(egui::pos2(rect.left() + 22.0, rect.center().y - g.size().y / 2.0), g, theme::muted());
     resp
 }
 

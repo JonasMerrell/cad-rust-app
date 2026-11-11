@@ -65,6 +65,12 @@ pub struct Prefs {
     pub zoom: Option<f32>,
     #[serde(default)]
     pub window: Option<[f32; 2]>,
+    /// The bottom tab bar groups tabs by kind (Part Studios, then Assemblies, ...).
+    #[serde(default)]
+    pub group_tabs: bool,
+    /// Kinds (`Tab::kind`) whose group is folded to its header in the grouped tab bar.
+    #[serde(default)]
+    pub folded_groups: Vec<usize>,
 }
 
 pub struct Session {
@@ -132,6 +138,13 @@ impl Default for Session {
             screenshot: false,
             render_mode: 0,
         }
+    }
+}
+
+impl Session {
+    /// A setting in `prefs` changed: written to disk once things settle.
+    pub fn prefs_dirty(&mut self) {
+        self.prefs_changed = Some(Instant::now());
     }
 }
 
@@ -1255,7 +1268,7 @@ mod tests {
 
     #[test]
     fn prefs_round_trip() {
-        let p = Prefs { zoom: Some(1.25), window: Some([1200.0, 800.0]) };
+        let p = Prefs { zoom: Some(1.25), window: Some([1200.0, 800.0]), group_tabs: true, folded_groups: vec![1] };
         let s = serde_json::to_string(&p).unwrap();
         assert_eq!(serde_json::from_str::<Prefs>(&s).unwrap(), p);
         assert_eq!(serde_json::from_str::<Prefs>("{}").unwrap(), Prefs::default());
