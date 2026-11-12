@@ -275,6 +275,7 @@ Pico controller firmware homes the steppers and runs a pick-and-place cycle in t
 Download a build for Linux or Windows from
 [Releases](https://github.com/JonasMerrell/cad-rust-app/releases) (`rcad-<platform>`), unpack it and run
 `rcad`. The archive also has `AGENTS.md`, `SCRIPTING.md`, `.mcp.json` and the examples.
+On Linux, `./install.sh` in the unpacked folder adds rCAD with its icon to your app menu (`./install.sh --uninstall` removes it).
 
 Or build from source:
 
