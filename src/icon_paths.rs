@@ -96,6 +96,8 @@ pub const ICONS: &[(&str, &str)] = &[
     ("transform", "M12 3v18M3 12h18M12 3l-3 3M12 3l3 3M12 21l-3-3M12 21l3-3M3 12l3-3M3 12l3 3M21 12l-3-3M21 12l-3 3"),
     ("deleteFace", "M4 4h16v16H4zM8 8l8 8M16 8l-8 8"),
     ("assembly", "M4 4h7v7H4zM13 13h7v7h-7zM11 7.5h4.5V13"),
+    ("group", "M3 7V3h4M17 3h4v4M21 17v4h-4M7 21H3v-4M7 7h6v6H7zM11 11h6v6h-6z"),
+    ("ungroup", "M4 4h6v6H4zM14 14h6v6h-6zM14 4h6M20 4v6M4 14v6M4 20h6"),
     ("drawing", "M5 3h10l4 4v14H5zM15 3v4h4M8 13h8M8 17h5"),
     ("mateFastened", "M7 11V7a5 5 0 0 1 10 0v4M5 11h14v10H5z"),
     ("mateRevolute", "M12 12m-3 0a3 3 0 1 0 6 0a3 3 0 1 0 -6 0M19 12a7 7 0 1 1-2-5M19 4v4h-4"),

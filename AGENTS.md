@@ -93,6 +93,7 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 | `create_assembly` / `assembly_insert` | assemblies of parts, or of other assemblies as rigid sub-assemblies |
 | `list_standard_parts` / `insert_standard_part` | ISO/DIN screws, nuts, washers, pins, shafts, bearings, NEMA steppers and T-slot extrusions, built parametrically in a "Standard parts" Part Studio and inserted into an assembly |
 | `assembly_mate` / `assembly_relation` / `assembly_move` | mates (fastened, revolute, slider, cylindrical, planar, ball) picked by a point on a face or edge; gear/rack/screw relations |
+| `assembly_group` | group instances so they move as one rigid body (mates on any member move the group, a fixed member holds it); ungroup or remove members |
 | `assembly_info` / `render_assembly` / `assembly_explode` | poses, BOM, interference check; shaded and exploded renders |
 | `assembly_animation` | motion sliders linked to mates (one slider moving several joints at ratios or in sequence, or driving other motions) and timelines of them; pose at a slider position or time, render frames; they play in `export_web` pages too |
 | `export_web` | an interactive 3D page (.html, opens in a browser) of an assembly, its slider/cylindrical/revolute mates moving within their limits and gear/rack relations following, or of a Part Studio's parts |
