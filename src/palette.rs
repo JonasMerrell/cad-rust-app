@@ -228,6 +228,12 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
             v.push(cmd("Hide / show selected instances", "View", "eyeOff", Some("H"), "hide show visibility eye parts", Action::Run(crate::asm_ui::toggle_hide_selected)));
             v.push(cmd("Show all instances", "View", "eye", Some("Shift+H"), "unhide show hidden visibility eye parts", Action::Run(crate::asm_ui::show_all)));
+            if app.asm.sel.len() > 1 {
+                v.push(cmd("Group selected instances", "Assembly", "group", Some("Ctrl+G"), "group rigid together combine lock move as one body", Action::Run(crate::asm_ui::group_selected)));
+            }
+            if crate::asm_ui::asm(app).is_some_and(|a| a.groups.iter().any(|g| g.members.iter().any(|m| app.asm.sel.contains(m)))) {
+                v.push(cmd("Ungroup", "Assembly", "ungroup", Some("Ctrl+Shift+G"), "ungroup dissolve split group rigid", Action::Run(crate::asm_ui::ungroup_selected)));
+            }
             if app.asm.sel.len() == 1 {
                 v.push(cmd("Open selected part", "Assembly", "partStudio", None, "edit go to part studio source sub-assembly jump", Action::Run(|a| {
                     if let Some(&id) = a.asm.sel.first() {

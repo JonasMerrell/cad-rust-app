@@ -257,6 +257,9 @@ impl Session {
             })
             .collect();
         let mut v = json!({"name": a.name, "instances": insts, "mates": mates, "bom": bom, "explode_steps": a.explode_steps, "failed_mates": failed});
+        if !a.groups.is_empty() {
+            v["groups"] = json!(a.groups.iter().map(|g| json!({"id": g.id, "name": g.name, "instances": g.members})).collect::<Vec<_>>());
+        }
         if interference {
             let mut items = vec![];
             let mut ids = vec![];
@@ -870,8 +873,10 @@ impl Session {
                 let ai = asm_idx(a, self)?;
                 self.build_for_assembly(ai)?;
                 let id = id_arg(a, "instance")?;
+                let old = self.ws.assemblies[ai].instance(id).ok_or("no such instance")?.pose;
+                // the rest of its group comes along
+                self.ws.assemblies[ai].move_rigid(id, pose_arg(a, old));
                 let x = self.ws.assemblies[ai].instances.iter_mut().find(|x| x.id == id).ok_or("no such instance")?;
-                x.pose = pose_arg(a, x.pose);
                 if let Some(f) = a.get("fixed").and_then(|f| f.as_bool()) {
                     x.fixed = f;
                 }
@@ -882,6 +887,7 @@ impl Session {
                     let asm = &mut self.ws.assemblies[ai];
                     asm.instances.retain(|x| x.id != id);
                     asm.mates.retain(|m| m.a.map(|c| c.inst != id).unwrap_or(true) && m.b.map(|c| c.inst != id).unwrap_or(true));
+                    asm.prune_groups();
                 }
                 let failed = self.solve(ai, &[id]);
                 let mut v = self.asm_info(ai, false)?;
@@ -943,6 +949,36 @@ impl Session {
                 r.phase = assembly::relation_phase(asm, &r);
                 asm.relations.push(r);
                 json!({"relation": id})
+            }
+            "assembly_group" => {
+                let ai = asm_idx(a, self)?;
+                let ids = |k: &str| -> Option<Vec<u64>> { a.get(k).and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_u64()).collect()) };
+                let asm = &mut self.ws.assemblies[ai];
+                let mut out = json!({});
+                if let Some(g) = a.get("ungroup").and_then(|v| v.as_u64()) {
+                    if !asm.groups.iter().any(|x| x.id == g) {
+                        return Err(format!("no group {g}"));
+                    }
+                    asm.groups.retain(|x| x.id != g);
+                    out["ungrouped"] = json!(g);
+                }
+                if let Some(r) = ids("remove") {
+                    asm.ungroup_instances(&r);
+                    out["removed"] = json!(r);
+                }
+                if let Some(m) = ids("instances") {
+                    if let Some(bad) = m.iter().find(|i| asm.instance(**i).is_none()) {
+                        return Err(format!("no instance {bad}"));
+                    }
+                    let name = a.get("name").and_then(|n| n.as_str()).map(String::from);
+                    let g = asm.group(&m, name).ok_or("a group needs two or more instances")?;
+                    out["group"] = json!(g);
+                }
+                if out.as_object().is_some_and(|o| o.is_empty()) {
+                    return Err("give instances (to group), ungroup (a group id) or remove (instance ids)".into());
+                }
+                out["groups"] = json!(self.ws.assemblies[ai].groups.iter().map(|g| json!({"id": g.id, "name": g.name, "instances": g.members})).collect::<Vec<_>>());
+                out
             }
             "assembly_explode" => {
                 let ai = asm_idx(a, self)?;
