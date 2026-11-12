@@ -1001,6 +1001,17 @@ fn solve_group(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> 
     let mut x = vec![0.0; n];
     let norm = |r: &[f64]| r.iter().map(|v| v * v).sum::<f64>();
     for _pass in 0..4 {
+    // a dragged part pinned at a limit has to come back off the pointer: holding it there too
+    // leaves the solve too stiff to turn it about its mate (the hinge came apart instead)
+    if _pass > 0 && !active.borrow().is_empty() {
+        for (k, &i) in free.iter().enumerate() {
+            if grab.is_some_and(|g| g.0 == asm.instances[i].id) {
+                for j in 3..6 {
+                    w[6 * k + j] = 1.0;
+                }
+            }
+        }
+    }
     if n > 0 {
         for _ in 0..80 {
             let r = residuals(&x);
@@ -1387,6 +1398,44 @@ mod tests {
     fn conn(inst: u64, o: [f64; 3], z: [f64; 3]) -> Connector {
         let zz = DVec3::from(z).normalize();
         Connector { inst, origin: o, z: zz.into(), x: connector_x(o.into(), zz).into(), on: None }
+    }
+
+    #[test]
+    fn a_door_dragged_on_past_its_limit_stays_on_its_hinge() {
+        // a 500 mm door on a revolute limited to 0..-90°, its free edge pulled round to -150° a
+        // frame at a time: it stops at the limit, still on its hinge, and swings back shut
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0; 3]));
+        let mut m = mate(3, MateKind::Revolute, conn(1, [0.0; 3], [0.0, 0.0, 1.0]), conn(2, [0.0; 3], [0.0, 0.0, 1.0]));
+        m.flip = true;
+        m.limits = Some([-90.0, 0.0]);
+        a.mates.push(m);
+        let ctr = |_: &Instance| DVec3::new(0.0, -250.0, 300.0);
+        assert!(solve(&mut a, &[], &ctr).ok);
+        let grab = DVec3::new(0.0, -500.0, 300.0);
+        let angle = |a: &Assembly| {
+            let m = &a.mates[0];
+            a.mate_turn(m, a.world(&m.a.unwrap()).unwrap(), a.world(&m.b.unwrap()).unwrap()).to_degrees()
+        };
+        let pull = |a: &mut Assembly, deg: f64| {
+            let t = deg.to_radians();
+            let target = DVec3::new(500.0 * t.sin(), -500.0 * t.cos(), 300.0);
+            let p = a.instances[1].pose;
+            a.instances[1].pose = p.perturbed(DVec3::ZERO, target - p.apply(grab), DVec3::ZERO);
+            solve_drag(a, &ctr, 2, grab)
+        };
+        let mut open = vec![];
+        for k in 1..=100 {
+            assert!(pull(&mut a, -1.5 * k as f64).ok, "the hinge came apart at step {k}");
+            open.push(angle(&a));
+        }
+        let at = open.last().unwrap().abs();
+        assert!((at - 90.0).abs() < 1.0, "stopped at {at}°");
+        for k in 1..=100 {
+            assert!(pull(&mut a, -150.0 + 1.6 * k as f64).ok, "the hinge came apart closing, step {k}");
+        }
+        assert!(angle(&a).abs() < 1.0, "shut at {}°", angle(&a));
     }
 
     #[test]
