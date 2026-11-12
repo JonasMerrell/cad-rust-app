@@ -204,6 +204,13 @@ an installed KiCad's libraries, or downloads release 10.0.8 from gitlab.com/kica
 KiCad Libraries Team and contributors under CC-BY-SA 4.0, with an exception that leaves designs
 made with them, and their outputs, free of the share-alike terms.
 
+**Digi-Key parts:** "Add Digi-Key's library…" in the same window downloads Digi-Key's KiCad library
+(about 1,000 orderable parts, each with its footprint, from github.com/Digi-Key/digikey-kicad-library,
+© Digi-Key Corporation, CC-BY-SA 4.0 with the same design exception). Its parts can be searched by
+Digi-Key or manufacturer part number, "Digi-Key parts only" lists just them, and a placed part takes
+its Digi-Key number, MPN and manufacturer, ready for the Digi-Key BOM. Digi-Key no longer updates
+that library, so check stock. Any other symbol has a "Find on Digi-Key" link that searches digikey.com.
+
 ### Circuit and firmware simulation
 
 <img alt="A Raspberry Pi Pico running its firmware drives a motor and a servo; the plots show the arm angle, motor current and limit switch" src="docs/screenshots/circuit-firmware.png" width="100%">
@@ -351,6 +358,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
 | `src/kicad_libs.rs`, `src/kicad_lib_ui.rs` | KiCad library download, index, search and loading; the symbol and footprint choosers |
+| `src/kicad_legacy.rs` | KiCad 5 `.lib` symbol libraries (Digi-Key's KiCad library) read as `.kicad_sym` trees |
 | `src/digikey.rs`, `src/digikey_ui.rs` | Digi-Key API client and CSV import, products to parts, the PCB tab's Digi-Key section |
 | `src/circuit.rs` | circuit simulation setup, part models by value, the circuit built from the schematic, results and measurements |
 | `src/circuit_solve.rs` | the circuit solver: MNA with Newton-Raphson, variable-step BDF2 transient with events and an external pin driver, AC sweep |

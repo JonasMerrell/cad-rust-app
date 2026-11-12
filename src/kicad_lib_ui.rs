@@ -43,6 +43,8 @@ pub struct KicadUi {
     sym_view: Option<(String, Result<Vec<Draw>, String>)>,
     fp_view: Option<(String, Result<(Vec<Draw>, bool), String>)>,
     focus: bool,
+    /// List only parts from Digi-Key's library (they carry Digi-Key part numbers).
+    dk_only: bool,
 }
 
 /// Open the browser (A in the schematic, "KiCad libraries…" in the Library section).
@@ -150,6 +152,31 @@ fn licence(ui: &mut Ui) {
             crate::printing::open_url(kl::LICENSE_URL);
         }
     });
+    if kl::digikey_dir().is_some() {
+        ui.horizontal_wrapped(|ui| {
+            ui.label(RichText::new(kl::DK_CREDIT).color(theme::muted()).size(11.5)).on_hover_text(kl::DK_LICENSE);
+            if ui.link(RichText::new("Licence").size(11.5)).on_hover_text(kl::DK_LICENSE).clicked() {
+                crate::printing::open_url(&format!("{}/blob/master/LICENSE.md", kl::DK_HOME));
+            }
+        });
+    }
+}
+
+/// Digi-Key's library: a filter once it is there, else a button to add it.
+fn digikey_row(app: &mut App, ui: &mut Ui) {
+    let k = &mut app.pcb.kicad;
+    if kl::digikey_dir().is_some() {
+        ui.checkbox(&mut k.dk_only, "Digi-Key parts only").on_hover_text("Parts from Digi-Key's KiCad library: each has its footprint and Digi-Key and manufacturer part numbers, which go on the part and into the BOM");
+    } else if let Some(job) = &k.job {
+        let g = job.lock().map(|g| g.clone()).unwrap_or_default();
+        ui.add(egui::ProgressBar::new(g.done).text(g.stage).desired_width(300.0));
+    } else if ui
+        .button("Add Digi-Key's library…")
+        .on_hover_text(format!("About 1,000 orderable parts from {}, each with its footprint and Digi-Key and manufacturer part numbers (about 10 MB, CC-BY-SA 4.0). Digi-Key no longer updates it, so check a part is still stocked.", kl::DK_HOME))
+        .clicked()
+    {
+        k.job = Some(kl::start_digikey());
+    }
 }
 
 enum Action {
@@ -181,6 +208,9 @@ fn browser(app: &mut App, ui: &mut Ui, ix: &Index) -> Option<Action> {
                 r.request_focus();
                 k.focus = false;
             }
+            if part.is_none() && mode != Mode::Power {
+                digikey_row(app, ui);
+            }
             ui.add_space(4.0);
             egui::ScrollArea::vertical().id_salt("kl-results").max_height(h - 30.0).auto_shrink([false, false]).show(ui, |ui| {
                 if let Some(p) = &part {
@@ -210,13 +240,16 @@ fn browser(app: &mut App, ui: &mut Ui, ix: &Index) -> Option<Action> {
 
 fn symbol_list(app: &mut App, ui: &mut Ui, ix: &Index, power: bool) {
     let k = &mut app.pcb.kicad;
+    let dk_only = k.dk_only && !power && kl::digikey_dir().is_some();
+    let shown = |s: &kl::SymEntry| !dk_only || s.from_digikey();
     let row = |ui: &mut Ui, s: &kl::SymEntry, on: bool| -> bool {
-        let text = if s.desc.is_empty() { RichText::new(&s.name).size(12.5) } else { RichText::new(format!("{}  ·  {}", s.name, s.desc)).size(12.5) };
+        let name = if s.digikey.is_empty() { s.name.clone() } else { format!("{} ({})", s.name, s.digikey) };
+        let text = if s.desc.is_empty() { RichText::new(name).size(12.5) } else { RichText::new(format!("{name}  ·  {}", s.desc)).size(12.5) };
         ui.add(egui::Button::selectable(on, text).truncate()).on_hover_text(format!("{}\n{}", s.key(), s.desc)).clicked()
     };
     if k.query.trim().is_empty() {
         // the library tree, as KiCad shows it
-        let mut libs: Vec<&str> = ix.symbols.iter().filter(|s| s.pins > 0 && (!power || s.power)).map(|s| s.lib.as_str()).collect();
+        let mut libs: Vec<&str> = ix.symbols.iter().filter(|s| s.pins > 0 && (!power || s.power) && shown(s)).map(|s| s.lib.as_str()).collect();
         libs.dedup();
         for lib in libs {
             let open = k.libs_open.contains(lib) || power;
@@ -243,7 +276,11 @@ fn symbol_list(app: &mut App, ui: &mut Ui, ix: &Index, power: bool) {
         }
         return;
     }
-    let hits = kl::search_symbols(ix, &k.query, power, 300);
+    let hits: Vec<&kl::SymEntry> = if dk_only {
+        kl::search_symbols(ix, &k.query, power, usize::MAX).into_iter().filter(|s| shown(s)).take(300).collect()
+    } else {
+        kl::search_symbols(ix, &k.query, power, 300)
+    };
     if hits.is_empty() {
         ui.label(RichText::new("Nothing matches").color(theme::muted()));
     }
@@ -322,9 +359,26 @@ fn symbol_detail(app: &mut App, ui: &mut Ui, ix: &Index, enter: bool) -> Option<
     if !s.keys.is_empty() {
         ui.label(RichText::new(format!("Keywords: {}", s.keys)).color(theme::muted()).size(11.5));
     }
-    if s.datasheet.starts_with("http") && ui.link(RichText::new("Datasheet").size(12.0)).on_hover_text(&s.datasheet).clicked() {
-        crate::printing::open_url(&s.datasheet);
+    if !s.digikey.is_empty() {
+        let mut who = vec![format!("Digi-Key {}", s.digikey)];
+        if !s.mpn.is_empty() {
+            who.push(format!("MPN {}", s.mpn));
+        }
+        if !s.manufacturer.is_empty() {
+            who.push(s.manufacturer.clone());
+        }
+        ui.label(RichText::new(who.join("  ·  ")).size(12.0)).on_hover_text("These go on the part when it is placed, and into the Digi-Key BOM");
     }
+    ui.horizontal_wrapped(|ui| {
+        if s.datasheet.starts_with("http") && ui.link(RichText::new("Datasheet").size(12.0)).on_hover_text(&s.datasheet).clicked() {
+            crate::printing::open_url(&s.datasheet);
+        }
+        // the part on digikey.com: its own page for Digi-Key's parts, else a search
+        let (label, q) = if s.digikey.is_empty() { ("Find on Digi-Key ↗", if s.lib == "Device" || s.lib.starts_with("power") { s.desc.clone() } else { s.name.clone() }) } else { ("Digi-Key ↗", s.digikey.clone()) };
+        if ui.link(RichText::new(label).size(12.0)).on_hover_text(format!("Search digikey.com for \"{q}\"; import the results here with Digi-Key → Import CSV")).clicked() {
+            crate::printing::open_url(&crate::digikey::web_search_url(&q));
+        }
+    });
     ui.add_space(4.0);
     // the symbol
     if app.pcb.kicad.sym_view.as_ref().is_none_or(|v| v.0 != key) {

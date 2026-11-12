@@ -270,6 +270,9 @@ pub struct LibSymbol {
     /// Where the symbol came from and under what licence (KiCad libraries: CC-BY-SA 4.0).
     #[serde(default, skip_serializing_if = "String::is_empty")]
     pub source: String,
+    /// The library's other fields (Digi-Key's library: Digi-Key_PN, MPN, Manufacturer, …).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub fields: Vec<(String, String)>,
 }
 
 impl LibSymbol {
