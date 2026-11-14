@@ -164,6 +164,7 @@ pub const ICONS: &[(&str, &str)] = &[
     ("camDrill", "M10 2h4v8h-4zM10 10l2 11 2-11M10 13l4 2"),
     ("camThread", "M7 4h10M7 8h10M7 12h10M7 16h10M7 20h10M7 4l10 4M7 8l10 4M7 12l10 4M7 16l10 4"),
     ("camTap", "M12 2v3M9 5h6v11l-3 5-3-5zM9 8l6 2M9 11l6 2M9 14l6 2"),
+    ("camProbe", "M9.5 2h6v7l-2 2h-2l-2-2zM12.5 11v6M11 18.5a1.5 1.5 0 1 0 3 0a1.5 1.5 0 1 0-3 0M14 14h7v8h-7"),
     ("camTools", "M4 3h4v18H4zM10 3h4v18h-4zM16 3h4v18h-4zM4 8h4M10 11h4M16 6h4"),
     ("camSim", "M7 4l13 8-13 8z"),
     ("camGcode", "M8 7l-5 5 5 5M16 7l5 5-5 5M14 4l-4 16"),

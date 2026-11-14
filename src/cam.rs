@@ -31,10 +31,12 @@ pub enum ToolKind {
     CenterDrill,
     Tap,
     Reamer,
+    /// Touch probe (3D probe with a ball stylus): measures the work instead of cutting it.
+    Probe,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 14] = [
+    pub const ALL: [ToolKind; 15] = [
         ToolKind::Flat,
         ToolKind::Ball,
         ToolKind::Bull,
@@ -49,6 +51,7 @@ impl ToolKind {
         ToolKind::CenterDrill,
         ToolKind::Tap,
         ToolKind::Reamer,
+        ToolKind::Probe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -67,6 +70,7 @@ impl ToolKind {
             ToolKind::CenterDrill => "Center drill",
             ToolKind::Tap => "Tap",
             ToolKind::Reamer => "Reamer",
+            ToolKind::Probe => "Touch probe",
         }
     }
 
@@ -86,6 +90,7 @@ impl ToolKind {
             ToolKind::CenterDrill => "center_drill",
             ToolKind::Tap => "tap",
             ToolKind::Reamer => "reamer",
+            ToolKind::Probe => "probe",
         }
     }
 
@@ -102,6 +107,7 @@ impl ToolKind {
             "facemill" => Some(ToolKind::FaceMill),
             "spot" => Some(ToolKind::SpotDrill),
             "center" => Some(ToolKind::CenterDrill),
+            "touch_probe" | "3d_probe" | "probing" | "wcs_probe" | "edge_finder" => Some(ToolKind::Probe),
             _ => None,
         })
     }
@@ -272,6 +278,7 @@ impl Tool {
             ToolKind::Slot => format!("Ø{d} × {} slot mill", fmt_mm(self.cutting_width)),
             ToolKind::ThreadMill => format!("Ø{d} thread mill, pitch {}", fmt_mm(self.pitch)),
             ToolKind::Tap => format!("M{} × {} tap", fmt_mm(self.diameter), fmt_mm(self.pitch)),
+            ToolKind::Probe => format!("touch probe, Ø{d} stylus ball"),
             ToolKind::Drill | ToolKind::SpotDrill | ToolKind::CenterDrill => format!("Ø{d} {}° {}", fmt_mm(self.angle), self.kind.label().to_lowercase()),
             _ => format!("Ø{d} {}, {} flutes", self.kind.label().to_lowercase(), self.flutes),
         }
@@ -301,7 +308,7 @@ impl Tool {
         let r = self.radius();
         let len = self.flute_length.max(r);
         match self.kind {
-            ToolKind::Ball => {
+            ToolKind::Ball | ToolKind::Probe => {
                 let mut v: Vec<(f64, f64)> = (0..=8).map(|i| i as f64 / 8.0 * std::f64::consts::FRAC_PI_2).map(|a| (r * a.sin(), r - r * a.cos())).collect();
                 v.push((r, len));
                 v
@@ -437,6 +444,13 @@ pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64, min_rpm: f64) {
     let fz = (0.008 * d.powf(0.8)).clamp(0.005, 0.12) * k;
     let flutes = tool.flutes.max(1) as f64;
     tool.rpm = (rpm / 100.0).round() * 100.0;
+    if tool.kind == ToolKind::Probe {
+        // a probe doesn't spin: its feed is the fast search, its plunge feed the slow second touch
+        tool.rpm = 0.0;
+        tool.feed = 300.0;
+        tool.plunge_feed = 25.0;
+        return;
+    }
     match tool.kind {
         ToolKind::Tap => {
             tool.rpm = (tool.rpm * 0.08).clamp(100.0, 800.0).round();
@@ -586,6 +600,16 @@ pub fn presets() -> Vec<Tool> {
             t.name = format!("Ø{} H7 reamer", fmt_mm(t.diameter));
         });
     }
+    // a touch probe with a Ø2 ruby ball on a 20 mm stylus, the probe body Ø25 above it
+    add(ToolKind::Probe, 2.0, &|t| {
+        t.flutes = 1;
+        t.shank_diameter = 1.5;
+        t.flute_length = 20.0;
+        t.stickout = 40.0;
+        t.holder_diameter = 25.0;
+        t.coolant = Coolant::Off;
+        t.name = "Touch probe (Ø2 ruby)".into();
+    });
     for t in v.iter_mut() {
         suggest(t, "Aluminium", 24000.0, 0.0);
     }
@@ -652,10 +676,12 @@ pub enum OpKind {
     /// Carve the closed shapes of a sketch (text, logos) with a V-bit: deeper where they are wider,
     /// so the walls meet in sharp corners.
     VCarve,
+    /// Find the stock or the part with a touch probe and set the work zero from it.
+    Probe,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 17] = [
+    pub const ALL: [OpKind; 18] = [
         OpKind::Face,
         OpKind::Clear,
         OpKind::Pocket,
@@ -673,6 +699,7 @@ impl OpKind {
         OpKind::Pencil,
         OpKind::Trace,
         OpKind::VCarve,
+        OpKind::Probe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -694,6 +721,7 @@ impl OpKind {
             OpKind::Pencil => "Pencil",
             OpKind::Trace => "Trace",
             OpKind::VCarve => "V-carve",
+            OpKind::Probe => "Probe",
         }
     }
 
@@ -716,6 +744,7 @@ impl OpKind {
             OpKind::Pencil => "pencil",
             OpKind::Trace => "trace",
             OpKind::VCarve => "vcarve",
+            OpKind::Probe => "probe",
         }
     }
 
@@ -737,6 +766,7 @@ impl OpKind {
             "tapping" => Some(OpKind::Tap),
             "engrave" | "engraving" | "follow" | "sketch" | "2d_contour" => Some(OpKind::Trace),
             "v_carve" | "v-carve" | "vcarving" | "v_carving" | "carve" => Some(OpKind::VCarve),
+            "probing" | "wcs" | "wcs_probe" | "work_zero" | "touch_off" | "probe_wcs" => Some(OpKind::Probe),
             _ => None,
         })
     }
@@ -760,6 +790,7 @@ impl OpKind {
             OpKind::Pencil => "3D clean-up with a small tool along the inside corners and fillets that a bigger (reference) tool left material in.",
             OpKind::Trace => "Follows the curves of sketches at a depth below the surface: engraved lines, or cutting along a drawing (on the line, or beside closed shapes).",
             OpKind::VCarve => "Carves the closed shapes of sketches (text, logos) with a V-bit, deeper where they are wider so the walls meet in sharp corners.",
+            OpKind::Probe => "Touches the stock or the part with a touch probe and sets the work zero from it: the top (Z), an edge, a corner, or the centre of a bore or boss.",
         }
     }
 
@@ -784,6 +815,7 @@ impl OpKind {
             OpKind::Deburr => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
             OpKind::Trace => matches!(k, ToolKind::Flat | ToolKind::Ball | ToolKind::Bull | ToolKind::TaperedBall | ToolKind::Chamfer | ToolKind::Engrave),
             OpKind::VCarve => matches!(k, ToolKind::Engrave | ToolKind::Chamfer),
+            OpKind::Probe => k == ToolKind::Probe,
         }
     }
 }
@@ -880,6 +912,72 @@ pub struct Operation {
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
+    /// Probe: what to touch and which work zero axes to set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probing: Option<ProbeOp>,
+}
+
+/// What a probing operation finds.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeCycle {
+    /// The top surface: sets Z.
+    #[default]
+    Z,
+    /// One side: sets X (left, right) or Y (front, back).
+    Edge,
+    /// An outside corner: sets X and Y (and Z with `with_z`).
+    Corner,
+    /// The middle of a round hole, touching its wall four times: sets X and Y.
+    Bore,
+    /// The middle of a block (the stock, or the part's outline) or of a round boss, touching it from
+    /// outside on all four sides: sets X and Y.
+    Boss,
+}
+
+impl ProbeCycle {
+    pub const ALL: [ProbeCycle; 5] = [ProbeCycle::Z, ProbeCycle::Edge, ProbeCycle::Corner, ProbeCycle::Bore, ProbeCycle::Boss];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProbeCycle::Z => "Z surface",
+            ProbeCycle::Edge => "Edge",
+            ProbeCycle::Corner => "Outside corner",
+            ProbeCycle::Bore => "Bore centre",
+            ProbeCycle::Boss => "Block or boss centre",
+        }
+    }
+}
+
+/// The settings of a probing operation. Points and heights are work coordinates; the work zero it sets is
+/// the setup's own (where the feature is in the setup), in G54.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProbeOp {
+    pub cycle: ProbeCycle,
+    /// Edge: "left", "right", "front" or "back"; corner: "front_left", "front_right", "back_left" or "back_right".
+    pub side: String,
+    /// Find the edge, corner or top on the part instead of the stock (e.g. after flipping a machined part).
+    pub on_part: bool,
+    /// Bore or boss diameter, with `Operation::at` its middle; 0 = found: the part's round hole (or boss) nearest
+    /// `at` (or the biggest), the block's sides for a block.
+    pub size: f64,
+    /// How far below the top to touch walls and edges, mm.
+    pub depth: f64,
+    /// Gap between the stylus ball and the surface where each touch starts, mm.
+    pub clearance: f64,
+    /// How far past the expected surface the probe may go before giving up, mm.
+    pub overtravel: f64,
+    /// Corner: how far in from the corner the two sides are touched, mm.
+    pub inset: f64,
+    /// Corner: touch the top too and set Z.
+    pub with_z: bool,
+}
+
+impl Default for ProbeOp {
+    fn default() -> Self {
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false }
+    }
 }
 
 impl Default for Operation {
@@ -928,6 +1026,7 @@ impl Default for Operation {
             depth: 0.0,
             lead: 0.0,
             chip_thinning: false,
+            probing: None,
         }
     }
 }
@@ -1448,6 +1547,20 @@ impl Cam {
                 op.depth = 0.5;
             }
             OpKind::VCarve => op.stepover = Some(0.02),
+            OpKind::Probe => {
+                // the first probing sets Z on the stock top, the next ones the corner the work zero is at
+                let corner = match self.origin {
+                    Origin::StockTopCenter => None,
+                    _ => Some("front_left"),
+                };
+                let cycle = if n == 1 { ProbeCycle::Z } else if corner.is_some() { ProbeCycle::Corner } else { ProbeCycle::Boss };
+                op.probing = Some(ProbeOp { cycle, side: corner.unwrap_or("front_left").into(), on_part: self.origin == Origin::PartTopCorner, ..Default::default() });
+                op.name = match cycle {
+                    ProbeCycle::Z => "Probe top".into(),
+                    ProbeCycle::Corner => "Probe corner".into(),
+                    _ => "Probe centre".into(),
+                };
+            }
             _ => {}
         }
         if kind == OpKind::Drill && self.tool(tool).map(|t| t.kind == ToolKind::Drill && t.diameter > 0.0).unwrap_or(false) {

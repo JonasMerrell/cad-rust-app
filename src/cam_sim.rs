@@ -26,6 +26,8 @@ pub enum EventKind {
     Machine,
     /// An axis went past its travel.
     Travel,
+    /// A touch probe ran into material on its way (it should only ever touch it).
+    Probe,
 }
 
 impl EventKind {
@@ -38,6 +40,7 @@ impl EventKind {
             EventKind::Fixture => "hits a fixture",
             EventKind::Machine => "machine crash",
             EventKind::Travel => "beyond the machine's travel",
+            EventKind::Probe => "probe runs into the work",
         }
     }
 }
@@ -75,6 +78,8 @@ struct Cutter {
     /// Length out of the holder, and the holder's length up to the spindle (for placing it in the machine).
     stickout: f64,
     holder_len: f64,
+    /// A touch probe: any material in its way is a crash.
+    probe: bool,
 }
 
 pub const LUT_STEP: f64 = 0.002;
@@ -154,7 +159,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t) }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe }
     }
 }
 
@@ -654,6 +659,13 @@ impl Sim {
             }
         }
         let undercut = c.undercut;
+        // a probe's stylus ball only comes within a hair of the work: deeper than a cell's worth of rounding is a hit
+        if c.probe {
+            if deepest as f64 > self.cell.max(0.05) {
+                self.event(EventKind::Probe, op, step, p, deepest as f64);
+            }
+            gouge = 0.0;
+        }
         self.removed += removed as f64;
         if rapid && deepest > 0.02 {
             self.event(EventKind::Rapid, op, step, p, deepest as f64);
