@@ -588,6 +588,9 @@ impl Sim {
             let n = (c.radius / self.cell).ceil() as i32 + 1;
             let r2 = c.radius * c.radius;
             let inner = (c.radius - 0.02).max(0.0);
+            // a probe stops a hair short of a wall: within a cell of its ball's outline the stock map can't
+            // tell that from a touch
+            let probe_inner = (c.radius - self.cell).max(0.0);
             for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
                 let dy = self.y0 + j as f64 * self.cell - p.y;
                 for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
@@ -604,7 +607,9 @@ impl Sim {
                         let floor = self.lo[k];
                         let cut = s - z.max(floor);
                         removed += cut * area;
-                        deepest = deepest.max(cut);
+                        if !c.probe || rho <= probe_inner {
+                            deepest = deepest.max(cut);
+                        }
                         // cut right through the column: nothing left over this cell
                         self.stock[k] = if z <= floor { EMPTY } else { z };
                         let tag = (ci + 1).min(250) as u8;
