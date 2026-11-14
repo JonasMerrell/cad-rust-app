@@ -238,7 +238,9 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
     }
     let total = crate::cam_paths::cycle_time(cam, paths);
-    o.line(&comment(&format!("estimated time {}:{:02}", (total / 60.0).floor(), (total % 60.0).round() as i64)));
+    // rounded once, so 239.6 s reads 4:00, not 3:60
+    let secs = total.round().max(0.0) as i64;
+    o.line(&comment(&format!("estimated time {}:{:02}", secs / 60, secs % 60)));
     match d {
         Dialect::Grbl => o.line("G21 G17 G90 G94"),
         // G91.1: arc centres (I, J) relative to the start, whatever the controller was left in
