@@ -875,6 +875,10 @@ pub struct Operation {
     pub breakthrough: f64,
     /// Chamfer width.
     pub chamfer: f64,
+    /// Chamfer: how far the chamfer mill's tip goes below the chamfer, so it cuts with the cone above its
+    /// weak, slow point for a better finish (the path moves out to keep the same chamfer); 0 = the standard 0.3 mm.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub tip_offset: f64,
     /// Thread major diameter and pitch; None = from the hole and tool.
     pub thread_diameter: Option<f64>,
     pub pitch: Option<f64>,
@@ -1011,6 +1015,7 @@ impl Default for Operation {
             dwell: 0.0,
             breakthrough: 0.5,
             chamfer: 0.5,
+            tip_offset: 0.0,
             thread_diameter: None,
             pitch: None,
             left_hand: false,

@@ -1844,6 +1844,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         }
         OpKind::Chamfer => {
             num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=50.0, 0.05);
+            // how far the tip goes below the chamfer, so it cuts higher up the cone (0 = 1 mm, less if the cone is too narrow)
+            num(ui, "Tip offset", &mut o.tip_offset, " mm", 0.0..=20.0, 0.05);
             opt(ui, "Edge height", &mut o.top, part_top, " mm", "the top of the part");
             row(ui, "Edges", |ui| {
                 for (s, l) in [(Side::Outside, "outside"), (Side::Inside, "inside"), (Side::Both, "both")] {

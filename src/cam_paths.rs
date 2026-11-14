@@ -1724,8 +1724,15 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let edge = ctx.wz(op.top).unwrap_or(ctx.part().hi.z);
     let half = (t.angle.max(10.0) / 2.0).to_radians();
     let tip = if t.kind == ToolKind::Chamfer { t.tip_diameter / 2.0 } else { 0.0 };
-    let e = 0.3_f64;
     let w = op.chamfer.max(0.0);
+    // How far the tip goes below the chamfer: 1 mm by default, so it cuts with the cone above its weak, slow
+    // point; less if the cone isn't wide enough for that (at least 0.3 mm).
+    let room = (t.radius() - tip) / half.tan() - w / half.tan();
+    let want = if op.tip_offset > 0.0 { op.tip_offset } else { 1.0 };
+    let e = want.min(room).max(0.3_f64.min(want));
+    if op.tip_offset > 0.0 && e < want - 1e-6 {
+        tp.warnings.push(format!("the tip offset is cut to {} mm: the chamfer mill's cone isn't wide enough for more", crate::cam::fmt_mm(e)));
+    }
     let depth = w / half.tan() + e;
     let s = tip + e * half.tan();
     if tip + depth * half.tan() > t.radius() + 1e-6 {
