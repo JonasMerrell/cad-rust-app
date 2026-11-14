@@ -1081,6 +1081,17 @@ impl Pcb {
         if let Some(l) = pcb_lib::lib_symbol(&k.key) {
             p.description = l.description.clone();
             p.datasheet = if l.datasheet == "~" { String::new() } else { l.datasheet.clone() };
+            // order numbers from libraries that carry them (Digi-Key's KiCad library)
+            let field = |k: &str| l.fields.iter().find(|f| f.0.eq_ignore_ascii_case(k)).map(|f| f.1.clone()).filter(|v| !v.is_empty() && v != "~");
+            if let Some(v) = field("Digi-Key_PN").or_else(|| field("Digi-Key Part Number")) {
+                p.digikey = v;
+            }
+            if let Some(v) = field("MPN") {
+                p.mpn = v;
+            }
+            if let Some(v) = field("Manufacturer") {
+                p.manufacturer = v;
+            }
         }
         p.at = self.free_spot(&p);
         self.parts.push(p);

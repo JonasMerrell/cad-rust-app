@@ -459,6 +459,8 @@ pub fn symbols(root: &Sx, lib: &str, notes: &mut Vec<String>) -> Result<Vec<LibS
         if sym.prefix.is_empty() {
             sym.prefix = "U".into();
         }
+        const STANDARD: [&str; 5] = ["Reference", "Value", "Footprint", "Datasheet", "Description"];
+        sym.fields = props.iter().filter(|p| !STANDARD.contains(&p.0.as_str()) && !p.0.starts_with("ki_") && !p.1.is_empty()).map(|p| (p.0.clone(), p.1.clone())).collect();
         // units side by side; De Morgan alternates (style 2) left out
         let mut units: Vec<(u32, Vec<&Sx>)> = vec![];
         for u in base.all("symbol") {
