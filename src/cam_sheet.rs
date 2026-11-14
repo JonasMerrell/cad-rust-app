@@ -568,6 +568,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         "setter" => kv.push(("Tool probing", "tool setter: zero the work Z with the first tool".into())),
         _ => {}
     }
+
     s.push_str("<h2>Setup</h2><div class=\"grid\"><div>");
     s.push_str(&figure(&vis.iso, "The part on the machine", "As on the machine, spindle above: the part, what holds it, the stock outline, and the X, Y and Z axes from the work zero."));
     s.push_str("</div><table class=\"kv\">");

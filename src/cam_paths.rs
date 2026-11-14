@@ -2245,6 +2245,31 @@ mod tests {
                 p.machine.spin_up = 5.0;
                 let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
                 assert!(!g.contains("G38") && !g.contains("G31") && !g.contains("G4 "), "{g}");
+                // probing the stock's top and middle becomes rcnc's Find stock, after loading the probe and before
+                // the first cutter, with no spindle in between
+                let mut t = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Probe).unwrap();
+                t.number = 99;
+                let probe = p.add_tool(t);
+                for cycle in [crate::cam::ProbeCycle::Z, crate::cam::ProbeCycle::Boss] {
+                    let id = p.add_op(OpKind::Probe, probe);
+                    let mut o = p.ops.pop().unwrap();
+                    assert_eq!(o.id, id);
+                    o.probing = Some(crate::cam::ProbeOp { cycle, ..Default::default() });
+                    let at = p.ops.iter().filter(|o| o.kind == OpKind::Probe).count();
+                    p.ops.insert(at, o);
+                }
+                let paths = generate(&p, &part);
+                let stock = Ctx::new(&p, &part).stock;
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                let size = stock.1 - stock.0;
+                let at = DVec3::new((stock.0.x + stock.1.x) / 2.0, (stock.0.y + stock.1.y) / 2.0, stock.1.z) - origin;
+                let n = crate::cam_post::num;
+                let want = format!("(RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL=1 DEPTH=4)", n(size.x), n(size.y), n(size.z), n(at.x), n(at.y), n(at.z));
+                let (probe, req, cutter) = (g.find("T99 M6").unwrap(), g.find(&want).expect(&g), g.find("T1 M6").unwrap());
+                assert!(probe < req && req < cutter, "{g}");
+                assert_eq!(g.matches("FIND_STOCK").count(), 1, "one request for both: {g}");
+                assert!(!g.contains("G31"), "{g}");
+                assert!(!g[..cutter].contains("M3"), "no spindle with the probe in: {g}");
             }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {

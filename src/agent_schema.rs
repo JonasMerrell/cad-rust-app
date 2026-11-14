@@ -550,7 +550,8 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             "clearance": t("number", "start gap to the surface, mm"),
             "overtravel": t("number", "mm past the expected surface before giving up"),
             "inset": t("number", "corner: mm from the corner the sides are touched"),
-            "with_z": t("boolean", "corner: touch the top too and set Z")
+            "with_z": t("boolean", "corner: touch the top too and set Z"),
+            "tolerance": t("number", "rcnc, stock top or middle (which rcnc's Find stock wizard does): largest difference between probed and stock size, mm (default 1)")
         }}),
         ("cam_soft_jaws", "one_piece") => t("boolean", "printed only: one block between the vise jaws, squeezed round the part, instead of two jaws"),
         ("cam_soft_jaws", "mount") => {

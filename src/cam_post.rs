@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::{Cam, Coolant, Tool, ToolKind};
+use crate::cam::{Cam, Coolant, ProbeCycle, Tool, ToolKind};
 use crate::cam_paths::{Move, Toolpath};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,7 +25,7 @@ fn dialect(post: &str) -> Dialect {
     }
 }
 
-fn num(v: f64) -> String {
+pub(crate) fn num(v: f64) -> String {
     let s = format!("{:.3}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     if s == "-0" {
@@ -196,11 +196,11 @@ fn message(d: Dialect, text: &str) -> String {
 /// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates).
 #[cfg(test)]
 pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String {
-    gcode_noted(cam, paths, origin, safe, None)
+    gcode_noted(cam, paths, origin, safe, None, None)
 }
 
-/// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice).
-pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>) -> String {
+/// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice). `stock` is the stock box in setup coordinates, for rcnc's Find stock.
+pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>, stock: Option<(DVec3, DVec3)>) -> String {
     let d = dialect(&cam.post);
     let mut o = Out { s: String::new(), last: [None; 3], motion: None, feed: None };
     let safe_w = safe - origin.z;
@@ -251,6 +251,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         o.line(&l);
     }
     let mut cur_tool: Option<u64> = None;
+    let mut found_stock = false;
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = Coolant::Off;
     for tp in paths {
@@ -320,6 +321,16 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             if coolant.is_on() {
                 o.line("M9");
                 coolant = Coolant::Off;
+            }
+            // rcnc finds the stock itself (Find stock: jog over it, it probes the top and all four sides and
+            // checks the size), so probing the stock's top or middle becomes one request for that
+            let find = op.and_then(|o| o.probing.as_ref()).filter(|p| cam.post == "rcnc" && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss));
+            if let (Some(p), Some((lo, hi))) = (find, stock) {
+                if !found_stock {
+                    find_stock(&mut o, p, lo, hi, origin);
+                    found_stock = true;
+                }
+                continue;
             }
             match &tp.probe {
                 Some(plan) => probe_cycle(&mut o, d, plan, origin, safe_w),
@@ -499,6 +510,27 @@ fn fill(text: &str, cam: &Cam, tool: Option<&Tool>) -> Vec<String> {
 
 /// Measure the tool just loaded: on a touch plate (sets the work Z zero) or on a tool setter (sets its
 /// length offset against the first tool, which must be the one the work Z zero was set with).
+/// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
+/// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
+/// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin: DVec3) {
+    let size = hi - lo;
+    let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
+    o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
+    o.line(&comment(&format!(
+        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}",
+        num(size.x),
+        num(size.y),
+        num(size.z),
+        num(top_centre.x),
+        num(top_centre.y),
+        num(top_centre.z),
+        num(p.tolerance),
+        num(p.depth)
+    )));
+    o.forget();
+}
+
 fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f64) {
     let p = &cam.probe;
     let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };

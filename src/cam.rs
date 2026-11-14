@@ -972,11 +972,14 @@ pub struct ProbeOp {
     pub inset: f64,
     /// Corner: touch the top too and set Z.
     pub with_z: bool,
+    /// rcnc, the stock's top or middle: how far the size rcnc's Find stock measures may differ from the
+    /// stock's before it stops, mm.
+    pub tolerance: f64,
 }
 
 impl Default for ProbeOp {
     fn default() -> Self {
-        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false }
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0 }
     }
 }
 
@@ -1198,7 +1201,15 @@ pub struct Probe {
 
 impl Default for Probe {
     fn default() -> Self {
-        Probe { mode: "off".into(), plate_at: [0.0, 0.0, 0.0], plate_thickness: 15.0, setter: [0.0, 0.0, -10.0], travel: 100.0, fast: 300.0, slow: 25.0 }
+        Probe {
+            mode: "off".into(),
+            plate_at: [0.0, 0.0, 0.0],
+            plate_thickness: 15.0,
+            setter: [0.0, 0.0, -10.0],
+            travel: 100.0,
+            fast: 300.0,
+            slow: 25.0,
+        }
     }
 }
 
