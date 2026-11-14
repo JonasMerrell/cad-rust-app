@@ -198,8 +198,15 @@ fn main() -> eframe::Result {
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
         // the window opens at the size it had last time
-        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD"),
+        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD").with_app_id("rcad").with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native("rCAD", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+}
+
+/// The window/taskbar icon: the sketched "r" alone, since title bars and taskbars show it at 16-32 px where
+/// the full "rCAD" word can't be read. Menus and docks get every size from rcad.desktop (Linux) and the
+/// rcad.ico embedded in the exe (Windows, see build.rs).
+fn app_icon() -> std::sync::Arc<egui::IconData> {
+    std::sync::Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/rcad-small-256.png")).unwrap_or_default())
 }
