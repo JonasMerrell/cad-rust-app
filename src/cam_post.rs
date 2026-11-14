@@ -231,7 +231,12 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
     for id in &used {
         if let Some(t) = cam.tool(*id) {
             let d = t.describe();
-            o.line(&comment(&if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) }));
+            let mut line = if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) };
+            // rcnc fills its tool table from these lines, for the picture at the tool change
+            if cam.post == "rcnc" {
+                line += &format!(", flute length {}, stickout {}", num(t.flute_length), num(t.stickout));
+            }
+            o.line(&comment(&line));
         }
     }
     if d != Dialect::LinuxCnc && cam.post != "rcnc" && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
