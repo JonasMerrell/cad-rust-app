@@ -637,7 +637,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             prev = p;
         }
         let z = if zlo.is_finite() && zhi.is_finite() { format!("{} / {}", fmt_mm(zhi - o.z), fmt_mm(zlo - o.z)) } else { "-".into() };
-        let step = if matches!(op.kind, OpKind::Drill | OpKind::Tap | OpKind::Thread | OpKind::Chamfer | OpKind::Deburr) {
+        let step = if matches!(op.kind, OpKind::Drill | OpKind::Tap | OpKind::Thread | OpKind::Chamfer | OpKind::Deburr | OpKind::Probe) {
             "-".to_string()
         } else {
             format!("{} mm / {}% Ø", fmt_mm(cam_paths::stepdown(op, t)), (cam_paths::stepover(op, t) / t.diameter.max(1e-9) * 100.0).round())
@@ -654,6 +654,9 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         if op.rest {
             notes.push("rest machining".into());
         }
+        if let Some(plan) = &tp.probe {
+            notes.push(esc(&format!("finds {} and sets {} (G54); jog the probe close to the work zero first", plan.what, plan.sets_text(o))));
+        }
         notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {
@@ -666,7 +669,14 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         let _ = write!(cards, "<div class=\"body\"><table class=\"kv\">");
         for (k, v) in [
             ("Tool", esc(&t.describe())),
-            ("Speed / feed", format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), cam.feeds(t).0.round())),
+            (
+                "Speed / feed",
+                if t.kind == ToolKind::Probe {
+                    format!("probing at {} / {} mm/min", t.feed.round(), t.plunge_feed.round())
+                } else {
+                    format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), cam.feeds(t).0.round())
+                },
+            ),
             ("Z top / bottom", z.clone()),
             ("Stepdown / over", step.clone()),
             ("Leave side / floor", leave.clone()),

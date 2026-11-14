@@ -312,6 +312,21 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             o.forget();
             cur_tool = Some(tool.id);
         }
+        if tool.kind == ToolKind::Probe {
+            // a touch probe never spins and stays dry
+            if spindle_rpm.take().is_some() {
+                o.line("M5");
+            }
+            if coolant.is_on() {
+                o.line("M9");
+                coolant = Coolant::Off;
+            }
+            match &tp.probe {
+                Some(plan) => probe_cycle(&mut o, d, plan, origin, safe_w),
+                None => o.line(&comment("nothing to probe")),
+            }
+            continue;
+        }
         // never above the spindle's top speed (the toolpath's feeds are scaled to match)
         let rpm = cam.spindle_rpm(tool).round();
         if spindle_rpm != Some(rpm) {
@@ -560,6 +575,91 @@ fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f
         }
         _ => {}
     }
+}
+
+/// A probing operation's cycle: each touch searches fast, backs off and touches again slowly; then the work
+/// zero (G54) axes are set so the surfaces found are where the setup has them.
+fn probe_cycle(o: &mut Out, d: Dialect, plan: &crate::cam_probe::Plan, origin: DVec3, safe_w: f64) {
+    use crate::cam_probe::Step;
+    let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };
+    // where the controller leaves the trip position (work coordinates)
+    let trip = if d == Dialect::Mach3 { 2000 } else { 5061 };
+    let var = |slot: usize| 110 + slot;
+    let axes = ['X', 'Y', 'Z'];
+    let readings = d != Dialect::Grbl;
+    o.line(&comment(&format!("find {} and set {}", plan.what, plan.sets_text(origin))));
+    if !readings && plan.needs_readings() {
+        o.line(&message(d, &format!("GRBL can't work out {} from probe readings: set {} there by hand, then press cycle start", plan.what, plan.sets_text(origin))));
+        o.line("M0");
+        return;
+    }
+    // "+ 1" / "- 1"; nothing for 0
+    let signed = |v: f64| {
+        let v = (v * 1000.0).round() / 1000.0;
+        if v.abs() < 1e-9 {
+            String::new()
+        } else if v > 0.0 {
+            format!(" + {}", num(v))
+        } else {
+            format!(" - {}", num(-v))
+        }
+    };
+    let comp_of = |slot: usize| {
+        plan.steps.iter().find_map(|s| match s {
+            Step::Touch { slot: k, comp, .. } if *k == slot => Some(*comp),
+            _ => None,
+        })
+    };
+    o.z_up(safe_w);
+    for step in &plan.steps {
+        match step {
+            Step::Move { to, feed, centre_x } => {
+                let p = DVec3::from(*to) - origin;
+                let gm = if feed.is_some() { 1 } else { 0 };
+                match centre_x {
+                    Some([a, b]) if readings => {
+                        let mut l = format!("G{gm} X[[#{} + #{}] / 2] Y{} Z{}", var(*a), var(*b), num(p.y), num(p.z));
+                        if let Some(f) = feed {
+                            let _ = write!(l, " F{}", num(f.round()));
+                        }
+                        o.line(&l);
+                        o.forget();
+                    }
+                    _ => o.mv(gm, p, *feed),
+                }
+            }
+            Step::Touch { from, axis, dir, expect, slot, comp } => {
+                let p = DVec3::from(*from) - origin;
+                let ax = axes[*axis];
+                let start = p[*axis];
+                let target = start + dir * (expect + plan.overtravel);
+                o.line(&format!("{g} {ax}{} F{}", num(target), num(plan.fast.round())));
+                o.line("G91");
+                o.line(&format!("G1 {ax}{} F{}", num(-dir * plan.latch), num(plan.fast.round())));
+                o.line("G90");
+                o.line(&format!("{g} {ax}{} F{}", num(target), num(plan.slow.round())));
+                if readings {
+                    o.line(&format!("#{} = #{}", var(*slot), trip + axis));
+                } else if let Some(set) = plan.sets.iter().find(|s| s.touches == [*slot]) {
+                    // GRBL: the probe is where it tripped, so set the axis from here
+                    o.line(&format!("G10 L20 P1 {ax}{}", num(((set.target - origin[set.axis] - comp) * 1000.0).round() / 1000.0)));
+                }
+                o.line(&format!("G1 {ax}{} F{}", num(start), num(plan.fast.round())));
+                o.forget();
+            }
+        }
+    }
+    o.z_up(safe_w);
+    if readings && !plan.sets.is_empty() {
+        let mut l = "G10 L2 P1".to_string();
+        for s in &plan.sets {
+            let terms: Vec<String> = s.touches.iter().map(|k| format!("#{}{}", var(*k), signed(comp_of(*k).unwrap_or(0.0)))).collect();
+            let mean = if terms.len() == 1 { terms[0].clone() } else { format!("[{}] / {}", terms.join(" + "), terms.len()) };
+            let _ = write!(l, " {}[#{} + {mean}{}]", axes[s.axis], 5221 + s.axis, signed(-(s.target - origin[s.axis])));
+        }
+        o.line(&l);
+    }
+    o.forget();
 }
 
 /// Largest gap between the toolpath's points and the arcs that replace it, mm.

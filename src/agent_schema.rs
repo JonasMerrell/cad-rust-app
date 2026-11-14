@@ -541,6 +541,17 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_tool", "tapping_head") => t("boolean", "taps: held in a self-reversing tapping head (no G84 or spindle reversal)"),
         ("cam_tool", "reverse_ratio") => json!({"type": "number", "exclusiveMinimum": 0, "description": "the tapping head's reverse ratio (default 1.75)"}),
         ("cam_op", "chip_thinning") => t("boolean", "adaptive: raise the cutting feed for radial chip thinning (at most ×1.5)"),
+        ("cam_op", "probing") => json!({"type": "object", "description": "probe: what to find and set", "properties": {
+            "cycle": en(&["z", "edge", "corner", "bore", "boss"], "z: the top (sets Z); edge: one side (X or Y); corner: X and Y; bore / boss: a middle (X and Y)"),
+            "side": t("string", "edge: left, right, front, back; corner: front_left, front_right, back_left, back_right"),
+            "on_part": t("boolean", "the part's faces instead of the stock's"),
+            "size": t("number", "bore/boss diameter (with at as its middle); 0 = found on the part"),
+            "depth": t("number", "mm below the top the ball touches walls"),
+            "clearance": t("number", "start gap to the surface, mm"),
+            "overtravel": t("number", "mm past the expected surface before giving up"),
+            "inset": t("number", "corner: mm from the corner the sides are touched"),
+            "with_z": t("boolean", "corner: touch the top too and set Z")
+        }}),
         ("cam_soft_jaws", "one_piece") => t("boolean", "printed only: one block between the vise jaws, squeezed round the part, instead of two jaws"),
         ("cam_soft_jaws", "mount") => {
             let presets: Vec<&str> = crate::cam::JAW_MOUNTS.iter().map(|m| m.1).collect();
@@ -668,7 +679,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         // fields serde leaves out at their defaults, so serde_fields can't see them
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
-            "cam_op" => &[("chip_thinning", "boolean")],
+            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object")],
             _ => &[],
         };
         for (k, ty) in hidden {

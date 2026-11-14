@@ -61,6 +61,9 @@ pub struct Toolpath {
     pub cut_length: f64,
     pub rapid_length: f64,
     pub time: f64,
+    /// A probing operation's cycle, which the post writes instead of the moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<crate::cam_probe::Plan>,
 }
 
 // ---------------------------------------------------------------- part geometry
@@ -1388,17 +1391,19 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         OpKind::Pencil => crate::cam_3d::pencil(ctx, op, &mut pb, &mut tp),
         OpKind::Trace => crate::cam_engrave::trace(ctx, op, &mut pb, &mut tp),
         OpKind::VCarve => crate::cam_engrave::vcarve(ctx, op, &mut pb, &mut tp),
+        OpKind::Probe => crate::cam_probe::probe(ctx, op, &mut pb, &mut tp),
     }
     pb.up();
     // deepest cut below the stock top against the flute length
-    if !tool.kind.is_hole_tool() && !matches!(tool.kind, ToolKind::Slot | ToolKind::ThreadMill) {
+    if !tool.kind.is_hole_tool() && !matches!(tool.kind, ToolKind::Slot | ToolKind::ThreadMill | ToolKind::Probe) {
         let top = ctx.stock.1.z;
         let low = pb.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
         if low.is_finite() && top - low > tool.flute_length + 1e-6 {
             tp.warnings.push(format!("cuts {} mm deep but the flutes are only {} mm long", crate::cam::fmt_mm(top - low), crate::cam::fmt_mm(tool.flute_length)));
         }
     }
-    let boxes = fixture_boxes(ctx.cam, ctx.part(), ctx.origin);
+    // a probe touches where it is told: lifting it over a fixture would spoil the touch (the simulation reports any hit)
+    let boxes = if op.kind == OpKind::Probe { vec![] } else { fixture_boxes(ctx.cam, ctx.part(), ctx.origin) };
     if boxes.is_empty() {
         tp.moves = pb.moves;
     } else {
@@ -1955,7 +1960,7 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
             rpm = None;
         }
         let r = cam.spindle_rpm(t).round();
-        if rpm != Some(r) {
+        if rpm != Some(r) && t.kind != ToolKind::Probe {
             rpm = Some(r);
             total += cam.machine.spin_up.max(0.0);
         }

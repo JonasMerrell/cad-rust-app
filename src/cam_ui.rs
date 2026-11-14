@@ -371,6 +371,12 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         }
     });
     App::group(ui, |ui| {
+        let k = OpKind::Probe;
+        if app.tool_button(ui, "camProbe", k.label(), k.description(), true, false, true).clicked() {
+            add_op(app, k);
+        }
+    });
+    App::group(ui, |ui| {
         if app.tool_button(ui, "camTools", "Tool library", "Pick tools from the library", true, app.cam.library_open, true).clicked() {
             app.cam.library_open = !app.cam.library_open;
         }
@@ -419,6 +425,7 @@ pub(crate) fn add_op(app: &mut App, k: OpKind) {
                     OpKind::Parallel | OpKind::Waterline | OpKind::Scallop => t.kind == ToolKind::Ball && t.diameter >= 6.0,
                     OpKind::Pencil => t.kind == ToolKind::Ball && t.diameter <= 3.0,
                     OpKind::Trace | OpKind::VCarve => t.kind == ToolKind::Engrave && t.angle >= 60.0,
+                    OpKind::Probe => true,
                     _ => t.kind == ToolKind::Flat && t.diameter >= 6.0,
                 }
         });
@@ -1303,6 +1310,7 @@ pub(crate) fn kind_icon(k: OpKind) -> &'static str {
         OpKind::Pencil => "camPencil",
         OpKind::Trace => "camTrace",
         OpKind::VCarve => "camVCarve",
+        OpKind::Probe => "camProbe",
     }
 }
 
@@ -1571,6 +1579,7 @@ fn stepover_row(ui: &mut Ui, label: &str, v: &mut Option<f64>, auto: f64) {
 fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
     let warnings: Vec<String> = app.cam.paths.iter().find(|p| p.op == id).map(|p| p.warnings.clone()).unwrap_or_default();
     let stats = app.cam.paths.iter().find(|p| p.op == id).map(|p| (p.time, p.cut_length));
+    let plan = app.cam.paths.iter().find(|p| p.op == id).and_then(|p| p.probe.clone());
     let origin = match (&app.cam.part, cam(app)) {
         (Some(p), Some(c)) => cam_paths::work_origin(c, p),
         _ => DVec3::ZERO,
@@ -1890,9 +1899,11 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Breakthrough", &mut o.breakthrough, " mm", 0.0..=10.0, 0.05);
             ui.checkbox(&mut o.coolant, "Coolant");
         }
+        OpKind::Probe => probe_params(ui, &mut o, plan.as_ref(), origin),
     }
     if let Some((t, l)) = stats {
-        ui.label(RichText::new(format!("{} · {:.0} mm of cutting", fmt_time(t), l)).color(theme::muted()).size(12.0));
+        let text = if o.kind == OpKind::Probe { fmt_time(t) } else { format!("{} · {:.0} mm of cutting", fmt_time(t), l) };
+        ui.label(RichText::new(text).color(theme::muted()).size(12.0));
     }
     for w in &warnings {
         ui.label(RichText::new(format!("⚠ {w}")).color(theme::error_soft()).size(12.0));
@@ -1901,6 +1912,108 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         app.ws.cams[ci].ops[oi] = o;
         app.cam.scene_dirty = true;
     }
+}
+
+/// A probing operation's settings: what to find, where, and how it touches.
+fn probe_params(ui: &mut Ui, o: &mut Operation, plan: Option<&crate::cam_probe::Plan>, origin: DVec3) {
+    use cam::ProbeCycle;
+    let p = o.probing.get_or_insert_with(Default::default);
+    row(ui, "Find", |ui| {
+        egui::ComboBox::from_id_salt("cam-probe-cycle").selected_text(p.cycle.label()).show_ui(ui, |ui| {
+            for k in ProbeCycle::ALL {
+                if ui.selectable_value(&mut p.cycle, k, k.label()).changed() {
+                    // keep the side meaningful for the new cycle
+                    let corner = p.side.contains('_');
+                    if k == ProbeCycle::Edge && corner {
+                        p.side = "left".into();
+                    } else if k == ProbeCycle::Corner && !corner {
+                        p.side = "front_left".into();
+                    }
+                    if k == ProbeCycle::Bore {
+                        p.on_part = true;
+                    }
+                }
+            }
+        });
+    });
+    match p.cycle {
+        ProbeCycle::Edge => row(ui, "Edge", |ui| {
+            for s in ["left", "right", "front", "back"] {
+                ui.radio_value(&mut p.side, s.to_string(), s);
+            }
+        }),
+        ProbeCycle::Corner => {
+            row(ui, "Corner", |ui| {
+                egui::Grid::new("cam-probe-corner").num_columns(2).spacing([6.0, 2.0]).show(ui, |ui| {
+                    for (k, s) in ["back_left", "back_right", "front_left", "front_right"].into_iter().enumerate() {
+                        ui.radio_value(&mut p.side, s.to_string(), s.replace('_', " "));
+                        if k % 2 == 1 {
+                            ui.end_row();
+                        }
+                    }
+                });
+            });
+            num(ui, "From corner", &mut p.inset, " mm", 0.5..=500.0, 0.1);
+            ui.checkbox(&mut p.with_z, "Touch the top too and set Z");
+        }
+        _ => {}
+    }
+    if p.cycle != ProbeCycle::Bore {
+        row(ui, "On", |ui| {
+            ui.radio_value(&mut p.on_part, false, "stock").on_hover_text("The raw stock's faces, as the setup sizes it");
+            ui.radio_value(&mut p.on_part, true, "part").on_hover_text("The part's faces: for a part machined before (flipped, or in a second setup)");
+        });
+    }
+    let xy_tip = match p.cycle {
+        ProbeCycle::Z => "Where to touch the top (work coordinates)",
+        ProbeCycle::Edge => "A point along the edge to touch at (work coordinates)",
+        ProbeCycle::Bore | ProbeCycle::Boss => "Near the middle of the bore or boss (work coordinates): picks the one nearest it",
+        ProbeCycle::Corner => "",
+    };
+    if p.cycle != ProbeCycle::Corner {
+        row(ui, "At", |ui| {
+            let mut on = o.at.is_some();
+            if ui.checkbox(&mut on, "").on_hover_text(xy_tip).changed() {
+                o.at = if on { Some([0.0, 0.0]) } else { None };
+            }
+            if let Some(a) = &mut o.at {
+                ui.add(egui::DragValue::new(&mut a[0]).prefix("X ").speed(0.5));
+                ui.add(egui::DragValue::new(&mut a[1]).prefix("Y ").speed(0.5));
+            } else {
+                let auto = match p.cycle {
+                    ProbeCycle::Bore => "the biggest bore",
+                    ProbeCycle::Boss if p.on_part => "the biggest boss, else the part's outline",
+                    _ => "the middle",
+                };
+                ui.label(RichText::new(auto).color(theme::muted()).size(12.0));
+            }
+        });
+    }
+    if matches!(p.cycle, ProbeCycle::Bore | ProbeCycle::Boss) {
+        row(ui, "Diameter", |ui| {
+            let mut on = p.size > 0.0;
+            if ui.checkbox(&mut on, "").on_hover_text("Give the size (with its middle at the point above) instead of finding it on the part").changed() {
+                p.size = if on { 10.0 } else { 0.0 };
+                if on && o.at.is_none() {
+                    o.at = Some([0.0, 0.0]);
+                }
+            }
+            if on {
+                ui.add(egui::DragValue::new(&mut p.size).range(0.5..=2000.0).speed(0.05).prefix("Ø").suffix(" mm"));
+            } else {
+                ui.label(RichText::new("from the part").color(theme::muted()).size(12.0));
+            }
+        });
+    }
+    if p.cycle != ProbeCycle::Z {
+        num(ui, "Touch depth", &mut p.depth, " mm", 0.1..=200.0, 0.1);
+    }
+    num(ui, "Clearance", &mut p.clearance, " mm", 0.5..=100.0, 0.1);
+    num(ui, "Overtravel", &mut p.overtravel, " mm", 0.5..=100.0, 0.1);
+    if let Some(plan) = plan {
+        ui.label(RichText::new(format!("Finds {} and sets {} there (G54)", plan.what, plan.sets_text(origin))).size(12.0));
+    }
+    ui.label(RichText::new("Feeds: the probe's feed (search) and plunge feed (second touch). Jog the probe near the work zero first: the touches start from where it is now.").color(theme::muted()).size(11.0));
 }
 
 fn rest_row(ui: &mut Ui, rest: &mut bool) {
@@ -1934,6 +2047,20 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
             }
         });
     });
+    if t.kind == ToolKind::Probe {
+        num(ui, "Ball Ø", &mut t.diameter, " mm", 0.1..=50.0, 0.01);
+        num(ui, "Stylus length", &mut t.flute_length, " mm", 1.0..=300.0, 0.1);
+        num(ui, "Stem Ø", &mut t.shank_diameter, " mm", 0.1..=50.0, 0.05);
+        num(ui, "Stickout", &mut t.stickout, " mm", 1.0..=500.0, 0.5);
+        num(ui, "Body Ø", &mut t.holder_diameter, " mm", 1.0..=300.0, 0.5);
+        t.holder.clear();
+        t.rpm = 0.0;
+        ui.add_space(4.0);
+        ui.label(RichText::new("PROBING").color(theme::muted()).size(11.0).strong());
+        num(ui, "Search feed", &mut t.feed, " mm/min", 1.0..=5000.0, 5.0);
+        num(ui, "Second touch", &mut t.plunge_feed, " mm/min", 1.0..=1000.0, 1.0);
+        return;
+    }
     num(ui, "Diameter", &mut t.diameter, " mm", 0.01..=200.0, 0.01);
     match t.kind {
         ToolKind::Bull => num(ui, "Corner radius", &mut t.corner_radius, " mm", 0.0..=50.0, 0.01),
@@ -2539,6 +2666,22 @@ fn build_scene(app: &App) -> SceneData {
                 Move::Dwell(_) => {}
             }
             prev = Some(p1);
+        }
+    }
+    // where the probing operations touch: a dot on the surface and a tick showing the way the probe comes in
+    if !sim_on {
+        for tp in &app.cam.paths {
+            let (Some(plan), Some(t)) = (&tp.probe, c.tool(tp.tool)) else { continue };
+            let on = sel.map(|id| id == tp.op).unwrap_or(true);
+            let col = rgba(Color32::from_rgb(0xd9, 0x3a, 0xb0), if on { 1.0 } else { 0.45 });
+            for (q, st) in plan.contacts(t.radius()).into_iter().zip(plan.steps.iter().filter(|s| matches!(s, crate::cam_probe::Step::Touch { .. }))) {
+                if let crate::cam_probe::Step::Touch { axis, dir, .. } = st {
+                    let mut back = q;
+                    back[*axis] -= dir * 4.0;
+                    s.line(to(back), to(q), 2.0, col);
+                }
+                s.point(to(q), if sel == Some(tp.op) { 9.0 } else { 7.0 }, col);
+            }
         }
     }
     // sharp edges while picking them for a deburr, and the picks of the selected deburr
