@@ -979,11 +979,13 @@ pub struct ProbeOp {
     /// rcnc, the stock's top or middle: how far the size rcnc's Find stock measures may differ from the
     /// stock's before it stops, mm.
     pub tolerance: f64,
+    /// rcnc, two bores: how far the part may be turned before rcnc stops, degrees.
+    pub max_turn: f64,
 }
 
 impl Default for ProbeOp {
     fn default() -> Self {
-        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0 }
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0, max_turn: 0.2 }
     }
 }
 
@@ -1059,10 +1061,23 @@ pub enum Origin {
     PartTopCorner,
     /// The part's own origin.
     Model,
+    /// The middle of the stock, at its bottom: what sits on the vise's parallels.
+    StockBottomCenter,
+    /// The middle of the stock, at the part's bottom: what sits on the parallels in a setup that follows a
+    /// facing of the other side.
+    PartBottomCenter,
 }
 
 impl Origin {
-    pub const ALL: [Origin; 5] = [Origin::StockTopCorner, Origin::StockTopCenter, Origin::StockBottomCorner, Origin::PartTopCorner, Origin::Model];
+    pub const ALL: [Origin; 7] = [
+        Origin::StockTopCorner,
+        Origin::StockTopCenter,
+        Origin::StockBottomCorner,
+        Origin::StockBottomCenter,
+        Origin::PartBottomCenter,
+        Origin::PartTopCorner,
+        Origin::Model,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Origin::StockTopCorner => "Stock top, front-left corner",
@@ -1070,6 +1085,8 @@ impl Origin {
             Origin::StockBottomCorner => "Stock bottom, front-left corner",
             Origin::PartTopCorner => "Part top, front-left corner",
             Origin::Model => "Part origin",
+            Origin::StockBottomCenter => "Stock bottom, centre (on the vise)",
+            Origin::PartBottomCenter => "Part bottom, stock centre (on the vise)",
         }
     }
     pub fn key(self) -> &'static str {
@@ -1079,6 +1096,8 @@ impl Origin {
             Origin::StockBottomCorner => "stock_bottom_corner",
             Origin::PartTopCorner => "part_top_corner",
             Origin::Model => "model",
+            Origin::StockBottomCenter => "stock_bottom_center",
+            Origin::PartBottomCenter => "part_bottom_center",
         }
     }
     pub fn parse(s: &str) -> Option<Origin> {
@@ -1202,6 +1221,10 @@ pub struct Probe {
     pub travel: f64,
     pub fast: f64,
     pub slow: f64,
+    /// rcnc: the Z reference every tool is zeroed on (e.g. "Vise": the vise's built-in parallels, where the
+    /// part sits); the work zero's Z must be that surface. Empty: Z from probing the stock's top.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub z_reference: String,
 }
 
 impl Default for Probe {
@@ -1214,6 +1237,7 @@ impl Default for Probe {
             travel: 100.0,
             fast: 300.0,
             slow: 25.0,
+            z_reference: String::new(),
         }
     }
 }

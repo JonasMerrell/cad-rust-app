@@ -220,6 +220,8 @@ pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
         Origin::StockTopCorner => DVec3::new(lo.x, lo.y, hi.z),
         Origin::StockTopCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z),
         Origin::StockBottomCorner => lo,
+        Origin::StockBottomCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z),
+        Origin::PartBottomCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, part.lo.z),
         Origin::PartTopCorner => DVec3::new(part.lo.x, part.lo.y, part.hi.z),
         Origin::Model => DVec3::ZERO,
     }

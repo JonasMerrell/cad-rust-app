@@ -461,7 +461,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             "boxes the toolpaths lift over (replaces the list)",
         ),
         ("create_cam" | "edit_cam", "probe") => obj(
-            json!({"mode": en(&["off", "plate", "setter"], "probing mode"), "plate_at": xyz("touch plate position, work coordinates"), "plate_thickness": t("number", "mm"), "setter": xyz("tool setter, machine coordinates"), "travel": t("number", "probe distance, mm"), "fast": t("number", "mm/min"), "slow": t("number", "mm/min")}),
+            json!({"mode": en(&["off", "plate", "setter"], "probing mode"), "plate_at": xyz("touch plate position, work coordinates"), "plate_thickness": t("number", "mm"), "setter": xyz("tool setter, machine coordinates"), "travel": t("number", "probe distance, mm"), "fast": t("number", "mm/min"), "slow": t("number", "mm/min"), "z_reference": t("string", "rcnc: the Z reference every tool is zeroed on, e.g. Vise (the work zero's Z must be that surface: origin stock_bottom_center / part_bottom_center); empty: Z from probing the stock top")}),
             &[],
             "tool measuring after each tool change",
         ),
@@ -551,7 +551,8 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             "overtravel": t("number", "mm past the expected surface before giving up"),
             "inset": t("number", "corner: mm from the corner the sides are touched"),
             "with_z": t("boolean", "corner: touch the top too and set Z"),
-            "tolerance": t("number", "rcnc, stock top or middle (which rcnc's Find stock wizard does): largest difference between probed and stock size, mm (default 1)")
+            "tolerance": t("number", "rcnc, stock top or middle (which rcnc's Find stock wizard does): largest difference between probed and stock size, mm (default 1); two bores in a row (rcnc Find bores): largest error in their spacing"),
+            "max_turn": t("number", "rcnc, two bores in a row: how far the part may be turned, degrees (default 0.2)")
         }}),
         ("cam_soft_jaws", "one_piece") => t("boolean", "printed only: one block between the vise jaws, squeezed round the part, instead of two jaws"),
         ("cam_soft_jaws", "mount") => {

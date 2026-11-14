@@ -259,6 +259,11 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
     }
     let mut cur_tool: Option<u64> = None;
     let mut found_stock = false;
+    // the probing operations already posted as part of an rcnc Find bores
+    let mut found_bores: Vec<u64> = vec![];
+    if cam.post == "rcnc" && !cam.probe.z_reference.trim().is_empty() {
+        o.line(&comment(&format!("RCNC Z_REFERENCE {}", cam.probe.z_reference.trim())));
+    }
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = Coolant::Off;
     for tp in paths {
@@ -334,9 +339,20 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             let find = op.and_then(|o| o.probing.as_ref()).filter(|p| cam.post == "rcnc" && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss));
             if let (Some(p), Some((lo, hi))) = (find, stock) {
                 if !found_stock {
-                    find_stock(&mut o, p, lo, hi, origin);
+                    find_stock(&mut o, p, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
                     found_stock = true;
                 }
+                continue;
+            }
+            // two (or more) bores of the part in a row: rcnc finds them all and sets X/Y from them
+            if cam.post == "rcnc" && found_bores.contains(&tp.op) {
+                continue;
+            }
+            if let Some(bores) = rcnc_bores(cam, paths, tp, tool.radius(), origin) {
+                found_bores.extend(bores.1);
+                o.line(&comment("rcnc Find bores: the probe finds the locating bores and sets X/Y from them"));
+                o.line(&comment(&bores.0));
+                o.forget();
                 continue;
             }
             match &tp.probe {
@@ -517,15 +533,50 @@ fn fill(text: &str, cam: &Cam, tool: Option<&Tool>) -> Vec<String> {
 
 /// Measure the tool just loaded: on a touch plate (sets the work Z zero) or on a tool setter (sets its
 /// length offset against the first tool, which must be the one the work Z zero was set with).
+/// rcnc: the bore probing operations starting at `tp` (consecutive probes of the part's bores with their middle
+/// and diameter given) as one `(RCNC FIND_BORES ...)` request, and their operation ids. None unless there are two.
+fn rcnc_bores(cam: &Cam, paths: &[Toolpath], tp: &Toolpath, r: f64, origin: DVec3) -> Option<(String, Vec<u64>)> {
+    if cam.post != "rcnc" {
+        return None;
+    }
+    let bore = |t: &Toolpath| {
+        let op = cam.op(t.op)?;
+        let p = op.probing.as_ref().filter(|p| p.cycle == ProbeCycle::Bore && p.size > 0.0)?;
+        let at = op.at?;
+        // the ball's tip goes `depth` + its radius below the bore's top
+        let tip = t.probe.as_ref()?.steps.iter().find_map(|s| match s {
+            crate::cam_probe::Step::Touch { from, .. } => Some(from[2]),
+            _ => None,
+        })?;
+        Some((op.id, at, p.clone(), tip - origin.z + p.depth + r))
+    };
+    let start = paths.iter().position(|p| std::ptr::eq(p, tp))?;
+    let found: Vec<_> = paths[start..].iter().map_while(bore).collect();
+    let [(_, a, pa, top), (_, b, _, _), ..] = found.as_slice() else { return None };
+    let text = format!(
+        "RCNC FIND_BORES A={},{} B={},{} D={} TOP={} DEPTH={} TOL={} ROT={}",
+        num(a[0]),
+        num(a[1]),
+        num(b[0]),
+        num(b[1]),
+        num(pa.size),
+        num(*top),
+        num(pa.depth),
+        num(pa.tolerance),
+        num(pa.max_turn)
+    );
+    Some((text, found.iter().map(|f| f.0).collect()))
+}
+
 /// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
 /// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
 /// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
-fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin: DVec3) {
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
     let size = hi - lo;
     let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
     o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
     o.line(&comment(&format!(
-        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}",
+        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}",
         num(size.x),
         num(size.y),
         num(size.z),
@@ -533,7 +584,8 @@ fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin
         num(top_centre.y),
         num(top_centre.z),
         num(p.tolerance),
-        num(p.depth)
+        num(p.depth),
+        if keep_z { " KEEPZ=1" } else { "" }
     )));
     o.forget();
 }
