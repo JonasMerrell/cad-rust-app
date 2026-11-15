@@ -303,6 +303,8 @@ pub struct Visuals {
     pub events: Vec<crate::cam_sim::SimEvent>,
     /// Each operation's heaviest cut in the simulation.
     pub loads: Vec<crate::cam_sim::OpLoad>,
+    /// Machined surface left with roughing stock on it.
+    pub unfinished: Option<crate::cam_sim::Unfinished>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -327,7 +329,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![] };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -376,6 +378,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     v.sim = Some((sc.shoot("iso", 560, 420, None), sc.shoot("top", 400, 300, None)));
     v.events = sim.events.clone();
     v.loads = sim.loads.clone();
+    v.unfinished = sim.unfinished(0.1);
     v
 }
 
@@ -498,6 +501,10 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
     if vis.sim.is_some() {
         let n = vis.events.len();
         kpis.push(("Simulation", if n == 0 { "no problems".into() } else { format!("{n} problem{}", if n == 1 { "" } else { "s" }) }, n > 0));
+        kpis.push(match vis.unfinished {
+            None => ("Finishing", "every machined surface".into(), false),
+            Some(u) => ("Finishing", format!("{} mm² left rough (up to {} mm)", u.area_mm2.round(), fmt_mm(u.max)), true),
+        });
     }
     s.push_str("<div class=\"kpis\">");
     for (k, v, bad) in kpis {

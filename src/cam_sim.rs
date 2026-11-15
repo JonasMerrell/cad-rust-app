@@ -244,6 +244,14 @@ pub struct OpLoad {
     pub ratio: f64,
 }
 
+/// Machined part surface left with stock on it (see `Sim::unfinished`): how much area, the most left, where.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Unfinished {
+    pub area_mm2: f64,
+    pub max: f64,
+    pub at: [f64; 3],
+}
+
 /// How deep an end mill of diameter `d` may cut, mm, when it is engaged `width` mm sideways: up to
 /// 2.5 D at a light sideways step, 0.8 D at half its width, under half D in a full-width slot.
 /// Calibrated on the DMC2 (a light mill, 6061): the first test part's cuts went fine (a 1/4" end mill
@@ -556,10 +564,11 @@ impl Sim {
             // wall the grid shows a little inside it)
             let rising = to.z > from.z && (to - from).truncate().length() < 1e-9;
             let (removed, deepest) = self.stamp(ci, op, step, p, rapid && !rising, k % check_every == 0 || k == n);
-            // plunges and steep ramps cut with the tool's end: the load check is about sideways cuts
+            // plunges and steep ramps down cut with the tool's end: the load check is about sideways cuts
+            // (a climb up a steep face cuts with the side: its travel is along the face)
             let (dxy, dz) = ((to - from).truncate().length() / n as f64, (to.z - from.z) / n as f64);
             if !rapid && dxy >= 2.0 * -dz {
-                self.load_sample(ci, op, step, p, removed, deepest, dxy);
+                self.load_sample(ci, op, step, p, removed, deepest, dxy.hypot(dz));
             }
         }
         self.pos = to;
@@ -591,6 +600,31 @@ impl Sim {
     }
 
     /// sqrt(1 + slope²) of the part's height map at a cell (gentler of the two sides along each axis).
+    /// Part surface this setup machined but left more than `tol` mm proud of (straight out from the
+    /// surface): roughing that no finishing pass followed. (Seen from above: walls aren't measured.)
+    pub fn unfinished(&self, tol: f32) -> Option<Unfinished> {
+        let mut u = Unfinished { area_mm2: 0.0, max: 0.0, at: [0.0; 3] };
+        for j in 0..self.ny {
+            for i in 0..self.nx {
+                let k = j * self.nx + i;
+                let (s, p) = (self.stock[k], self.part[k]);
+                if self.cuts[k][0].0 == 0 || !p.is_finite() || s == EMPTY || s <= p + tol {
+                    continue;
+                }
+                let d = (s - p) / self.slope_factor(i as i32, j as i32);
+                if d > tol {
+                    u.area_mm2 += self.cell * self.cell;
+                    if d as f64 > u.max {
+                        u.max = d as f64;
+                        u.at = [self.x0 + i as f64 * self.cell, self.y0 + j as f64 * self.cell, p as f64];
+                    }
+                }
+            }
+        }
+        // a few cells is the grid, not a missing pass
+        (u.area_mm2 > 1.0).then_some(u)
+    }
+
     fn slope_factor(&self, i: i32, j: i32) -> f32 {
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let h = |i: i32, j: i32| if i < 0 || j < 0 || i >= nx || j >= ny { f32::NEG_INFINITY } else { self.part[(j * nx + i) as usize] };

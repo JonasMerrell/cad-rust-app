@@ -2321,6 +2321,24 @@ mod tests {
         assert!(s.loads[0].ratio < 0.9, "{:?}", s.loads);
     }
 
+    /// Machined surface left with roughing stock on it is reported; a finishing pass clears the report.
+    #[test]
+    fn unfinished_surface_is_reported() {
+        let part = plinth();
+        let run = |leave: f64| {
+            let mut c = Cam::default();
+            c.stock.side = 1.0;
+            c.stock.top = 2.0;
+            let t = tool(&mut c, ToolKind::Flat, 6.0);
+            let id = c.add_op(OpKind::Face, t);
+            c.ops.iter_mut().find(|o| o.id == id).unwrap().leave_floor = leave;
+            sim(&c, &part).0.unfinished(0.1)
+        };
+        let u = run(0.5).expect("the face left 0.5 mm on the top");
+        assert!(u.area_mm2 > 3000.0 && (u.max - 0.5).abs() < 0.05, "{u:?}");
+        assert_eq!(run(0.0), None);
+    }
+
     #[test]
     fn allowed_depth_and_area_by_engagement() {
         use crate::cam_sim::{allowed_depth, area_limit};
