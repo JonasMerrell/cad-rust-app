@@ -633,6 +633,12 @@ impl Session {
                     .map(|l| json!({"operation": names(l.op), "op_id": l.op, "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "allowed_depth": round(crate::cam_sim::allowed_depth(l.diameter, l.width)), "area_limit": round(l.max_area), "load": round(l.ratio), "at": [round(l.at[0] - o.x), round(l.at[1] - o.y), round(l.at[2] - o.z)]}))
                     .collect();
                 v["loads"] = json!(loads);
+                let air: Vec<Value> = sim
+                    .air
+                    .iter()
+                    .map(|a| json!({"operation": names(a.op), "op_id": a.op, "feed_min": round(a.feed_s / 60.0), "air_pct": (a.air_s / a.feed_s.max(1e-9) * 100.0).round(), "light_pct": (a.light_s / a.feed_s.max(1e-9) * 100.0).round(), "air_mm": a.air_mm.round(), "feed_mm": a.feed_mm.round()}))
+                    .collect();
+                v["air"] = json!(air);
                 // every surface this setup machines should end with a finishing pass
                 if let Some(u) = sim.unfinished(0.1) {
                     v["unfinished"] = json!({"area_mm2": u.area_mm2.round(), "max": round(u.max), "at": [round(u.at[0] - o.x), round(u.at[1] - o.y), round(u.at[2] - o.z)],

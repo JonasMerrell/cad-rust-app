@@ -87,6 +87,9 @@ struct Cutter {
     /// An end mill whose load is checked (flat, bull, ball): its diameter, and the most cut cross-section it
     /// takes per mm of travel (mm², see `area_limit`).
     load_d: Option<(f64, f64)>,
+    /// The operation's own cut cross-section (step-down × stepover, mm²): a feed move taking under 5% of it
+    /// is next to nothing.
+    nominal: f64,
 }
 
 pub const LUT_STEP: f64 = 0.002;
@@ -166,7 +169,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))) }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0 }
     }
 }
 
@@ -225,6 +228,22 @@ pub struct Sim {
     load_of: Option<(usize, u64)>,
     /// The heaviest cut of each operation (see `OpLoad`).
     pub loads: Vec<OpLoad>,
+    /// How much of each operation's feed moves cut nothing (see `OpAir`).
+    pub air: Vec<OpAir>,
+    feed: f64,
+}
+
+/// An operation's feed moves: how far, how long (at the programmed feed), and how much of that cut no
+/// material at all (air) or next to none (under 5% of its own step-down × stepover).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct OpAir {
+    pub op: u64,
+    pub feed_mm: f64,
+    pub feed_s: f64,
+    pub air_mm: f64,
+    pub air_s: f64,
+    pub light_mm: f64,
+    pub light_s: f64,
 }
 
 /// How hard an operation works its tool at its heaviest: the cut's cross-section over about a
@@ -323,6 +342,8 @@ impl Sim {
             load_win: Default::default(),
             load_of: None,
             loads: vec![],
+            air: vec![],
+            feed: 1000.0,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -380,7 +401,9 @@ impl Sim {
             Some(OpKind::VCarve) => op.map(|o| if o.depth > 0.0 { o.depth + 0.05 } else { tool.flute_length }).unwrap_or(1.0) as f32,
             _ => 0.02,
         };
-        self.cutters.push(Cutter::new(tool, self.cell, allowance));
+        let mut cutter = Cutter::new(tool, self.cell, allowance);
+        cutter.nominal = op.map(|o| crate::cam_paths::stepdown(o, tool) * crate::cam_paths::stepover(o, tool)).unwrap_or(1.0).max(0.01);
+        self.cutters.push(cutter);
         let ci = self.cutters.len() - 1;
         for m in &tp.moves {
             self.moves.push((ci, tp.op, *m));
@@ -516,7 +539,10 @@ impl Sim {
             let step = self.done;
             match m {
                 Move::Rapid(p) => spent += self.travel(ci, op, step, DVec3::from(p), true),
-                Move::Feed(p, _) => spent += self.travel(ci, op, step, DVec3::from(p), false),
+                Move::Feed(p, f) => {
+                    self.feed = f;
+                    spent += self.travel(ci, op, step, DVec3::from(p), false)
+                }
                 Move::Tap { z, r, .. } => {
                     let a = self.pos;
                     spent += self.travel(ci, op, step, DVec3::new(a.x, a.y, z), false);
@@ -567,6 +593,9 @@ impl Sim {
             // plunges and steep ramps down cut with the tool's end: the load check is about sideways cuts
             // (a climb up a steep face cuts with the side: its travel is along the face)
             let (dxy, dz) = ((to - from).truncate().length() / n as f64, (to.z - from.z) / n as f64);
+            if !rapid && !self.cutters[ci].probe {
+                self.air_sample(ci, op, removed, dxy.hypot(dz));
+            }
             if !rapid && dxy >= 2.0 * -dz {
                 self.load_sample(ci, op, step, p, removed, deepest, dxy.hypot(dz));
             }
@@ -667,6 +696,30 @@ impl Sim {
         }
         if self.events.len() < 500 {
             self.events.push(SimEvent { kind, op, step, at: at.to_array(), depth, what });
+        }
+    }
+
+    fn air_sample(&mut self, ci: usize, op: u64, removed: f32, len: f64) {
+        if len <= 0.0 {
+            return;
+        }
+        let secs = len / (self.feed.max(1.0) / 60.0);
+        let light = (removed as f64) / len < 0.05 * self.cutters[ci].nominal;
+        let a = match self.air.iter_mut().find(|a| a.op == op) {
+            Some(a) => a,
+            None => {
+                self.air.push(OpAir { op, ..Default::default() });
+                self.air.last_mut().unwrap()
+            }
+        };
+        a.feed_mm += len;
+        a.feed_s += secs;
+        if removed <= 1e-6 {
+            a.air_mm += len;
+            a.air_s += secs;
+        } else if light {
+            a.light_mm += len;
+            a.light_s += secs;
         }
     }
 

@@ -305,6 +305,8 @@ pub struct Visuals {
     pub loads: Vec<crate::cam_sim::OpLoad>,
     /// Machined surface left with roughing stock on it.
     pub unfinished: Option<crate::cam_sim::Unfinished>,
+    /// Each operation's feed moves that cut nothing.
+    pub air: Vec<crate::cam_sim::OpAir>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -329,7 +331,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None, air: vec![] };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -379,6 +381,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     v.events = sim.events.clone();
     v.loads = sim.loads.clone();
     v.unfinished = sim.unfinished(0.1);
+    v.air = sim.air.clone();
     v
 }
 
@@ -678,7 +681,19 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
                 (l.ratio * 100.0).round(),
                 t.number
             );
-            notes.push(if l.ratio > 1.0 { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+            // over the limit: a problem; within 15% of it: heavier than the cuts the limit was set from
+            notes.push(if l.ratio > 1.0 {
+                format!("<span class=\"warn\">{}</span>", esc(&text))
+            } else if l.ratio > 0.85 {
+                format!("<span class=\"warn\">{} (caution: above 85%, heavier than proven cuts)</span>", esc(&text))
+            } else {
+                esc(&text)
+            });
+        }
+        if let Some(a) = vis.air.iter().find(|a| a.op == op.id).filter(|a| a.feed_s > 1.0) {
+            let (air, light) = (a.air_s / a.feed_s * 100.0, a.light_s / a.feed_s * 100.0);
+            let text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
+            notes.push(if air + light > 50.0 && matches!(op.kind, OpKind::Adaptive | OpKind::Clear | OpKind::Pocket | OpKind::Face | OpKind::Contour) { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
         }
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {
