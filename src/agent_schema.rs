@@ -454,7 +454,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)")}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)"), "spindle_power": t("number", "spindle's rated electrical input power, W (0: not known, 1500 assumed)"), "spindle_efficiency": t("number", "share of the input power at the shaft (default 0.78)"), "spindle_rated_rpm": t("number", "speed the rated power is at; below it the torque is constant (0: 24000)"), "max_cut_force": t("number", "most sideways force the machine takes at the tool, N (0: 700 assumed)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),

@@ -191,7 +191,7 @@ impl Session {
         Ok(json!({
             "name": c.name, "studio": c.studio, "orient": c.orient, "tilt": c.tilt, "origin": c.origin.key(), "work_zero": cam_paths::work_zero_note(c, &part), "post": c.post,
             "follows": c.follows, "setup_notes": c.setup_notes(), "coolant": c.coolant,
-            "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer, "spin_up": c.machine.spin_up},
+            "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer, "spin_up": c.machine.spin_up, "spindle_power": c.machine.spindle_power, "spindle_efficiency": c.machine.spindle_efficiency, "spindle_rated_rpm": c.machine.spindle_rated_rpm, "max_cut_force": c.machine.max_cut_force},
             "errors": errors, "hints": hints,
             "stock": {"min": w(lo), "max": w(hi), "material": c.stock.material, "side": c.stock.side, "top": c.stock.top, "bottom": c.stock.bottom, "size": c.stock.size},
             "part": {"min": w(part.lo), "max": w(part.hi)},
