@@ -1654,6 +1654,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                             ui.label(RichText::new("ramp along the wall").color(theme::muted()).size(12.0)).on_hover_text(tip);
                         }
                     });
+                    // extra passes outside the wall take any stock further out than this down first
+                    stepover_row(ui, "Max engagement", &mut o.max_engagement, crate::cam_contour::DEFAULT_MAX_ENGAGEMENT);
                 }
             }
             if o.kind == OpKind::Pocket {
