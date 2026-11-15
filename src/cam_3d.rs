@@ -1679,6 +1679,9 @@ pub(crate) struct Level<'a, 'b> {
     pub climb: bool,
     /// Radius of the helix into enclosed material.
     pub helix: f64,
+    /// How much further out than `material` says the stock may really stand (rest machining takes the outline
+    /// from the stock map, less slivers a cell or two thin): the tool comes down from above that much clear of it.
+    pub slack: f64,
 }
 
 /// A centre counts as clear of material when its tool misses it by this much.
@@ -1734,11 +1737,23 @@ impl Level<'_, '_> {
         // retract, and come down beside the material (the column over a clear centre is clear); a start whose
         // tool would touch material (a hole the stock map shows open lower down, say) gets a helix, not a plunge
         if inside(near, p.to_array()) {
-            self.helix_in(p, self.helix);
+            // (no wider than the room round the start: the helix must not leave where the centre may go)
+            let room = nearest_on(area, p).map(|q| q.distance(p)).unwrap_or(0.0);
+            self.helix_in(p, self.helix.min(0.9 * room));
             return;
         }
-        self.pb.approach(p.x, p.y, self.z_from);
-        self.pb.cut(p.extend(self.z), self.fast);
+        // (right beside material the stock may stand a little further out than its outline here, and higher
+        // than the level above: come down that much further off, and feed over)
+        let down = match nearest_on(near, p) {
+            Some(q) if self.slack > 0.0 && q.distance(p) < self.slack && q.distance(p) > 1e-9 => {
+                let off = q + (p - q) / q.distance(p) * (self.slack + 0.05);
+                if inside(area, off.to_array()) && !inside(near, off.to_array()) { off } else { p }
+            }
+            _ => p,
+        };
+        self.pb.approach(down.x, down.y, self.z_from);
+        self.pb.cut(down.extend(self.z), self.fast);
+        self.pb.cut(p.extend(self.z), self.feed);
     }
 
     /// Cut along `pts` at depth; `near`: centres whose tool reaches material (tight arcs there are slowed).
@@ -1801,19 +1816,30 @@ impl Level<'_, '_> {
         if !cleared.is_empty() {
             free = union_all(&[flat(&free), flat(&intersect(cleared, a))].concat());
         }
+        // a hole the tool only just fits (a bore from an earlier setup, say) is no place to start from: rings
+        // growing out of it are arcs tighter than the tool, where the edge runs several times the stepover into
+        // the material for every one the centre moves. Leave such holes to the passes that come from open ground,
+        // which break through into them; they are a start only for material nothing else reaches.
+        let room = std::f64::consts::PI * r * r;
+        let (holes, open): (Shapes, Shapes) = free.iter().cloned().partition(|sh| shapes_area(&vec![sh.clone()]) < room);
+        let mut holes = if open.is_empty() { vec![] } else { holes };
+        if !holes.is_empty() {
+            free = open;
+        }
         // first everything but a stepover-wide band along the walls, with the passes turning away before they
         // reach it (a pass that runs into the wall takes the corner the passes before it left there, head-on);
         // then the walls, in passes along them that take that band
         let inner = opened(&offset(a, -self.step), 0.05);
         if !inner.is_empty() {
-            free = self.grow(&inner, a, material, free, false);
+            free = self.grow(&inner, a, material, free, false, &mut vec![]);
         }
-        self.grow(a, a, material, free, true);
+        self.grow(a, a, material, free, true, &mut holes);
     }
 
     /// Grow the cleared centres `free` within `lim` (part of `a`) until no material is left that it reaches;
-    /// `seed`: start a helix into material that can't be reached otherwise.
-    fn grow(&mut self, lim: &Shapes, a: &Shapes, material: &Shapes, mut free: Shapes, seed: bool) -> Shapes {
+    /// `seed`: start from `holes` (small clear spots set aside), then with a helix into the material, for what
+    /// can't be reached otherwise.
+    fn grow(&mut self, lim: &Shapes, a: &Shapes, material: &Shapes, mut free: Shapes, seed: bool, holes: &mut Shapes) -> Shapes {
         let r = self.r;
         let h = (0.2 * r).clamp(0.05, 1.0);
         let bridge = (1.5 * r).max(1.0);
@@ -1827,14 +1853,40 @@ impl Level<'_, '_> {
             // the new ring with its corners rounded to the tool's radius: a pass that runs into a sharp corner of
             // it (where it meets a wall) takes the corner the passes before it left there head-on. The corners
             // come off in later rings, which round them a stepover further in; the last bits without rounding.
-            let ring = intersect(&offset(&free, self.step), lim);
-            let mut grown = union_all(&[flat(&free), flat(&opened(&ring, r))].concat());
-            if shapes_area(&grown) - shapes_area(&free) < 0.05 * self.step * r {
-                grown = union_all(&[flat(&free), flat(&ring)].concat());
+            // Where the ground is narrower than the tool (a channel between two walls less than 2 r apart in
+            // centres) a rounding of r takes the whole ring away: round tighter there rather than not at all, or
+            // each pass across the channel starts with a stepover straight along the wall into the face, the
+            // front half of the tool in the cut. Rounded, the ring leaves the walls tangentially and the cut
+            // grows from nothing, as on a trochoid. Round a curve of radius ρ the edge takes (ρ + r) / ρ times
+            // what the centre moves, so a tighter rounding grows by less: as much at its heaviest as a ring
+            // rounded to r.
+            let had = shapes_area(&free);
+            let plain = union_all(&[flat(&free), flat(&intersect(&offset(&free, self.step), lim))].concat());
+            let mut grown = union_all(&[flat(&free), flat(&opened(&intersect(&offset(&free, self.step), lim), r))].concat());
+            if shapes_area(&grown) - had < 0.05 * self.step * r {
+                // (a tighter rounding only where it takes a good part of what a plain ring as wide would: in a
+                // channel, not for the last slivers in a corner, which would take many rings of next to nothing)
+                let worth = 0.5 * (shapes_area(&plain) - had);
+                grown = [0.8 * r, 0.6 * r, 0.4 * r, 0.25 * r]
+                    .iter()
+                    .map(|round| {
+                        let share = 2.0 * round / (round + r);
+                        let ring = intersect(&offset(&free, self.step * share), lim);
+                        (share, union_all(&[flat(&free), flat(&opened(&ring, *round))].concat()))
+                    })
+                    .find(|(share, g)| shapes_area(g) - had >= (share * worth).max(0.05 * self.step * r))
+                    .map(|(_, g)| g)
+                    .unwrap_or(plain);
             }
             if shapes_area(&grown) - shapes_area(&free) < 1e-3 {
                 if !seed {
                     break;
+                }
+                // what is left can't be reached from open ground: from the holes set aside, if there are any
+                if !holes.is_empty() {
+                    free = union_all(&[flat(&free), flat(holes)].concat());
+                    holes.clear();
+                    continue;
                 }
                 // material enclosed all round (or out of reach): a helix in where it is roomiest
                 match roomiest(&intersect(a, &near), r) {
@@ -1948,7 +2000,10 @@ impl Level<'_, '_> {
             self.run(&pts[1..], near);
             return;
         }
-        let ease = (4.0 * r).max(3.0 * self.step);
+        // (over no more than the first part of a short pass: one eased all the way never gets out to the line it
+        // is meant to cut, and the ring it leaves there counts as cleared)
+        let per: f64 = pts.windows(2).map(|w| DVec2::from(w[0]).distance(DVec2::from(w[1]))).sum();
+        let ease = (4.0 * r).max(3.0 * self.step).min(0.4 * per);
         let mut run: Vec<P2> = vec![];
         let mut acc = 0.0;
         for (i, q) in pts.iter().enumerate() {
@@ -2214,7 +2269,10 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         // (without hairline slits: the part's outline can have cracks between its triangles that the offset keeps)
         let a = opened(&difference(&bound, &offset(&shadow, r + op.leave)), 0.1);
         let material = match stock {
-            Some(m) => leftover(ctx, m, z, op.leave),
+            // (with what hangs over the level: stock whose underside is above it but below the level before, which
+            // the flutes take with their side as they pass under it. An earlier setup's cut from the other side
+            // leaves such a rim: round the phone stand's plinth, 2.7 mm of it, 4 mm wide at the corners)
+            Some(m) => leftover_under(ctx, m, z, z_prev, op.leave),
             None if z >= lo.z - 1e-6 && z < hi.z - 1e-6 => difference(&rect(lo, hi), &offset(&shadow, op.leave.max(0.0))),
             None => vec![],
         };
@@ -2229,7 +2287,8 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         if level_step < step - 1e-3 {
             narrowed = narrowed.min(level_step);
         }
-        let mut lv = Level { pb: &mut *pb, z, z_from: z_prev, r, step: level_step, feed, fast, climb: op.climb, helix };
+        let slack = stock.map(|m| 2.5 * m.cell).unwrap_or(0.0);
+        let mut lv = Level { pb: &mut *pb, z, z_from: z_prev, r, step: level_step, feed, fast, climb: op.climb, helix, slack };
         lv.clear(&a, &material, &vec![]);
         z_prev = z;
     }
@@ -2251,20 +2310,31 @@ pub(crate) fn intersect(a: &Shapes, b: &Shapes) -> Shapes {
 
 /// Stock left at height z that isn't part (nor the `leave` on it), without slivers a couple of cells thin.
 pub(crate) fn leftover(ctx: &Ctx, m: &StockMap, z: f64, leave: f64) -> Shapes {
+    leftover_under(ctx, m, z, z, leave)
+}
+
+/// The same, with the stock that starts above z but below `z_top` (it hangs over the level: a tool at z whose
+/// flutes reach up to `z_top` cuts it too).
+pub(crate) fn leftover_under(ctx: &Ctx, m: &StockMap, z: f64, z_top: f64, leave: f64) -> Shapes {
     let c = m.cell * 1.5;
-    let x = difference(&material(m, z), &offset(&ctx.geo.shadow(z), leave.max(0.0) + c));
+    let x = difference(&material_under(m, z, z_top), &offset(&ctx.geo.shadow(z), leave.max(0.0) + c));
     offset(&offset(&x, -c), c)
 }
 
 /// Outline of the stock that is left at height z (more than REST_TOL above it).
 pub(crate) fn material(m: &StockMap, z: f64) -> Shapes {
+    material_under(m, z, z)
+}
+
+/// Outline of the stock that is left above z and starts below `z_top`.
+pub(crate) fn material_under(m: &StockMap, z: f64, z_top: f64) -> Shapes {
     // a grid one cell bigger all round, so every outline closes
     let (nx, ny) = (m.nx + 2, m.ny + 2);
     let mut v = vec![-1.0; nx * ny];
     for j in 0..m.ny {
         for i in 0..m.nx {
             let k = j * m.nx + i;
-            if m.hi[k] > m.lo[k] && (m.lo[k] as f64) < z {
+            if m.hi[k] > m.lo[k] && (m.lo[k] as f64) < z_top.max(z) {
                 v[(j + 1) * nx + i + 1] = m.hi[k] as f64 - z;
             }
         }
@@ -2749,6 +2819,80 @@ mod tests {
         assert!((f - 2400.0 * 1.0 / 4.175).abs() < 20.0, "{f}");
         assert_eq!(arc_feed(2400.0, on(20.0, 0.0), on(20.0, 0.05), on(20.0, 0.1), 3.175), 2400.0);
         assert_eq!(arc_feed(2400.0, DVec2::ZERO, DVec2::X, 2.0 * DVec2::X, 3.175), 2400.0);
+    }
+
+    /// One level cleared with a Ø6.35 tool, stepover 1.2: the moves, and the widest cut they take.
+    fn level_engagement(a: &Shapes, material: &Shapes) -> (Vec<Move>, f64, DVec3) {
+        let mut c = Cam::default();
+        let t = tool(&mut c, ToolKind::Flat, 6.0);
+        let r = 3.175;
+        let mut pb = Pb { tool: c.tool(t).unwrap(), moves: vec![], pos: None, safe: 10.0, retract: 2.0, ramp: 0.05, feed: 2400.0, plunge: 300.0 };
+        let mut lv = Level { pb: &mut pb, z: 0.0, z_from: 3.0, r, step: 1.2, feed: 2400.0, fast: 3000.0, climb: true, helix: 2.5, slack: 0.0 };
+        lv.clear(a, material, &vec![]);
+        let e = crate::cam_contour::check(&pb.moves, None, material, 3.0, r, 0.05).unwrap();
+        (pb.moves, e.peak, e.at)
+    }
+
+    /// A groove the tool only just fits along (the phone stand's, 11.6 wide for a Ø6.35 tool: centres 5.3 apart):
+    /// the passes across it leave the walls tangentially, like a trochoid's loops. They used to start with a
+    /// stepover straight along the wall into the face (4.3 mm wide at the full depth), and, eased from the cleared
+    /// ground over more than their whole length, never got out to their line, so a band counted as cleared was
+    /// still standing when a link at the fast feed crossed it.
+    #[test]
+    fn adaptive_keeps_its_engagement_across_a_narrow_groove() {
+        let slab: Shapes = vec![vec![vec![[-37.0, -7.0], [37.0, -7.0], [37.0, 7.0], [-37.0, 7.0]]]];
+        let a: Shapes = vec![vec![vec![[-45.0, -2.65], [45.0, -2.65], [45.0, 2.65], [-45.0, 2.65]]]];
+        let (moves, peak, at) = level_engagement(&a, &slab);
+        assert!(peak <= 2.3 * 1.2, "takes {peak} mm at {at:?}");
+        // (links at the fast feed included: one through a band still standing would show as a wide cut)
+        // and the groove is cleared: the centre line is run from end to end
+        let xs: Vec<f64> = moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { (p[2] < 1e-6).then_some(p[0]) } else { None }).collect();
+        let (lo, hi) = xs.iter().fold((f64::INFINITY, f64::NEG_INFINITY), |(a, b), x| (a.min(*x), b.max(*x)));
+        assert!(lo < -30.0 && hi > 30.0, "{lo} .. {hi}");
+    }
+
+    /// A bore the tool only just fits (Ø8 for a Ø6.35 tool, left by an earlier setup) is not where the clearing
+    /// starts when there is open ground: rings growing out of it are arcs far tighter than the tool, each taking
+    /// several stepovers. The passes from outside break through into it. Shut in on all sides, it is the start.
+    #[test]
+    fn adaptive_does_not_spiral_out_of_a_bore_it_can_reach_from_outside() {
+        let hole: Contour = circle(DVec2::ZERO, 4.0).into_iter().rev().collect();
+        let slab: Shapes = vec![vec![vec![[-15.0, -15.0], [15.0, -15.0], [15.0, 15.0], [-15.0, 15.0]], hole.clone()]];
+        let open: Shapes = vec![vec![vec![[-22.0, -22.0], [22.0, -22.0], [22.0, 22.0], [-22.0, 22.0]]]];
+        let (moves, _, _) = level_engagement(&open, &slab);
+        // (round the bore: the stock's outer corners are other tests' business)
+        let round_bore = intersect(&slab, &vec![vec![circle(DVec2::ZERO, 9.0)]]);
+        let e = crate::cam_contour::check(&moves, None, &round_bore, 3.0, 3.175, 0.05).unwrap();
+        assert!(e.peak <= 2.0 * 1.2, "takes {} mm at {:?}", e.peak, e.at);
+        let first = moves.iter().find_map(|m| if let Move::Feed(p, _) = m { (p[2] < 1e-6).then_some(DVec2::new(p[0], p[1])) } else { None }).unwrap();
+        assert!(first.length() > 15.0, "starts at {first:?}");
+        // a pocket with nothing open but the bore: cleared from the bore
+        let shut: Shapes = vec![vec![vec![[-11.0, -11.0], [11.0, -11.0], [11.0, 11.0], [-11.0, 11.0]]]];
+        let (moves, _, _) = level_engagement(&shut, &slab);
+        let first = moves.iter().find_map(|m| if let Move::Feed(p, _) = m { (p[2] < 1e-6).then_some(DVec2::new(p[0], p[1])) } else { None }).unwrap();
+        assert!(first.length() < 2.0, "starts at {first:?}");
+        let far = moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { (p[2] < 1e-6).then_some(DVec2::new(p[0], p[1]).length()) } else { None }).fold(0.0, f64::max);
+        assert!(far > 14.0, "reaches {far}");
+    }
+
+    /// Stock whose underside is above a level but below the level before hangs over it, and the flutes cut it as
+    /// they pass under: it counts as the level's material (a rim an earlier setup left by cutting from the other
+    /// side; the phone stand's was taken unplanned, 4 mm wide at the plinth's corners).
+    #[test]
+    fn stock_hanging_over_a_level_is_its_material() {
+        let mut m = StockMap::block(DVec3::ZERO, DVec3::new(20.0, 20.0, 10.0), 0.5);
+        for j in 0..m.ny {
+            for i in 0..m.nx {
+                if m.x0 + i as f64 * m.cell > 10.2 {
+                    m.lo[j * m.nx + i] = 6.0;
+                }
+            }
+        }
+        let half = shapes_area(&material(&m, 5.0));
+        assert!((half - 215.0).abs() < 20.0, "{half}");
+        assert!((shapes_area(&material_under(&m, 5.0, 5.5)) - half).abs() < 1e-6, "the level before is below the rim");
+        let all = shapes_area(&material_under(&m, 5.0, 8.0));
+        assert!((all - 430.0).abs() < 30.0 && all > 1.8 * half, "{all}");
     }
 
     #[test]
