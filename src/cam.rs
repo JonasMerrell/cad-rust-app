@@ -227,6 +227,14 @@ pub struct Tool {
     pub stepdown: f64,
     /// Default stepover as a fraction of the diameter.
     pub stepover: f64,
+    /// Measured (tap test) first bending mode at the tip: frequency Hz, stiffness N/mm, damping ratio;
+    /// 0 = worked out from the tool's geometry and the machine's holder stiffness (see docs/cutting-model.md).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_hz: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_k: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_zeta: f64,
 }
 
 impl Default for Tool {
@@ -254,6 +262,9 @@ impl Default for Tool {
             coolant: Coolant::Auto,
             tapping_head: false,
             reverse_ratio: 1.75,
+            mode_hz: 0.0,
+            mode_k: 0.0,
+            mode_zeta: 0.0,
             rpm: 12000.0,
             feed: 1000.0,
             plunge_feed: 300.0,
@@ -1181,6 +1192,10 @@ pub struct Machine {
     pub max_cut_force: f64,
     /// How chips are cleared: "flood-low" (low-pressure flood, the default), "flood", "air", "none".
     pub chip_clearing: String,
+    /// Holder and spindle stiffness at the tool, N/mm (in series with the tool's own bending; a guess until
+    /// a tap test), and the damping ratio of the tool's mode.
+    pub holder_stiffness: f64,
+    pub tool_damping: f64,
 }
 
 impl Default for Machine {
@@ -1198,6 +1213,8 @@ impl Default for Machine {
             spindle_rated_rpm: 0.0,
             max_cut_force: 0.0,
             chip_clearing: "flood-low".into(),
+            holder_stiffness: 20_000.0,
+            tool_damping: 0.03,
         }
     }
 }

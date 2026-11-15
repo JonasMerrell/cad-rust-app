@@ -255,6 +255,110 @@ impl ChipMap {
     }
 }
 
+/// The tool's first bending mode at its tip, in series with the holder and spindle: stiffness N/mm,
+/// natural frequency Hz, damping ratio. Measured values (a tap test) override the computed ones.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Mode {
+    pub k: f64,
+    pub hz: f64,
+    pub zeta: f64,
+}
+
+/// The mode from the tool's geometry: a stepped cantilever (shank, then flutes at about 80% of the
+/// diameter in bending) of the tool's material, its mass lumped as a uniform cantilever's (0.24 of it at
+/// the tip), on a holder/spindle of stiffness `holder_k` N/mm (in series).
+pub fn tool_mode(t: &ToolGeom, holder_k: f64, zeta: f64) -> Mode {
+    let l = t.stickout.max(1.0);
+    let lf = t.flute_length.min(l).max(0.0);
+    let i = |dia: f64| PI * dia.powi(4) / 64.0;
+    let (i_f, i_s) = (i(0.8 * t.diameter), i(t.shank.max(0.1)));
+    let compliance = 1.0 / (3.0 * t.modulus) * ((l.powi(3) - lf.powi(3)) / i_s + lf.powi(3) / i_f);
+    let k_tool = 1.0 / compliance.max(1e-12);
+    // density, tonnes/mm³ (N·s²/mm per mm³): carbide 14.5 g/cm³, steel 8.0
+    let rho = if t.modulus > 400_000.0 { 1.45e-8 } else { 8.0e-9 };
+    let area = |dia: f64| PI * dia * dia / 4.0;
+    let mass = rho * (area(t.shank) * (l - lf) + area(0.85 * t.diameter) * lf);
+    let hz_tool = (k_tool / (0.243 * mass)).sqrt() / (2.0 * PI);
+    // the holder in series lowers the stiffness; its mass hardly moves at the tool's mode
+    let k = 1.0 / (1.0 / k_tool + 1.0 / holder_k.max(1.0));
+    let hz = hz_tool * (k / k_tool).sqrt();
+    Mode { k, hz, zeta }
+}
+
+/// The deepest stable axial depth (mm) at `rpm` for a cut engaged `width` of a `d` mm tool with `z` teeth,
+/// from the zero-order (average-coefficient) milling stability solution (Altintas & Budak 1995), the tool
+/// equally flexible in X and Y. `kt`: tangential cutting coefficient, N/mm² (kc at the mean chip);
+/// `kr`: radial to tangential. Also the lowest the lobes go at any speed (the unconditionally stable depth).
+pub fn stable_depth(m: &Mode, d: f64, width: f64, z: u32, kt: f64, kr: f64, rpm: f64, climb: bool) -> (f64, f64) {
+    let n_teeth = z.max(1) as f64;
+    let ae = width.clamp(0.0, d);
+    // entry and exit angles (climb: the tooth enters at the cut's edge and leaves at the wall)
+    let a = (1.0 - 2.0 * ae / d).clamp(-1.0, 1.0).acos();
+    let (st, ex) = if climb { (PI - a, PI) } else { (0.0, a) };
+    let f = |ph: f64| {
+        let (c2, s2) = ((2.0 * ph).cos(), (2.0 * ph).sin());
+        [0.5 * (c2 - 2.0 * kr * ph + kr * s2), 0.5 * (-s2 - 2.0 * ph + kr * c2), 0.5 * (-s2 + 2.0 * ph + kr * c2), 0.5 * (-c2 - 2.0 * kr * ph - kr * s2)]
+    };
+    let (fe, fs) = (f(ex), f(st));
+    let [axx, axy, ayx, ayy] = [fe[0] - fs[0], fe[1] - fs[1], fe[2] - fs[2], fe[3] - fs[3]];
+    let det = axx * ayy - axy * ayx;
+    let tr = axx + ayy;
+    if det.abs() < 1e-12 && tr.abs() < 1e-12 {
+        return (f64::INFINITY, f64::INFINITY);
+    }
+    let wn = 2.0 * PI * m.hz;
+    let mut best = f64::INFINITY;
+    let mut floor = f64::INFINITY;
+    // the eigenvalue of the oriented transfer function: Λ = -λ0 / G, λ0 = (tr ± sqrt(tr² - 4 det)) / (2 det)
+    let disc = num_complex_sqrt(tr * tr - 4.0 * det);
+    for sign in [1.0, -1.0] {
+        let lam0 = if det.abs() > 1e-12 { ((tr + sign * disc.0) / (2.0 * det), sign * disc.1 / (2.0 * det)) } else { (1.0 / tr, 0.0) };
+        // previous point on each lobe, to interpolate where it crosses `rpm`
+        let mut prev: Vec<Option<(f64, f64)>> = vec![None; 40];
+        let steps = 1500;
+        for i in 0..=steps {
+            let r = 1.0 + 1.5 * i as f64 / steps as f64;
+            let wc = r * wn;
+            // 1/G = k (1 - r² + 2iζr)
+            let (gr, gi) = (m.k * (1.0 - r * r), m.k * 2.0 * m.zeta * r);
+            let (lr, li) = (-(lam0.0 * gr - lam0.1 * gi), -(lam0.0 * gi + lam0.1 * gr));
+            if lr >= 0.0 {
+                continue;
+            }
+            let kappa = li / lr;
+            let ap = -2.0 * PI * lr / (n_teeth * kt) * (1.0 + kappa * kappa);
+            floor = floor.min(ap);
+            let eps = PI - 2.0 * kappa.atan();
+            for (k, p) in prev.iter_mut().enumerate() {
+                let n = 60.0 * wc / (n_teeth * (eps + 2.0 * PI * k as f64));
+                if let Some((n0, a0)) = *p {
+                    if (n0 - rpm) * (n - rpm) <= 0.0 && (n - n0).abs() > 1e-9 {
+                        best = best.min(a0 + (ap - a0) * (rpm - n0) / (n - n0));
+                    }
+                }
+                *p = Some((n, ap));
+            }
+        }
+    }
+    // between lobes (no lobe crosses this speed): stable up to the lobes' tops, take the floor's few times
+    (if best.is_finite() { best } else { floor * 4.0 }, floor)
+}
+
+/// The computed lobes, with the placeholder holder stiffness and damping, put every cut the DMC2 has made
+/// cleanly (the phone stand's op 1 at worst 11–12× its lobes' stable depth) deep in chatter: the real
+/// tool-point response is far better damped or stiffer than assumed. Until a tap test, the margin is
+/// scaled so those clean cuts read about 0.9: an index relative to proven cuts, not an absolute prediction.
+pub const CHATTER_SCALE: f64 = 0.078;
+
+/// sqrt of a real number as a complex (re, im).
+fn num_complex_sqrt(x: f64) -> (f64, f64) {
+    if x >= 0.0 {
+        (x.sqrt(), 0.0)
+    } else {
+        (0.0, (-x).sqrt())
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -321,6 +425,20 @@ mod tests {
         assert!(pocket > 5.0 * open, "{open} {pocket}");
         assert!(run(0.9, 20.0, 0.005, true) > run(0.9, 20.0, 0.03, true));
         assert!(run(0.9, 5.0, 0.01, false) > run(0.9, 5.0, 0.01, true));
+    }
+
+    /// A 1/4" carbide end mill 24 out: a first mode in the low kHz, stiffness a few N/µm; lobes give a
+    /// deeper stable cut for a light stepover than for a slot, and a shorter stick-out is stiffer.
+    #[test]
+    fn chatter_lobes() {
+        let m = tool_mode(&t24(), 20_000.0, 0.03);
+        assert!(m.hz > 1500.0 && m.hz < 8000.0 && m.k > 1000.0 && m.k < 20_000.0, "{m:?}");
+        let kt = 700.0 * 0.02f64.powf(-0.25);
+        let (slot, _) = stable_depth(&m, 6.35, 6.35, 3, kt, 0.35, 24000.0, true);
+        let (light, _) = stable_depth(&m, 6.35, 0.6, 3, kt, 0.35, 24000.0, true);
+        assert!(light > slot, "{light} {slot}");
+        let short = tool_mode(&ToolGeom { stickout: 19.0, ..t24() }, 20_000.0, 0.03);
+        assert!(short.k > m.k && short.hz > m.hz, "{short:?} {m:?}");
     }
 
     #[test]

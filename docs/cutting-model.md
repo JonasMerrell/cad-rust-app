@@ -108,9 +108,56 @@ Code: `cam_cutting::ChipMap`, `Sim::chip_sample`, `OpChips`.
 - To tune: BULK, THROW_CHIP, the clearing rates and RISK_SCALE, from cuts where chips did or didn't pack
   (add them as tests like `calibrated_on_the_dmc2`).
 
+## Chatter (stability lobes): trend-accurate only, until the tool is tap-tested
+
+Code: `cam_cutting::tool_mode`, `stable_depth`, `CHATTER_SCALE`; `Sim` `OpChatter`.
+
+- The tool's first bending mode at its tip: the stepped cantilever above (stiffness 1/compliance),
+  mass ρ·volume (carbide 14.5 g/cm³, steel 8.0), 0.243 of it at the tip (uniform cantilever) →
+  f = √(k/m)/2π; in series with the holder and spindle (`Machine::holder_stiffness`, 20 N/µm assumed),
+  damping ratio `Machine::tool_damping` (0.03). A tool's measured `mode_hz`, `mode_k`, `mode_zeta`
+  (tap test) replace the computed ones. The 1/4" carbide 24 out: about 7.5 kHz, 4.6 N/µm.
+- Zero-order milling stability (Altintas & Budak, 1995): the average directional coefficients for the
+  cut's entry and exit angles (climb or conventional), the tool equally flexible in X and Y, Kt = kc at the
+  mean chip, Kr = the material's radial ratio. For chatter frequencies from 1 to 2.5 × f the limiting
+  depth a_lim = −2π·Re(Λ)/(N·Kt)·(1 + κ²) and the spindle speed n = 60·ωc/(N·(π − 2·atan κ + 2πk)) per
+  lobe k; the stable depth at the programmed speed is the lowest lobe crossing it.
+- The honest part: with the assumed holder stiffness and damping these lobes put every clean cut the DMC2
+  has made 8–12× past the limit, so the real tool-point response is much better than assumed.
+  `CHATTER_SCALE` (0.078) scales the margin (depth ÷ stable depth) so the phone stand's op 1 cuts that ran
+  clean read about 0.8–0.9: it is an index relative to proven cuts. Above 0.7: caution; above 1: expected
+  to chatter. The suggested nearby spindle speed and the effect of 5 mm less stick-out are trends.
+- To make it absolute: a tap test per tool and stick-out (instrumented hammer and an accelerometer, or a
+  microphone: tap the tool, record the ring, the peak frequency and its decay give f and ζ; the stiffness
+  needs a known force or a static deflection measurement), and observed chatter / no-chatter cuts as tests.
+
+## Listening on the machine (rcnc, planned: design notes)
+
+Jonas is adding a microphone. Plan, not built yet:
+- Crates: `cpal` (audio input on Windows WASAPI, Linux ALSA/Pulse) and `rustfft`; `hound` to read WAVs
+  in the simulator and tests. An optional feature of the app crate, so a machine without audio builds and
+  runs as now.
+- Record one or two channels (air microphone and/or a piezo contact pickup on the spindle housing) while
+  a program runs; time-stamp each block against the executing line, operation, tool, programmed rpm and
+  feed.
+- Rolling FFT (e.g. 8192 points at 48 kHz, 50% overlap): find the tooth-passing frequency (rpm·teeth/60)
+  and its harmonics: the actual spindle speed from them, so bogging shows as rpm droop under load
+  (→ calibrates the spindle's power and efficiency); strong peaks that are not harmonics, near the tool's
+  mode → chatter (→ calibrates the mode and damping, and `CHATTER_SCALE`); overall loudness in the cut
+  band as a load proxy.
+- Log per line next to the job (`<program>.cutlog.json`: line, op, tool, rpm, feed, measured rpm, droop %,
+  chatter peak Hz and level, loudness) in a form rCAD's sim reads back as calibration tests.
+- A small live indicator in rcnc (rpm droop %, chatter yes/no). No feed override or other motion change
+  until Jonas asks.
+- A guided tap test at a tool change: tap the tool, record the ring, fit frequency and decay → the tool's
+  mode for that stick-out, saved to the tool table and written into the program's tool header next time.
+- Concerns: the spindle's own whine (a 24k rpm spindle at 400 Hz plus the VFD's switching), coolant and
+  air noise, a microphone's placement and level; Windows device selection; keeping audio capture off the
+  real-time control loop (its own thread, a ring buffer).
+
 ## Not modelled
 
-Chatter and stability lobes (planned), tool wear and edge rounding, thermal
+ tool wear and edge rounding, thermal
 effects, the machine's own stiffness and the workholding (a part can move before the tool bends), the
 spindle's speed droop under load (planned with the rcnc microphone), runout.
 

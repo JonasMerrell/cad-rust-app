@@ -666,6 +666,15 @@ impl Session {
                     })
                     .collect();
                 v["chips"] = json!(chips);
+                let (holder_k, kr, top_rpm) = (c.machine.holder_stiffness, crate::cam_cutting::material(&c.stock.material).radial, if c.max_rpm > 0.0 { c.max_rpm } else { 24000.0 });
+                let chatter: Vec<Value> = sim
+                    .chatter
+                    .iter()
+                    .map(|ch| (ch, chatter_advice(ch, holder_k, kr, top_rpm)))
+                    .map(|(c, advice)| json!({"advice": advice, "operation": names(c.op), "op_id": c.op, "margin": round(c.margin), "depth": round(c.depth), "width": round(c.width), "stable_depth": round(c.stable), "rpm": c.rpm.round(), "mode_hz": c.hz.round(), "mode_k": c.k.round(),
+                        "at": [round(c.at[0] - o.x), round(c.at[1] - o.y), round(c.at[2] - o.z)], "rating": if c.margin > 1.0 { "chatter expected" } else if c.margin > 0.7 { "caution" } else { "ok" }}))
+                    .collect();
+                v["chatter"] = json!(chatter);
                 // every surface this setup machines should end with a finishing pass
                 if let Some(u) = sim.unfinished(0.1) {
                     v["unfinished"] = json!({"area_mm2": u.area_mm2.round(), "max": round(u.max), "at": [round(u.at[0] - o.x), round(u.at[1] - o.y), round(u.at[2] - o.z)],
@@ -980,4 +989,23 @@ pub fn tools() -> Vec<Value> {
 
 fn wants_standard_stock(a: &Value) -> bool {
     a.get("stock").and_then(|s| s.get("standard_size")).and_then(|v| v.as_bool()).unwrap_or(false)
+}
+
+/// For a cut near or past chatter: the spindle speed (up to the machine's top) with the lowest margin,
+/// and what 5 mm less stick-out would do.
+fn chatter_advice(c: &crate::cam_sim::OpChatter, holder_k: f64, kr: f64, top_rpm: f64) -> Value {
+    if c.margin <= 0.7 {
+        return Value::Null;
+    }
+    let mut best = (c.rpm, c.margin);
+    let mut n = (top_rpm * 0.4 / 250.0).round() * 250.0;
+    while n <= top_rpm + 1.0 {
+        let m = c.margin_at(n, None, holder_k, kr);
+        if m < best.1 - 1e-9 {
+            best = (n, m);
+        }
+        n += 250.0;
+    }
+    let shorter = c.geom.map(|g| c.margin_at(c.rpm, Some((g.stickout - 5.0).max(g.flute_length + 1.0)), holder_k, kr));
+    json!({"best_rpm": best.0.round(), "margin_there": (best.1 * 100.0).round() / 100.0, "margin_5mm_shorter_stickout": shorter.map(|m| (m * 100.0).round() / 100.0)})
 }
