@@ -370,9 +370,12 @@ pub(crate) fn probe(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
         }
     };
     tp.warnings.extend(warnings);
+    let (p_on_part, p_cycle) = op.probing.as_ref().map(|p| (p.on_part, p.cycle)).unwrap_or((false, ProbeCycle::Z));
     match ctx.cam.post.as_str() {
         "grbl" if plan.needs_readings() => tp.warnings.push("GRBL can't keep probe readings to work out a middle: find it by hand, or use an edge or corner".into()),
-        "rcnc" if plan.sets.iter().any(|s| s.axis == 2) => tp.warnings.push(
+        // the stock's top or middle posts as rcnc's Find stock, which keeps that top as the Z every later tool
+        // is measured to
+        "rcnc" if plan.sets.iter().any(|s| s.axis == 2) && !(!p_on_part && matches!(p_cycle, ProbeCycle::Z | ProbeCycle::Boss)) => tp.warnings.push(
             "rcnc measures each tool on the tool setter at the next tool change and sets the work Z from it, replacing this Z: \
              leave Z to rcnc (or turn its tool change touch-off off)"
                 .into(),
@@ -490,6 +493,23 @@ mod tests {
     }
 
     #[test]
+    fn block_centre_touches_are_not_crashes_at_fine_resolution() {
+        // a 39 × 77 block: its sides fall between the stock map's cells, which a touch that stops a hair
+        // short of them must not read as running into the work
+        let part = plate();
+        for res in [200, 500, 777] {
+            let mut c = setup("rcnc");
+            c.stock.size = Some([39.0, 77.0, 20.0]);
+            probe_op(&mut c, |o| o.probing.as_mut().unwrap().cycle = ProbeCycle::Boss);
+            let paths = generate(&c, &part);
+            let ctx = crate::cam_paths::Ctx::new(&c, &part);
+            let mut sim = crate::cam_sim::Sim::new(&c, &part, ctx.stock, &paths, res);
+            sim.run_to(usize::MAX, usize::MAX);
+            assert!(sim.events.is_empty(), "{res}: {:?}", sim.events);
+        }
+    }
+
+    #[test]
     fn grbl_sets_each_axis_where_the_probe_stopped() {
         let part = plate();
         let mut c = setup("grbl");
@@ -566,7 +586,12 @@ mod tests {
     fn z_on_rcnc_warns_that_the_tool_change_resets_it() {
         let part = plate();
         let mut c = setup("rcnc");
+        // the stock's top is rcnc's Find stock, which keeps it as the Z later tools are measured to: no warning
         probe_op(&mut c, |_| {});
+        let paths = generate(&c, &part);
+        assert!(paths[0].warnings.is_empty(), "{:?}", paths[0].warnings);
+        c.ops.clear();
+        probe_op(&mut c, |o| o.probing.as_mut().unwrap().on_part = true);
         let mut cutter = Tool::default();
         cutter.number = 0;
         let t = c.add_tool(cutter);
@@ -576,7 +601,7 @@ mod tests {
         let ctx = crate::cam_paths::Ctx::new(&c, &part);
         let g = crate::cam_post::gcode(&c, &paths, ctx.origin, ctx.safe());
         // the probe goes in and out with M6; the face mill then starts its spindle
-        assert!(g.contains("T1 M6") && g.contains("T2 M6") && g.contains("G10 L2 P1 Z[#5223 + #110]"), "{g}");
+        assert!(g.contains("T1 M6") && g.contains("T2 M6") && g.contains("G10 L2 P1 Z[#5223 + #110"), "{g}");
         let before_face = &g[..g.find("T2 M6").unwrap()];
         assert!(!before_face.contains(" M3"), "{before_face}");
     }

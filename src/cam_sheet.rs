@@ -301,6 +301,12 @@ pub struct Visuals {
     /// The finished simulation, from above at an angle and from the top, and what it found.
     pub sim: Option<(Option<Shot>, Option<Shot>)>,
     pub events: Vec<crate::cam_sim::SimEvent>,
+    /// Each operation's heaviest cut in the simulation.
+    pub loads: Vec<crate::cam_sim::OpLoad>,
+    /// Machined surface left with roughing stock on it.
+    pub unfinished: Option<crate::cam_sim::Unfinished>,
+    /// Each operation's feed moves that cut nothing.
+    pub air: Vec<crate::cam_sim::OpAir>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -325,7 +331,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![] };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None, air: vec![] };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -373,6 +379,9 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     }
     v.sim = Some((sc.shoot("iso", 560, 420, None), sc.shoot("top", 400, 300, None)));
     v.events = sim.events.clone();
+    v.loads = sim.loads.clone();
+    v.unfinished = sim.unfinished(0.1);
+    v.air = sim.air.clone();
     v
 }
 
@@ -495,6 +504,10 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
     if vis.sim.is_some() {
         let n = vis.events.len();
         kpis.push(("Simulation", if n == 0 { "no problems".into() } else { format!("{n} problem{}", if n == 1 { "" } else { "s" }) }, n > 0));
+        kpis.push(match vis.unfinished {
+            None => ("Finishing", "every machined surface".into(), false),
+            Some(u) => ("Finishing", format!("{} mm² left rough (up to {} mm)", u.area_mm2.round(), fmt_mm(u.max)), true),
+        });
     }
     s.push_str("<div class=\"kpis\">");
     for (k, v, bad) in kpis {
@@ -568,6 +581,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         "setter" => kv.push(("Tool probing", "tool setter: zero the work Z with the first tool".into())),
         _ => {}
     }
+
     s.push_str("<h2>Setup</h2><div class=\"grid\"><div>");
     s.push_str(&figure(&vis.iso, "The part on the machine", "As on the machine, spindle above: the part, what holds it, the stock outline, and the X, Y and Z axes from the work zero."));
     s.push_str("</div><table class=\"kv\">");
@@ -658,6 +672,29 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             notes.push(esc(&format!("finds {} and sets {} (G54); jog the probe close to the work zero first", plan.what, plan.sets_text(o))));
         }
         notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
+        if let Some(l) = vis.loads.iter().find(|l| l.op == op.id) {
+            let text = format!(
+                "heaviest cut {} wide × {} deep ({} mm² per mm): {}% of what T{} takes",
+                fmt_mm(l.width),
+                fmt_mm(l.depth),
+                fmt_mm(l.area),
+                (l.ratio * 100.0).round(),
+                t.number
+            );
+            // over the limit: a problem; within 15% of it: heavier than the cuts the limit was set from
+            notes.push(if l.ratio > 1.0 {
+                format!("<span class=\"warn\">{}</span>", esc(&text))
+            } else if l.ratio > 0.85 {
+                format!("<span class=\"warn\">{} (caution: above 85%, heavier than proven cuts)</span>", esc(&text))
+            } else {
+                esc(&text)
+            });
+        }
+        if let Some(a) = vis.air.iter().find(|a| a.op == op.id).filter(|a| a.feed_s > 1.0) {
+            let (air, light) = (a.air_s / a.feed_s * 100.0, a.light_s / a.feed_s * 100.0);
+            let text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
+            notes.push(if air + light > 50.0 && matches!(op.kind, OpKind::Adaptive | OpKind::Clear | OpKind::Pocket | OpKind::Face | OpKind::Contour) { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+        }
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {
             notes.push(format!("<span class=\"warn\">{problems} problem(s) in the simulation</span>"));

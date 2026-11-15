@@ -659,7 +659,7 @@ pub enum OpKind {
     Thread,
     /// Tapping (rigid or floating).
     Tap,
-    /// 3D roughing with cycloidal (trochoidal) loops that keep the tool's engagement constant.
+    /// 3D roughing that grows the cleared area a stepover at a time, so the tool's engagement stays constant.
     Adaptive,
     /// 3D finishing along parallel lines.
     Parallel,
@@ -782,7 +782,7 @@ impl OpKind {
             OpKind::Bore => "Helically interpolates holes bigger than the end mill.",
             OpKind::Thread => "Mills internal threads in holes with a thread mill.",
             OpKind::Tap => "Taps holes; rigid tapping on LinuxCNC/Fanuc, floating on GRBL.",
-            OpKind::Adaptive => "3D roughing level by level with cycloidal loops: the tool takes a constant small stepover at full depth, so it can cut deep and fast.",
+            OpKind::Adaptive => "3D roughing level by level: the passes follow the cleared area outwards a small stepover at a time, also along walls and into corners, so the tool can cut deep and fast.",
             OpKind::Parallel => "3D finishing along parallel lines at an angle, optionally only on shallow or steep areas.",
             OpKind::Waterline => "3D finishing at constant heights; best on steep walls.",
             OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
@@ -875,6 +875,10 @@ pub struct Operation {
     pub breakthrough: f64,
     /// Chamfer width.
     pub chamfer: f64,
+    /// Chamfer: how far the chamfer mill's tip goes below the chamfer, so it cuts with the cone above its
+    /// weak, slow point for a better finish (the path moves out to keep the same chamfer); 0 = the standard 0.3 mm.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub tip_offset: f64,
     /// Thread major diameter and pitch; None = from the hole and tool.
     pub thread_diameter: Option<f64>,
     pub pitch: Option<f64>,
@@ -883,7 +887,8 @@ pub struct Operation {
     pub slot_depth: f64,
     /// Coolant on (overrides the tool's setting when true).
     pub coolant: bool,
-    /// Adaptive: radius of the cycloidal loops, mm (0 = 40% of the tool diameter).
+    /// Adaptive: radius of the helix into material the tool can't reach from the side, mm (0 = 40% of the
+    /// tool diameter). It was the cycloidal loops' radius, hence the name.
     pub trochoid: f64,
     /// Parallel: direction of the passes, degrees from X.
     pub angle: f64,
@@ -912,7 +917,7 @@ pub struct Operation {
     /// stock reaches further out than that, extra passes outside the wall take it down first.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub max_engagement: Option<f64>,
-    /// Adaptive: raise the feed for radial chip thinning (the loops take a thin cut, so the chips are thinner
+    /// Adaptive: raise the feed for radial chip thinning (the passes take a thin cut, so the chips are thinner
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
@@ -976,11 +981,16 @@ pub struct ProbeOp {
     pub inset: f64,
     /// Corner: touch the top too and set Z.
     pub with_z: bool,
+    /// rcnc, the stock's top or middle: how far the size rcnc's Find stock measures may differ from the
+    /// stock's before it stops, mm.
+    pub tolerance: f64,
+    /// rcnc, two bores: how far the part may be turned before rcnc stops, degrees.
+    pub max_turn: f64,
 }
 
 impl Default for ProbeOp {
     fn default() -> Self {
-        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false }
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0, max_turn: 0.2 }
     }
 }
 
@@ -1012,6 +1022,7 @@ impl Default for Operation {
             dwell: 0.0,
             breakthrough: 0.5,
             chamfer: 0.5,
+            tip_offset: 0.0,
             thread_diameter: None,
             pitch: None,
             left_hand: false,
@@ -1056,10 +1067,23 @@ pub enum Origin {
     PartTopCorner,
     /// The part's own origin.
     Model,
+    /// The middle of the stock, at its bottom: what sits on the vise's parallels.
+    StockBottomCenter,
+    /// The middle of the stock, at the part's bottom: what sits on the parallels in a setup that follows a
+    /// facing of the other side.
+    PartBottomCenter,
 }
 
 impl Origin {
-    pub const ALL: [Origin; 5] = [Origin::StockTopCorner, Origin::StockTopCenter, Origin::StockBottomCorner, Origin::PartTopCorner, Origin::Model];
+    pub const ALL: [Origin; 7] = [
+        Origin::StockTopCorner,
+        Origin::StockTopCenter,
+        Origin::StockBottomCorner,
+        Origin::StockBottomCenter,
+        Origin::PartBottomCenter,
+        Origin::PartTopCorner,
+        Origin::Model,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Origin::StockTopCorner => "Stock top, front-left corner",
@@ -1067,6 +1091,8 @@ impl Origin {
             Origin::StockBottomCorner => "Stock bottom, front-left corner",
             Origin::PartTopCorner => "Part top, front-left corner",
             Origin::Model => "Part origin",
+            Origin::StockBottomCenter => "Stock bottom, centre (on the vise)",
+            Origin::PartBottomCenter => "Part bottom, stock centre (on the vise)",
         }
     }
     pub fn key(self) -> &'static str {
@@ -1076,6 +1102,8 @@ impl Origin {
             Origin::StockBottomCorner => "stock_bottom_corner",
             Origin::PartTopCorner => "part_top_corner",
             Origin::Model => "model",
+            Origin::StockBottomCenter => "stock_bottom_center",
+            Origin::PartBottomCenter => "part_bottom_center",
         }
     }
     pub fn parse(s: &str) -> Option<Origin> {
@@ -1199,11 +1227,24 @@ pub struct Probe {
     pub travel: f64,
     pub fast: f64,
     pub slow: f64,
+    /// rcnc: the Z reference every tool is zeroed on (e.g. "Vise": the vise's built-in parallels, where the
+    /// part sits); the work zero's Z must be that surface. Empty: Z from probing the stock's top.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub z_reference: String,
 }
 
 impl Default for Probe {
     fn default() -> Self {
-        Probe { mode: "off".into(), plate_at: [0.0, 0.0, 0.0], plate_thickness: 15.0, setter: [0.0, 0.0, -10.0], travel: 100.0, fast: 300.0, slow: 25.0 }
+        Probe {
+            mode: "off".into(),
+            plate_at: [0.0, 0.0, 0.0],
+            plate_thickness: 15.0,
+            setter: [0.0, 0.0, -10.0],
+            travel: 100.0,
+            fast: 300.0,
+            slow: 25.0,
+            z_reference: String::new(),
+        }
     }
 }
 

@@ -28,6 +28,9 @@ pub enum EventKind {
     Travel,
     /// A touch probe ran into material on its way (it should only ever touch it).
     Probe,
+    /// The cutter took a cut too wide for how deep it is (or too deep for how wide): more load than
+    /// the tool takes, as at a corner where a single contour meets a lump of stock.
+    Overload,
 }
 
 impl EventKind {
@@ -41,6 +44,7 @@ impl EventKind {
             EventKind::Machine => "machine crash",
             EventKind::Travel => "beyond the machine's travel",
             EventKind::Probe => "probe runs into the work",
+            EventKind::Overload => "tool overloaded: the cut is too wide for its depth",
         }
     }
 }
@@ -80,6 +84,12 @@ struct Cutter {
     holder_len: f64,
     /// A touch probe: any material in its way is a crash.
     probe: bool,
+    /// An end mill whose load is checked (flat, bull, ball): its diameter, and the most cut cross-section it
+    /// takes per mm of travel (mm², see `area_limit`).
+    load_d: Option<(f64, f64)>,
+    /// The operation's own cut cross-section (step-down × stepover, mm²): a feed move taking under 5% of it
+    /// is next to nothing.
+    nominal: f64,
 }
 
 pub const LUT_STEP: f64 = 0.002;
@@ -159,7 +169,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0 }
     }
 }
 
@@ -210,7 +220,7 @@ pub struct Sim {
     pub cuts: Vec<[(u8, f32); 3]>,
     pub top: f32,
     pub bottom: f32,
-    moves: Vec<(usize, u64, Move)>,
+    pub moves: Vec<(usize, u64, Move)>,
     cutters: Vec<Cutter>,
     /// Next move to run.
     pub done: usize,
@@ -224,6 +234,76 @@ pub struct Sim {
     fixture_top: f64,
     /// The machine, when the setup has one.
     pub machine: Option<SimMachine>,
+    /// The last millimetre or so of cutting with the current cutter, for the load check: (material
+    /// removed mm³, horizontal travel mm, deepest cut mm) per tool position.
+    load_win: std::collections::VecDeque<(f32, f64, f32)>,
+    load_of: Option<(usize, u64)>,
+    /// The heaviest cut of each operation (see `OpLoad`).
+    pub loads: Vec<OpLoad>,
+    /// How much of each operation's feed moves cut nothing (see `OpAir`).
+    pub air: Vec<OpAir>,
+    feed: f64,
+}
+
+/// An operation's feed moves: how far, how long (at the programmed feed), and how much of that cut no
+/// material at all (air) or next to none (under 5% of its own step-down × stepover).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct OpAir {
+    pub op: u64,
+    pub feed_mm: f64,
+    pub feed_s: f64,
+    pub air_mm: f64,
+    pub air_s: f64,
+    pub light_mm: f64,
+    pub light_s: f64,
+}
+
+/// How hard an operation works its tool at its heaviest: the cut's cross-section over about a
+/// millimetre of travel, as a width (radial engagement) and depth (axial), against what the tool
+/// takes at that width (`allowed_depth`) and in all (`area_limit`). `ratio` above 1 is an overload.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct OpLoad {
+    pub op: u64,
+    pub step: usize,
+    pub at: [f64; 3],
+    /// mm² of cut per mm of travel, width and depth (mm), tool diameter.
+    pub area: f64,
+    pub width: f64,
+    pub depth: f64,
+    pub diameter: f64,
+    pub max_area: f64,
+    pub ratio: f64,
+}
+
+/// Machined part surface left with stock on it (see `Sim::unfinished`): how much area, the most left, where.
+#[derive(Debug, Clone, Copy, PartialEq, serde::Serialize)]
+pub struct Unfinished {
+    pub area_mm2: f64,
+    pub max: f64,
+    pub at: [f64; 3],
+}
+
+/// How deep an end mill of diameter `d` may cut, mm, when it is engaged `width` mm sideways: up to
+/// 2.5 D at a light sideways step, 0.8 D at half its width, under half D in a full-width slot.
+/// Calibrated on the DMC2 (a light mill, 6061): the first test part's cuts went fine (a 1/4" end mill
+/// 4.65 wide × 3 deep, a 1.5 deep slot), the phone stand's single contour round the plinth corners,
+/// 5 wide × 4 deep, overloaded the tool.
+/// The most material an end mill of diameter `d` should remove per mm of travel, mm² (width × depth),
+/// whatever the shape of the cut: 0.4 D² for carbide (16 mm² for a 1/4" end mill, a hair over the
+/// test part's 13.9), 0.24 D² for HSS and cobalt.
+pub fn area_limit(d: f64, material: &str) -> f64 {
+    let k = if material.eq_ignore_ascii_case("carbide") || material.is_empty() { 0.4 } else { 0.24 };
+    k * d * d
+}
+
+pub fn allowed_depth(d: f64, width: f64) -> f64 {
+    const TABLE: [(f64, f64); 6] = [(0.0, 2.5), (0.15, 2.5), (0.3, 1.4), (0.5, 0.8), (0.75, 0.6), (1.0, 0.45)];
+    let r = (width / d).clamp(0.0, 1.0);
+    let k = TABLE.windows(2).find(|w| r <= w[1].0).map(|w| {
+        let t = (r - w[0].0) / (w[1].0 - w[0].0);
+        w[0].1 + t * (w[1].1 - w[0].1)
+    });
+    d * k.unwrap_or(TABLE[4].1)
 }
 
 /// The machine model placed for the simulation, and each toolpath's tool as points for checking it.
@@ -271,6 +351,11 @@ impl Sim {
             max_h: hi.z as f32,
             fixture_top: f64::INFINITY,
             machine: None,
+            load_win: Default::default(),
+            load_of: None,
+            loads: vec![],
+            air: vec![],
+            feed: 1000.0,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -328,7 +413,9 @@ impl Sim {
             Some(OpKind::VCarve) => op.map(|o| if o.depth > 0.0 { o.depth + 0.05 } else { tool.flute_length }).unwrap_or(1.0) as f32,
             _ => 0.02,
         };
-        self.cutters.push(Cutter::new(tool, self.cell, allowance));
+        let mut cutter = Cutter::new(tool, self.cell, allowance);
+        cutter.nominal = op.map(|o| crate::cam_paths::stepdown(o, tool) * crate::cam_paths::stepover(o, tool)).unwrap_or(1.0).max(0.01);
+        self.cutters.push(cutter);
         let ci = self.cutters.len() - 1;
         for m in &tp.moves {
             self.moves.push((ci, tp.op, *m));
@@ -464,7 +551,10 @@ impl Sim {
             let step = self.done;
             match m {
                 Move::Rapid(p) => spent += self.travel(ci, op, step, DVec3::from(p), true),
-                Move::Feed(p, _) => spent += self.travel(ci, op, step, DVec3::from(p), false),
+                Move::Feed(p, f) => {
+                    self.feed = f;
+                    spent += self.travel(ci, op, step, DVec3::from(p), false)
+                }
                 Move::Tap { z, r, .. } => {
                     let a = self.pos;
                     spent += self.travel(ci, op, step, DVec3::new(a.x, a.y, z), false);
@@ -511,7 +601,16 @@ impl Sim {
             // straight up only ever leaves material: it can't be a rapid into the stock (the tool can sit beside a
             // wall the grid shows a little inside it)
             let rising = to.z > from.z && (to - from).truncate().length() < 1e-9;
-            self.stamp(ci, op, step, p, rapid && !rising, k % check_every == 0 || k == n);
+            let (removed, deepest) = self.stamp(ci, op, step, p, rapid && !rising, k % check_every == 0 || k == n);
+            // plunges and steep ramps down cut with the tool's end: the load check is about sideways cuts
+            // (a climb up a steep face cuts with the side: its travel is along the face)
+            let (dxy, dz) = ((to - from).truncate().length() / n as f64, (to.z - from.z) / n as f64);
+            if !rapid && !self.cutters[ci].probe {
+                self.air_sample(ci, op, removed, dxy.hypot(dz));
+            }
+            if !rapid && dxy >= 2.0 * -dz {
+                self.load_sample(ci, op, step, p, removed, deepest, dxy.hypot(dz));
+            }
         }
         self.pos = to;
         work
@@ -542,6 +641,31 @@ impl Sim {
     }
 
     /// sqrt(1 + slope²) of the part's height map at a cell (gentler of the two sides along each axis).
+    /// Part surface this setup machined but left more than `tol` mm proud of (straight out from the
+    /// surface): roughing that no finishing pass followed. (Seen from above: walls aren't measured.)
+    pub fn unfinished(&self, tol: f32) -> Option<Unfinished> {
+        let mut u = Unfinished { area_mm2: 0.0, max: 0.0, at: [0.0; 3] };
+        for j in 0..self.ny {
+            for i in 0..self.nx {
+                let k = j * self.nx + i;
+                let (s, p) = (self.stock[k], self.part[k]);
+                if self.cuts[k][0].0 == 0 || !p.is_finite() || s == EMPTY || s <= p + tol {
+                    continue;
+                }
+                let d = (s - p) / self.slope_factor(i as i32, j as i32);
+                if d > tol {
+                    u.area_mm2 += self.cell * self.cell;
+                    if d as f64 > u.max {
+                        u.max = d as f64;
+                        u.at = [self.x0 + i as f64 * self.cell, self.y0 + j as f64 * self.cell, p as f64];
+                    }
+                }
+            }
+        }
+        // a few cells is the grid, not a missing pass
+        (u.area_mm2 > 1.0).then_some(u)
+    }
+
     fn slope_factor(&self, i: i32, j: i32) -> f32 {
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let h = |i: i32, j: i32| if i < 0 || j < 0 || i >= nx || j >= ny { f32::NEG_INFINITY } else { self.part[(j * nx + i) as usize] };
@@ -587,7 +711,66 @@ impl Sim {
         }
     }
 
-    fn stamp(&mut self, ci: usize, op: u64, step: usize, p: DVec3, rapid: bool, check_holder: bool) {
+    fn air_sample(&mut self, ci: usize, op: u64, removed: f32, len: f64) {
+        if len <= 0.0 {
+            return;
+        }
+        let secs = len / (self.feed.max(1.0) / 60.0);
+        let light = (removed as f64) / len < 0.05 * self.cutters[ci].nominal;
+        let a = match self.air.iter_mut().find(|a| a.op == op) {
+            Some(a) => a,
+            None => {
+                self.air.push(OpAir { op, ..Default::default() });
+                self.air.last_mut().unwrap()
+            }
+        };
+        a.feed_mm += len;
+        a.feed_s += secs;
+        if removed <= 1e-6 {
+            a.air_mm += len;
+            a.air_s += secs;
+        } else if light {
+            a.light_mm += len;
+            a.light_s += secs;
+        }
+    }
+
+    /// Add a tool position to the load window and check the cut over the last millimetre.
+    fn load_sample(&mut self, ci: usize, op: u64, step: usize, p: DVec3, removed: f32, deepest: f32, dxy: f64) {
+        let Some((d, max_area)) = self.cutters[ci].load_d else { return };
+        if self.load_of != Some((ci, op)) {
+            self.load_win.clear();
+            self.load_of = Some((ci, op));
+        }
+        self.load_win.push_back((removed, dxy, deepest));
+        let mut travel: f64 = self.load_win.iter().map(|w| w.1).sum();
+        while self.load_win.len() > 1 && travel - self.load_win[0].1 >= 1.0 {
+            travel -= self.load_win.pop_front().unwrap().1;
+        }
+        // a plunge or a short stretch says nothing about a sideways cut
+        if travel < 0.5 {
+            return;
+        }
+        let vol: f64 = self.load_win.iter().map(|w| w.0 as f64).sum();
+        let depth = self.load_win.iter().map(|w| w.2).fold(0.0f32, f32::max) as f64;
+        if depth < 0.05 {
+            return;
+        }
+        let area = vol / travel;
+        let width = (area / depth).min(d);
+        let ratio = (depth / allowed_depth(d, width)).max(area / max_area);
+        let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio };
+        match self.loads.iter_mut().find(|l| l.op == op) {
+            Some(l) if l.ratio < ratio => *l = load,
+            Some(_) => {}
+            None => self.loads.push(load),
+        }
+        if ratio > 1.0 {
+            self.event(EventKind::Overload, op, step, p, ratio);
+        }
+    }
+
+    fn stamp(&mut self, ci: usize, op: u64, step: usize, p: DVec3, rapid: bool, check_holder: bool) -> (f32, f32) {
         let (ci0, cj0) = self.cell_of(p);
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let tip = p.z as f32;
@@ -599,7 +782,12 @@ impl Sim {
         if !c.lut.is_empty() {
             let n = (c.radius / self.cell).ceil() as i32 + 1;
             let r2 = c.radius * c.radius;
-            let inner = (c.radius - 0.02).max(0.0);
+            // the part's mesh cuts round holes with chords that sag up to about 0.025 mm inside the true
+            // circle (a 29-sided Ø8 bore): a tool that just fits the hole would read as cutting those slivers
+            let inner = (c.radius - 0.04).max(0.0);
+            // a probe stops a hair short of a wall: within a cell of its ball's outline the stock map can't
+            // tell that from a touch
+            let probe_inner = (c.radius - self.cell).max(0.0);
             for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
                 let dy = self.y0 + j as f64 * self.cell - p.y;
                 for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
@@ -616,7 +804,9 @@ impl Sim {
                         let floor = self.lo[k];
                         let cut = s - z.max(floor);
                         removed += cut * area;
-                        deepest = deepest.max(cut);
+                        if !c.probe || rho <= probe_inner {
+                            deepest = deepest.max(cut);
+                        }
                         // cut right through the column: nothing left over this cell
                         self.stock[k] = if z <= floor { EMPTY } else { z };
                         let tag = (ci + 1).min(250) as u8;
@@ -692,6 +882,7 @@ impl Sim {
         if holder_hit > 0.0 {
             self.event(EventKind::Holder, op, step, p, holder_hit as f64);
         }
+        (removed, deepest)
     }
 
     /// The stock in blocks of cells, at most `max_cells` along each side (see `Blocks`).

@@ -110,7 +110,7 @@ pub fn outer_passes(shadow: &Shapes, outside: &Shapes, off: f64, r: f64, step: f
 
 /// The pieces of the closed loop `l` inside `near`, each starting and ending one sample outside it.
 /// Gaps shorter than `bridge` are cut through rather than retracting over them.
-fn clip(l: &Contour, near: &Shapes, h: f64, bridge: f64) -> Vec<Seg> {
+pub(crate) fn clip(l: &Contour, near: &Shapes, h: f64, bridge: f64) -> Vec<Seg> {
     let n0 = l.len();
     if n0 < 2 {
         return vec![];

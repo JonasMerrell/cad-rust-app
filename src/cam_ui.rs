@@ -1583,6 +1583,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
     let warnings: Vec<String> = app.cam.paths.iter().find(|p| p.op == id).map(|p| p.warnings.clone()).unwrap_or_default();
     let stats = app.cam.paths.iter().find(|p| p.op == id).map(|p| (p.time, p.cut_length));
     let plan = app.cam.paths.iter().find(|p| p.op == id).and_then(|p| p.probe.clone());
+    let rcnc = cam(app).map(|c| c.post == "rcnc").unwrap_or(false);
     let origin = match (&app.cam.part, cam(app)) {
         (Some(p), Some(c)) => cam_paths::work_origin(c, p),
         _ => DVec3::ZERO,
@@ -1691,10 +1692,10 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
             opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
             stepover_row(ui, "Optimal load", &mut o.stepover, so);
-            row(ui, "Loop radius", |ui| {
+            row(ui, "Helix radius", |ui| {
                 let mut on = o.trochoid > 0.0;
                 let auto = tool.as_ref().map(|t| t.diameter * 0.4).unwrap_or(2.0);
-                if ui.checkbox(&mut on, "").on_hover_text("Radius of the cycloidal loops").changed() {
+                if ui.checkbox(&mut on, "").on_hover_text("Radius of the helix the tool spirals down on into material it can't reach from the side").changed() {
                     o.trochoid = if on { (auto * 10.0).round() / 10.0 } else { 0.0 };
                 }
                 if on {
@@ -1708,13 +1709,13 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
             let thin = tool.as_ref().map(|t| cam::chip_thinning(cam_paths::stepover(&o, t) / t.diameter.max(1e-9))).unwrap_or(1.0);
             row(ui, "Chip thinning", |ui| {
-                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the loops")).on_hover_text(
-                    "The loops take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
+                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the passes")).on_hover_text(
+                    "The passes take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
                      Kept on the safe side: at most ×1.5, and not on the helix entries",
                 );
             });
             rest_row(ui, &mut o.rest);
-            row(ui, "Loops", |ui| {
+            row(ui, "Passes", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
                 ui.radio_value(&mut o.climb, false, "conventional");
             });
@@ -1848,6 +1849,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         }
         OpKind::Chamfer => {
             num(ui, "Chamfer", &mut o.chamfer, " mm", 0.0..=50.0, 0.05);
+            // how far the tip goes below the chamfer, so it cuts higher up the cone (0 = 1 mm, less if the cone is too narrow)
+            num(ui, "Tip offset", &mut o.tip_offset, " mm", 0.0..=20.0, 0.05);
             opt(ui, "Edge height", &mut o.top, part_top, " mm", "the top of the part");
             row(ui, "Edges", |ui| {
                 for (s, l) in [(Side::Outside, "outside"), (Side::Inside, "inside"), (Side::Both, "both")] {
@@ -1904,7 +1907,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Breakthrough", &mut o.breakthrough, " mm", 0.0..=10.0, 0.05);
             ui.checkbox(&mut o.coolant, "Coolant");
         }
-        OpKind::Probe => probe_params(ui, &mut o, plan.as_ref(), origin),
+        OpKind::Probe => probe_params(ui, &mut o, plan.as_ref(), origin, rcnc),
     }
     if let Some((t, l)) = stats {
         let text = if o.kind == OpKind::Probe { fmt_time(t) } else { format!("{} · {:.0} mm of cutting", fmt_time(t), l) };
@@ -1920,7 +1923,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
 }
 
 /// A probing operation's settings: what to find, where, and how it touches.
-fn probe_params(ui: &mut Ui, o: &mut Operation, plan: Option<&crate::cam_probe::Plan>, origin: DVec3) {
+/// `rcnc_finds`: posted for rcnc, whose Find stock wizard does the stock's top and middle itself.
+fn probe_params(ui: &mut Ui, o: &mut Operation, plan: Option<&crate::cam_probe::Plan>, origin: DVec3, rcnc_finds: bool) {
     use cam::ProbeCycle;
     let p = o.probing.get_or_insert_with(Default::default);
     row(ui, "Find", |ui| {
@@ -2015,6 +2019,14 @@ fn probe_params(ui: &mut Ui, o: &mut Operation, plan: Option<&crate::cam_probe::
     }
     num(ui, "Clearance", &mut p.clearance, " mm", 0.5..=100.0, 0.1);
     num(ui, "Overtravel", &mut p.overtravel, " mm", 0.5..=100.0, 0.1);
+    if rcnc_finds && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss) {
+        num(ui, "Size tolerance", &mut p.tolerance, " mm", 0.05..=10.0, 0.05);
+        ui.label(
+            RichText::new("rcnc: this becomes its Find stock wizard (jog over the middle of the stock; it probes the top and all four sides, checks the size against the stock's and sets the work zero). One per setup.")
+                .color(theme::muted())
+                .size(11.0),
+        );
+    }
     if let Some(plan) = plan {
         ui.label(RichText::new(format!("Finds {} and sets {} there (G54)", plan.what, plan.sets_text(origin))).size(12.0));
     }
@@ -2284,7 +2296,9 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
 
 pub fn gcode_for(c: &Cam, part: &Part, paths: &[Toolpath]) -> String {
     let ctx = cam_paths::Ctx::new(c, part);
-    crate::cam_post::gcode_noted(c, paths, ctx.origin, ctx.safe(), Some(cam_paths::work_zero_note(c, part)))
+    // a tilted block's bounding box isn't the stock rcnc would find
+    let stock = cam_paths::tilted_block(c, part).is_none().then_some(ctx.stock);
+    crate::cam_post::gcode_noted(c, paths, ctx.origin, ctx.safe(), Some(cam_paths::work_zero_note(c, part)), stock)
 }
 
 pub(crate) fn export_dialog(app: &mut App) {

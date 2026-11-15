@@ -1,5 +1,5 @@
-//! Import tool libraries: Fusion 360 (.json export or .tools, a zip holding tools.json) and this
-//! app's own tools.json.
+//! Import tool libraries: Fusion 360 (.json export, .tools - a zip holding tools.json - or the CSV
+//! export) and this app's own tools.json.
 
 use crate::cam::{fmt_mm, Tool, ToolKind};
 use serde_json::Value;
@@ -19,7 +19,112 @@ pub fn import_file(path: &std::path::Path) -> Result<Imported, String> {
     } else {
         String::from_utf8(bytes).map_err(|_| "not a text or zip file".to_string())?
     };
+    let t = text.trim_start_matches('\u{feff}').trim_start();
+    if !(t.starts_with('{') || t.starts_with('[')) {
+        return import_csv(t);
+    }
     import_json(&text)
+}
+
+/// Fusion 360's CSV export of a tool library (comma or tab separated). Its header names columns
+/// "Name (field_id)" or just "field_id"; each row becomes a Fusion tool and is read as one. Tool
+/// numbers can repeat (a tool with several presets), so names get the row number when they clash.
+pub fn import_csv(text: &str) -> Result<Imported, String> {
+    let mut lines = text.lines().filter(|l| !l.trim().is_empty());
+    let head = lines.next().ok_or("empty file")?;
+    let sep = if head.contains('\t') { '\t' } else { ',' };
+    let key = |h: &str| {
+        let h = h.trim();
+        match (h.rfind('('), h.ends_with(')')) {
+            (Some(i), true) => h[i + 1..h.len() - 1].trim().to_string(),
+            _ => h.to_string(),
+        }
+    };
+    let keys: Vec<String> = split_csv(head, sep).iter().map(|h| key(h)).collect();
+    if !keys.iter().any(|k| k == "tool_diameter") {
+        return Err("not a Fusion 360 tool library CSV (no tool_diameter column)".into());
+    }
+    let mut out = Imported::default();
+    let mut names: Vec<String> = vec![];
+    for (row, line) in lines.enumerate() {
+        let cells = split_csv(line, sep);
+        let get = |k: &str| keys.iter().position(|h| h == k).and_then(|i| cells.get(i)).map(|c| c.trim()).filter(|c| !c.is_empty());
+        let n = |k: &str| get(k).and_then(|c| c.parse::<f64>().ok());
+        let mut geometry = serde_json::Map::new();
+        for (field, g) in [
+            ("tool_diameter", "DC"),
+            ("tool_numberOfFlutes", "NOF"),
+            ("tool_fluteLength", "LCF"),
+            ("tool_bodyLength", "LB"),
+            ("tool_overallLength", "OAL"),
+            ("tool_shaftDiameter", "SFDM"),
+            ("tool_cornerRadius", "RE"),
+            ("tool_tipDiameter", "tip-diameter"),
+            ("tool_tipAngle", "SIG"),
+            ("tool_taperAngle", "TA"),
+            ("tool_threadPitch", "TP"),
+        ] {
+            if let Some(v) = n(field) {
+                geometry.insert(g.into(), v.into());
+            }
+        }
+        let mut preset = serde_json::Map::new();
+        for (field, p) in [("tool_spindleSpeed", "n"), ("tool_feedCutting", "v_f"), ("tool_feedPlunge", "v_f_plunge"), ("tool_stepdown", "stepdown"), ("tool_stepover", "stepover")] {
+            if let Some(v) = n(field) {
+                preset.insert(p.into(), v.into());
+            }
+        }
+        if let Some(c) = get("tool_coolant") {
+            preset.insert("tool-coolant".into(), c.into());
+        }
+        let unit = get("tool_unit").map(|u| if u.to_lowercase().starts_with("in") { "inches" } else { "millimeters" }).unwrap_or("millimeters");
+        let mut e = serde_json::json!({
+            "type": get("tool_type").unwrap_or(""),
+            "unit": unit,
+            "description": get("tool_description").unwrap_or(""),
+            "vendor": get("tool_vendor").unwrap_or(""),
+            "BMC": get("tool_material").unwrap_or("carbide"),
+            "geometry": geometry,
+        });
+        if let Some(t) = n("tool_number") {
+            e["post-process"] = serde_json::json!({ "number": t.max(1.0) as u64 });
+        }
+        if !preset.is_empty() {
+            e["start-values"] = serde_json::json!({ "presets": [preset] });
+        }
+        match fusion_tool(&e) {
+            Ok(Some(mut t)) => {
+                if names.contains(&t.name) {
+                    t.name = format!("{} (row {})", t.name, row + 1);
+                }
+                names.push(t.name.clone());
+                out.tools.push(t);
+            }
+            Ok(None) => {}
+            Err(why) => out.skipped.push(format!("row {}: {why}", row + 1)),
+        }
+    }
+    Ok(out)
+}
+
+/// One CSV line's cells; quoted cells may hold the separator and doubled quotes.
+fn split_csv(line: &str, sep: char) -> Vec<String> {
+    let mut cells = vec![String::new()];
+    let mut quoted = false;
+    let mut chars = line.chars().peekable();
+    while let Some(c) = chars.next() {
+        let cell = cells.last_mut().unwrap();
+        match c {
+            '"' if quoted && chars.peek() == Some(&'"') => {
+                cell.push('"');
+                chars.next();
+            }
+            '"' => quoted = !quoted,
+            c if c == sep && !quoted => cells.push(String::new()),
+            c => cell.push(c),
+        }
+    }
+    cells
 }
 
 /// Add tools to the user's library (~/.config/cad-rust-app/tools.json), replacing ones with the same
@@ -270,6 +375,28 @@ mod tests {
         assert_eq!((c.kind, c.angle, c.diameter, c.rpm), (ToolKind::Chamfer, 90.0, 12.7, 0.0));
         let tap = &r.tools[2];
         assert_eq!((tap.kind, tap.pitch, tap.feed), (ToolKind::Tap, 1.0, 500.0));
+    }
+
+    #[test]
+    fn reads_fusion_csv_exports() {
+        let csv = "tool_index,tool_type,tool_description,tool_number,tool_diameter,tool_numberOfFlutes,tool_material,tool_fluteLength,tool_bodyLength,tool_overallLength,tool_shaftDiameter,tool_tipAngle,tool_taperAngle,tool_spindleSpeed,tool_feedCutting,tool_feedPlunge,tool_stepdown,tool_stepover,tool_coolant\n\
+            2,chamfer mill,ALUMINUM,1,6.35,4,carbide,18,36,50.8,6.35,,45,24000,2880,100,,,flood\n\
+            28,flat end mill,3 FLUTE DLC 1/4,24,6.35,3,carbide,19.05,24,36,6.35,,,24000,3000,333.333,12,0.5,flood\n\
+            29,flat end mill,\"3 FLUTE DLC 1/4\",24,6.35,3,carbide,25.4,26,36,6.35,,,24000,2400,333.333,12,0.4,flood\n\
+            24,drill,,21,2,2,carbide,20,25,40,2,118,,20000,,333,,,flood\n";
+        let r = import_csv(csv).unwrap();
+        assert_eq!(r.tools.len(), 4, "{:?}", r.skipped);
+        let c = &r.tools[0];
+        assert_eq!((c.kind, c.angle, c.number, c.rpm, c.feed), (ToolKind::Chamfer, 90.0, 1, 24000.0, 2880.0));
+        let t = &r.tools[1];
+        assert_eq!((t.kind, t.number, t.flutes, t.diameter, t.flute_length, t.stickout), (ToolKind::Flat, 24, 3, 6.35, 19.05, 24.0));
+        assert!((t.stepover - 0.5 / 6.35).abs() < 1e-9 && t.stepdown == 12.0);
+        assert_eq!(r.tools[2].name, "3 FLUTE DLC 1/4 (row 3)");
+        assert_eq!((r.tools[3].kind, r.tools[3].angle), (ToolKind::Drill, 118.0));
+        // Fusion's own header style, tab separated
+        let tsv = "Number (tool_number)\tType (tool_type)\tDiameter (tool_diameter)\n7\tflat end mill\t2\n";
+        assert_eq!(import_csv(tsv).unwrap().tools[0].number, 7);
+        assert!(import_csv("a,b\n1,2").is_err());
     }
 
     #[test]
