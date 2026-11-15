@@ -626,6 +626,13 @@ impl Session {
                     .map(|e| json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label() } else { e.what.as_str() }, "operation": names(e.op), "op_id": e.op, "at": [round(e.at[0] - o.x), round(e.at[1] - o.y), round(e.at[2] - o.z)], "depth": round(e.depth)}))
                     .collect();
                 let mut v = json!({"moves": sim.total(), "removed_mm3": sim.removed.round(), "problems": events, "ok": sim.events.is_empty(), "cell_mm": round(sim.cell)});
+                // each operation's heaviest cut: width and depth against what the tool takes at that width
+                let loads: Vec<Value> = sim
+                    .loads
+                    .iter()
+                    .map(|l| json!({"operation": names(l.op), "op_id": l.op, "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "allowed_depth": round(crate::cam_sim::allowed_depth(l.diameter, l.width)), "area_limit": round(l.max_area), "load": round(l.ratio), "at": [round(l.at[0] - o.x), round(l.at[1] - o.y), round(l.at[2] - o.z)]}))
+                    .collect();
+                v["loads"] = json!(loads);
                 if let Some(m) = &sim.machine {
                     v["machine"] = json!(m.placed.machine.model.name);
                     let skipped: Vec<String> = m.placed.overlapping.iter().map(|(a, b)| format!("{} / {}", a.short(), b.short())).collect();

@@ -301,6 +301,8 @@ pub struct Visuals {
     /// The finished simulation, from above at an angle and from the top, and what it found.
     pub sim: Option<(Option<Shot>, Option<Shot>)>,
     pub events: Vec<crate::cam_sim::SimEvent>,
+    /// Each operation's heaviest cut in the simulation.
+    pub loads: Vec<crate::cam_sim::OpLoad>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -325,7 +327,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![] };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![] };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -373,6 +375,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     }
     v.sim = Some((sc.shoot("iso", 560, 420, None), sc.shoot("top", 400, 300, None)));
     v.events = sim.events.clone();
+    v.loads = sim.loads.clone();
     v
 }
 
@@ -659,6 +662,17 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             notes.push(esc(&format!("finds {} and sets {} (G54); jog the probe close to the work zero first", plan.what, plan.sets_text(o))));
         }
         notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
+        if let Some(l) = vis.loads.iter().find(|l| l.op == op.id) {
+            let text = format!(
+                "heaviest cut {} wide × {} deep ({} mm² per mm): {}% of what T{} takes",
+                fmt_mm(l.width),
+                fmt_mm(l.depth),
+                fmt_mm(l.area),
+                (l.ratio * 100.0).round(),
+                t.number
+            );
+            notes.push(if l.ratio > 1.0 { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+        }
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {
             notes.push(format!("<span class=\"warn\">{problems} problem(s) in the simulation</span>"));

@@ -2259,6 +2259,81 @@ mod tests {
         }
     }
 
+    /// A 74 × 74 × 15 block with R10 corners: the phone stand's plinth.
+    fn plinth() -> Part {
+        let (h, rc) = (37.0, 10.0);
+        let mut ring = vec![];
+        for (cx, cy, a0) in [(h - rc, h - rc, 0.0), (rc - h, h - rc, 90.0), (rc - h, rc - h, 180.0), (h - rc, rc - h, 270.0)] {
+            for k in 0..=12 {
+                let a = (a0 + k as f64 * 7.5f64).to_radians();
+                ring.push(DVec2::new(cx + rc * a.cos(), cy + rc * a.sin()));
+            }
+        }
+        let z = 15.0;
+        let mut t = vec![];
+        let n = ring.len();
+        for k in 0..n {
+            let (a, b) = (ring[k], ring[(k + 1) % n]);
+            t.push([DVec3::new(0.0, 0.0, z), a.extend(z), b.extend(z)]);
+            t.push([DVec3::ZERO, b.extend(0.0), a.extend(0.0)]);
+            t.push([a.extend(0.0), b.extend(0.0), b.extend(z)]);
+            t.push([a.extend(0.0), b.extend(z), a.extend(z)]);
+        }
+        Part::new(&t, &[], "top")
+    }
+
+    /// The load check flags what overloaded a 1/4" end mill on the DMC2: one contour 4 mm deep round
+    /// the R10 corners of a plinth in square stock 1 mm bigger all round (about 5.6 mm of stock at each
+    /// corner), and passes adaptive clearing of the same.
+    #[test]
+    fn load_check_flags_a_contour_into_square_corners_not_adaptive() {
+        let part = plinth();
+        let run = |kind: OpKind, f: &dyn Fn(&mut crate::cam::Operation)| {
+            let mut c = Cam::default();
+            c.stock.side = 1.0;
+            c.stock.top = 0.0;
+            c.origin = crate::cam::Origin::StockBottomCenter;
+            let t = tool(&mut c, ToolKind::Flat, 6.0);
+            let id = c.add_op(kind, t);
+            let op = c.ops.iter_mut().find(|o| o.id == id).unwrap();
+            op.bottom = Some(5.0);
+            op.leave = 0.2;
+            f(op);
+            let (s, paths) = sim(&c, &part);
+            assert!(paths[0].moves.len() > 10, "{kind:?}: {:?} {:?}", paths[0].warnings, paths[0].moves.len());
+            s
+        };
+        let s = run(OpKind::Contour, &|op| op.stepdown = Some(4.0));
+        let over: Vec<_> = s.events.iter().filter(|e| e.kind == EventKind::Overload).collect();
+        assert!(!over.is_empty(), "{:?}", s.loads);
+        // at the corners, not along the straight sides (1 mm of stock)
+        let (lo, hi) = stock_box(&Cam { origin: crate::cam::Origin::StockBottomCenter, ..Default::default() }, &part);
+        let mid = (lo + hi) / 2.0;
+        assert!(over.iter().all(|e| (e.at[0] - mid.x).abs() > 25.0 && (e.at[1] - mid.y).abs() > 25.0), "{:?}", over.iter().take(5).collect::<Vec<_>>());
+        let l = s.loads[0];
+        assert!(l.width > 4.0 && l.depth > 3.5 && l.ratio > 1.0, "{l:?}");
+
+        let s = run(OpKind::Adaptive, &|op| {
+            op.stepdown = Some(5.0);
+            op.stepover = Some(0.12);
+        });
+        assert!(!s.events.iter().any(|e| e.kind == EventKind::Overload), "{:?}", s.loads);
+        assert!(s.loads[0].ratio < 0.9, "{:?}", s.loads);
+    }
+
+    #[test]
+    fn allowed_depth_and_area_by_engagement() {
+        use crate::cam_sim::{allowed_depth, area_limit};
+        let d = 6.35;
+        assert!((allowed_depth(d, 0.5) - 2.5 * d).abs() < 1e-9, "a light step: 2.5 D");
+        assert!((allowed_depth(d, d / 2.0) - 0.8 * d).abs() < 1e-9);
+        assert!((allowed_depth(d, d) - 0.45 * d).abs() < 1e-9, "a full slot");
+        // the test part's heaviest cut, 4.65 wide x 3 deep, cut fine on the DMC2; the plinth corner didn't
+        assert!(3.0 < allowed_depth(d, 4.65) && 4.0 > allowed_depth(d, 5.0));
+        assert!(area_limit(d, "carbide") > 13.9 && area_limit(d, "carbide") < 20.0);
+        assert!(area_limit(6.0, "hss") < area_limit(6.0, "carbide"));
+    }
+
     #[test]
     fn adaptive_clears_with_loops_and_no_crashes() {
         let part = dome();

@@ -2183,7 +2183,10 @@ mod tests {
         let stock = stock_box(&c, &part);
         let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &paths, 300);
         sim.run_to(usize::MAX, usize::MAX);
-        assert!(sim.events.is_empty(), "{:?}", sim.events);
+        // (the pocket's first pass is a full-width slot at the tool's default step-down: heavier than the load
+        // check lets a light mill take, which is its own business)
+        assert!(sim.events.iter().all(|e| e.kind == crate::cam_sim::EventKind::Overload), "{:?}", sim.events);
+        assert!(sim.events.iter().all(|e| e.op == 3), "only the pocket's slot: {:?}", sim.events);
         assert!(sim.removed > 1000.0);
         // a rapid straight through the stock is a crash
         let bad = Toolpath { op: 1, tool: t, moves: vec![Move::Rapid([-10.0, 20.0, 5.0]), Move::Rapid([70.0, 20.0, 5.0])], ..Default::default() };
