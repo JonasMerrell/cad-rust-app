@@ -908,6 +908,10 @@ pub struct Operation {
     pub depth: f64,
     /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
     pub lead: f64,
+    /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
+    /// stock reaches further out than that, extra passes outside the wall take it down first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_engagement: Option<f64>,
     /// Adaptive: raise the feed for radial chip thinning (the loops take a thin cut, so the chips are thinner
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
@@ -1025,6 +1029,7 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            max_engagement: None,
             chip_thinning: false,
             probing: None,
         }
