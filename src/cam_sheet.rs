@@ -673,19 +673,26 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         }
         notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
         if let Some(l) = vis.loads.iter().find(|l| l.op == op.id) {
+            let (c, u) = (&l.cut, &l.uses);
             let text = format!(
-                "heaviest cut {} wide × {} deep ({} mm² per mm): {}% of what T{} takes",
+                "spindle {}% of the power it has at {} rpm ({} W, {} N·m); heaviest cut {} wide × {} deep at {} mm/min: {} N on the tool, bends {} mm, chip {} mm; worst limit {}%",
+                (u.power * 100.0).round(),
+                l.rpm.round(),
+                c.power.round(),
+                fmt_mm(c.torque),
                 fmt_mm(l.width),
                 fmt_mm(l.depth),
-                fmt_mm(l.area),
-                (l.ratio * 100.0).round(),
-                t.number
+                l.feed.round(),
+                c.force.round(),
+                fmt_mm(c.deflection),
+                fmt_mm(c.h_max),
+                (l.ratio * 100.0).round()
             );
-            // over the limit: a problem; within 15% of it: heavier than the cuts the limit was set from
+            // over a limit: a problem; within 15% of it: heavier than the cuts the limits were set from
             notes.push(if l.ratio > 1.0 {
                 format!("<span class=\"warn\">{}</span>", esc(&text))
             } else if l.ratio > 0.85 {
-                format!("<span class=\"warn\">{} (caution: above 85%, heavier than proven cuts)</span>", esc(&text))
+                format!("<span class=\"warn\">{} (caution: above 85%)</span>", esc(&text))
             } else {
                 esc(&text)
             });

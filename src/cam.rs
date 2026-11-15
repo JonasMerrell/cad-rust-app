@@ -1171,11 +1171,44 @@ pub struct Machine {
     /// path to a machine file); empty = none.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The spindle's rated (electrical input) power, W, at `spindle_rated_rpm`; 0 = not known (the load
+    /// check then assumes 1.5 kW at 24000 rpm, a common VFD spindle, and says so).
+    pub spindle_power: f64,
+    /// Share of the input power that reaches the shaft.
+    pub spindle_efficiency: f64,
+    pub spindle_rated_rpm: f64,
+    /// The most sideways force the machine takes at the tool, N; 0 = not known (700 assumed).
+    pub max_cut_force: f64,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0, model: String::new() }
+        Machine {
+            name: String::new(),
+            travel: [0.0; 3],
+            max_feed: 0.0,
+            rapid_z: 0.0,
+            tool_changer: false,
+            spin_up: 5.0,
+            model: String::new(),
+            spindle_power: 0.0,
+            spindle_efficiency: 0.78,
+            spindle_rated_rpm: 0.0,
+            max_cut_force: 0.0,
+        }
+    }
+}
+
+impl Machine {
+    /// What the load check holds cuts to, and whether any of it is assumed rather than set.
+    pub fn cut_limits(&self) -> (crate::cam_cutting::Limits, bool) {
+        let assumed = !(self.spindle_power > 0.0) || !(self.max_cut_force > 0.0);
+        let power = if self.spindle_power > 0.0 { self.spindle_power } else { 1500.0 };
+        let eff = if self.spindle_efficiency > 0.0 { self.spindle_efficiency.min(1.0) } else { 0.78 };
+        let rated = if self.spindle_rated_rpm > 0.0 { self.spindle_rated_rpm } else { 24000.0 };
+        // (the DMC2 took 576 N on a 1 mm × 12.5 mm finishing pass without complaint: the spindle runs out first)
+        let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
+        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, force, deflection: 0.06 }, assumed)
     }
 }
 
@@ -1417,7 +1450,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone() };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone(), ..c.machine.clone() };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true

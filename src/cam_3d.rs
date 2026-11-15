@@ -2294,6 +2294,9 @@ mod tests {
             c.stock.top = 0.0;
             c.origin = crate::cam::Origin::StockBottomCenter;
             let t = tool(&mut c, ToolKind::Flat, 6.0);
+            // as the DMC2 ran it: 3 flutes, 24000 rpm, 2400 mm/min, 24 out of the holder
+            let tl = c.tools.iter_mut().find(|x| x.id == t).unwrap();
+            (tl.flutes, tl.rpm, tl.feed, tl.stickout, tl.material) = (3, 24000.0, 2400.0, 24.0, "carbide".into());
             let id = c.add_op(kind, t);
             let op = c.ops.iter_mut().find(|o| o.id == id).unwrap();
             op.bottom = Some(5.0);
@@ -2311,14 +2314,14 @@ mod tests {
         let mid = (lo + hi) / 2.0;
         assert!(over.iter().all(|e| (e.at[0] - mid.x).abs() > 25.0 && (e.at[1] - mid.y).abs() > 25.0), "{:?}", over.iter().take(5).collect::<Vec<_>>());
         let l = s.loads[0];
-        assert!(l.width > 4.0 && l.depth > 3.5 && l.ratio > 1.0, "{l:?}");
+        assert!(l.width > 4.0 && l.depth > 3.5 && l.ratio > 1.0 && l.uses.power > 1.0 && l.geometric > 1.0, "{l:?}");
 
         let s = run(OpKind::Adaptive, &|op| {
             op.stepdown = Some(5.0);
             op.stepover = Some(0.12);
         });
         assert!(!s.events.iter().any(|e| e.kind == EventKind::Overload), "{:?}", s.loads);
-        assert!(s.loads[0].ratio < 0.9, "{:?}", s.loads);
+        assert!(s.loads[0].ratio < 0.9 && s.loads[0].geometric < 0.9, "{:?}", s.loads);
     }
 
     /// Machined surface left with roughing stock on it is reported; a finishing pass clears the report.
@@ -2364,7 +2367,9 @@ mod tests {
         let (s, paths) = sim(&c, &part);
         let tp = &paths[0];
         assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
-        assert!(s.events.is_empty(), "{:?}", s.events.iter().take(5).collect::<Vec<_>>());
+        // (the preset's feed and step-down are more than the default 1.5 kW spindle takes: that's the load check's
+        // business, not this test's)
+        assert!(s.events.iter().all(|e| e.kind == EventKind::Overload), "{:?}", s.events.iter().take(5).collect::<Vec<_>>());
         // the stock around the dome comes down to near the plate (leaving 0.2 on the floor)
         let stock = stock_box(&c, &part);
         let mut high = 0;

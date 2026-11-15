@@ -87,6 +87,11 @@ struct Cutter {
     /// An end mill whose load is checked (flat, bull, ball): its diameter, and the most cut cross-section it
     /// takes per mm of travel (mm², see `area_limit`).
     load_d: Option<(f64, f64)>,
+    /// The tool for the physical cutting model, and its spindle speed (set in `push`).
+    geom: crate::cam_cutting::ToolGeom,
+    rpm: f64,
+    /// A finishing pass: its bend is a wall error, not a load.
+    finishing: bool,
     /// The operation's own cut cross-section (step-down × stepover, mm²): a feed move taking under 5% of it
     /// is next to nothing.
     nominal: f64,
@@ -169,7 +174,19 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0 }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0, geom: {
+            let (modulus, stress_limit) = crate::cam_cutting::tool_steel(&t.material);
+            crate::cam_cutting::ToolGeom {
+                diameter: 2.0 * r,
+                ball: matches!(t.kind, ToolKind::Ball | ToolKind::TaperedBall),
+                flutes: t.flutes,
+                stickout: stick,
+                flute_length: flutes,
+                shank: if t.shank_diameter > 0.0 { t.shank_diameter } else { 2.0 * r },
+                modulus,
+                stress_limit,
+            }
+        }, rpm: 0.0, finishing: false }
     }
 }
 
@@ -231,6 +248,10 @@ pub struct Sim {
     /// How much of each operation's feed moves cut nothing (see `OpAir`).
     pub air: Vec<OpAir>,
     feed: f64,
+    /// The stock material and the machine's limits for the cutting model; whether the limits are assumed.
+    material: crate::cam_cutting::Material,
+    pub limits: crate::cam_cutting::Limits,
+    pub limits_assumed: bool,
 }
 
 /// An operation's feed moves: how far, how long (at the programmed feed), and how much of that cut no
@@ -260,7 +281,15 @@ pub struct OpLoad {
     pub depth: f64,
     pub diameter: f64,
     pub max_area: f64,
+    /// The worst share of a limit the physical model gives (spindle power or torque, force, deflection,
+    /// stress, chip): above 1 is an overload. `geometric` is the older width × depth rule.
     pub ratio: f64,
+    pub geometric: f64,
+    /// Feed and speed at that point, and what the cut does (see `cam_cutting`).
+    pub feed: f64,
+    pub rpm: f64,
+    pub cut: crate::cam_cutting::Cut,
+    pub uses: crate::cam_cutting::Use,
 }
 
 /// Machined part surface left with stock on it (see `Sim::unfinished`): how much area, the most left, where.
@@ -344,6 +373,9 @@ impl Sim {
             loads: vec![],
             air: vec![],
             feed: 1000.0,
+            material: crate::cam_cutting::material(&cam.stock.material),
+            limits: cam.machine.cut_limits().0,
+            limits_assumed: cam.machine.cut_limits().1,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -403,6 +435,10 @@ impl Sim {
         };
         let mut cutter = Cutter::new(tool, self.cell, allowance);
         cutter.nominal = op.map(|o| crate::cam_paths::stepdown(o, tool) * crate::cam_paths::stepover(o, tool)).unwrap_or(1.0).max(0.01);
+        cutter.rpm = cam.spindle_rpm(tool);
+        cutter.finishing = op.is_some_and(|o| {
+            matches!(o.kind, OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil) || (o.kind == OpKind::Contour && o.leave <= 0.0)
+        });
         self.cutters.push(cutter);
         let ci = self.cutters.len() - 1;
         for m in &tp.moves {
@@ -746,8 +782,13 @@ impl Sim {
         }
         let area = vol / travel;
         let width = (area / depth).min(d);
-        let ratio = (depth / allowed_depth(d, width)).max(area / max_area);
-        let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio };
+        let geometric = (depth / allowed_depth(d, width)).max(area / max_area);
+        let c = &self.cutters[ci];
+        let (feed, rpm) = (self.feed, c.rpm);
+        let cut = crate::cam_cutting::cut(&c.geom, &self.material, width, depth, feed, rpm, area);
+        let uses = crate::cam_cutting::use_of(&cut, &c.geom, &self.limits, rpm, c.finishing);
+        let ratio = uses.worst;
+        let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio, geometric, feed, rpm, cut, uses };
         match self.loads.iter_mut().find(|l| l.op == op) {
             Some(l) if l.ratio < ratio => *l = load,
             Some(_) => {}

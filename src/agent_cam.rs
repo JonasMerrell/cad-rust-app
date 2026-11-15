@@ -630,9 +630,17 @@ impl Session {
                 let loads: Vec<Value> = sim
                     .loads
                     .iter()
-                    .map(|l| json!({"operation": names(l.op), "op_id": l.op, "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "allowed_depth": round(crate::cam_sim::allowed_depth(l.diameter, l.width)), "area_limit": round(l.max_area), "load": round(l.ratio), "at": [round(l.at[0] - o.x), round(l.at[1] - o.y), round(l.at[2] - o.z)]}))
+                    .map(|l| {
+                        let (c, u) = (&l.cut, &l.uses);
+                        json!({"operation": names(l.op), "op_id": l.op, "load": round(l.ratio), "spindle_power_pct": (u.power * 100.0).round(), "power_w": c.power.round(), "torque_nm": round(c.torque),
+                            "force_n": c.force.round(), "deflection_mm": round(c.deflection), "stress_mpa": c.stress.round(), "chip_mm": round(c.h_max), "fz_mm": round(c.fz), "vc_m_min": c.vc.round(), "mrr_cm3_min": round(c.mrr),
+                            "uses": {"power": round(u.power), "torque": round(u.torque), "force": round(u.force), "deflection": round(u.deflection), "stress": round(u.stress), "chip": round(u.chip)},
+                            "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "geometric": round(l.geometric), "feed": l.feed.round(), "rpm": l.rpm.round(),
+                            "at": [round(l.at[0] - o.x), round(l.at[1] - o.y), round(l.at[2] - o.z)]})
+                    })
                     .collect();
                 v["loads"] = json!(loads);
+                v["limits"] = json!({"spindle_shaft_w": sim.limits.power.round(), "rated_rpm": sim.limits.rated_rpm, "max_force_n": sim.limits.force, "deflection_mm": sim.limits.deflection, "assumed": sim.limits_assumed});
                 let air: Vec<Value> = sim
                     .air
                     .iter()
