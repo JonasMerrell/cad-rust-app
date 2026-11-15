@@ -54,6 +54,8 @@ reported as assumed. The DMC2: 1.5 kW input, about 1170 W at the shaft; 490 W at
 - Bending stress at the holder (or where the flutes start, if that is weaker): σ = M·c/I; limits 800 MPa
   carbide, 900 MPa HSS (well under rupture: fatigue and edge chipping come first).
 - Chip load: h_max against 2.5% of the diameter.
+- The tool's material comes from the library. Jonas's tools are all carbide (the 1/4" flats DLC coated);
+  his Fusion library's material column is wrong for some, so the jobs import it with `material: carbide`.
 
 ## Limits and what is reported
 

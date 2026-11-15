@@ -480,6 +480,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "program") => t("integer", "program number"),
         ("import_tool_library", "path") => t("string", "Fusion 360 .json/.tools library or a tools.json"),
         ("import_tool_library", "cam") => json!({"type": "integer", "minimum": 0, "description": "also add every tool to this Manufacture tab"}),
+        ("import_tool_library", "material") => t("string", "every imported tool is this material, whatever the file says (carbide, hss, cobalt)"),
         ("cam_tool_library" | "cam_tool", "kind") => en(&cam_keys(&crate::cam::ToolKind::ALL, crate::cam::ToolKind::key), "tool kind"),
         ("cam_tool_library", "search") => t("string", "search words, e.g. '6 flat'"),
         ("cam_tool", "preset") => t("string", "library search, e.g. 'Ø6 flat end mill'"),
