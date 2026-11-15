@@ -1699,38 +1699,58 @@ impl Level<'_, '_> {
     }
 
     /// Can the tool feed straight from `a` to `b` at depth without touching material (`near`: centres that do)?
-    fn link_clear(&self, a: DVec2, b: DVec2, area: &Shapes, near: &Shapes) -> bool {
+    fn link_clear(&self, a: DVec2, b: DVec2, area: &Shapes, near: &Shapes, free: &Shapes) -> bool {
         let len = a.distance(b);
         if len > 12.0 * self.r.max(1.0) {
             return false;
         }
         let n = (len / (0.25 * self.r).max(0.05)).ceil().max(1.0) as usize;
-        (1..n).all(|k| {
+        // the end too, and only over centres already cleared at this level (the phone stand: a 12 mm link along
+        // the groove's backrest, over a band the passes hadn't reached yet, met a strip 4 mm wide)
+        let cleared = offset(free, 0.1 * self.r);
+        (1..=n).all(|k| {
             let p = a.lerp(b, k as f64 / n as f64).to_array();
-            inside(area, p) && !inside(near, p)
+            inside(area, p) && !inside(near, p) && inside(&cleared, p)
         })
     }
 
     /// Get to `p` (a clear centre) at depth: straight over through cleared ground, else from above.
-    fn go_to(&mut self, p: DVec2, area: &Shapes, near: &Shapes) {
+    fn go_to(&mut self, p: DVec2, area: &Shapes, near: &Shapes, free: &Shapes) {
         let here = self.pb.pos;
         if let Some(q) = here {
             if q.truncate().distance(p) < 1e-6 && (q.z - self.z).abs() < 1e-6 {
                 return;
             }
         }
-        if self.at_depth() && self.link_clear(here.unwrap().truncate(), p, area, near) {
+        if self.at_depth() && self.link_clear(here.unwrap().truncate(), p, area, near, free) {
             self.pb.cut(p.extend(self.z), self.fast);
             return;
         }
-        // retract, and come down beside the material (the column over a clear centre is clear)
+        // a short step at depth to a start in material: at the cutting feed, not the link's
+        if self.at_depth() && here.is_some_and(|q| q.truncate().distance(p) < 2.0 * self.step.max(0.2)) {
+            self.pb.cut(p.extend(self.z), self.feed);
+            return;
+        }
+        // retract, and come down beside the material (the column over a clear centre is clear); a start whose
+        // tool would touch material (a hole the stock map shows open lower down, say) gets a helix, not a plunge
+        if inside(near, p.to_array()) {
+            self.helix_in(p, self.helix);
+            return;
+        }
         self.pb.approach(p.x, p.y, self.z_from);
         self.pb.cut(p.extend(self.z), self.fast);
     }
 
     fn run(&mut self, pts: &[P2]) {
-        for q in pts {
-            self.pb.cut(DVec3::new(q[0], q[1], self.z), self.feed);
+        let start = self.pb.pos.map(|p| p.truncate());
+        for (i, q) in pts.iter().enumerate() {
+            let prev = if i > 0 { Some(DVec2::from(pts[i - 1])) } else { start };
+            let next = pts.get(i + 1).map(|n| DVec2::from(*n));
+            let f = match (prev, next) {
+                (Some(a), Some(c)) => arc_feed(self.feed, a, DVec2::from(*q), c, self.r),
+                _ => self.feed,
+            };
+            self.pb.cut(DVec3::new(q[0], q[1], self.z), f);
         }
     }
 
@@ -1878,7 +1898,7 @@ impl Level<'_, '_> {
                         })
                         .collect();
                     let start = blend.first().copied().unwrap_or(pt(k));
-                    self.go_to(start, a, &near);
+                    self.go_to(start, a, &near, &free);
                     let mut pts: Vec<P2> = blend.iter().skip(1).map(|q| q.to_array()).collect();
                     pts.extend((0..=n).map(|i| s.pts[(k + i) % n]));
                     self.run(&pts);
@@ -1923,7 +1943,7 @@ impl Level<'_, '_> {
             return;
         }
         if head_on(pts, remaining, r, 3.0 * r) <= 0.5 * h {
-            self.go_to(DVec2::from(pts[0]), a, near);
+            self.go_to(DVec2::from(pts[0]), a, near, free);
             self.run(&pts[1..]);
             return;
         }
@@ -1943,7 +1963,7 @@ impl Level<'_, '_> {
             let t = acc / ease;
             run.push((f + (q - f) * (t * t * (3.0 - 2.0 * t))).to_array());
         }
-        self.go_to(DVec2::from(run[0]), a, near);
+        self.go_to(DVec2::from(run[0]), a, near, free);
         if run.len() > 1 {
             self.run(&run[1..]);
         }
@@ -2082,6 +2102,34 @@ fn roomiest(s: &Shapes, r: f64) -> Option<(DVec2, f64)> {
     Some((p, depth))
 }
 
+/// The feed for the centre at `b` on a path a → b → c: on a tight curve with the cut on its outside (rings growing
+/// out of a hole or a helix) the cutting edge runs (R + r) / R times faster than the centre, so the chip and
+/// the power go up as much: slow the centre down so the edge keeps to `feed` (arc feed compensation). Only
+/// curves tighter than 1.5 tool radii (where the edge runs 1.7× and more): the rest of a loop's arcs are mostly
+/// in air, and slowing those costs time for nothing.
+fn arc_feed(feed: f64, a: DVec2, b: DVec2, c: DVec2, r: f64) -> f64 {
+    let (u, v) = (b - a, c - b);
+    let (lu, lv) = (u.length(), v.length());
+    if lu < 1e-9 || lv < 1e-9 {
+        return feed;
+    }
+    // radius of the circle through a, b, c
+    let cross = u.perp_dot(v);
+    let chord = (c - a).length();
+    if cross.abs() < 1e-12 || chord < 1e-9 {
+        return feed;
+    }
+    let big_r = lu * lv * chord / (2.0 * cross.abs());
+    if big_r > 1.5 * r {
+        return feed;
+    }
+    feed * (big_r / (big_r + r)).max(0.15)
+}
+
+/// The share of the spindle's power (at the tool's speed) the cut may take at its heaviest (where a pass meets
+/// a wall); `AREA_SHARE` of it along the passes' sides.
+const POWER_SHARE: f64 = 0.7;
+
 /// The share of the tool's cut area (`cam_sim::area_limit`) a pass takes along its side at most: where a pass
 /// meets a wall it takes two to three times as much for a moment, so the side cut keeps well under the limit.
 const AREA_SHARE: f64 = 0.4;
@@ -2122,7 +2170,8 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     // the passes take a cut `step` wide: with chip thinning the feed rises to keep the chip as thick as the feed per tooth
     let thin = if op.chip_thinning { crate::cam::chip_thinning(step / t.diameter.max(1e-9)) } else { 1.0 };
     let feed = pb.feed * thin;
-    // links through cleared ground: as fast as the machine feeds
+    // links through cleared ground (`Level::link_clear`: only over centres already cleared at the level): as fast
+    // as the machine feeds
     let fast = match ctx.cam.machine.max_feed {
         m if m > 0.0 => m.max(feed),
         _ => feed * 1.5,
@@ -2141,6 +2190,20 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         }
     }
     let area_max = crate::cam_sim::area_limit(t.diameter, &t.material);
+    // the cut area (mm² per mm) at which the spindle gives POWER_SHARE of the power it has at this speed, at this
+    // feed (the physical model, cam_cutting): on a small spindle that is what limits a cut, not the tool
+    let area_power = {
+        let (lim, _) = ctx.cam.machine.cut_limits();
+        let rpm = ctx.cam.spindle_rpm(t);
+        let m = crate::cam_cutting::material(&ctx.cam.stock.material);
+        let avail = lim.power * (rpm / lim.rated_rpm.max(1.0)).min(1.0);
+        // the chip at the full stepover sets the specific cutting force (a thinner chip costs more per mm³)
+        let fz = feed / (rpm.max(1.0) * t.flutes.max(1) as f64);
+        let phi = (1.0 - 2.0 * step.min(t.diameter) / t.diameter.max(1e-9)).clamp(-1.0, 1.0).acos();
+        let hm = if phi > 1e-9 { fz * (1.0 - phi.cos()) / phi } else { fz };
+        let kc = m.kc1 * hm.max(0.005).powf(-m.mc);
+        if rpm > 0.0 && feed > 0.0 { POWER_SHARE * avail * 60_000.0 / (feed * kc) } else { f64::INFINITY }
+    };
     let mut narrowed = f64::INFINITY;
     let mut z_prev = top;
     let mut any = false;
@@ -2161,7 +2224,7 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         any = true;
         // a deep level at the full stepover can take more than the tool's cut area: narrow the stepover there
         let deep = z_prev - z;
-        let level_step = if deep > 1e-6 { step.min(AREA_SHARE * area_max / deep).min(WIDTH_SHARE * widest(t.diameter, deep)) } else { step };
+        let level_step = if deep > 1e-6 { step.min(AREA_SHARE * area_max.min(area_power) / deep).min(WIDTH_SHARE * widest(t.diameter, deep)) } else { step };
         if level_step < step - 1e-3 {
             narrowed = narrowed.min(level_step);
         }
@@ -2674,6 +2737,17 @@ mod tests {
         let u = run(0.5).expect("the face left 0.5 mm on the top");
         assert!(u.area_mm2 > 3000.0 && (u.max - 0.5).abs() < 0.05, "{u:?}");
         assert_eq!(run(0.0), None);
+    }
+
+    /// A ring growing out of a small hole: the edge runs (R + r) / R faster than the centre, so the centre is
+    /// slowed to keep the edge at the feed; wide curves and straights keep the feed.
+    #[test]
+    fn arc_feed_keeps_the_edge_at_the_feed() {
+        let on = |rad: f64, a: f64| DVec2::new(rad * a.cos(), rad * a.sin());
+        let f = arc_feed(2400.0, on(1.0, 0.0), on(1.0, 0.3), on(1.0, 0.6), 3.175);
+        assert!((f - 2400.0 * 1.0 / 4.175).abs() < 20.0, "{f}");
+        assert_eq!(arc_feed(2400.0, on(20.0, 0.0), on(20.0, 0.05), on(20.0, 0.1), 3.175), 2400.0);
+        assert_eq!(arc_feed(2400.0, DVec2::ZERO, DVec2::X, 2.0 * DVec2::X, 3.175), 2400.0);
     }
 
     #[test]
