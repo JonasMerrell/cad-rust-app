@@ -307,6 +307,8 @@ pub struct Visuals {
     pub unfinished: Option<crate::cam_sim::Unfinished>,
     /// Each operation's feed moves that cut nothing.
     pub air: Vec<crate::cam_sim::OpAir>,
+    /// Each operation's chip evacuation.
+    pub chips: Vec<crate::cam_sim::OpChips>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -331,7 +333,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None, air: vec![] };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None, air: vec![], chips: vec![] };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -382,6 +384,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     v.loads = sim.loads.clone();
     v.unfinished = sim.unfinished(0.1);
     v.air = sim.air.clone();
+    v.chips = sim.chip_ops.clone();
     v
 }
 
@@ -710,6 +713,19 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             let (air, light) = (a.air_s / a.feed_s * 100.0, a.light_s / a.feed_s * 100.0);
             let text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
             notes.push(if air + light > 50.0 && matches!(op.kind, OpKind::Adaptive | OpKind::Clear | OpKind::Pocket | OpKind::Face | OpKind::Contour) { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+        }
+        if let Some(c) = vis.chips.iter().find(|c| c.op == op.id) {
+            let t = (c.open_s + c.slot_s + c.pocket_s).max(1e-9);
+            if t > 1.0 {
+                let text = format!(
+                    "chips: fill up to {}% of the cavity they lie in; cutting {}% in pockets, {}% in slots; {} mm through packed chips",
+                    (c.max_fill * 100.0).round(),
+                    (c.pocket_s / t * 100.0).round(),
+                    (c.slot_s / t * 100.0).round(),
+                    c.recut_mm.round()
+                );
+                notes.push(if c.max_fill > 0.5 { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+            }
         }
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {

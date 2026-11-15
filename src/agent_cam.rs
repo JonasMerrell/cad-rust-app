@@ -653,6 +653,19 @@ impl Session {
                     .map(|a| json!({"operation": names(a.op), "op_id": a.op, "feed_min": round(a.feed_s / 60.0), "air_pct": (a.air_s / a.feed_s.max(1e-9) * 100.0).round(), "light_pct": (a.light_s / a.feed_s.max(1e-9) * 100.0).round(), "air_mm": a.air_mm.round(), "feed_mm": a.feed_mm.round()}))
                     .collect();
                 v["air"] = json!(air);
+                let chips: Vec<Value> = sim
+                    .chip_ops
+                    .iter()
+                    .filter(|c| c.open_s + c.slot_s + c.pocket_s > 0.0)
+                    .map(|c| {
+                        let t = (c.open_s + c.slot_s + c.pocket_s).max(1e-9);
+                        json!({"operation": names(c.op), "op_id": c.op, "chip_fill": round(c.max_fill), "at": [round(c.at[0] - o.x), round(c.at[1] - o.y), round(c.at[2] - o.z)],
+                            "open_pct": (c.open_s / t * 100.0).round(), "slot_pct": (c.slot_s / t * 100.0).round(), "pocket_pct": (c.pocket_s / t * 100.0).round(),
+                            "recut_mm": c.recut_mm.round(), "deep_slot_mm": c.deep_slot_mm.round(),
+                            "rating": if c.max_fill > 1.0 { "problem: chips pack in" } else if c.max_fill > 0.5 { "caution" } else { "ok" }})
+                    })
+                    .collect();
+                v["chips"] = json!(chips);
                 // every surface this setup machines should end with a finishing pass
                 if let Some(u) = sim.unfinished(0.1) {
                     v["unfinished"] = json!({"area_mm2": u.area_mm2.round(), "max": round(u.max), "at": [round(u.at[0] - o.x), round(u.at[1] - o.y), round(u.at[2] - o.z)],

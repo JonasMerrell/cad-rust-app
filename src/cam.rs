@@ -1179,6 +1179,8 @@ pub struct Machine {
     pub spindle_rated_rpm: f64,
     /// The most sideways force the machine takes at the tool, N; 0 = not known (700 assumed).
     pub max_cut_force: f64,
+    /// How chips are cleared: "flood-low" (low-pressure flood, the default), "flood", "air", "none".
+    pub chip_clearing: String,
 }
 
 impl Default for Machine {
@@ -1195,6 +1197,7 @@ impl Default for Machine {
             spindle_efficiency: 0.78,
             spindle_rated_rpm: 0.0,
             max_cut_force: 0.0,
+            chip_clearing: "flood-low".into(),
         }
     }
 }

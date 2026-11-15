@@ -169,6 +169,92 @@ pub fn use_of(c: &Cut, t: &ToolGeom, l: &Limits, rpm: f64, finishing: bool) -> U
     Use { power, torque, force, deflection, stress, chip, worst }
 }
 
+/// Chip evacuation, a risk index (not chip physics): chips that stay in the cut lie in the cavity around
+/// the tool until the coolant washes them out; packed tight they get re-cut, weld on and break tools.
+///
+/// Per tool position: the chips made (volume removed × `BULK`), the share that stays (the more walled-in
+/// the tool is, and the thinner and lighter the chips, the less is thrown clear), spread over the coarse
+/// cells within two diameters; each cell drains at a rate set by the machine's chip clearing, slower the
+/// deeper the cavity. Fill = chips in a cell ÷ its free volume (cell area × cavity depth). The constants
+/// (`BULK`, `THROW_CHIP`, the clearing rates) are for tuning from what Jonas sees on the machine.
+pub struct ChipMap {
+    lo: glam::DVec2,
+    cell: f64,
+    nx: usize,
+    ny: usize,
+    vol: Vec<f64>,
+    depth: Vec<f64>,
+    at: Vec<f64>,
+    clearing: String,
+}
+
+/// Loose chips take this many times the volume of the metal they came from.
+pub const BULK: f64 = 12.0;
+/// A chip this thick (mean, mm) or thicker is thrown clear of the tool; thinner ones less and less.
+pub const THROW_CHIP: f64 = 0.02;
+/// Scales the index so that the phone stand's op 1 (ran on the DMC2 with no chip trouble) reads about 0.4.
+pub const RISK_SCALE: f64 = 0.635;
+
+impl ChipMap {
+    pub fn new(lo: glam::DVec2, hi: glam::DVec2, cell: f64, clearing: String) -> ChipMap {
+        let nx = ((hi.x - lo.x) / cell).ceil().max(1.0) as usize + 1;
+        let ny = ((hi.y - lo.y) / cell).ceil().max(1.0) as usize + 1;
+        ChipMap { lo, cell, nx, ny, vol: vec![0.0; nx * ny], depth: vec![0.0; nx * ny], at: vec![0.0; nx * ny], clearing }
+    }
+
+    /// How fast chips leave a cavity `depth` deep for a tool of diameter `d`, share per second.
+    fn drain(&self, depth: f64, d: f64, coolant: bool) -> f64 {
+        let base = match self.clearing.as_str() {
+            "none" => 0.05,
+            "air" | "air blast" => 0.6,
+            "flood" | "high-pressure flood" => 1.0,
+            // low-pressure flood (the DMC2), and the default
+            _ => 0.4,
+        };
+        let base = if coolant || self.clearing == "air" { base } else { 0.05 };
+        base * (-depth / (1.5 * d.max(1.0))).exp()
+    }
+
+    /// A tool position at `p` removing `removed` mm³, walled in on `conf` of its sides by walls `depth`
+    /// high, chips `chip` mm thick: add the chips that stay, drain, and give the fill where the tool is.
+    #[allow(clippy::too_many_arguments)]
+    pub fn cut(&mut self, p: glam::DVec3, removed: f64, conf: f64, depth: f64, chip: f64, d: f64, coolant: bool, now: f64) -> f64 {
+        let throw = (chip / THROW_CHIP).clamp(0.15, 1.0);
+        let stay = conf * conf * (1.0 - 0.6 * throw);
+        let made = removed * BULK * stay;
+        let ci = ((p.x - self.lo.x) / self.cell).round() as i64;
+        let cj = ((p.y - self.lo.y) / self.cell).round() as i64;
+        let n = (d / self.cell).ceil() as i64;
+        let mut cells = vec![];
+        for j in cj - n..=cj + n {
+            for i in ci - n..=ci + n {
+                if i < 0 || j < 0 || i >= self.nx as i64 || j >= self.ny as i64 || (((i - ci).pow(2) + (j - cj).pow(2)) as f64).sqrt() * self.cell > d {
+                    continue;
+                }
+                cells.push(j as usize * self.nx + i as usize);
+            }
+        }
+        if cells.is_empty() {
+            return 0.0;
+        }
+        let share = made / cells.len() as f64;
+        let mut here = 0.0f64;
+        for k in cells {
+            // bring the cell up to date, then add
+            let rate = self.drain(self.depth[k].max(depth), d, coolant);
+            self.vol[k] *= (-rate * (now - self.at[k]).max(0.0)).exp();
+            self.at[k] = now;
+            self.vol[k] += share;
+            self.depth[k] = if made > 0.0 { depth } else { self.depth[k] };
+            // chips in a shallow cavity spill over the edge rather than pack: weight by depth
+            let free = self.cell * self.cell * self.depth[k].max(1.0);
+            let deep = (self.depth[k] / (1.5 * d.max(1.0))).clamp(0.1, 2.0);
+            here = here.max(RISK_SCALE * self.vol[k] / free * deep);
+        }
+        here
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -215,6 +301,26 @@ mod tests {
         // it audibly bogged: over on the spindle's power
         assert!(ub.power > 1.1, "{bad:?} {ub:?}");
         assert!(ue.power > 0.45 && ue.power < 0.7 && ue.worst < 0.75, "{easy:?} {ue:?}");
+    }
+
+    /// Chips pile up in a deep pocket, not on an open edge; thin chips stay more than thick ones; coolant
+    /// washes them out.
+    #[test]
+    fn chips_pile_up_in_deep_pockets() {
+        let run = |conf: f64, depth: f64, chip: f64, coolant: bool| {
+            let mut m = ChipMap::new(glam::DVec2::ZERO, glam::DVec2::new(40.0, 40.0), 2.0, "flood-low".into());
+            let mut fill = 0.0;
+            // 30 s cutting 5 mm³ per 0.01 s along a 20 mm line, back and forth
+            for k in 0..3000 {
+                let x = 10.0 + (k % 200) as f64 * 0.1;
+                fill = m.cut(glam::DVec3::new(x, 20.0, 0.0), 5.0, conf, depth, chip, 6.35, coolant, k as f64 * 0.01);
+            }
+            fill
+        };
+        let (open, pocket) = (run(0.2, 2.0, 0.02, true), run(0.9, 20.0, 0.02, true));
+        assert!(pocket > 5.0 * open, "{open} {pocket}");
+        assert!(run(0.9, 20.0, 0.005, true) > run(0.9, 20.0, 0.03, true));
+        assert!(run(0.9, 5.0, 0.01, false) > run(0.9, 5.0, 0.01, true));
     }
 
     #[test]

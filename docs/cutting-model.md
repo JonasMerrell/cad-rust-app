@@ -85,9 +85,32 @@ These are the tests `cam_cutting::tests::calibrated_on_the_dmc2` and
 `cam_3d::tests::load_check_flags_a_contour_into_square_corners_not_adaptive`. Add every new observation the
 same way.
 
+## Chip evacuation (a heuristic risk index, not chip physics)
+
+Code: `cam_cutting::ChipMap`, `Sim::chip_sample`, `OpChips`.
+
+- Confinement at each tool position: in 16 directions, whether stock stands more than 1 mm above the
+  tool's tip within two diameters of its edge (re-measured every few positions); `conf` = share of
+  directions walled in, `depth` = their mean height. Cutting time is split open (conf < 0.4), slot
+  (0.4–0.75) and pocket (≥ 0.75).
+- Chips made: volume removed × `BULK` (12). Share that stays near the tool: conf² × (1 − 0.6·throw), with
+  throw = mean chip thickness / `THROW_CHIP` (0.02 mm), between 0.15 and 1: thin, light chips (light
+  high-speed stepovers) aren't thrown clear, thick ones are (Jonas: "worse with thin light chips").
+- They are spread over the 2 mm cells within one diameter of the tool. Each cell drains exponentially at
+  a rate set by the machine's chip clearing (`Machine::chip_clearing`: low-pressure flood 0.4/s, flood 1.0,
+  air 0.6, none or coolant off 0.05), times exp(−depth / 1.5 D): deep cavities hardly drain (Jonas: "deep
+  pockets were bad", low-pressure flood).
+- Index = chips in a cell ÷ (cell area × cavity depth) × depth weight (depth / 1.5 D, 0.1–2: chips in a
+  shallow cavity spill over rather than pack) × `RISK_SCALE`. `RISK_SCALE` (0.635) puts the phone stand's
+  op 1, which ran with no chip trouble, at 0.4. Above 0.5: caution; above 1: chips pack in.
+- Also counted: distance cut through cells over 0.5 (re-cutting packed chips), and full-width slots deeper
+  than the diameter.
+- To tune: BULK, THROW_CHIP, the clearing rates and RISK_SCALE, from cuts where chips did or didn't pack
+  (add them as tests like `calibrated_on_the_dmc2`).
+
 ## Not modelled
 
-Chatter and stability lobes (planned), chip evacuation (planned), tool wear and edge rounding, thermal
+Chatter and stability lobes (planned), tool wear and edge rounding, thermal
 effects, the machine's own stiffness and the workholding (a part can move before the tool bends), the
 spindle's speed droop under load (planned with the rcnc microphone), runout.
 
