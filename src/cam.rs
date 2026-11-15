@@ -670,7 +670,7 @@ pub enum OpKind {
     Thread,
     /// Tapping (rigid or floating).
     Tap,
-    /// 3D roughing with cycloidal (trochoidal) loops that keep the tool's engagement constant.
+    /// 3D roughing that grows the cleared area a stepover at a time, so the tool's engagement stays constant.
     Adaptive,
     /// 3D finishing along parallel lines.
     Parallel,
@@ -793,7 +793,7 @@ impl OpKind {
             OpKind::Bore => "Helically interpolates holes bigger than the end mill.",
             OpKind::Thread => "Mills internal threads in holes with a thread mill.",
             OpKind::Tap => "Taps holes; rigid tapping on LinuxCNC/Fanuc, floating on GRBL.",
-            OpKind::Adaptive => "3D roughing level by level with cycloidal loops: the tool takes a constant small stepover at full depth, so it can cut deep and fast.",
+            OpKind::Adaptive => "3D roughing level by level: the passes follow the cleared area outwards a small stepover at a time, also along walls and into corners, so the tool can cut deep and fast.",
             OpKind::Parallel => "3D finishing along parallel lines at an angle, optionally only on shallow or steep areas.",
             OpKind::Waterline => "3D finishing at constant heights; best on steep walls.",
             OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
@@ -898,7 +898,8 @@ pub struct Operation {
     pub slot_depth: f64,
     /// Coolant on (overrides the tool's setting when true).
     pub coolant: bool,
-    /// Adaptive: radius of the cycloidal loops, mm (0 = 40% of the tool diameter).
+    /// Adaptive: radius of the helix into material the tool can't reach from the side, mm (0 = 40% of the
+    /// tool diameter). It was the cycloidal loops' radius, hence the name.
     pub trochoid: f64,
     /// Parallel: direction of the passes, degrees from X.
     pub angle: f64,
@@ -923,7 +924,11 @@ pub struct Operation {
     pub depth: f64,
     /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
     pub lead: f64,
-    /// Adaptive: raise the feed for radial chip thinning (the loops take a thin cut, so the chips are thinner
+    /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
+    /// stock reaches further out than that, extra passes outside the wall take it down first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_engagement: Option<f64>,
+    /// Adaptive: raise the feed for radial chip thinning (the passes take a thin cut, so the chips are thinner
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
@@ -1046,6 +1051,7 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            max_engagement: None,
             chip_thinning: false,
             probing: None,
         }

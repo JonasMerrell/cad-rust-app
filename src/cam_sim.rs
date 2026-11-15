@@ -216,6 +216,18 @@ pub fn class_rgb(cl: u8) -> [u8; 3] {
     }
 }
 
+/// The stock in square blocks of `k` × `k` cells (the lowest cell of each): `mx` × `my` columns of material
+/// [l, h] (h <= l: none), the colour class of each top and the cuts that exposed it (see `Sim::cuts`).
+pub struct Blocks {
+    pub k: usize,
+    pub mx: usize,
+    pub my: usize,
+    pub h: Vec<f64>,
+    pub l: Vec<f64>,
+    pub cls: Vec<u8>,
+    pub cuts: Vec<[(u8, f32); 3]>,
+}
+
 pub struct Sim {
     pub x0: f64,
     pub y0: f64,
@@ -232,7 +244,7 @@ pub struct Sim {
     pub cuts: Vec<[(u8, f32); 3]>,
     pub top: f32,
     pub bottom: f32,
-    moves: Vec<(usize, u64, Move)>,
+    pub moves: Vec<(usize, u64, Move)>,
     cutters: Vec<Cutter>,
     /// Next move to run.
     pub done: usize,
@@ -1104,10 +1116,8 @@ impl Sim {
         (removed, deepest)
     }
 
-    /// Triangles of the simulated stock (setup coordinates), at most `max_cells` along each side:
-    /// positions and per-triangle colour class: CLASS_STOCK (untouched), CLASS_GOUGE, CLASS_EARLIER
-    /// (machined in an earlier setup) or CLASS_PATH + the index of the toolpath that cut it last.
-    pub fn mesh(&self, max_cells: usize) -> (Vec<[DVec3; 3]>, Vec<u8>) {
+    /// The stock in blocks of cells, at most `max_cells` along each side (see `Blocks`).
+    pub fn blocks(&self, max_cells: usize) -> Blocks {
         let k = ((self.nx.max(self.ny) as f64 / max_cells.max(10) as f64).ceil() as usize).max(1);
         let (mx, my) = (self.nx.div_ceil(k), self.ny.div_ceil(k));
         let bz = self.bottom as f64;
@@ -1148,6 +1158,26 @@ impl Sim {
                 };
             }
         }
+        Blocks { k, mx, my, h, l, cls, cuts }
+    }
+
+    /// The tool and holder bands of the cutter of toolpath `ci` (see `tool_body`) and how far it sticks out of
+    /// its holder.
+    pub fn cutter_body(&self, ci: usize) -> Option<(&[(f64, f64)], f64)> {
+        self.cutters.get(ci).map(|c| (c.body.as_slice(), c.stickout))
+    }
+
+    /// Index of the toolpath (and cutter) of move `k`.
+    pub fn cutter_at(&self, k: usize) -> Option<usize> {
+        self.moves.get(k).map(|m| m.0)
+    }
+
+    /// Triangles of the simulated stock (setup coordinates), at most `max_cells` along each side:
+    /// positions and per-triangle colour class: CLASS_STOCK (untouched), CLASS_GOUGE, CLASS_EARLIER
+    /// (machined in an earlier setup) or CLASS_PATH + the index of the toolpath that cut it last.
+    pub fn mesh(&self, max_cells: usize) -> (Vec<[DVec3; 3]>, Vec<u8>) {
+        let Blocks { k, mx, my, h, l, cls, cuts } = self.blocks(max_cells);
+        let bz = self.bottom as f64;
         let c = self.cell * k as f64;
         let mut tris = vec![];
         let mut col = vec![];

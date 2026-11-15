@@ -390,6 +390,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "camGcode", "Send to rcnc", "Load the G-code, its tools and its setup sheet in rcnc, the CNC controller, running on this computer", true, false, !app.cam.paths.is_empty()).clicked() {
             send_to_rcnc(app);
         }
+        if app.tool_button(ui, "camWebSim", "Web page", "Save the simulation as a web page that plays it back in any browser: stock, tool, toolpath, fixtures and machine", true, false, !app.cam.paths.is_empty()).clicked() {
+            web_sim_dialog(app);
+        }
         if app.tool_button(ui, "camSheet", "Setup sheet", "Save a setup sheet for the operator: stock, work zero, fixtures, tools and operations", true, false, !app.cam.paths.is_empty()).clicked() {
             sheet_dialog(app);
         }
@@ -1655,6 +1658,8 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                             ui.label(RichText::new("ramp along the wall").color(theme::muted()).size(12.0)).on_hover_text(tip);
                         }
                     });
+                    // extra passes outside the wall take any stock further out than this down first
+                    stepover_row(ui, "Max engagement", &mut o.max_engagement, crate::cam_contour::DEFAULT_MAX_ENGAGEMENT);
                 }
             }
             if o.kind == OpKind::Pocket {
@@ -1687,10 +1692,10 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
             opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
             stepover_row(ui, "Optimal load", &mut o.stepover, so);
-            row(ui, "Loop radius", |ui| {
+            row(ui, "Helix radius", |ui| {
                 let mut on = o.trochoid > 0.0;
                 let auto = tool.as_ref().map(|t| t.diameter * 0.4).unwrap_or(2.0);
-                if ui.checkbox(&mut on, "").on_hover_text("Radius of the cycloidal loops").changed() {
+                if ui.checkbox(&mut on, "").on_hover_text("Radius of the helix the tool spirals down on into material it can't reach from the side").changed() {
                     o.trochoid = if on { (auto * 10.0).round() / 10.0 } else { 0.0 };
                 }
                 if on {
@@ -1704,13 +1709,13 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
             let thin = tool.as_ref().map(|t| cam::chip_thinning(cam_paths::stepover(&o, t) / t.diameter.max(1e-9))).unwrap_or(1.0);
             row(ui, "Chip thinning", |ui| {
-                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the loops")).on_hover_text(
-                    "The loops take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
+                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the passes")).on_hover_text(
+                    "The passes take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
                      Kept on the safe side: at most ×1.5, and not on the helix entries",
                 );
             });
             rest_row(ui, &mut o.rest);
-            row(ui, "Loops", |ui| {
+            row(ui, "Passes", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
                 ui.radio_value(&mut o.climb, false, "conventional");
             });
@@ -2367,6 +2372,21 @@ pub(crate) fn sheet_dialog(app: &mut App) {
     let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} setup sheet.html")) else { return };
     let sim = crate::cam_sheet::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref());
     match std::fs::write(&p, crate::cam_sheet::sheet(&c, &part, &app.cam.paths, Some(sim))) {
+        Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
+        Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
+    }
+}
+
+pub(crate) fn web_sim_dialog(app: &mut App) {
+    let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
+    if app.cam.computing {
+        app.flash("Toolpaths are still being made", ToastKind::Info);
+        return;
+    }
+    let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
+    let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} simulation.html")) else { return };
+    let page = crate::cam_web::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref(), 500).and_then(|sim| crate::cam_web::page(&c, &part, &app.cam.paths, sim));
+    match page.and_then(|text| std::fs::write(&p, text).map_err(|e| e.to_string())) {
         Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
         Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
     }
