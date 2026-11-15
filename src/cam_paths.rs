@@ -270,6 +270,13 @@ pub fn union_all(contours: &[Contour]) -> Shapes {
     clean(ov.overlay(OverlayRule::Subject, FillRule::NonZero))
 }
 
+pub fn intersection(a: &Shapes, b: &Shapes) -> Shapes {
+    if a.is_empty() || b.is_empty() {
+        return vec![];
+    }
+    clean(flat(a).overlay(&flat(b), OverlayRule::Intersect, FillRule::NonZero))
+}
+
 pub fn difference(a: &Shapes, b: &Shapes) -> Shapes {
     if a.is_empty() || b.is_empty() {
         return a.clone();
@@ -708,8 +715,11 @@ impl<'a> Pb<'a> {
         true
     }
 
-    /// Clear the tool-centre area `area` at height z with offset rings, spiralling out from the middle of each region.
-    fn clear_area(&mut self, area: &Shapes, z: f64, z_from: f64, step: f64, climb: bool) {
+    /// Clear the tool-centre area at depth z, growing the cleared ground a stepover at a time so no pass takes
+    /// more than the stepover sideways, also in the corners and along the outer edge: from beside the stock where
+    /// the tool can start there, else from loops round each region's core (ramping in); passes skip what's
+    /// already clear. `material`: the stock at this level.
+    fn clear_area(&mut self, area: &Shapes, material: &Shapes, z: f64, z_from: f64, step: f64, climb: bool) {
         let mut comps: Vec<Shape> = area.clone();
         while !comps.is_empty() {
             // nearest region next
@@ -723,53 +733,39 @@ impl<'a> Pb<'a> {
                 .unwrap();
             let comp = comps.remove(k);
             let region: Shapes = vec![comp.clone()];
-            let mut rings: Vec<Vec<Contour>> = vec![];
-            let mut cur = region.clone();
-            while !cur.is_empty() && rings.len() < 5000 {
-                rings.push(flat(&cur));
-                cur = offset(&cur, -step);
-            }
-            let link_region = offset(&region, 0.01);
-            let mut first = true;
-            for ring in rings.iter().rev() {
-                let mut loops: Vec<Contour> = ring.iter().map(|c| if climb { c.clone() } else { c.iter().rev().copied().collect() }).collect();
-                while !loops.is_empty() {
-                    let here = self.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
-                    let j = (0..loops.len())
-                        .min_by(|a, b| {
-                            let da = loops[*a].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
-                            let db = loops[*b].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
-                            da.partial_cmp(&db).unwrap()
-                        })
-                        .unwrap();
-                    let l = loops.remove(j);
-                    let from = if first { z_from } else { z };
-                    // already at depth inside the region: link straight over, else ramp in from above
-                    if !first && self.pos.map(|p| (p.z - z).abs() < 1e-6).unwrap_or(false) {
-                        let before = self.moves.len();
-                        self.cut_loop(&l, z, z, step * 1.6, Some(&link_region), None);
-                        // a retract happened: the loop was entered from above, so it must ramp
-                        if self.moves[before..].iter().any(|m| matches!(m, Move::Rapid(_))) {
-                            self.moves.truncate(before);
-                            self.pos = recompute_pos(&self.moves);
-                            self.cut_loop(&l, z, z_from, 0.0, None, None);
-                        }
-                    } else {
-                        self.cut_loop(&l, z, from, 0.0, None, None);
-                    }
-                    first = false;
+            let (feed, r) = (self.feed, self.tool.radius());
+            let mat = crate::cam_3d::intersect(material, &offset(&region, r + 0.01));
+            // where the tool can start beside the material (outside the stock, or over ground already cleared),
+            // the passes grow from there; otherwise from loops round the region's core, cut first
+            let open = shapes_area(&difference(&region, &offset(&mat, r))) > 0.5 * r * r;
+            let mut core = if open { vec![] } else { region.clone() };
+            for _ in 0..5000 {
+                if core.is_empty() {
+                    break;
                 }
+                let next = offset(&core, -step);
+                if next.is_empty() {
+                    break;
+                }
+                core = next;
             }
+            let mut loops: Vec<Contour> = flat(&core).into_iter().map(|c| if climb { c } else { c.into_iter().rev().collect() }).collect();
+            while !loops.is_empty() {
+                let here = self.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+                let j = (0..loops.len())
+                    .min_by(|a, b| {
+                        let da = loops[*a].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
+                        let db = loops[*b].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
+                        da.partial_cmp(&db).unwrap()
+                    })
+                    .unwrap();
+                let l = loops.remove(j);
+                self.cut_loop(&l, z, z_from, 0.0, None, None);
+            }
+            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r };
+            lv.clear(&region, &mat, &core);
         }
     }
-}
-
-fn recompute_pos(moves: &[Move]) -> Option<DVec3> {
-    let mut p: Option<DVec3> = None;
-    for m in moves {
-        p = Some(m.end(p.unwrap_or(DVec3::ZERO)));
-    }
-    p
 }
 
 // ---------------------------------------------------------------- operations
@@ -1475,7 +1471,9 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let top = rest_top(ctx, ctx.wz(op.top).unwrap_or(hi.z));
     let bottom = ctx.wz(op.bottom).unwrap_or(ctx.part().lo.z + op.leave_floor);
     let r = t.radius();
-    let bound = offset(&rect(lo, hi), r * 0.5);
+    // round the stock with room for the tool to start beside it: the passes grow in from there a stepover at
+    // a time, the first of them only grazing the stock's edge
+    let bound = offset(&rect(lo, hi), r + 0.5);
     let floors: Vec<f64> = ctx.geo.floors().iter().map(|f| f + op.leave_floor).collect();
     let mut z_prev = top;
     let mut any = false;
@@ -1488,7 +1486,11 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             continue;
         }
         any = true;
-        pb.clear_area(&area, z, z_prev, stepover(op, t), op.climb);
+        let material = match &ctx.stock_in {
+            Some(m) => crate::cam_3d::leftover(ctx, m, z, op.leave),
+            None => difference(&rect(lo, hi), &offset(&ctx.geo.shadow(z), op.leave.max(0.0))),
+        };
+        pb.clear_area(&area, &material, z, z_prev, stepover(op, t), op.climb);
         z_prev = z;
     }
     if !any {
@@ -1573,7 +1575,11 @@ fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             continue;
         }
         any = true;
-        pb.clear_area(&area, z, z_prev, stepover(op, t), op.climb);
+        let material = match &ctx.stock_in {
+            Some(m) => crate::cam_3d::intersect(&raw, &crate::cam_3d::leftover(ctx, m, z, op.leave)),
+            None => raw.clone(),
+        };
+        pb.clear_area(&area, &material, z, z_prev, stepover(op, t), op.climb);
         z_prev = z;
     }
     if too_small {

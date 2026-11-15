@@ -220,7 +220,7 @@ pub struct Sim {
     pub cuts: Vec<[(u8, f32); 3]>,
     pub top: f32,
     pub bottom: f32,
-    moves: Vec<(usize, u64, Move)>,
+    pub moves: Vec<(usize, u64, Move)>,
     cutters: Vec<Cutter>,
     /// Next move to run.
     pub done: usize,

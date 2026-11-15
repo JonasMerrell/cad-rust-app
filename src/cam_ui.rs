@@ -1692,10 +1692,10 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             opt(ui, "Bottom", &mut o.bottom, part_bottom, " mm", "the bottom of the part");
             opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
             stepover_row(ui, "Optimal load", &mut o.stepover, so);
-            row(ui, "Loop radius", |ui| {
+            row(ui, "Helix radius", |ui| {
                 let mut on = o.trochoid > 0.0;
                 let auto = tool.as_ref().map(|t| t.diameter * 0.4).unwrap_or(2.0);
-                if ui.checkbox(&mut on, "").on_hover_text("Radius of the cycloidal loops").changed() {
+                if ui.checkbox(&mut on, "").on_hover_text("Radius of the helix the tool spirals down on into material it can't reach from the side").changed() {
                     o.trochoid = if on { (auto * 10.0).round() / 10.0 } else { 0.0 };
                 }
                 if on {
@@ -1709,13 +1709,13 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
             num(ui, "Helix angle", &mut o.ramp_angle, "°", 0.5..=45.0, 0.1);
             let thin = tool.as_ref().map(|t| cam::chip_thinning(cam_paths::stepover(&o, t) / t.diameter.max(1e-9))).unwrap_or(1.0);
             row(ui, "Chip thinning", |ui| {
-                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the loops")).on_hover_text(
-                    "The loops take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
+                ui.checkbox(&mut o.chip_thinning, format!("feed ×{thin:.2} on the passes")).on_hover_text(
+                    "The passes take a thin cut, so the chips come out thinner than the feed per tooth: raise the feed to keep the chip load. \
                      Kept on the safe side: at most ×1.5, and not on the helix entries",
                 );
             });
             rest_row(ui, &mut o.rest);
-            row(ui, "Loops", |ui| {
+            row(ui, "Passes", |ui| {
                 ui.radio_value(&mut o.climb, true, "climb");
                 ui.radio_value(&mut o.climb, false, "conventional");
             });
