@@ -587,7 +587,9 @@ impl Sim {
         if !c.lut.is_empty() {
             let n = (c.radius / self.cell).ceil() as i32 + 1;
             let r2 = c.radius * c.radius;
-            let inner = (c.radius - 0.02).max(0.0);
+            // the part's mesh cuts round holes with chords that sag up to about 0.025 mm inside the true
+            // circle (a 29-sided Ø8 bore): a tool that just fits the hole would read as cutting those slivers
+            let inner = (c.radius - 0.04).max(0.0);
             // a probe stops a hair short of a wall: within a cell of its ball's outline the stock map can't
             // tell that from a touch
             let probe_inner = (c.radius - self.cell).max(0.0);

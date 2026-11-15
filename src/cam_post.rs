@@ -250,6 +250,8 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         Dialect::Grbl => o.line("G21 G17 G90 G94"),
         // G91.1: arc centres (I, J) relative to the start, whatever the controller was left in
         Dialect::LinuxCnc => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94 G64 P0.01"),
+        // rcnc: constant velocity, or every one of a 3D path's short moves stops dead at its end
+        Dialect::Mach3 if cam.post == "rcnc" => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94 G64"),
         Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94"),
         Dialect::Fanuc => o.line("G21 G17 G40 G49 G80 G90 G94"),
     }
