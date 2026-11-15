@@ -390,6 +390,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "camGcode", "Send to rcnc", "Load the G-code, its tools and its setup sheet in rcnc, the CNC controller, running on this computer", true, false, !app.cam.paths.is_empty()).clicked() {
             send_to_rcnc(app);
         }
+        if app.tool_button(ui, "camWebSim", "Web page", "Save the simulation as a web page that plays it back in any browser: stock, tool, toolpath, fixtures and machine", true, false, !app.cam.paths.is_empty()).clicked() {
+            web_sim_dialog(app);
+        }
         if app.tool_button(ui, "camSheet", "Setup sheet", "Save a setup sheet for the operator: stock, work zero, fixtures, tools and operations", true, false, !app.cam.paths.is_empty()).clicked() {
             sheet_dialog(app);
         }
@@ -2355,6 +2358,21 @@ pub(crate) fn sheet_dialog(app: &mut App) {
     let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} setup sheet.html")) else { return };
     let sim = crate::cam_sheet::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref());
     match std::fs::write(&p, crate::cam_sheet::sheet(&c, &part, &app.cam.paths, Some(sim))) {
+        Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
+        Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
+    }
+}
+
+pub(crate) fn web_sim_dialog(app: &mut App) {
+    let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
+    if app.cam.computing {
+        app.flash("Toolpaths are still being made", ToastKind::Info);
+        return;
+    }
+    let name: String = c.name.chars().map(|ch| if ch.is_ascii_alphanumeric() || "-_".contains(ch) { ch } else { '_' }).collect();
+    let Some(p) = app.save_file_dialog("Web page", &["html", "htm"], format!("{name} simulation.html")) else { return };
+    let page = crate::cam_web::new_sim(&c, &part, &app.cam.paths, app.cam.stock_in.as_deref(), 500).and_then(|sim| crate::cam_web::page(&c, &part, &app.cam.paths, sim));
+    match page.and_then(|text| std::fs::write(&p, text).map_err(|e| e.to_string())) {
         Ok(()) => app.flash_info(format!("Saved {}", p.display()), Some(std::time::Duration::from_secs(3))),
         Err(e) => app.flash(format!("Could not save: {e}"), ToastKind::Error),
     }
