@@ -259,6 +259,7 @@ pub struct Sim {
     material: crate::cam_cutting::Material,
     pub limits: crate::cam_cutting::Limits,
     pub limits_assumed: bool,
+    chatter_scale: f64,
     /// Chip evacuation (see `chip_sample`): chips lying in the cut on a coarse grid, mm³, when each cell was
     /// last brought up to date (s of cutting time), how deep the cavity there is; cutting time so far; the
     /// last chip's mean thickness; how walled-in the tool is (share of directions, wall height), re-measured
@@ -298,6 +299,8 @@ pub struct OpChatter {
     pub zeta: f64,
     #[serde(skip)]
     pub climb: bool,
+    #[serde(skip)]
+    pub scale: f64,
 }
 
 impl OpChatter {
@@ -310,7 +313,7 @@ impl OpChatter {
             None => crate::cam_cutting::Mode { k: self.k, hz: self.hz, zeta: self.zeta },
         };
         let stable = crate::cam_cutting::stable_depth(&mode, g.diameter, self.width.max(0.05), g.flutes, self.kt, kr, rpm, self.climb).0;
-        crate::cam_cutting::CHATTER_SCALE * self.depth / stable.max(1e-6)
+        self.scale * self.depth / stable.max(1e-6)
     }
 }
 
@@ -451,6 +454,7 @@ impl Sim {
             material: crate::cam_cutting::material(&cam.stock.material),
             limits: cam.machine.cut_limits().0,
             limits_assumed: cam.machine.cut_limits().1,
+            chatter_scale: if cam.machine.chatter_scale > 0.0 { cam.machine.chatter_scale } else { crate::cam_cutting::CHATTER_SCALE },
             chips: crate::cam_cutting::ChipMap::new(stock.0.truncate(), stock.1.truncate(), 2.0, cam.machine.chip_clearing.clone()),
             time: 0.0,
             last_chip: 0.02,
@@ -964,9 +968,9 @@ impl Sim {
                 .stable
                 .entry(key)
                 .or_insert_with(|| crate::cam_cutting::stable_depth(&mode, d, (key.0 as f64 / 20.0 * d).max(0.05), z, kt, kr, rpm, climb).0);
-            let margin = crate::cam_cutting::CHATTER_SCALE * depth / stable.max(1e-6);
+            let margin = self.chatter_scale * depth / stable.max(1e-6);
             let geom = Some(self.cutters[ci].geom);
-            let rec = OpChatter { op, margin, at: p.to_array(), width, depth, stable, rpm, hz: mode.hz, k: mode.k, kt, geom, zeta: mode.zeta, climb };
+            let rec = OpChatter { op, margin, at: p.to_array(), width, depth, stable, rpm, hz: mode.hz, k: mode.k, kt, geom, zeta: mode.zeta, climb, scale: self.chatter_scale };
             match self.chatter.iter_mut().find(|c| c.op == op) {
                 Some(c) if c.margin < margin => *c = rec,
                 Some(_) => {}

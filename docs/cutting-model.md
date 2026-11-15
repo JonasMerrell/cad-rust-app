@@ -131,9 +131,15 @@ Code: `cam_cutting::tool_mode`, `stable_depth`, `CHATTER_SCALE`; `Sim` `OpChatte
   microphone: tap the tool, record the ring, the peak frequency and its decay give f and ζ; the stiffness
   needs a known force or a static deflection measurement), and observed chatter / no-chatter cuts as tests.
 
-## Listening on the machine (rcnc, planned: design notes)
+## Listening on the machine (rcnc: built, waiting for the microphone)
 
-Jonas is adding a microphone. Plan, not built yet:
+rcnc's `cnc-listen` crate and the app's Settings → Listening write `<program>.cutlog.json` beside each
+program run; rCAD's `import_cutlog` reads it back for a setup: per operation the heard speed droop and
+chatter against the model's spindle power and chatter margin, and suggests (or with `apply` sets) the
+machine's `spindle_efficiency` (droop ÷ `spindle_rated_slip` = the share of shaft power used, so
+efficiency = model power ÷ (that share × input power available at the speed), the median over operations)
+and `chatter_scale` (the quietest chattering cut reads 1; flagged if a clean cut would then read 1 or more).
+The design notes it was built from:
 - Crates: `cpal` (audio input on Windows WASAPI, Linux ALSA/Pulse) and `rustfft`; `hound` to read WAVs
   in the simulator and tests. An optional feature of the app crate, so a machine without audio builds and
   runs as now.

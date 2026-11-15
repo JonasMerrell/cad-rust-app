@@ -349,7 +349,7 @@ impl Session {
     /// The CAM tools. One that fails leaves the Manufacture tabs as they were (an operation
     /// added before a bad setting was found, a post changed before the export failed, …).
     pub(super) fn cam_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
-        const CHANGES_CAMS: [&str; 7] = ["create_cam", "edit_cam", "import_tool_library", "cam_tool", "cam_op", "cam_template", "export_gcode"];
+        const CHANGES_CAMS: [&str; 8] = ["create_cam", "edit_cam", "import_tool_library", "cam_tool", "cam_op", "cam_template", "export_gcode", "import_cutlog"];
         if !CHANGES_CAMS.contains(&name) {
             return self.cam_call_inner(name, a);
         }
@@ -618,6 +618,95 @@ impl Session {
             "cam_info" => {
                 let ci = self.cam_idx(a)?;
                 self.cam_info(ci)?
+            }
+            "import_cutlog" => {
+                let ci = self.cam_idx(a)?;
+                let path = self.input_path(a.get("path").and_then(|p| p.as_str()).ok_or("give path (a .cutlog.json rcnc wrote)")?);
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                let log: Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
+                let (_part, _paths, sim) = self.cam_sim(ci, 400)?;
+                let c = &self.ws.cams[ci];
+                let names = |id: u64| c.op(id).map(|o| o.name.clone()).unwrap_or_default();
+                // what was heard, by operation (the program's "(Name - Kind)" comments are the op names)
+                #[derive(Default)]
+                struct Heard {
+                    frames: f64,
+                    heard: f64,
+                    droop: f64,
+                    chatter: f64,
+                    hz: f64,
+                }
+                let mut by_op: std::collections::BTreeMap<String, Heard> = Default::default();
+                for (_, l) in log.get("lines").and_then(|l| l.as_object()).into_iter().flatten() {
+                    let f = |k: &str| l.get(k).and_then(|v| v.as_f64()).unwrap_or(0.0);
+                    let op = l.get("op").and_then(|v| v.as_str()).unwrap_or("").to_string();
+                    if op.is_empty() || !l.get("cutting").and_then(|v| v.as_bool()).unwrap_or(false) {
+                        continue;
+                    }
+                    let h = by_op.entry(op).or_default();
+                    h.frames += f("frames");
+                    h.heard += f("heard");
+                    h.droop += f("droop_mean") * f("heard");
+                    h.chatter += f("chatter");
+                    if f("chatter") > 0.0 {
+                        h.hz = f("chatter_hz");
+                    }
+                }
+                let m = &c.machine;
+                let (p_in, rated) = (if m.spindle_power > 0.0 { m.spindle_power } else { 1500.0 }, if m.spindle_rated_rpm > 0.0 { m.spindle_rated_rpm } else { 24000.0 });
+                let slip = if m.spindle_rated_slip > 0.0 { m.spindle_rated_slip } else { 0.04 };
+                let scale = if m.chatter_scale > 0.0 { m.chatter_scale } else { crate::cam_cutting::CHATTER_SCALE };
+                let mut ops = vec![];
+                let mut effs = vec![];
+                let (mut chat_min, mut clean_max) = (f64::INFINITY, 0.0f64);
+                for (op, h) in &by_op {
+                    let load = sim.loads.iter().find(|l| &names(l.op) == op);
+                    let ch = sim.chatter.iter().find(|x| &names(x.op) == op);
+                    let droop = if h.heard > 0.0 { h.droop / h.heard } else { 0.0 };
+                    let share = if h.frames > 0.0 { h.chatter / h.frames } else { 0.0 };
+                    // a VFD spindle slows with torque: droop / slip at rated load = the share of its shaft power used
+                    let eff = load.filter(|l| droop > 0.005 && l.cut.power > 50.0).map(|l| {
+                        let avail_in = p_in * (l.rpm / rated).min(1.0);
+                        l.cut.power / (droop / slip * avail_in)
+                    });
+                    if let Some(e) = eff {
+                        effs.push(e);
+                    }
+                    if let Some(x) = ch {
+                        if share > 0.3 {
+                            chat_min = chat_min.min(x.margin);
+                        } else if share < 0.05 {
+                            clean_max = clean_max.max(x.margin);
+                        }
+                    }
+                    ops.push(json!({"operation": op, "heard_droop_pct": (droop * 1000.0).round() / 10.0, "chatter_share_pct": (share * 100.0).round(), "chatter_hz": h.hz.round(),
+                        "model_power_w": load.map(|l| l.cut.power.round()), "model_spindle_pct": load.map(|l| (l.uses.power * 100.0).round()), "model_chatter_margin": ch.map(|x| round(x.margin)), "efficiency_from_it": eff.map(round)}));
+                }
+                effs.sort_by(|x, y| x.total_cmp(y));
+                let efficiency = effs.get(effs.len() / 2).copied().map(|e| e.clamp(0.3, 1.0));
+                // chatter heard: those cuts should read 1; clean ones under 1
+                let new_scale = if chat_min.is_finite() {
+                    Some(scale / chat_min)
+                } else if clean_max >= 0.9 {
+                    Some(scale * 0.9 / clean_max)
+                } else {
+                    None
+                };
+                let conflict = chat_min.is_finite() && clean_max * (scale / chat_min) >= 1.0;
+                let apply = a.get("apply").and_then(|v| v.as_bool()).unwrap_or(false);
+                let eff_was = m.spindle_efficiency;
+                if apply {
+                    let m = &mut self.ws.cams[ci].machine;
+                    if let Some(e) = efficiency {
+                        m.spindle_efficiency = e;
+                    }
+                    if let Some(sc) = new_scale.filter(|_| !conflict) {
+                        m.chatter_scale = sc;
+                    }
+                }
+                json!({"operations": ops, "spindle_efficiency": efficiency.map(round), "spindle_efficiency_was": eff_was, "chatter_scale": new_scale.map(|x| (x * 10000.0).round() / 10000.0), "chatter_scale_was": scale,
+                    "chatter_conflict": conflict, "applied": apply,
+                    "note": "efficiency from speed droop assumes the spindle slows by spindle_rated_slip at full load; chatter scale makes the quietest chattering cut read 1"})
             }
             "simulate_cam" => {
                 let ci = self.cam_idx(a)?;
@@ -982,6 +1071,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "cam_template", "description": "Operation templates, kept for the user across documents. No arguments: list them. save: name (with cam; operations [ids], default every operation that isn't suppressed) saves the operations and their tools, leaving out what belongs to the part (top/bottom heights, at, points, edges, sketches). apply: name (with cam) adds the template's operations to that setup, reusing its tools where one is the same cutter and adding the others; trace/vcarve follow the latest sketch. delete: name.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "save": {"type": "string"}, "apply": {"type": "string"}, "delete": {"type": "string"}, "operations": {"type": "array"}}), &[])}),
         json!({"name": "cam_soft_jaws", "description": "Hold a setup's part in soft jaws: vise jaw blanks with a pocket machined to the part's outline below the jaw tops (plus clearance, with reliefs in corners the cutter can't reach), usually for the flipped second setup (follows). The vise closes along Y. The jaws act as fixtures (toolpaths lift over them, the simulation reports hits) and the setup warns when the part is narrower than the gap, the jaws are too thin, or the stock the earlier setup leaves doesn't fit the pocket. Fields (mm, any subset): width, thickness, height (each blank: along the vise, front to back, height; default 150 × 25 × 40), grip (how deep the part sits, default 6), gap (between the jaw faces while the pocket is cut, default 4), clearance (default 0.05), cutter (end mill diameter for the pocket and its reliefs, default 6), material (jaw material), printed (true: 3D printed jaws, no cutter reliefs; use about 0.15 clearance), one_piece (printed only: one block in between the vise jaws, sitting on the vise bed and squeezed round the part, instead of two jaws, no screw holes; gap is then the slit down its middle (about 1), web how far above the bottom the slit stops (default 1.5, 0 for two halves) and flare the radius of the rounds where it opens at the ends (default 5); height is from the vise bed to the block top). mount: how the jaws bolt into the vise, as a preset name (\"gen3_insert_bar\": in place of the Gen3 Smooth Insert Bars of an M12 dual-station vise, 95.5 × 12.7 jaws with four counterbored screws on a 25.4 pitch, the vise's lip and jaw around them as fixtures; \"top_jaw\": in place of its Top Jaws, 95.5 × 48 with two M8 screws), which also sets width and thickness, \"none\", or an object of fields {holes (X from the jaw middle), inset (from the grip face), drill, cbore, seat (under the head), head, fit (thickness the vise takes, 0 any), lip, lip_height, back, back_height}; the holes go in the jaw meshes and the printed solids (machined blanks get them before the pocket is cut). enabled false removes them. print_jaws true puts both jaws in a Part Studio named after the setup plus \" jaws (print)\" (standing on their bases, pocket up, solids built from extrudes) and returns print_studio; export_step (a path) also writes them as STEP for the slicer. machine_jaws true also makes (or finds) the Manufacture tab that machines the jaws: both blanks on a spacer in the vise, work zero top centre, a skim of the tops and a rough and finish of the pocket with a flat end mill no bigger than cutter; returns jaw_cam, its info and held_zero_from_jaw_zero (where the holding setup's work zero is from the jaws').", "inputSchema": obj(json!({"cam": {"type": "integer"}, "enabled": {"type": "boolean"}, "width": {"type": "number"}, "thickness": {"type": "number"}, "height": {"type": "number"}, "grip": {"type": "number"}, "gap": {"type": "number"}, "clearance": {"type": "number"}, "cutter": {"type": "number"}, "material": {"type": "string"}, "printed": {"type": "boolean"}, "one_piece": {"type": "boolean"}, "web": {"type": "number"}, "flare": {"type": "number"}, "mount": {}, "machine_jaws": {"type": "boolean"}, "print_jaws": {"type": "boolean"}, "export_step": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_machine", "description": "The milling machine's own geometry for the simulation, kept in the user's machine library (~/.config/cad-rust-app/machines). No arguments: list the machines. import (a STEP assembly of the machine; name, default the file name) reads its parts and guesses which axis carries each (from names such as \"X axis\", \"Base\", \"spindle\"; unnamed parts standing on the table ride with it), what rides on what, the spindle (the middle of the lowest face of the spindle's carrier, where the tool comes out) and the table top, and the travel (how far each axis's guides reach). name (an existing machine, or a path to a machine .json file) with fields changes it: carriers {part or assembly name: base | x | y | z, …}, rides [what X, Y and Z ride on], spindle_on, table_on (the work's carrier; base on a gantry router), travel [[min, max] ×3] (mm from where each axis is in the model; equal ends: not checked), spindle [x,y,z], table [x,y,z] (model coordinates), holders (true: the model ends at the spindle face and each tool's holder hangs below it; false (default): the model has the collet nut and tools stick out of it by their stickout), remove [part or assembly names] (things the machine doesn't have), add [{name, step (a file) | cylinder [diameter, height] | box [x, y, z], at [x, y, z]}] (things standing on the table and riding with it, such as a vise or a tool setter: at is where the middle of their bottom goes from the table point; adding a name again replaces it). cam: also make it that setup's machine (machine.model), with on_table [x,y,z] (where the stock's middle, at the bottom of the stock or of the lowest fixture, sits from the table point). simulate_cam then moves the machine with the toolpath and reports machine crashes (head, spindle, column or table into each other, the stock, the part or a fixture; the tool into the table) and moves beyond the travel. Returns the machine's kinematics and any problem with them.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "import": {"type": "string"}, "name": {"type": "string"}, "carriers": {"type": "object"}, "rides": {"type": "array"}, "spindle_on": {"type": "string"}, "table_on": {"type": "string"}, "travel": {"type": "array"}, "spindle": {"type": "array"}, "table": {"type": "array"}, "holders": {"type": "boolean"}, "on_table": {"type": "array"}, "remove": {"type": "array"}, "add": {"type": "array"}}), &[])}),
+        json!({"name": "import_cutlog", "description": "Calibrate the cutting model from what rcnc heard while running this setup's program (a <program>.cutlog.json): per operation the spindle's speed droop and chatter heard against the model's power and chatter margin; suggests the spindle efficiency (from droop, with the machine's spindle_rated_slip) and the chatter scale (the chattering cuts read 1). apply: true writes them into the setup's machine.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "apply": {"type": "boolean"}}), &["cam", "path"])}),
         json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
     ]

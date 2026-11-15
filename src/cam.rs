@@ -1196,6 +1196,11 @@ pub struct Machine {
     /// a tap test), and the damping ratio of the tool's mode.
     pub holder_stiffness: f64,
     pub tool_damping: f64,
+    /// Scales the chatter margin to observations (0: `cam_cutting::CHATTER_SCALE`); set from a cut log.
+    pub chatter_scale: f64,
+    /// The spindle's speed droop at its rated load (a VFD spindle without speed feedback slows with
+    /// torque), share; a microphone's measured droop gives the load from it.
+    pub spindle_rated_slip: f64,
 }
 
 impl Default for Machine {
@@ -1215,6 +1220,8 @@ impl Default for Machine {
             chip_clearing: "flood-low".into(),
             holder_stiffness: 20_000.0,
             tool_damping: 0.03,
+            chatter_scale: 0.0,
+            spindle_rated_slip: 0.04,
         }
     }
 }
