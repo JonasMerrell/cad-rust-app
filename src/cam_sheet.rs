@@ -398,7 +398,8 @@ fn tool_svg(t: &crate::cam::Tool, height: f64) -> String {
     let total = stick + hh;
     let wide = prof.iter().map(|p| p.0).chain(holder.iter().filter(|p| p.1 < hh).map(|p| p.0)).fold(shank.max(r), f64::max);
     let s = height / total;
-    let (w, cx) = (2.0 * wide * s + 8.0, wide * s + 4.0);
+    // room on the right for the stick-out dimension
+    let (w, cx) = (2.0 * wide * s + 8.0 + 34.0, wide * s + 4.0);
     let at = |x: f64, z: f64| format!("{:.1},{:.1}", cx + x * s, height + 2.0 - z * s);
     let shape = |right: &[(f64, f64)], fill: &str| -> String {
         let pts: Vec<String> = right.iter().map(|p| at(p.0, p.1)).chain(right.iter().rev().map(|p| at(-p.0, p.1))).collect();
@@ -420,7 +421,15 @@ fn tool_svg(t: &crate::cam::Tool, height: f64) -> String {
         shape(&hold, "#a3abb6"),
         shape(&[(0.0, len), (shank, len), (shank, stick), (0.0, stick)], "#d3d8df"),
         shape(&cut, "#6f7d90"),
-    )
+    ) .replace("</svg>", &{
+        // the stick-out: from the tip to the holder's (collet nut's) face
+        let x = cx + wide * s + 6.0;
+        let (y0, y1) = (height + 2.0, height + 2.0 - stick * s);
+        format!(
+            "<line x1=\"{x:.1}\" y1=\"{y0:.1}\" x2=\"{x:.1}\" y2=\"{y1:.1}\" stroke=\"#d06a1a\" stroke-width=\"1\"/><line x1=\"{:.1}\" y1=\"{y0:.1}\" x2=\"{:.1}\" y2=\"{y0:.1}\" stroke=\"#d06a1a\"/><line x1=\"{:.1}\" y1=\"{y1:.1}\" x2=\"{:.1}\" y2=\"{y1:.1}\" stroke=\"#d06a1a\"/><text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#d06a1a\" transform=\"rotate(-90 {:.1} {:.1})\" text-anchor=\"middle\">{} mm</text></svg>",
+            x - 3.0, x + 3.0, x - 3.0, x + 3.0, x + 11.0, (y0 + y1) / 2.0, x + 11.0, (y0 + y1) / 2.0, fmt_mm(t.stickout)
+        )
+    })
 }
 
 fn b64(png: &[u8]) -> String {
@@ -618,7 +627,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             fmt_mm(t.diameter),
             t.flutes,
             fmt_mm(t.flute_length),
-            fmt_mm(t.stickout),
+            format!("<b style=\"font-size:1.3em\">{} mm</b><div class=\"muted\">from the collet nut face; what the simulation assumed: set it when you load the tool</div>", fmt_mm(t.stickout)),
             if t.kind == ToolKind::Tap && t.tapping_head { format!("{holder}, self-reversing tapping head") } else { holder },
             cam.spindle_rpm(t).round(),
             feed.round(),
