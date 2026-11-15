@@ -1741,13 +1741,14 @@ impl Level<'_, '_> {
         self.pb.cut(p.extend(self.z), self.fast);
     }
 
-    fn run(&mut self, pts: &[P2]) {
+    /// Cut along `pts` at depth; `near`: centres whose tool reaches material (tight arcs there are slowed).
+    fn run(&mut self, pts: &[P2], near: &Shapes) {
         let start = self.pb.pos.map(|p| p.truncate());
         for (i, q) in pts.iter().enumerate() {
             let prev = if i > 0 { Some(DVec2::from(pts[i - 1])) } else { start };
             let next = pts.get(i + 1).map(|n| DVec2::from(*n));
             let f = match (prev, next) {
-                (Some(a), Some(c)) => arc_feed(self.feed, a, DVec2::from(*q), c, self.r),
+                (Some(a), Some(c)) if inside(near, *q) => arc_feed(self.feed, a, DVec2::from(*q), c, self.r),
                 _ => self.feed,
             };
             self.pb.cut(DVec3::new(q[0], q[1], self.z), f);
@@ -1901,7 +1902,7 @@ impl Level<'_, '_> {
                     self.go_to(start, a, &near, &free);
                     let mut pts: Vec<P2> = blend.iter().skip(1).map(|q| q.to_array()).collect();
                     pts.extend((0..=n).map(|i| s.pts[(k + i) % n]));
-                    self.run(&pts);
+                    self.run(&pts, &near);
                 } else {
                     // a pass that runs head-on into the material (along a wall into the face it is clearing: a slot
                     // for a moment) can be eased in at its start, but not at its end, where the leading edge takes
@@ -1944,7 +1945,7 @@ impl Level<'_, '_> {
         }
         if head_on(pts, remaining, r, 3.0 * r) <= 0.5 * h {
             self.go_to(DVec2::from(pts[0]), a, near, free);
-            self.run(&pts[1..]);
+            self.run(&pts[1..], near);
             return;
         }
         let ease = (4.0 * r).max(3.0 * self.step);
@@ -1965,7 +1966,7 @@ impl Level<'_, '_> {
         }
         self.go_to(DVec2::from(run[0]), a, near, free);
         if run.len() > 1 {
-            self.run(&run[1..]);
+            self.run(&run[1..], near);
         }
     }
 }
@@ -2105,8 +2106,8 @@ fn roomiest(s: &Shapes, r: f64) -> Option<(DVec2, f64)> {
 /// The feed for the centre at `b` on a path a → b → c: on a tight curve with the cut on its outside (rings growing
 /// out of a hole or a helix) the cutting edge runs (R + r) / R times faster than the centre, so the chip and
 /// the power go up as much: slow the centre down so the edge keeps to `feed` (arc feed compensation). Only
-/// curves tighter than 1.5 tool radii (where the edge runs 1.7× and more): the rest of a loop's arcs are mostly
-/// in air, and slowing those costs time for nothing.
+/// curves tighter than half a tool radius (the edge 3× and more: spirals out of a hole); the rings'
+/// corners, rounded to the tool radius, are mostly in air, and slowing them costs time for nothing.
 fn arc_feed(feed: f64, a: DVec2, b: DVec2, c: DVec2, r: f64) -> f64 {
     let (u, v) = (b - a, c - b);
     let (lu, lv) = (u.length(), v.length());
@@ -2120,7 +2121,7 @@ fn arc_feed(feed: f64, a: DVec2, b: DVec2, c: DVec2, r: f64) -> f64 {
         return feed;
     }
     let big_r = lu * lv * chord / (2.0 * cross.abs());
-    if big_r > 1.5 * r {
+    if big_r > 0.5 * r {
         return feed;
     }
     feed * (big_r / (big_r + r)).max(0.15)
