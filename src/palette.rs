@@ -217,6 +217,7 @@ fn commands(app: &App) -> Vec<Cmd> {
             }
             v.push(cmd("Simulate", "Manufacture", "camSim", None, "play stock check crash", Action::Run(crate::cam_ui::toggle_sim)));
             v.push(cmd("Export G-code…", "Manufacture", "camGcode", None, "post nc gcode save", Action::Run(crate::cam_ui::export_dialog)));
+            v.push(cmd("Simulation web page…", "Manufacture", "camWebSim", None, "export html browser share playback animation", Action::Run(crate::cam_ui::web_sim_dialog)));
             v.push(cmd("Setup sheet…", "Manufacture", "camSheet", None, "print operator html", Action::Run(crate::cam_ui::sheet_dialog)));
             v.push(cmd("Tool library", "Manufacture", "camTools", None, "tools import fusion", Action::Run(|a| a.cam.library_open = true)));
         }

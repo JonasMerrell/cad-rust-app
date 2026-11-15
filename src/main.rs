@@ -22,6 +22,7 @@ mod cam_paths;
 mod cam_post;
 mod cam_probe;
 mod cam_sim;
+mod cam_web;
 mod cam_stock;
 mod cam_ui;
 mod palette;
