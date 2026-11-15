@@ -922,8 +922,22 @@ pub struct Operation {
     pub sketches: Vec<u64>,
     /// Trace: depth below the surface; V-carve: deepest cut (0 = as deep as the V-bit goes).
     pub depth: f64,
-    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
+    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it). New contours
+    /// get half the tool's diameter; where that doesn't fit, smaller arcs are tried before ramping.
     pub lead: f64,
+    /// Contour with leads: how far the pass runs on past where it started before it leads off, mm, so its end
+    /// blends over its start instead of leaving a step (the seam's witness mark).
+    pub overlap: f64,
+    /// Contour with leads, cutting to size (leave 0): a light last lap. The lap before it stays this much
+    /// outside the wall (mm), so the last one takes almost nothing and the tool hardly bends: 0 = no lap.
+    pub finish_lap: f64,
+    /// Contour: go round the last lap a second time at the same size (a spring pass).
+    #[serde(skip_serializing_if = "is_false")]
+    pub spring_pass: bool,
+    /// Contour with leads: where passes start and end (work X/Y): on the side nearest this point. None: in the
+    /// middle of the loop's longest straight side, away from corners and arcs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seam: Option<[f64; 2]>,
     /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
     /// stock reaches further out than that, extra passes outside the wall take it down first.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1051,6 +1065,10 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            overlap: 1.5,
+            finish_lap: 0.03,
+            spring_pass: false,
+            seam: None,
             max_engagement: None,
             chip_thinning: false,
             probing: None,
@@ -1643,6 +1661,8 @@ impl Cam {
             }
             OpKind::Parallel | OpKind::Scallop => op.stepover = Some(0.1),
             OpKind::Waterline => op.stepdown = Some(0.3),
+            // arcs onto and off the wall, the seam overlapped and a light last lap (see `lead_loop`)
+            OpKind::Contour => op.lead = tl.as_ref().map(|t| fmt_round(t.diameter * 0.5)).unwrap_or(3.0),
             OpKind::Deburr => op.chamfer = 0.3,
             OpKind::Pencil => {
                 op.stepover = Some(0.1);
