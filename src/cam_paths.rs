@@ -762,7 +762,7 @@ impl<'a> Pb<'a> {
                 let l = loops.remove(j);
                 self.cut_loop(&l, z, z_from, 0.0, None, None);
             }
-            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0 };
+            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0, blocking: Default::default(), hop: None };
             lv.clear(&region, &mat, &core);
         }
     }
