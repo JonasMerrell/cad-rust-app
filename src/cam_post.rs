@@ -342,8 +342,10 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             if let (Some(p), Some((lo, hi))) = (find, stock) {
                 if !found_stock {
                     // the fixed jaw for X may be set on either of the stock probes (top or middle)
-                    let jaw = cam.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref()).find(|p| p.jaw_x != 0.0);
-                    find_stock(&mut o, p, jaw, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
+                    let probes = || cam.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref());
+                    let jaw = probes().find(|p| p.jaw_x != 0.0);
+                    let size = probes().find_map(|p| p.find_size);
+                    find_stock(&mut o, p, jaw, size, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
                     found_stock = true;
                 }
                 continue;
@@ -575,9 +577,10 @@ fn rcnc_bores(cam: &Cam, paths: &[Toolpath], tp: &Toolpath, r: f64, origin: DVec
 /// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
 /// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
 /// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
-fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::ProbeOp>, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
+#[allow(clippy::too_many_arguments)]
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::ProbeOp>, find_size: Option<[f64; 2]>, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
     let mut size = hi - lo;
-    if let Some([x, y]) = p.find_size.or(jaw.and_then(|j| j.find_size)) {
+    if let Some([x, y]) = find_size {
         size = DVec3::new(x, y, size.z);
     }
     let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
