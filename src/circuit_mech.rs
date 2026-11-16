@@ -528,6 +528,9 @@ struct Rel {
     b: Option<usize>,
     k: f64,
     phase: f64,
+    /// Belt: the second slider and its sign (travel b + kc · travel c = k θa + phase).
+    c: Option<usize>,
+    kc: f64,
 }
 
 /// A motor's or servo's running state.
@@ -727,10 +730,9 @@ impl MechExt {
             let known: Vec<(usize, u64)> = ext.mates.iter().map(|m| (m.asm, m.id)).collect();
             for (ai, id) in known {
                 for r in &asms[ai].relations {
-                    if r.a == id || r.b == Some(id) {
-                        ext.mate_ix(asms, ai, r.a);
-                        if let Some(b) = r.b {
-                            ext.mate_ix(asms, ai, b);
+                    if r.mates().any(|m| m == id) {
+                        for m in r.mates() {
+                            ext.mate_ix(asms, ai, m);
                         }
                     }
                 }
@@ -743,12 +745,13 @@ impl MechExt {
         for (ai, a) in asms.iter().enumerate() {
             for r in &a.relations {
                 let ix = |id: u64| ext.mates.iter().position(|m| m.asm == ai && m.id == id);
-                let (Some(ia), ib) = (ix(r.a), r.b.and_then(ix)) else { continue };
-                if r.b.is_some() && ib.is_none() || !seen.insert((ai, r.id)) {
+                let (Some(ia), ib, ic) = (ix(r.a), r.b.and_then(ix), r.c.and_then(ix)) else { continue };
+                if r.b.is_some() && ib.is_none() || r.c.is_some() && ic.is_none() || !seen.insert((ai, r.id)) {
                     continue;
                 }
                 let sign = if r.reverse { -1.0 } else { 1.0 };
-                ext.rels.push(Rel { kind: r.kind, a: ia, b: ib, k: sign * r.ratio, phase: r.phase });
+                let kc = if r.reverse_c { -1.0 } else { 1.0 };
+                ext.rels.push(Rel { kind: r.kind, a: ia, b: ib, k: sign * r.ratio, phase: r.phase, c: ic, kc });
             }
         }
         let mut tau: f64 = f64::INFINITY;
@@ -949,6 +952,25 @@ impl MechExt {
                                 self.mates[a].angle = Some((y - r.phase) / r.k);
                                 changed = true;
                             }
+                        }
+                    }
+                    (RelationKind::Belt, Some(b)) => {
+                        // travel b + kc · travel c = k θa + phase (no c: a rack)
+                        let c = r.c.map(|c| self.mates[c].slide);
+                        let cv = c.flatten().unwrap_or(0.0);
+                        let c_known = c.map(|v| v.is_some()).unwrap_or(true);
+                        let (x, y) = (self.mates[a].angle, self.mates[b].slide);
+                        if let (Some(x), None, true) = (x, y, c_known) {
+                            self.mates[b].slide = Some(r.k * x + r.phase - r.kc * cv);
+                            changed = true;
+                        } else if let (None, Some(y), true) = (x, y, c_known) {
+                            if r.k != 0.0 {
+                                self.mates[a].angle = Some((y + r.kc * cv - r.phase) / r.k);
+                                changed = true;
+                            }
+                        } else if let (Some(x), Some(y), Some(ci), false) = (x, y, r.c, c_known) {
+                            self.mates[ci].slide = Some((r.k * x + r.phase - y) / r.kc);
+                            changed = true;
                         }
                     }
                     (RelationKind::Screw, _) => {
@@ -1488,7 +1510,7 @@ mod tests {
     #[test]
     fn a_pot_reads_a_slider_through_a_rack() {
         // a pinion (revolute) drives a rack (slider): 5 mm of travel per radian
-        let rel = Relation { id: 99, name: "Rack".into(), kind: RelationKind::Rack, a: 1, b: Some(2), ratio: 5.0, reverse: false, phase: 0.0 };
+        let rel = Relation { id: 99, name: "Rack".into(), kind: RelationKind::Rack, a: 1, b: Some(2), ratio: 5.0, reverse: false, phase: 0.0, c: None, reverse_c: false };
         let a = asm(vec![mate(1, "Pinion", MateKind::Revolute, None), mate(2, "Rack", MateKind::Slider, Some([0.0, 40.0]))], vec![rel]);
         let mut p = board(
             &[("M", "6V 10000rpm 1A 1:200"), ("RV", "10k")],

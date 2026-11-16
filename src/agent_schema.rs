@@ -378,7 +378,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             if tool == "assembly_mate" {
                 en(&["fastened", "revolute", "slider", "cylindrical", "planar", "ball"], "mate kind")
             } else {
-                en(&["gear", "rack", "screw"], "relation kind")
+                en(&["gear", "rack", "screw", "belt"], "relation kind")
             }
         }
         ("assembly_mate", "a" | "b") => obj(
@@ -395,7 +395,9 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("assembly_move", "instance") => t("integer", "instance id"),
         ("assembly_relation", "mate_a") => t("integer", "driving mate id"),
         ("assembly_relation", "mate_b") => t("integer", "driven mate id"),
-        ("assembly_relation", "ratio") => t("number", "gear ratio, rack pitch radius (mm) or screw pitch (mm/turn)"),
+        ("assembly_relation", "mate_c") => t("integer", "belt: a second slider the belt moves (CoreXY: the other axis)"),
+        ("assembly_relation", "reverse_c") => t("boolean", "belt: the second slider counts negative (travel b − travel c)"),
+        ("assembly_relation", "ratio") => t("number", "gear ratio, rack or belt pulley pitch radius (mm), or screw pitch (mm/turn)"),
         ("assembly_relation", "reverse") => t("boolean", "reverse the direction"),
         ("assembly_explode", "steps") => arr(
             obj(

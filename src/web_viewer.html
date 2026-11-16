@@ -268,7 +268,7 @@ let explodeT = 0;
 const tmpM = new THREE.Matrix4(), tmpR = new THREE.Matrix4(), tmpV = new THREE.Vector3();
 function update() {
   for (let pass = 0; pass < 4; pass++)
-    NODES.forEach((n, i) => { const d = n.joint && n.joint.drive; if (d) vals[i] = d.ratio * vals[d.of] + (d.offset || 0); });
+    NODES.forEach((n, i) => { const d = n.joint && n.joint.drive; if (d) vals[i] = d.ratio * vals[d.of] + (d.also ? d.also[1] * vals[d.also[0]] : 0) + (d.offset || 0); });
   NODES.forEach((n, i) => {
     const M = groups[i].matrix.identity();
     if (n.explode && explodeT) M.makeTranslation(n.explode[0] * explodeT, n.explode[1] * explodeT, n.explode[2] * explodeT);
