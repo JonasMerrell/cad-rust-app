@@ -59,7 +59,8 @@ pub fn check(stations: &[&Cam]) -> Vec<String> {
     let mut w = vec![];
     for (i, a) in stations.iter().enumerate() {
         for b in &stations[i + 1..] {
-            if a.wcs() == b.wcs() {
+            // the same work offset is right for setups at the same station (an engraving after op 2)
+            if a.wcs() == b.wcs() && a.on_table != b.on_table {
                 w.push(format!("{} and {} both use G{}: give each station its own work_offset", a.name, b.name, 53 + a.wcs() as u32));
             }
             if a.post != b.post {
@@ -141,7 +142,7 @@ impl Job {
     /// stations, renumbered and named after their station; the fixtures of all; work zero at the lead's setup
     /// origin), the parts, the toolpaths in job order with a move over the top between stations, the stock box
     /// round them all and the stock they start from.
-    pub fn combined(&self) -> (Cam, Part, Vec<Toolpath>, (DVec3, DVec3), StockMap) {
+    pub fn combined(&self) -> (Cam, Part, Vec<Toolpath>, (DVec3, DVec3)) {
         let lead = &self.stations[0];
         let mut c = lead.cam.clone();
         c.name = self.stations.iter().map(|s| s.cam.name.clone()).collect::<Vec<_>>().join(" + ");
@@ -242,15 +243,17 @@ impl Job {
             paths.push(tp);
         }
 
-        // the stock: each station's (as its setup starts it), nothing between them
-        let cell = self.stations.iter().filter_map(|s| s.left.as_ref().map(|m| m.cell)).fold(0.1f64, f64::min).max(0.05);
-        let nx = ((hi.x - lo.x) / cell).ceil() as usize + 1;
-        let ny = ((hi.y - lo.y) / cell).ceil() as usize + 1;
-        let mut map = StockMap { x0: lo.x, y0: lo.y, cell, nx, ny, hi: vec![EMPTY; nx * ny], lo: vec![lo.z as f32; nx * ny] };
+        (c, part, paths, (lo, hi))
+    }
+
+    /// The stock the job starts from on a grid (the simulation's, so nothing is resampled twice): each
+    /// station's, as its setup starts it, and nothing between them.
+    pub fn stock_on(&self, x0: f64, y0: f64, cell: f64, nx: usize, ny: usize, floor: f64) -> StockMap {
+        let mut map = StockMap { x0, y0, cell, nx, ny, hi: vec![EMPTY; nx * ny], lo: vec![floor as f32; nx * ny] };
         for j in 0..ny {
-            let y = lo.y + j as f64 * cell;
+            let y = y0 + j as f64 * cell;
             for i in 0..nx {
-                let x = lo.x + i as f64 * cell;
+                let x = x0 + i as f64 * cell;
                 let k = j * nx + i;
                 for s in &self.stations {
                     let (a, b) = s.stock();
@@ -267,13 +270,14 @@ impl Job {
                 }
             }
         }
-        (c, part, paths, (lo, hi), map)
+        map
     }
 
     /// The combined simulation, not yet run, with the lead's machine (if it has one).
     pub fn sim(&self, resolution: usize) -> Result<(Cam, Part, Vec<Toolpath>, Sim), String> {
-        let (c, part, paths, stock, map) = self.combined();
+        let (c, part, paths, stock) = self.combined();
         let mut sim = Sim::new(&c, &part, stock, &paths, resolution);
+        let map = self.stock_on(sim.x0, sim.y0, sim.cell, sim.nx, sim.ny, stock.0.z);
         sim.start_from(&map);
         if !c.machine.model.is_empty() {
             let l = crate::cam_machine::load(&c.machine.model)?;

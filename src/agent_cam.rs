@@ -144,6 +144,10 @@ impl Session {
         }
         let mut idx = vec![ci];
         for n in &lead.with {
+            // with stations given, only those have to exist yet (op 1 posted before op 2's setup is made)
+            if keep.as_ref().is_some_and(|k| !k.contains(n)) {
+                continue;
+            }
             let i = self.ws.cams.iter().position(|c| &c.name == n).ok_or_else(|| format!("with: no setup called {n}"))?;
             if !idx.contains(&i) {
                 idx.push(i);
