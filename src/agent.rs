@@ -30,6 +30,8 @@ mod pcb;
 mod circuit;
 #[path = "agent_anim.rs"]
 mod anim;
+#[path = "agent_gsim.rs"]
+mod gsim;
 #[cfg(test)]
 pub(crate) use pcb::connect as pcb_connect;
 #[path = "agent_query.rs"]
@@ -1822,6 +1824,7 @@ pub(crate) fn tools() -> Value {
         v.extend(pcb::tools());
         v.extend(circuit::tools());
         v.extend(anim::tools());
+        v.extend(gsim::tools());
         schema::complete(&mut v);
         Value::Array(v)
     })

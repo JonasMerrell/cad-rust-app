@@ -102,6 +102,7 @@ mod session;
 mod sketcher;
 mod stdparts;
 mod stock_size;
+mod gsim;
 mod stdparts_ui;
 mod text;
 mod theme;
