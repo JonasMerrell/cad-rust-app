@@ -201,17 +201,77 @@ pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String 
 
 /// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice). `stock` is the stock box in setup coordinates, for rcnc's Find stock.
 pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>, stock: Option<(DVec3, DVec3)>) -> String {
+    gcode_job(&[Station { cam, paths, origin, safe, work_zero, stock }], None)
+}
+
+/// One station of a job: a setup with its toolpaths, work zero and safe height (setup coordinates).
+pub struct Station<'a> {
+    pub cam: &'a Cam,
+    pub paths: &'a [Toolpath],
+    pub origin: DVec3,
+    pub safe: f64,
+    pub work_zero: Option<String>,
+    pub stock: Option<(DVec3, DVec3)>,
+}
+
+/// The order a job's toolpaths run in, as (station, toolpath): each station keeps its own order, and the
+/// loaded tool cuts wherever a station's next toolpath uses it before the next tool goes in (the tool of the
+/// earliest station that has toolpaths left). Tools are matched by number.
+pub fn job_order(tools: &[Vec<Option<u32>>]) -> Vec<(usize, usize)> {
+    let mut next = vec![0usize; tools.len()];
+    let mut out = vec![];
+    let skip = |next: &mut Vec<usize>| {
+        for (s, t) in tools.iter().enumerate() {
+            while next[s] < t.len() && t[next[s]].is_none() {
+                next[s] += 1;
+            }
+        }
+    };
+    loop {
+        skip(&mut next);
+        let Some(first) = (0..tools.len()).find(|s| next[*s] < tools[*s].len()) else { break };
+        let cur = tools[first][next[first]];
+        for s in 0..tools.len() {
+            while next[s] < tools[s].len() && (tools[s][next[s]] == cur || tools[s][next[s]].is_none()) {
+                if tools[s][next[s]].is_some() {
+                    out.push((s, next[s]));
+                }
+                next[s] += 1;
+            }
+        }
+    }
+    out
+}
+
+/// One program for several stations (setups each in their own work offset, e.g. two vise stations), in
+/// `order` (default: the first station's toolpaths in turn). Each tool is loaded once per run of the order;
+/// moving to another station goes to the top, switches the work offset and travels over at the top.
+pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
+    let order = order.unwrap_or_else(|| (0..st[0].paths.len()).map(|i| (0, i)).collect());
+    let multi = st.len() > 1;
+    let first_station = order.first().map(|o| o.0).unwrap_or(0);
+    let cam = st[first_station].cam;
+    let work_zero = st[first_station].work_zero.clone();
     let d = dialect(&cam.post);
     let mut o = Out { s: String::new(), last: [None; 3], motion: None, feed: None };
-    let safe_w = safe - origin.z;
     if d == Dialect::Fanuc {
         o.line("%");
         o.line(&format!("O{:04} {}", cam.program % 10000, comment(&cam.name)));
     }
     o.line(&comment(&format!("{} - made by rCAD", cam.name)));
     o.line(&comment(&format!("work zero: {}", work_zero.unwrap_or_else(|| cam.origin.label().to_lowercase()))));
-    for n in cam.setup_notes() {
-        o.line(&comment(&n));
+    if multi {
+        o.line(&comment(&format!("{} stations, each in its own work offset", st.len())));
+        for (i, s) in st.iter().enumerate() {
+            o.line(&comment(&format!("station {}: G{} {} - work zero: {}", i + 1, 53 + s.cam.wcs() as u32, s.cam.name, s.work_zero.clone().unwrap_or_else(|| s.cam.origin.label().to_lowercase()))));
+            for n in s.cam.setup_notes() {
+                o.line(&comment(&format!("  {n}")));
+            }
+        }
+    } else {
+        for n in cam.setup_notes() {
+            o.line(&comment(&n));
+        }
     }
     match d {
         Dialect::Mach3 if cam.post == "rcnc" => o.line(&comment("retracts use G53 G0 Z0 - home the machine first")),
@@ -222,14 +282,19 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         Dialect::LinuxCnc => o.line(&comment("retracts use G53 G0 Z0 - home the machine first")),
         _ => {}
     }
-    let mut used: Vec<u64> = vec![];
-    for p in paths.iter().filter(|p| !p.moves.is_empty()) {
-        if !used.contains(&p.tool) {
-            used.push(p.tool);
+    // each tool once, by number, in the order they go in
+    let mut used: Vec<&Tool> = vec![];
+    for &(si, pi) in &order {
+        let s = &st[si];
+        let Some(t) = s.paths.get(pi).filter(|p| !p.moves.is_empty()).and_then(|p| s.cam.tool(p.tool)) else { continue };
+        match used.iter().find(|u| u.number == t.number) {
+            Some(u) if u.describe() != t.describe() => o.line(&comment(&format!("WARNING: T{} is {} in one station and {} in another", t.number, u.describe(), t.describe()))),
+            Some(_) => {}
+            None => used.push(t),
         }
     }
-    for id in &used {
-        if let Some(t) = cam.tool(*id) {
+    for t in used.iter().copied() {
+        {
             let d = t.describe();
             let mut line = if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) };
             // rcnc fills its tool table from these lines, for the picture at the tool change
@@ -239,10 +304,10 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             o.line(&comment(&line));
         }
     }
-    if d != Dialect::LinuxCnc && cam.post != "rcnc" && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
+    if d != Dialect::LinuxCnc && cam.post != "rcnc" && used.iter().any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
         o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
     }
-    let total = crate::cam_paths::cycle_time(cam, paths);
+    let total: f64 = st.iter().map(|s| crate::cam_paths::cycle_time(s.cam, s.paths)).sum();
     // rounded once, so 239.6 s reads 4:00, not 3:60
     let secs = total.round().max(0.0) as i64;
     o.line(&comment(&format!("estimated time {}:{:02}", secs / 60, secs % 60)));
@@ -259,24 +324,50 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
     for l in fill(&cam.post_text.header, cam, None) {
         o.line(&l);
     }
-    let mut cur_tool: Option<u64> = None;
-    let mut found_stock = false;
+    // the loaded tool, by number (stations have their own tool lists)
+    let mut cur_tool: Option<u32> = None;
+    let mut found_stock = vec![false; st.len()];
     // the probing operations already posted as part of an rcnc Find bores
-    let mut found_bores: Vec<u64> = vec![];
-    if cam.post == "rcnc" && !cam.probe.z_reference.trim().is_empty() {
-        o.line(&comment(&format!("RCNC Z_REFERENCE {}", cam.probe.z_reference.trim())));
-    }
+    let mut found_bores: Vec<Vec<u64>> = vec![vec![]; st.len()];
+    // each station's Z reference goes in its own work offset, the first time the job gets there
+    let mut zref = vec![false; st.len()];
+    let z_reference = |o: &mut Out, c: &Cam| {
+        if c.post == "rcnc" && !c.probe.z_reference.trim().is_empty() {
+            o.line(&comment(&format!("RCNC Z_REFERENCE {}", c.probe.z_reference.trim())));
+        }
+    };
+    z_reference(&mut o, cam);
+    zref[first_station] = true;
+    let mut station = first_station;
+    // just moved to another station: travel over at the top before coming down
+    let mut travel = false;
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = Coolant::Off;
-    for tp in paths {
+    for &(si, pi) in &order {
+        let Some(tp) = st[si].paths.get(pi) else { continue };
         if tp.moves.is_empty() {
             continue;
         }
+        let Station { cam, paths, origin, safe, stock, .. } = st[si];
+        let safe_w = safe - origin.z;
         let Some(tool) = cam.tool(tp.tool) else { continue };
+        if si != station {
+            o.line("");
+            o.line(&comment(&format!("station {}: {}", si + 1, cam.name)));
+            o.top(d, st[station].safe - st[station].origin.z);
+            o.line(&format!("G{}", 53 + cam.wcs() as u32));
+            o.forget();
+            if !zref[si] {
+                z_reference(&mut o, cam);
+                zref[si] = true;
+            }
+            station = si;
+            travel = true;
+        }
         let op = cam.op(tp.op);
         o.line("");
         o.line(&comment(&format!("{} - {}", op.map(|o| o.name.as_str()).unwrap_or("operation"), op.map(|o| o.kind.label()).unwrap_or(""))));
-        if cur_tool != Some(tool.id) {
+        if cur_tool != Some(tool.number) {
             if cur_tool.is_some() || d != Dialect::Grbl {
                 o.top(d, safe_w);
                 if spindle_rpm.is_some() {
@@ -325,7 +416,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                 probe(&mut o, d, cam, tool, cur_tool.is_none(), safe_w);
             }
             o.forget();
-            cur_tool = Some(tool.id);
+            cur_tool = Some(tool.number);
         }
         if tool.kind == ToolKind::Probe {
             // a touch probe never spins and stays dry
@@ -340,22 +431,22 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             // checks the size), so probing the stock's top or middle becomes one request for that
             let find = op.and_then(|o| o.probing.as_ref()).filter(|p| cam.post == "rcnc" && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss));
             if let (Some(p), Some((lo, hi))) = (find, stock) {
-                if !found_stock {
+                if !found_stock[si] {
                     // the fixed jaw for X may be set on either of the stock probes (top or middle)
                     let probes = || cam.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref());
                     let jaw = probes().find(|p| p.jaw_x != 0.0);
                     let size = probes().find_map(|p| p.find_size);
                     find_stock(&mut o, p, jaw, size, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
-                    found_stock = true;
+                    found_stock[si] = true;
                 }
                 continue;
             }
             // two (or more) bores of the part in a row: rcnc finds them all and sets X/Y from them
-            if cam.post == "rcnc" && found_bores.contains(&tp.op) {
+            if cam.post == "rcnc" && found_bores[si].contains(&tp.op) {
                 continue;
             }
             if let Some(bores) = rcnc_bores(cam, paths, tp, tool.radius(), origin) {
-                found_bores.extend(bores.1);
+                found_bores[si].extend(bores.1);
                 o.line(&comment("rcnc Find bores: the probe finds the locating bores and sets X/Y from them"));
                 o.line(&comment(&bores.0));
                 o.forget();
@@ -425,6 +516,11 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             match *m {
                 Move::Rapid(p) => {
                     let w = DVec3::from(p) - origin;
+                    if first && travel {
+                        o.line(&format!("G0 X{} Y{}", num(w.x), num(w.y)));
+                        o.forget();
+                        travel = false;
+                    }
                     if first {
                         // go up first, then over
                         o.z_up(safe_w);
@@ -434,6 +530,12 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                     pos = p.into();
                 }
                 Move::Feed(p, f) => {
+                    if first && travel {
+                        let w = DVec3::from(p) - origin;
+                        o.line(&format!("G0 X{} Y{}", num(w.x), num(w.y)));
+                        o.forget();
+                        travel = false;
+                    }
                     if first {
                         o.z_up(safe_w);
                     }
@@ -490,7 +592,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         }
     }
     o.line("");
-    o.top(d, safe_w);
+    o.top(d, st[station].safe - st[station].origin.z);
     o.line("M5");
     if coolant.is_on() {
         o.line("M9");
