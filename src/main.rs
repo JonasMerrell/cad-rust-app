@@ -14,6 +14,7 @@ mod cam_3d;
 mod cam_contour;
 mod cam_engrave;
 mod cam_jaws;
+mod cam_job;
 mod cam_machine;
 mod cam_machine_ui;
 mod cam_sheet;

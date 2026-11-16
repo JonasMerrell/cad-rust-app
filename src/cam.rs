@@ -1576,6 +1576,13 @@ pub struct Cam {
     /// can be merged into one program. Probing writes to it.
     #[serde(skip_serializing_if = "is_one_u8")]
     pub work_offset: u8,
+    /// Other setups (by name) machined in the same program as this one, each at its own station on the
+    /// machine (its own `on_table` and `work_offset`): this setup leads the job (see cam_job).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<String>,
+    /// Lines a job's combined setup puts first on its setup sheet (one per station).
+    #[serde(skip)]
+    pub job_notes: Vec<String>,
     /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
     /// at the bottom of the stock or of the lowest fixture.
     #[serde(skip_serializing_if = "is_zero3")]
@@ -1639,6 +1646,8 @@ impl Default for Cam {
             fixtures: vec![],
             fixture_clearance: 0.0,
             work_offset: 1,
+            with: vec![],
+            job_notes: vec![],
             on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),
@@ -1784,7 +1793,7 @@ impl Cam {
     /// What the operator does before running the program: how the part sits (the side up, a 3+2 tilt) and
     /// what holds it. Plain lines for the G-code header and the setup sheet.
     pub fn setup_notes(&self) -> Vec<String> {
-        let mut v = vec![];
+        let mut v = self.job_notes.clone();
         if !self.jaws_of.is_empty() {
             v.push(format!("clamp both soft jaw blanks of {} in the vise on a spacer, tops level", self.jaws_of));
         } else if !self.follows.is_empty() {
