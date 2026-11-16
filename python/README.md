@@ -3,7 +3,7 @@
 Python bindings to rCAD's OpenCascade kernel, its renderer and its finite elements, for
 parametric models written as Python scripts (`python model.py`, no window).
 
-    cd python && CMAKE_POLICY_VERSION_MINIMUM=3.5 maturin develop --release   # into the active environment
+    cd python && maturin develop --release   # into the active environment
 
 The first build compiles OpenCascade (about 20 minutes).
 

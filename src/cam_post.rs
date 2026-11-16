@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::{Cam, Coolant, Tool, ToolKind};
+use crate::cam::{Cam, Coolant, ProbeCycle, Tool, ToolKind};
 use crate::cam_paths::{Move, Toolpath};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -25,7 +25,7 @@ fn dialect(post: &str) -> Dialect {
     }
 }
 
-fn num(v: f64) -> String {
+pub(crate) fn num(v: f64) -> String {
     let s = format!("{:.3}", v);
     let s = s.trim_end_matches('0').trim_end_matches('.').to_string();
     if s == "-0" {
@@ -196,11 +196,11 @@ fn message(d: Dialect, text: &str) -> String {
 /// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates).
 #[cfg(test)]
 pub fn gcode(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64) -> String {
-    gcode_noted(cam, paths, origin, safe, None)
+    gcode_noted(cam, paths, origin, safe, None, None)
 }
 
-/// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice).
-pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>) -> String {
+/// G-code for the toolpaths, in work coordinates (`origin` is the work zero in setup coordinates), with `work_zero` telling the operator where the work zero is (None = the setup's origin choice). `stock` is the stock box in setup coordinates, for rcnc's Find stock.
+pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work_zero: Option<String>, stock: Option<(DVec3, DVec3)>) -> String {
     let d = dialect(&cam.post);
     let mut o = Out { s: String::new(), last: [None; 3], motion: None, feed: None };
     let safe_w = safe - origin.z;
@@ -231,18 +231,27 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
     for id in &used {
         if let Some(t) = cam.tool(*id) {
             let d = t.describe();
-            o.line(&comment(&if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) }));
+            let mut line = if t.name == d || t.name.is_empty() { format!("T{} {d}", t.number) } else { format!("T{} {} - {d}", t.number, t.name) };
+            // rcnc fills its tool table from these lines, for the picture at the tool change
+            if cam.post == "rcnc" {
+                line += &format!(", flute length {}, stickout {}", num(t.flute_length), num(t.stickout));
+            }
+            o.line(&comment(&line));
         }
     }
     if d != Dialect::LinuxCnc && cam.post != "rcnc" && used.iter().filter_map(|id| cam.tool(*id)).any(|t| t.kind == ToolKind::Tap && !t.tapping_head) {
         o.line(&comment("no rigid tapping: the spindle reverses at the bottom of each tap - hold taps in a floating tap holder"));
     }
     let total = crate::cam_paths::cycle_time(cam, paths);
-    o.line(&comment(&format!("estimated time {}:{:02}", (total / 60.0).floor(), (total % 60.0).round() as i64)));
+    // rounded once, so 239.6 s reads 4:00, not 3:60
+    let secs = total.round().max(0.0) as i64;
+    o.line(&comment(&format!("estimated time {}:{:02}", secs / 60, secs % 60)));
     match d {
         Dialect::Grbl => o.line("G21 G17 G90 G94"),
         // G91.1: arc centres (I, J) relative to the start, whatever the controller was left in
         Dialect::LinuxCnc => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94 G64 P0.01"),
+        // rcnc: constant velocity, or every one of a 3D path's short moves stops dead at its end
+        Dialect::Mach3 if cam.post == "rcnc" => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94 G64"),
         Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94"),
         Dialect::Fanuc => o.line("G21 G17 G40 G49 G80 G90 G94"),
     }
@@ -251,6 +260,12 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         o.line(&l);
     }
     let mut cur_tool: Option<u64> = None;
+    let mut found_stock = false;
+    // the probing operations already posted as part of an rcnc Find bores
+    let mut found_bores: Vec<u64> = vec![];
+    if cam.post == "rcnc" && !cam.probe.z_reference.trim().is_empty() {
+        o.line(&comment(&format!("RCNC Z_REFERENCE {}", cam.probe.z_reference.trim())));
+    }
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = Coolant::Off;
     for tp in paths {
@@ -311,6 +326,42 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             }
             o.forget();
             cur_tool = Some(tool.id);
+        }
+        if tool.kind == ToolKind::Probe {
+            // a touch probe never spins and stays dry
+            if spindle_rpm.take().is_some() {
+                o.line("M5");
+            }
+            if coolant.is_on() {
+                o.line("M9");
+                coolant = Coolant::Off;
+            }
+            // rcnc finds the stock itself (Find stock: jog over it, it probes the top and all four sides and
+            // checks the size), so probing the stock's top or middle becomes one request for that
+            let find = op.and_then(|o| o.probing.as_ref()).filter(|p| cam.post == "rcnc" && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss));
+            if let (Some(p), Some((lo, hi))) = (find, stock) {
+                if !found_stock {
+                    find_stock(&mut o, p, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
+                    found_stock = true;
+                }
+                continue;
+            }
+            // two (or more) bores of the part in a row: rcnc finds them all and sets X/Y from them
+            if cam.post == "rcnc" && found_bores.contains(&tp.op) {
+                continue;
+            }
+            if let Some(bores) = rcnc_bores(cam, paths, tp, tool.radius(), origin) {
+                found_bores.extend(bores.1);
+                o.line(&comment("rcnc Find bores: the probe finds the locating bores and sets X/Y from them"));
+                o.line(&comment(&bores.0));
+                o.forget();
+                continue;
+            }
+            match &tp.probe {
+                Some(plan) => probe_cycle(&mut o, d, plan, origin, safe_w),
+                None => o.line(&comment("nothing to probe")),
+            }
+            continue;
         }
         // never above the spindle's top speed (the toolpath's feeds are scaled to match)
         let rpm = cam.spindle_rpm(tool).round();
@@ -484,6 +535,63 @@ fn fill(text: &str, cam: &Cam, tool: Option<&Tool>) -> Vec<String> {
 
 /// Measure the tool just loaded: on a touch plate (sets the work Z zero) or on a tool setter (sets its
 /// length offset against the first tool, which must be the one the work Z zero was set with).
+/// rcnc: the bore probing operations starting at `tp` (consecutive probes of the part's bores with their middle
+/// and diameter given) as one `(RCNC FIND_BORES ...)` request, and their operation ids. None unless there are two.
+fn rcnc_bores(cam: &Cam, paths: &[Toolpath], tp: &Toolpath, r: f64, origin: DVec3) -> Option<(String, Vec<u64>)> {
+    if cam.post != "rcnc" {
+        return None;
+    }
+    let bore = |t: &Toolpath| {
+        let op = cam.op(t.op)?;
+        let p = op.probing.as_ref().filter(|p| p.cycle == ProbeCycle::Bore && p.size > 0.0)?;
+        let at = op.at?;
+        // the ball's tip goes `depth` + its radius below the bore's top
+        let tip = t.probe.as_ref()?.steps.iter().find_map(|s| match s {
+            crate::cam_probe::Step::Touch { from, .. } => Some(from[2]),
+            _ => None,
+        })?;
+        Some((op.id, at, p.clone(), tip - origin.z + p.depth + r))
+    };
+    let start = paths.iter().position(|p| std::ptr::eq(p, tp))?;
+    let found: Vec<_> = paths[start..].iter().map_while(bore).collect();
+    let [(_, a, pa, top), (_, b, _, _), ..] = found.as_slice() else { return None };
+    let text = format!(
+        "RCNC FIND_BORES A={},{} B={},{} D={} TOP={} DEPTH={} TOL={} ROT={}",
+        num(a[0]),
+        num(a[1]),
+        num(b[0]),
+        num(b[1]),
+        num(pa.size),
+        num(*top),
+        num(pa.depth),
+        num(pa.tolerance),
+        num(pa.max_turn)
+    );
+    Some((text, found.iter().map(|f| f.0).collect()))
+}
+
+/// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
+/// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
+/// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
+    let size = hi - lo;
+    let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
+    o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
+    o.line(&comment(&format!(
+        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}",
+        num(size.x),
+        num(size.y),
+        num(size.z),
+        num(top_centre.x),
+        num(top_centre.y),
+        num(top_centre.z),
+        num(p.tolerance),
+        num(p.depth),
+        if keep_z { " KEEPZ=1" } else { "" }
+    )));
+    o.forget();
+}
+
 fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f64) {
     let p = &cam.probe;
     let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };
@@ -560,6 +668,91 @@ fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f
         }
         _ => {}
     }
+}
+
+/// A probing operation's cycle: each touch searches fast, backs off and touches again slowly; then the work
+/// zero (G54) axes are set so the surfaces found are where the setup has them.
+fn probe_cycle(o: &mut Out, d: Dialect, plan: &crate::cam_probe::Plan, origin: DVec3, safe_w: f64) {
+    use crate::cam_probe::Step;
+    let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };
+    // where the controller leaves the trip position (work coordinates)
+    let trip = if d == Dialect::Mach3 { 2000 } else { 5061 };
+    let var = |slot: usize| 110 + slot;
+    let axes = ['X', 'Y', 'Z'];
+    let readings = d != Dialect::Grbl;
+    o.line(&comment(&format!("find {} and set {}", plan.what, plan.sets_text(origin))));
+    if !readings && plan.needs_readings() {
+        o.line(&message(d, &format!("GRBL can't work out {} from probe readings: set {} there by hand, then press cycle start", plan.what, plan.sets_text(origin))));
+        o.line("M0");
+        return;
+    }
+    // "+ 1" / "- 1"; nothing for 0
+    let signed = |v: f64| {
+        let v = (v * 1000.0).round() / 1000.0;
+        if v.abs() < 1e-9 {
+            String::new()
+        } else if v > 0.0 {
+            format!(" + {}", num(v))
+        } else {
+            format!(" - {}", num(-v))
+        }
+    };
+    let comp_of = |slot: usize| {
+        plan.steps.iter().find_map(|s| match s {
+            Step::Touch { slot: k, comp, .. } if *k == slot => Some(*comp),
+            _ => None,
+        })
+    };
+    o.z_up(safe_w);
+    for step in &plan.steps {
+        match step {
+            Step::Move { to, feed, centre_x } => {
+                let p = DVec3::from(*to) - origin;
+                let gm = if feed.is_some() { 1 } else { 0 };
+                match centre_x {
+                    Some([a, b]) if readings => {
+                        let mut l = format!("G{gm} X[[#{} + #{}] / 2] Y{} Z{}", var(*a), var(*b), num(p.y), num(p.z));
+                        if let Some(f) = feed {
+                            let _ = write!(l, " F{}", num(f.round()));
+                        }
+                        o.line(&l);
+                        o.forget();
+                    }
+                    _ => o.mv(gm, p, *feed),
+                }
+            }
+            Step::Touch { from, axis, dir, expect, slot, comp } => {
+                let p = DVec3::from(*from) - origin;
+                let ax = axes[*axis];
+                let start = p[*axis];
+                let target = start + dir * (expect + plan.overtravel);
+                o.line(&format!("{g} {ax}{} F{}", num(target), num(plan.fast.round())));
+                o.line("G91");
+                o.line(&format!("G1 {ax}{} F{}", num(-dir * plan.latch), num(plan.fast.round())));
+                o.line("G90");
+                o.line(&format!("{g} {ax}{} F{}", num(target), num(plan.slow.round())));
+                if readings {
+                    o.line(&format!("#{} = #{}", var(*slot), trip + axis));
+                } else if let Some(set) = plan.sets.iter().find(|s| s.touches == [*slot]) {
+                    // GRBL: the probe is where it tripped, so set the axis from here
+                    o.line(&format!("G10 L20 P1 {ax}{}", num(((set.target - origin[set.axis] - comp) * 1000.0).round() / 1000.0)));
+                }
+                o.line(&format!("G1 {ax}{} F{}", num(start), num(plan.fast.round())));
+                o.forget();
+            }
+        }
+    }
+    o.z_up(safe_w);
+    if readings && !plan.sets.is_empty() {
+        let mut l = "G10 L2 P1".to_string();
+        for s in &plan.sets {
+            let terms: Vec<String> = s.touches.iter().map(|k| format!("#{}{}", var(*k), signed(comp_of(*k).unwrap_or(0.0)))).collect();
+            let mean = if terms.len() == 1 { terms[0].clone() } else { format!("[{}] / {}", terms.join(" + "), terms.len()) };
+            let _ = write!(l, " {}[#{} + {mean}{}]", axes[s.axis], 5221 + s.axis, signed(-(s.target - origin[s.axis])));
+        }
+        o.line(&l);
+    }
+    o.forget();
 }
 
 /// Largest gap between the toolpath's points and the arcs that replace it, mm.

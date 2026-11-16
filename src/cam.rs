@@ -31,10 +31,12 @@ pub enum ToolKind {
     CenterDrill,
     Tap,
     Reamer,
+    /// Touch probe (3D probe with a ball stylus): measures the work instead of cutting it.
+    Probe,
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 14] = [
+    pub const ALL: [ToolKind; 15] = [
         ToolKind::Flat,
         ToolKind::Ball,
         ToolKind::Bull,
@@ -49,6 +51,7 @@ impl ToolKind {
         ToolKind::CenterDrill,
         ToolKind::Tap,
         ToolKind::Reamer,
+        ToolKind::Probe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -67,6 +70,7 @@ impl ToolKind {
             ToolKind::CenterDrill => "Center drill",
             ToolKind::Tap => "Tap",
             ToolKind::Reamer => "Reamer",
+            ToolKind::Probe => "Touch probe",
         }
     }
 
@@ -86,6 +90,7 @@ impl ToolKind {
             ToolKind::CenterDrill => "center_drill",
             ToolKind::Tap => "tap",
             ToolKind::Reamer => "reamer",
+            ToolKind::Probe => "probe",
         }
     }
 
@@ -102,6 +107,7 @@ impl ToolKind {
             "facemill" => Some(ToolKind::FaceMill),
             "spot" => Some(ToolKind::SpotDrill),
             "center" => Some(ToolKind::CenterDrill),
+            "touch_probe" | "3d_probe" | "probing" | "wcs_probe" | "edge_finder" => Some(ToolKind::Probe),
             _ => None,
         })
     }
@@ -221,6 +227,14 @@ pub struct Tool {
     pub stepdown: f64,
     /// Default stepover as a fraction of the diameter.
     pub stepover: f64,
+    /// Measured (tap test) first bending mode at the tip: frequency Hz, stiffness N/mm, damping ratio;
+    /// 0 = worked out from the tool's geometry and the machine's holder stiffness (see docs/cutting-model.md).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_hz: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_k: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_zeta: f64,
 }
 
 impl Default for Tool {
@@ -248,6 +262,9 @@ impl Default for Tool {
             coolant: Coolant::Auto,
             tapping_head: false,
             reverse_ratio: 1.75,
+            mode_hz: 0.0,
+            mode_k: 0.0,
+            mode_zeta: 0.0,
             rpm: 12000.0,
             feed: 1000.0,
             plunge_feed: 300.0,
@@ -272,6 +289,7 @@ impl Tool {
             ToolKind::Slot => format!("Ø{d} × {} slot mill", fmt_mm(self.cutting_width)),
             ToolKind::ThreadMill => format!("Ø{d} thread mill, pitch {}", fmt_mm(self.pitch)),
             ToolKind::Tap => format!("M{} × {} tap", fmt_mm(self.diameter), fmt_mm(self.pitch)),
+            ToolKind::Probe => format!("touch probe, Ø{d} stylus ball"),
             ToolKind::Drill | ToolKind::SpotDrill | ToolKind::CenterDrill => format!("Ø{d} {}° {}", fmt_mm(self.angle), self.kind.label().to_lowercase()),
             _ => format!("Ø{d} {}, {} flutes", self.kind.label().to_lowercase(), self.flutes),
         }
@@ -301,7 +319,7 @@ impl Tool {
         let r = self.radius();
         let len = self.flute_length.max(r);
         match self.kind {
-            ToolKind::Ball => {
+            ToolKind::Ball | ToolKind::Probe => {
                 let mut v: Vec<(f64, f64)> = (0..=8).map(|i| i as f64 / 8.0 * std::f64::consts::FRAC_PI_2).map(|a| (r * a.sin(), r - r * a.cos())).collect();
                 v.push((r, len));
                 v
@@ -437,6 +455,13 @@ pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64, min_rpm: f64) {
     let fz = (0.008 * d.powf(0.8)).clamp(0.005, 0.12) * k;
     let flutes = tool.flutes.max(1) as f64;
     tool.rpm = (rpm / 100.0).round() * 100.0;
+    if tool.kind == ToolKind::Probe {
+        // a probe doesn't spin: its feed is the fast search, its plunge feed the slow second touch
+        tool.rpm = 0.0;
+        tool.feed = 300.0;
+        tool.plunge_feed = 25.0;
+        return;
+    }
     match tool.kind {
         ToolKind::Tap => {
             tool.rpm = (tool.rpm * 0.08).clamp(100.0, 800.0).round();
@@ -586,6 +611,16 @@ pub fn presets() -> Vec<Tool> {
             t.name = format!("Ø{} H7 reamer", fmt_mm(t.diameter));
         });
     }
+    // a touch probe with a Ø2 ruby ball on a 20 mm stylus, the probe body Ø25 above it
+    add(ToolKind::Probe, 2.0, &|t| {
+        t.flutes = 1;
+        t.shank_diameter = 1.5;
+        t.flute_length = 20.0;
+        t.stickout = 40.0;
+        t.holder_diameter = 25.0;
+        t.coolant = Coolant::Off;
+        t.name = "Touch probe (Ø2 ruby)".into();
+    });
     for t in v.iter_mut() {
         suggest(t, "Aluminium", 24000.0, 0.0);
     }
@@ -635,7 +670,7 @@ pub enum OpKind {
     Thread,
     /// Tapping (rigid or floating).
     Tap,
-    /// 3D roughing with cycloidal (trochoidal) loops that keep the tool's engagement constant.
+    /// 3D roughing that grows the cleared area a stepover at a time, so the tool's engagement stays constant.
     Adaptive,
     /// 3D finishing along parallel lines.
     Parallel,
@@ -652,10 +687,12 @@ pub enum OpKind {
     /// Carve the closed shapes of a sketch (text, logos) with a V-bit: deeper where they are wider,
     /// so the walls meet in sharp corners.
     VCarve,
+    /// Find the stock or the part with a touch probe and set the work zero from it.
+    Probe,
 }
 
 impl OpKind {
-    pub const ALL: [OpKind; 17] = [
+    pub const ALL: [OpKind; 18] = [
         OpKind::Face,
         OpKind::Clear,
         OpKind::Pocket,
@@ -673,6 +710,7 @@ impl OpKind {
         OpKind::Pencil,
         OpKind::Trace,
         OpKind::VCarve,
+        OpKind::Probe,
     ];
 
     pub fn label(self) -> &'static str {
@@ -694,6 +732,7 @@ impl OpKind {
             OpKind::Pencil => "Pencil",
             OpKind::Trace => "Trace",
             OpKind::VCarve => "V-carve",
+            OpKind::Probe => "Probe",
         }
     }
 
@@ -716,6 +755,7 @@ impl OpKind {
             OpKind::Pencil => "pencil",
             OpKind::Trace => "trace",
             OpKind::VCarve => "vcarve",
+            OpKind::Probe => "probe",
         }
     }
 
@@ -737,6 +777,7 @@ impl OpKind {
             "tapping" => Some(OpKind::Tap),
             "engrave" | "engraving" | "follow" | "sketch" | "2d_contour" => Some(OpKind::Trace),
             "v_carve" | "v-carve" | "vcarving" | "v_carving" | "carve" => Some(OpKind::VCarve),
+            "probing" | "wcs" | "wcs_probe" | "work_zero" | "touch_off" | "probe_wcs" => Some(OpKind::Probe),
             _ => None,
         })
     }
@@ -752,7 +793,7 @@ impl OpKind {
             OpKind::Bore => "Helically interpolates holes bigger than the end mill.",
             OpKind::Thread => "Mills internal threads in holes with a thread mill.",
             OpKind::Tap => "Taps holes; rigid tapping on LinuxCNC/Fanuc, floating on GRBL.",
-            OpKind::Adaptive => "3D roughing level by level with cycloidal loops: the tool takes a constant small stepover at full depth, so it can cut deep and fast.",
+            OpKind::Adaptive => "3D roughing level by level: the passes follow the cleared area outwards a small stepover at a time, also along walls and into corners, so the tool can cut deep and fast.",
             OpKind::Parallel => "3D finishing along parallel lines at an angle, optionally only on shallow or steep areas.",
             OpKind::Waterline => "3D finishing at constant heights; best on steep walls.",
             OpKind::Scallop => "3D finishing with a constant stepover measured over the surface, working in from the outline.",
@@ -760,6 +801,7 @@ impl OpKind {
             OpKind::Pencil => "3D clean-up with a small tool along the inside corners and fillets that a bigger (reference) tool left material in.",
             OpKind::Trace => "Follows the curves of sketches at a depth below the surface: engraved lines, or cutting along a drawing (on the line, or beside closed shapes).",
             OpKind::VCarve => "Carves the closed shapes of sketches (text, logos) with a V-bit, deeper where they are wider so the walls meet in sharp corners.",
+            OpKind::Probe => "Touches the stock or the part with a touch probe and sets the work zero from it: the top (Z), an edge, a corner, or the centre of a bore or boss.",
         }
     }
 
@@ -784,6 +826,7 @@ impl OpKind {
             OpKind::Deburr => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
             OpKind::Trace => matches!(k, ToolKind::Flat | ToolKind::Ball | ToolKind::Bull | ToolKind::TaperedBall | ToolKind::Chamfer | ToolKind::Engrave),
             OpKind::VCarve => matches!(k, ToolKind::Engrave | ToolKind::Chamfer),
+            OpKind::Probe => k == ToolKind::Probe,
         }
     }
 }
@@ -843,6 +886,10 @@ pub struct Operation {
     pub breakthrough: f64,
     /// Chamfer width.
     pub chamfer: f64,
+    /// Chamfer: how far the chamfer mill's tip goes below the chamfer, so it cuts with the cone above its
+    /// weak, slow point for a better finish (the path moves out to keep the same chamfer); 0 = the standard 0.3 mm.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub tip_offset: f64,
     /// Thread major diameter and pitch; None = from the hole and tool.
     pub thread_diameter: Option<f64>,
     pub pitch: Option<f64>,
@@ -851,7 +898,8 @@ pub struct Operation {
     pub slot_depth: f64,
     /// Coolant on (overrides the tool's setting when true).
     pub coolant: bool,
-    /// Adaptive: radius of the cycloidal loops, mm (0 = 40% of the tool diameter).
+    /// Adaptive: radius of the helix into material the tool can't reach from the side, mm (0 = 40% of the
+    /// tool diameter). It was the cycloidal loops' radius, hence the name.
     pub trochoid: f64,
     /// Parallel: direction of the passes, degrees from X.
     pub angle: f64,
@@ -874,12 +922,101 @@ pub struct Operation {
     pub sketches: Vec<u64>,
     /// Trace: depth below the surface; V-carve: deepest cut (0 = as deep as the V-bit goes).
     pub depth: f64,
-    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
+    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it). New contours
+    /// get half the tool's diameter; where that doesn't fit, smaller arcs are tried before ramping.
     pub lead: f64,
-    /// Adaptive: raise the feed for radial chip thinning (the loops take a thin cut, so the chips are thinner
+    /// Contour with leads: how far the pass runs on past where it started before it leads off, mm, so its end
+    /// blends over its start instead of leaving a step (the seam's witness mark).
+    pub overlap: f64,
+    /// Contour with leads, cutting to size (leave 0): a light last lap. The lap before it stays this much
+    /// outside the wall (mm), so the last one takes almost nothing and the tool hardly bends: 0 = no lap.
+    pub finish_lap: f64,
+    /// Contour: go round the last lap a second time at the same size (a spring pass).
+    #[serde(skip_serializing_if = "is_false")]
+    pub spring_pass: bool,
+    /// Contour with leads: where passes start and end (work X/Y): on the side nearest this point. None: in the
+    /// middle of the loop's longest straight side, away from corners and arcs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seam: Option<[f64; 2]>,
+    /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
+    /// stock reaches further out than that, extra passes outside the wall take it down first.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub max_engagement: Option<f64>,
+    /// Adaptive: raise the feed for radial chip thinning (the passes take a thin cut, so the chips are thinner
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
+    /// Probe: what to touch and which work zero axes to set.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub probing: Option<ProbeOp>,
+}
+
+/// What a probing operation finds.
+#[derive(Clone, Copy, Debug, Serialize, Deserialize, PartialEq, Eq, Default)]
+#[serde(rename_all = "snake_case")]
+pub enum ProbeCycle {
+    /// The top surface: sets Z.
+    #[default]
+    Z,
+    /// One side: sets X (left, right) or Y (front, back).
+    Edge,
+    /// An outside corner: sets X and Y (and Z with `with_z`).
+    Corner,
+    /// The middle of a round hole, touching its wall four times: sets X and Y.
+    Bore,
+    /// The middle of a block (the stock, or the part's outline) or of a round boss, touching it from
+    /// outside on all four sides: sets X and Y.
+    Boss,
+}
+
+impl ProbeCycle {
+    pub const ALL: [ProbeCycle; 5] = [ProbeCycle::Z, ProbeCycle::Edge, ProbeCycle::Corner, ProbeCycle::Bore, ProbeCycle::Boss];
+
+    pub fn label(self) -> &'static str {
+        match self {
+            ProbeCycle::Z => "Z surface",
+            ProbeCycle::Edge => "Edge",
+            ProbeCycle::Corner => "Outside corner",
+            ProbeCycle::Bore => "Bore centre",
+            ProbeCycle::Boss => "Block or boss centre",
+        }
+    }
+}
+
+/// The settings of a probing operation. Points and heights are work coordinates; the work zero it sets is
+/// the setup's own (where the feature is in the setup), in G54.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct ProbeOp {
+    pub cycle: ProbeCycle,
+    /// Edge: "left", "right", "front" or "back"; corner: "front_left", "front_right", "back_left" or "back_right".
+    pub side: String,
+    /// Find the edge, corner or top on the part instead of the stock (e.g. after flipping a machined part).
+    pub on_part: bool,
+    /// Bore or boss diameter, with `Operation::at` its middle; 0 = found: the part's round hole (or boss) nearest
+    /// `at` (or the biggest), the block's sides for a block.
+    pub size: f64,
+    /// How far below the top to touch walls and edges, mm.
+    pub depth: f64,
+    /// Gap between the stylus ball and the surface where each touch starts, mm.
+    pub clearance: f64,
+    /// How far past the expected surface the probe may go before giving up, mm.
+    pub overtravel: f64,
+    /// Corner: how far in from the corner the two sides are touched, mm.
+    pub inset: f64,
+    /// Corner: touch the top too and set Z.
+    pub with_z: bool,
+    /// rcnc, the stock's top or middle: how far the size rcnc's Find stock measures may differ from the
+    /// stock's before it stops, mm.
+    pub tolerance: f64,
+    /// rcnc, two bores: how far the part may be turned before rcnc stops, degrees.
+    pub max_turn: f64,
+}
+
+impl Default for ProbeOp {
+    fn default() -> Self {
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0, max_turn: 0.2 }
+    }
 }
 
 impl Default for Operation {
@@ -910,6 +1047,7 @@ impl Default for Operation {
             dwell: 0.0,
             breakthrough: 0.5,
             chamfer: 0.5,
+            tip_offset: 0.0,
             thread_diameter: None,
             pitch: None,
             left_hand: false,
@@ -927,7 +1065,13 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            overlap: 1.5,
+            finish_lap: 0.03,
+            spring_pass: false,
+            seam: None,
+            max_engagement: None,
             chip_thinning: false,
+            probing: None,
         }
     }
 }
@@ -952,10 +1096,23 @@ pub enum Origin {
     PartTopCorner,
     /// The part's own origin.
     Model,
+    /// The middle of the stock, at its bottom: what sits on the vise's parallels.
+    StockBottomCenter,
+    /// The middle of the stock, at the part's bottom: what sits on the parallels in a setup that follows a
+    /// facing of the other side.
+    PartBottomCenter,
 }
 
 impl Origin {
-    pub const ALL: [Origin; 5] = [Origin::StockTopCorner, Origin::StockTopCenter, Origin::StockBottomCorner, Origin::PartTopCorner, Origin::Model];
+    pub const ALL: [Origin; 7] = [
+        Origin::StockTopCorner,
+        Origin::StockTopCenter,
+        Origin::StockBottomCorner,
+        Origin::StockBottomCenter,
+        Origin::PartBottomCenter,
+        Origin::PartTopCorner,
+        Origin::Model,
+    ];
     pub fn label(self) -> &'static str {
         match self {
             Origin::StockTopCorner => "Stock top, front-left corner",
@@ -963,6 +1120,8 @@ impl Origin {
             Origin::StockBottomCorner => "Stock bottom, front-left corner",
             Origin::PartTopCorner => "Part top, front-left corner",
             Origin::Model => "Part origin",
+            Origin::StockBottomCenter => "Stock bottom, centre (on the vise)",
+            Origin::PartBottomCenter => "Part bottom, stock centre (on the vise)",
         }
     }
     pub fn key(self) -> &'static str {
@@ -972,6 +1131,8 @@ impl Origin {
             Origin::StockBottomCorner => "stock_bottom_corner",
             Origin::PartTopCorner => "part_top_corner",
             Origin::Model => "model",
+            Origin::StockBottomCenter => "stock_bottom_center",
+            Origin::PartBottomCenter => "part_bottom_center",
         }
     }
     pub fn parse(s: &str) -> Option<Origin> {
@@ -1045,11 +1206,60 @@ pub struct Machine {
     /// path to a machine file); empty = none.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The spindle's rated (electrical input) power, W, at `spindle_rated_rpm`; 0 = not known (the load
+    /// check then assumes 1.5 kW at 24000 rpm, a common VFD spindle, and says so).
+    pub spindle_power: f64,
+    /// Share of the input power that reaches the shaft.
+    pub spindle_efficiency: f64,
+    pub spindle_rated_rpm: f64,
+    /// The most sideways force the machine takes at the tool, N; 0 = not known (700 assumed).
+    pub max_cut_force: f64,
+    /// How chips are cleared: "flood-low" (low-pressure flood, the default), "flood", "air", "none".
+    pub chip_clearing: String,
+    /// Holder and spindle stiffness at the tool, N/mm (in series with the tool's own bending; a guess until
+    /// a tap test), and the damping ratio of the tool's mode.
+    pub holder_stiffness: f64,
+    pub tool_damping: f64,
+    /// Scales the chatter margin to observations (0: `cam_cutting::CHATTER_SCALE`); set from a cut log.
+    pub chatter_scale: f64,
+    /// The spindle's speed droop at its rated load (a VFD spindle without speed feedback slows with
+    /// torque), share; a microphone's measured droop gives the load from it.
+    pub spindle_rated_slip: f64,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0, model: String::new() }
+        Machine {
+            name: String::new(),
+            travel: [0.0; 3],
+            max_feed: 0.0,
+            rapid_z: 0.0,
+            tool_changer: false,
+            spin_up: 5.0,
+            model: String::new(),
+            spindle_power: 0.0,
+            spindle_efficiency: 0.78,
+            spindle_rated_rpm: 0.0,
+            max_cut_force: 0.0,
+            chip_clearing: "flood-low".into(),
+            holder_stiffness: 20_000.0,
+            tool_damping: 0.03,
+            chatter_scale: 0.0,
+            spindle_rated_slip: 0.04,
+        }
+    }
+}
+
+impl Machine {
+    /// What the load check holds cuts to, and whether any of it is assumed rather than set.
+    pub fn cut_limits(&self) -> (crate::cam_cutting::Limits, bool) {
+        let assumed = !(self.spindle_power > 0.0) || !(self.max_cut_force > 0.0);
+        let power = if self.spindle_power > 0.0 { self.spindle_power } else { 1500.0 };
+        let eff = if self.spindle_efficiency > 0.0 { self.spindle_efficiency.min(1.0) } else { 0.78 };
+        let rated = if self.spindle_rated_rpm > 0.0 { self.spindle_rated_rpm } else { 24000.0 };
+        // (the DMC2 took 576 N on a 1 mm × 12.5 mm finishing pass without complaint: the spindle runs out first)
+        let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
+        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, force, deflection: 0.06 }, assumed)
     }
 }
 
@@ -1095,11 +1305,24 @@ pub struct Probe {
     pub travel: f64,
     pub fast: f64,
     pub slow: f64,
+    /// rcnc: the Z reference every tool is zeroed on (e.g. "Vise": the vise's built-in parallels, where the
+    /// part sits); the work zero's Z must be that surface. Empty: Z from probing the stock's top.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub z_reference: String,
 }
 
 impl Default for Probe {
     fn default() -> Self {
-        Probe { mode: "off".into(), plate_at: [0.0, 0.0, 0.0], plate_thickness: 15.0, setter: [0.0, 0.0, -10.0], travel: 100.0, fast: 300.0, slow: 25.0 }
+        Probe {
+            mode: "off".into(),
+            plate_at: [0.0, 0.0, 0.0],
+            plate_thickness: 15.0,
+            setter: [0.0, 0.0, -10.0],
+            travel: 100.0,
+            fast: 300.0,
+            slow: 25.0,
+            z_reference: String::new(),
+        }
     }
 }
 
@@ -1278,7 +1501,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone() };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone(), ..c.machine.clone() };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true
@@ -1438,6 +1661,8 @@ impl Cam {
             }
             OpKind::Parallel | OpKind::Scallop => op.stepover = Some(0.1),
             OpKind::Waterline => op.stepdown = Some(0.3),
+            // arcs onto and off the wall, the seam overlapped and a light last lap (see `lead_loop`)
+            OpKind::Contour => op.lead = tl.as_ref().map(|t| fmt_round(t.diameter * 0.5)).unwrap_or(3.0),
             OpKind::Deburr => op.chamfer = 0.3,
             OpKind::Pencil => {
                 op.stepover = Some(0.1);
@@ -1448,6 +1673,20 @@ impl Cam {
                 op.depth = 0.5;
             }
             OpKind::VCarve => op.stepover = Some(0.02),
+            OpKind::Probe => {
+                // the first probing sets Z on the stock top, the next ones the corner the work zero is at
+                let corner = match self.origin {
+                    Origin::StockTopCenter => None,
+                    _ => Some("front_left"),
+                };
+                let cycle = if n == 1 { ProbeCycle::Z } else if corner.is_some() { ProbeCycle::Corner } else { ProbeCycle::Boss };
+                op.probing = Some(ProbeOp { cycle, side: corner.unwrap_or("front_left").into(), on_part: self.origin == Origin::PartTopCorner, ..Default::default() });
+                op.name = match cycle {
+                    ProbeCycle::Z => "Probe top".into(),
+                    ProbeCycle::Corner => "Probe corner".into(),
+                    _ => "Probe centre".into(),
+                };
+            }
             _ => {}
         }
         if kind == OpKind::Drill && self.tool(tool).map(|t| t.kind == ToolKind::Drill && t.diameter > 0.0).unwrap_or(false) {

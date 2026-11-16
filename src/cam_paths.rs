@@ -61,6 +61,9 @@ pub struct Toolpath {
     pub cut_length: f64,
     pub rapid_length: f64,
     pub time: f64,
+    /// A probing operation's cycle, which the post writes instead of the moves.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub probe: Option<crate::cam_probe::Plan>,
 }
 
 // ---------------------------------------------------------------- part geometry
@@ -217,6 +220,8 @@ pub fn work_origin(cam: &Cam, part: &Part) -> DVec3 {
         Origin::StockTopCorner => DVec3::new(lo.x, lo.y, hi.z),
         Origin::StockTopCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z),
         Origin::StockBottomCorner => lo,
+        Origin::StockBottomCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, lo.z),
+        Origin::PartBottomCenter => DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, part.lo.z),
         Origin::PartTopCorner => DVec3::new(part.lo.x, part.lo.y, part.hi.z),
         Origin::Model => DVec3::ZERO,
     }
@@ -263,6 +268,13 @@ pub fn union_all(contours: &[Contour]) -> Shapes {
     }
     let mut ov = FloatOverlay::with_subj(contours);
     clean(ov.overlay(OverlayRule::Subject, FillRule::NonZero))
+}
+
+pub fn intersection(a: &Shapes, b: &Shapes) -> Shapes {
+    if a.is_empty() || b.is_empty() {
+        return vec![];
+    }
+    clean(flat(a).overlay(&flat(b), OverlayRule::Intersect, FillRule::NonZero))
 }
 
 pub fn difference(a: &Shapes, b: &Shapes) -> Shapes {
@@ -703,8 +715,11 @@ impl<'a> Pb<'a> {
         true
     }
 
-    /// Clear the tool-centre area `area` at height z with offset rings, spiralling out from the middle of each region.
-    fn clear_area(&mut self, area: &Shapes, z: f64, z_from: f64, step: f64, climb: bool) {
+    /// Clear the tool-centre area at depth z, growing the cleared ground a stepover at a time so no pass takes
+    /// more than the stepover sideways, also in the corners and along the outer edge: from beside the stock where
+    /// the tool can start there, else from loops round each region's core (ramping in); passes skip what's
+    /// already clear. `material`: the stock at this level.
+    fn clear_area(&mut self, area: &Shapes, material: &Shapes, z: f64, z_from: f64, step: f64, climb: bool) {
         let mut comps: Vec<Shape> = area.clone();
         while !comps.is_empty() {
             // nearest region next
@@ -718,53 +733,39 @@ impl<'a> Pb<'a> {
                 .unwrap();
             let comp = comps.remove(k);
             let region: Shapes = vec![comp.clone()];
-            let mut rings: Vec<Vec<Contour>> = vec![];
-            let mut cur = region.clone();
-            while !cur.is_empty() && rings.len() < 5000 {
-                rings.push(flat(&cur));
-                cur = offset(&cur, -step);
-            }
-            let link_region = offset(&region, 0.01);
-            let mut first = true;
-            for ring in rings.iter().rev() {
-                let mut loops: Vec<Contour> = ring.iter().map(|c| if climb { c.clone() } else { c.iter().rev().copied().collect() }).collect();
-                while !loops.is_empty() {
-                    let here = self.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
-                    let j = (0..loops.len())
-                        .min_by(|a, b| {
-                            let da = loops[*a].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
-                            let db = loops[*b].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
-                            da.partial_cmp(&db).unwrap()
-                        })
-                        .unwrap();
-                    let l = loops.remove(j);
-                    let from = if first { z_from } else { z };
-                    // already at depth inside the region: link straight over, else ramp in from above
-                    if !first && self.pos.map(|p| (p.z - z).abs() < 1e-6).unwrap_or(false) {
-                        let before = self.moves.len();
-                        self.cut_loop(&l, z, z, step * 1.6, Some(&link_region), None);
-                        // a retract happened: the loop was entered from above, so it must ramp
-                        if self.moves[before..].iter().any(|m| matches!(m, Move::Rapid(_))) {
-                            self.moves.truncate(before);
-                            self.pos = recompute_pos(&self.moves);
-                            self.cut_loop(&l, z, z_from, 0.0, None, None);
-                        }
-                    } else {
-                        self.cut_loop(&l, z, from, 0.0, None, None);
-                    }
-                    first = false;
+            let (feed, r) = (self.feed, self.tool.radius());
+            let mat = crate::cam_3d::intersect(material, &offset(&region, r + 0.01));
+            // where the tool can start beside the material (outside the stock, or over ground already cleared),
+            // the passes grow from there; otherwise from loops round the region's core, cut first
+            let open = shapes_area(&difference(&region, &offset(&mat, r))) > 0.5 * r * r;
+            let mut core = if open { vec![] } else { region.clone() };
+            for _ in 0..5000 {
+                if core.is_empty() {
+                    break;
                 }
+                let next = offset(&core, -step);
+                if next.is_empty() {
+                    break;
+                }
+                core = next;
             }
+            let mut loops: Vec<Contour> = flat(&core).into_iter().map(|c| if climb { c } else { c.into_iter().rev().collect() }).collect();
+            while !loops.is_empty() {
+                let here = self.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+                let j = (0..loops.len())
+                    .min_by(|a, b| {
+                        let da = loops[*a].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
+                        let db = loops[*b].iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min);
+                        da.partial_cmp(&db).unwrap()
+                    })
+                    .unwrap();
+                let l = loops.remove(j);
+                self.cut_loop(&l, z, z_from, 0.0, None, None);
+            }
+            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0 };
+            lv.clear(&region, &mat, &core);
         }
     }
-}
-
-fn recompute_pos(moves: &[Move]) -> Option<DVec3> {
-    let mut p: Option<DVec3> = None;
-    for m in moves {
-        p = Some(m.end(p.unwrap_or(DVec3::ZERO)));
-    }
-    p
 }
 
 // ---------------------------------------------------------------- operations
@@ -1027,7 +1028,8 @@ fn stock_hash(s: Option<&StockMap>) -> u64 {
 fn generate_all(cam: &Cam, part: &Part, stock: Option<&StockMap>, want_stock: bool) -> (Vec<Toolpath>, Option<StockMap>) {
     use std::hash::Hash;
     let ops: Vec<&Operation> = cam.ops.iter().filter(|o| !o.suppressed).collect();
-    let needs = |o: &Operation| (o.rest || stock.is_some()) && o.kind.uses_stock();
+    // contours always look at the stock the operations before them leave, to know how far out it reaches
+    let needs = |o: &Operation| ((o.rest || stock.is_some()) && o.kind.uses_stock()) || (o.kind == OpKind::Contour && !o.suppressed);
     // what every operation depends on: the setup's settings, the part, its own tool, and for rest machining the
     // stock the operations before it leave (`prefix`, chained through their keys)
     let base = {
@@ -1388,17 +1390,19 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         OpKind::Pencil => crate::cam_3d::pencil(ctx, op, &mut pb, &mut tp),
         OpKind::Trace => crate::cam_engrave::trace(ctx, op, &mut pb, &mut tp),
         OpKind::VCarve => crate::cam_engrave::vcarve(ctx, op, &mut pb, &mut tp),
+        OpKind::Probe => crate::cam_probe::probe(ctx, op, &mut pb, &mut tp),
     }
     pb.up();
     // deepest cut below the stock top against the flute length
-    if !tool.kind.is_hole_tool() && !matches!(tool.kind, ToolKind::Slot | ToolKind::ThreadMill) {
+    if !tool.kind.is_hole_tool() && !matches!(tool.kind, ToolKind::Slot | ToolKind::ThreadMill | ToolKind::Probe) {
         let top = ctx.stock.1.z;
         let low = pb.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
         if low.is_finite() && top - low > tool.flute_length + 1e-6 {
             tp.warnings.push(format!("cuts {} mm deep but the flutes are only {} mm long", crate::cam::fmt_mm(top - low), crate::cam::fmt_mm(tool.flute_length)));
         }
     }
-    let boxes = fixture_boxes(ctx.cam, ctx.part(), ctx.origin);
+    // a probe touches where it is told: lifting it over a fixture would spoil the touch (the simulation reports any hit)
+    let boxes = if op.kind == OpKind::Probe { vec![] } else { fixture_boxes(ctx.cam, ctx.part(), ctx.origin) };
     if boxes.is_empty() {
         tp.moves = pb.moves;
     } else {
@@ -1467,7 +1471,9 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let top = rest_top(ctx, ctx.wz(op.top).unwrap_or(hi.z));
     let bottom = ctx.wz(op.bottom).unwrap_or(ctx.part().lo.z + op.leave_floor);
     let r = t.radius();
-    let bound = offset(&rect(lo, hi), r * 0.5);
+    // round the stock with room for the tool to start beside it: the passes grow in from there a stepover at
+    // a time, the first of them only grazing the stock's edge
+    let bound = offset(&rect(lo, hi), r + 0.5);
     let floors: Vec<f64> = ctx.geo.floors().iter().map(|f| f + op.leave_floor).collect();
     let mut z_prev = top;
     let mut any = false;
@@ -1480,7 +1486,11 @@ fn clear(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             continue;
         }
         any = true;
-        pb.clear_area(&area, z, z_prev, stepover(op, t), op.climb);
+        let material = match &ctx.stock_in {
+            Some(m) => crate::cam_3d::leftover(ctx, m, z, op.leave),
+            None => difference(&rect(lo, hi), &offset(&ctx.geo.shadow(z), op.leave.max(0.0))),
+        };
+        pb.clear_area(&area, &material, z, z_prev, stepover(op, t), op.climb);
         z_prev = z;
     }
     if !any {
@@ -1565,7 +1575,11 @@ fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             continue;
         }
         any = true;
-        pb.clear_area(&area, z, z_prev, stepover(op, t), op.climb);
+        let material = match &ctx.stock_in {
+            Some(m) => crate::cam_3d::intersect(&raw, &crate::cam_3d::leftover(ctx, m, z, op.leave)),
+            None => raw.clone(),
+        };
+        pb.clear_area(&area, &material, z, z_prev, stepover(op, t), op.climb);
         z_prev = z;
     }
     if too_small {
@@ -1587,30 +1601,71 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let lv = if slot { vec![bottom] } else { levels(top, bottom, stepdown(op, t), &ctx.geo.floors()) };
     let off = if slot { r - if op.slot_depth > 0.0 { op.slot_depth } else { r * 0.3 } } else { r + op.leave };
     let tab_top = bottom + op.tab_height;
+    // the most a pass may take radially; extra passes outside the wall keep to it where the stock reaches further out
+    let limit = crate::cam_contour::max_engagement(op, t);
+    let step = stepover(op, t).min(limit);
+    let seam = Seam { lead: if slot { 0.0 } else { op.lead }, overlap: op.overlap.max(0.0), at: op.seam.map(|p| DVec2::new(p[0] + ctx.origin.x, p[1] + ctx.origin.y)) };
+    // cutting to size with leads: a light last lap, the one before it `finish_lap` outside the wall
+    let lap = if !slot && op.lead > 0.0 && op.leave.abs() < 1e-9 { op.finish_lap.max(0.0) } else { 0.0 };
     let mut z_prev = top;
     let mut any = false;
+    let mut worst: Option<(crate::cam_contour::Engagement, f64)> = None;
+    let mut too_far: Option<f64> = None;
     for z in lv {
         let sh = ctx.geo.shadow(z);
         let path = offset(&sh, off);
-        let mut loops: Vec<Contour> = vec![];
-        for s in &path {
-            for (i, c) in s.iter().enumerate() {
-                let want = match op.side {
-                    Side::Outside => i == 0,
-                    Side::Inside => i > 0,
-                    Side::Both => true,
-                };
-                if want {
-                    loops.push(if op.climb { c.iter().rev().copied().collect() } else { c.clone() });
+        let first_move = pb.moves.len();
+        let from = pb.pos;
+        let material = if slot { vec![] } else { crate::cam_contour::material(ctx, &sh, z, op.leave) };
+        let collect = |path: &Shapes| {
+            let mut loops: Vec<Contour> = vec![];
+            for s in path {
+                for (i, c) in s.iter().enumerate() {
+                    let want = match op.side {
+                        Side::Outside => i == 0,
+                        Side::Inside => i > 0,
+                        Side::Both => true,
+                    };
+                    if want {
+                        loops.push(if op.climb { c.iter().rev().copied().collect() } else { c.clone() });
+                    }
                 }
             }
-        }
+            loops
+        };
+        let loops = collect(&path);
         if loops.is_empty() {
             // nothing cut at this level (above the part's top): the next one ramps from z_prev, not from here
             continue;
         }
         any = true;
         let tabs = (op.tabs > 0 && z < tab_top - 1e-6).then_some((op.tabs, op.tab_width, tab_top));
+        // with tabs the stock round the part holds it, so it stays: no extra passes
+        let mut outer_ok = false;
+        if !slot && op.side != Side::Inside && op.tabs == 0 {
+            let outside = difference(&material, &crate::cam_contour::filled(&sh));
+            match crate::cam_contour::outer_passes(&sh, &outside, off, r, step, op.climb, 3.0 * t.diameter) {
+                Ok(passes) => {
+                    outer_ok = true;
+                    for pass in passes {
+                        outer_pass(pb, &pass, &sh, &outside, z, z_prev, r, step, seam);
+                    }
+                }
+                Err(reach) => too_far = Some(too_far.unwrap_or(0.0).max(reach)),
+            }
+        }
+        // what is left for the wall pass: what the extra passes didn't take
+        let wall_left = if outer_ok { crate::cam_3d::intersect(&material, &offset(&sh, op.leave + step)) } else { material.clone() };
+        // the laps round the wall: the light last one after one `lap` outside it, then the spring pass
+        let mut laps = vec![];
+        if lap > 1e-6 {
+            laps.push(collect(&offset(&sh, off + lap)));
+        }
+        laps.push(loops);
+        if op.spring_pass && !slot {
+            laps.push(collect(&path));
+        }
+        for mut loops in laps {
         while !loops.is_empty() {
             let here = pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
             let j = (0..loops.len())
@@ -1635,8 +1690,18 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                     pb.cut(DVec3::new(lead.x, lead.y, z), pb.feed);
                     pb.up();
                 }
-            } else if op.lead <= 0.0 || !lead_loop(pb, &l, z, z_prev, &offset(&sh, r * 0.98), op.lead, tabs) {
+            } else if !lead_loop(pb, &l, z, z_prev, &offset(&sh, r * 0.98), seam, tabs, Some((&wall_left, limit))) {
                 pb.cut_loop(&l, z, z_prev, 0.05, None, tabs);
+            }
+        }
+        }
+        // how much the moves of this level really take, on the material that was there
+        if !material.is_empty() {
+            let cell = crate::cam_contour::check_cell(r, &material);
+            if let Some(e) = crate::cam_contour::check(&pb.moves[first_move..], from, &material, z_prev, r, cell) {
+                if worst.map(|w| e.peak > w.0.peak).unwrap_or(true) {
+                    worst = Some((e, cell));
+                }
             }
         }
         z_prev = z;
@@ -1647,69 +1712,174 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             _ => "nothing to follow".into(),
         });
     }
+    if let Some((e, cell)) = worst {
+        if e.peak > limit + cell.max(0.01 * t.diameter) {
+            let f = crate::cam::fmt_mm;
+            let at = e.at - ctx.origin;
+            let pct = |v: f64| format!("{:.0} % of Ø", v / t.diameter * 100.0);
+            let why = match too_far {
+                Some(reach) => format!(" (the stock reaches more than {} mm beyond the walls, too far for extra contour passes)", f(reach)),
+                None if op.tabs > 0 => " (the tabs need the stock round the part, so there are no extra passes; allow it with a 100 % max engagement)".into(),
+                None => String::new(),
+            };
+            tp.warnings.push(format!(
+                "takes up to {} mm radially ({}) at X{} Y{} Z{}, over the {} limit{why}: rough these walls with adaptive, then finish with the contour",
+                f(e.peak),
+                pct(e.peak),
+                f(at.x),
+                f(at.y),
+                f(at.z),
+                pct(limit)
+            ));
+        }
+    }
 }
 
-/// Cut a closed loop at `z` with arcs of radius `lead` onto and off it, on the side away from the material
-/// (`keep_out`: where the tool's centre mustn't go), starting mid-way along a side. False when there is no room.
-fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, lead: f64, tabs: Option<(u32, f64, f64)>) -> bool {
+/// One of the extra passes outside the wall: its whole loops ramp in like the wall pass, its open pieces start
+/// and end in air, so the tool comes down beside the stock and lifts off past it.
+fn outer_pass(pb: &mut Pb, pass: &crate::cam_contour::Pass, sh: &Shapes, material: &Shapes, z: f64, z_from: f64, r: f64, step: f64, seam: Seam) {
+    let mut segs = pass.segs.clone();
+    while !segs.is_empty() {
+        let here = pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+        let j = (0..segs.len())
+            .min_by(|a, b| {
+                let d = |k: usize| {
+                    let s = &segs[k];
+                    if s.closed {
+                        s.pts.iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min)
+                    } else {
+                        DVec2::from(s.pts[0]).distance_squared(here)
+                    }
+                };
+                d(*a).total_cmp(&d(*b))
+            })
+            .unwrap();
+        let s = segs.remove(j);
+        if s.closed {
+            let left = crate::cam_3d::intersect(material, &offset(sh, pass.dist - r + step));
+            if !lead_loop(pb, &s.pts, z, z_from, &offset(sh, pass.dist - 0.02 * r), seam, None, Some((&left, step))) {
+                pb.cut_loop(&s.pts, z, z_from, 0.05, None, None);
+            }
+        } else {
+            let p0 = s.pts[0];
+            pb.approach(p0[0], p0[1], z_from);
+            pb.cut(DVec3::new(p0[0], p0[1], z), pb.plunge);
+            for p in &s.pts[1..] {
+                pb.cut(DVec3::new(p[0], p[1], z), pb.feed);
+            }
+        }
+    }
+}
+
+/// How a closed contour pass starts and ends (see `lead_loop`).
+#[derive(Clone, Copy)]
+struct Seam {
+    /// Arc radius tried first; smaller ones are tried where it doesn't fit.
+    lead: f64,
+    /// Run on past the start this far before leading off.
+    overlap: f64,
+    /// Start on the side nearest this point; None: the middle of the longest side.
+    at: Option<DVec2>,
+}
+
+/// Cut a closed loop at `z` with arcs onto and off it, on the side away from the material (`keep_out`: where the
+/// tool's centre mustn't go), starting mid-way along a side: the longest straight one (or the one nearest
+/// `seam.at`), so the seam is away from corners and arcs. The tool comes down along the far half of the lead-in,
+/// clear of the wall; the pass runs `seam.overlap` past its start so the end blends over it, and the lead-out
+/// rises a little so the tool isn't rubbing the wall at depth as it unloads. The arc radius shrinks (down to a
+/// quarter of the tool's radius) where `seam.lead` doesn't fit. False when nothing fits.
+/// `guard`: the material there and the most the tool may take radially; a lead-in that would take more (arcing
+/// into stock left on the wall) is passed over for another start, and with none left the caller ramps instead.
+fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, seam: Seam, tabs: Option<(u32, f64, f64)>, guard: Option<(&Shapes, f64)>) -> bool {
     let n = l.len();
-    if n < 3 {
+    if n < 3 || seam.lead <= 0.0 {
         return false;
     }
-    let here = pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
-    // the middles of the sides, nearest first
-    let mut starts: Vec<usize> = (0..n).filter(|i| DVec2::from(l[*i]).distance(DVec2::from(l[(i + 1) % n])) > 1e-3).collect();
+    let side_len = |i: usize| DVec2::from(l[i]).distance(DVec2::from(l[(i + 1) % n]));
     let mid = |i: usize| (DVec2::from(l[i]) + DVec2::from(l[(i + 1) % n])) / 2.0;
-    starts.sort_by(|a, b| mid(*a).distance_squared(here).total_cmp(&mid(*b).distance_squared(here)));
+    let mut starts: Vec<usize> = (0..n).filter(|i| side_len(*i) > 1e-3).collect();
+    match seam.at {
+        Some(p) => starts.sort_by(|a, b| mid(*a).distance_squared(p).total_cmp(&mid(*b).distance_squared(p))),
+        // the longest straight sides first; ties (a regular polygon, an arc's chords) nearest the tool
+        None => {
+            let here = pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+            starts.sort_by(|a, b| (side_len(*b) * 100.0).round().total_cmp(&(side_len(*a) * 100.0).round()).then(mid(*a).distance_squared(here).total_cmp(&mid(*b).distance_squared(here))));
+        }
+    }
+    let r = pb.tool.radius();
     let steps = 12;
-    for &i in starts.iter().take(24) {
-        let s0 = mid(i);
-        let t = (DVec2::from(l[(i + 1) % n]) - DVec2::from(l[i])).normalize();
-        for side in [1.0, -1.0] {
-            // centre beside the start; in along a quarter circle ending tangent to the loop, out along another
-            let u = -t.perp() * side;
-            let c = s0 - u * lead;
-            let quarter = |f: &dyn Fn(f64) -> DVec2| (0..=steps).map(|k| f(k as f64 / steps as f64 * std::f64::consts::FRAC_PI_2)).collect::<Vec<DVec2>>();
-            let lead_in = quarter(&|a: f64| c + (u * a.sin() - t * a.cos()) * lead);
-            let lead_out = quarter(&|a: f64| c + (u * a.cos() + t * a.sin()) * lead);
-            if lead_in.iter().chain(&lead_out).any(|p| inside(keep_out, [p.x, p.y])) {
-                continue;
-            }
-            // the loop from the middle of that side
-            let mut lp: Vec<P2> = vec![[s0.x, s0.y]];
-            lp.extend((1..=n).map(|k| l[(i + k) % n]));
-            pb.approach(lead_in[0].x, lead_in[0].y, z_from);
-            let dz = z_from - z;
-            if dz > 1e-6 {
-                // ramp down back and forth along the lead-in arc (clear of the part) instead of plunging into the stock
-                pb.cut(lead_in[0].extend(z_from), pb.plunge);
-                let len: f64 = lead_in.windows(2).map(|w| w[0].distance(w[1])).sum();
-                let per_pass = 2.0 * len * pb.ramp.tan().max(1e-3);
-                let pairs = ((dz / per_pass).ceil() as usize).clamp(1, 1000);
-                let step = dz / (2 * pairs) as f64;
-                let mut zz = z_from;
-                for _ in 0..pairs {
-                    for path in [lead_in.iter().collect::<Vec<_>>(), lead_in.iter().rev().collect::<Vec<_>>()] {
-                        let z0 = zz;
-                        let mut d = 0.0;
-                        for w in path.windows(2) {
-                            d += w[0].distance(*w[1]);
-                            pb.cut(w[1].extend(z0 - step * d / len.max(1e-9)), pb.feed);
-                        }
-                        zz = z0 - step;
+    let mut radius = seam.lead;
+    while radius >= 0.25 * r - 1e-9 {
+        for &i in starts.iter().take(24) {
+            let s0 = mid(i);
+            let t = (DVec2::from(l[(i + 1) % n]) - DVec2::from(l[i])).normalize();
+            // run on along the same side only (with tabs the loop is broken up anyway)
+            let over = if tabs.is_some() { 0.0 } else { seam.overlap.clamp(0.0, (side_len(i) / 2.0 - 1e-3).max(0.0)) };
+            let s1 = s0 + t * over;
+            for side in [1.0, -1.0] {
+                // centre beside the start; in along a quarter circle ending tangent to the loop, out along another
+                let u = -t.perp() * side;
+                let (c_in, c_out) = (s0 - u * radius, s1 - u * radius);
+                let quarter = |f: &dyn Fn(f64) -> DVec2| (0..=steps).map(|k| f(k as f64 / steps as f64 * std::f64::consts::FRAC_PI_2)).collect::<Vec<DVec2>>();
+                let lead_in = quarter(&|a: f64| c_in + (u * a.sin() - t * a.cos()) * radius);
+                let lead_out = quarter(&|a: f64| c_out + (u * a.cos() + t * a.sin()) * radius);
+                if lead_in.iter().chain(&lead_out).any(|p| inside(keep_out, [p.x, p.y])) {
+                    continue;
+                }
+                if let Some((material, limit)) = guard {
+                    let moves: Vec<Move> = lead_in.iter().skip(1).map(|p| Move::Feed(p.extend(z).to_array(), pb.feed)).collect();
+                    let (lo, hi) = lead_in.iter().fold((DVec2::splat(f64::INFINITY), DVec2::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+                    let near = crate::cam_3d::intersect(material, &rect((lo - DVec2::splat(r + 1.0)).extend(0.0), (hi + DVec2::splat(r + 1.0)).extend(0.0)));
+                    let cell = (r / 16.0).max(0.02);
+                    let e = crate::cam_contour::check(&moves, Some(lead_in[0].extend(z)), &near, z + 1.0, r, cell);
+                    if e.map(|e| e.peak > limit).unwrap_or(false) {
+                        continue;
                     }
                 }
+                // the loop from the middle of that side
+                let mut lp: Vec<P2> = vec![[s0.x, s0.y]];
+                lp.extend((1..=n).map(|k| l[(i + k) % n]));
+                pb.approach(lead_in[0].x, lead_in[0].y, z_from);
+                let dz = z_from - z;
+                if dz > 1e-6 {
+                    // ramp down back and forth along the far half of the lead-in, clear of the wall: never a Z move
+                    // with the tool against it (and never a plunge into the stock)
+                    pb.cut(lead_in[0].extend(z_from), pb.plunge);
+                    let far = &lead_in[..=steps / 2];
+                    let len: f64 = far.windows(2).map(|w| w[0].distance(w[1])).sum();
+                    let per_pass = 2.0 * len * pb.ramp.tan().max(1e-3);
+                    let pairs = ((dz / per_pass).ceil() as usize).clamp(1, 1000);
+                    let step = dz / (2 * pairs) as f64;
+                    let mut zz = z_from;
+                    for _ in 0..pairs {
+                        for path in [far.iter().collect::<Vec<_>>(), far.iter().rev().collect::<Vec<_>>()] {
+                            let z0 = zz;
+                            let mut d = 0.0;
+                            for w in path.windows(2) {
+                                d += w[0].distance(*w[1]);
+                                pb.cut(w[1].extend(z0 - step * d / len.max(1e-9)), pb.feed);
+                            }
+                            zz = z0 - step;
+                        }
+                    }
+                }
+                pb.cut(lead_in[0].extend(z), pb.plunge);
+                for p in &lead_in[1..] {
+                    pb.cut(p.extend(z), pb.feed);
+                }
+                pb.cut_loop(&lp, z, z, 0.05, None, tabs);
+                if over > 0.0 {
+                    pb.cut(s1.extend(z), pb.feed);
+                }
+                // off the wall rising a little (at most to where the pass came down from)
+                let lift = (0.25 * radius).min(1.0).min(dz.max(0.0));
+                for (k, p) in lead_out[1..].iter().enumerate() {
+                    pb.cut(p.extend(z + lift * (k + 1) as f64 / steps as f64), pb.feed);
+                }
+                return true;
             }
-            pb.cut(lead_in[0].extend(z), pb.plunge);
-            for p in &lead_in[1..] {
-                pb.cut(p.extend(z), pb.feed);
-            }
-            pb.cut_loop(&lp, z, z, 0.05, None, tabs);
-            for p in &lead_out[1..] {
-                pb.cut(p.extend(z), pb.feed);
-            }
-            return true;
         }
+        radius *= 0.7;
     }
     false
 }
@@ -1719,8 +1889,15 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let edge = ctx.wz(op.top).unwrap_or(ctx.part().hi.z);
     let half = (t.angle.max(10.0) / 2.0).to_radians();
     let tip = if t.kind == ToolKind::Chamfer { t.tip_diameter / 2.0 } else { 0.0 };
-    let e = 0.3_f64;
     let w = op.chamfer.max(0.0);
+    // How far the tip goes below the chamfer: 1 mm by default, so it cuts with the cone above its weak, slow
+    // point; less if the cone isn't wide enough for that (at least 0.3 mm).
+    let room = (t.radius() - tip) / half.tan() - w / half.tan();
+    let want = if op.tip_offset > 0.0 { op.tip_offset } else { 1.0 };
+    let e = want.min(room).max(0.3_f64.min(want));
+    if op.tip_offset > 0.0 && e < want - 1e-6 {
+        tp.warnings.push(format!("the tip offset is cut to {} mm: the chamfer mill's cone isn't wide enough for more", crate::cam::fmt_mm(e)));
+    }
     let depth = w / half.tan() + e;
     let s = tip + e * half.tan();
     if tip + depth * half.tan() > t.radius() + 1e-6 {
@@ -1955,7 +2132,7 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
             rpm = None;
         }
         let r = cam.spindle_rpm(t).round();
-        if rpm != Some(r) {
+        if rpm != Some(r) && t.kind != ToolKind::Probe {
             rpm = Some(r);
             total += cam.machine.spin_up.max(0.0);
         }
@@ -2089,6 +2266,8 @@ mod tests {
         let id = c.add_op(OpKind::Contour, t);
         c.op_mut(id).unwrap().lead = 3.0;
         c.op_mut(id).unwrap().side = Side::Inside;
+        // the pocket is still solid, so this slots it: that's allowed here (without, it warns)
+        c.op_mut(id).unwrap().max_engagement = Some(1.0);
         let tp = generate(&c, &part).remove(0);
         assert!(tp.warnings.is_empty(), "{:?}", tp.warnings);
         let pts = feeds(&tp);
@@ -2098,7 +2277,8 @@ mod tests {
             assert!(wall > 3.0 - 0.02, "{p}");
         }
         // the first cut: ramp down back and forth along the lead-in (no straight plunge into the stock), then a
-        // quarter circle of radius 3 at depth arriving at the wall offset (3 mm in)
+        // quarter circle of radius 3 at depth arriving 0.03 outside the wall offset (3 mm in): the lap before the
+        // light last one
         let i = (1..pts.len() - 13)
             .find(|&i| pts[i].truncate().distance(pts[0].truncate()) < 1e-9 && pts[i + 1..i + 13].iter().all(|p| (p.z - pts[i].z).abs() < 1e-9))
             .unwrap();
@@ -2107,7 +2287,7 @@ mod tests {
         let lead: Vec<DVec3> = pts[i..i + 13].to_vec();
         let end = lead[12];
         let wall = (end.x - 10.0).min(30.0 - end.x).min(end.y - 10.0).min(30.0 - end.y);
-        assert!((wall - 3.0).abs() < 0.02, "{end}");
+        assert!((wall - 3.03).abs() < 0.005, "{end}");
         let chord = lead[0].truncate().distance(end.truncate());
         assert!((chord - 3.0 * 2f64.sqrt()).abs() < 0.05, "{chord}");
         assert!(lead.iter().all(|p| (p.z - lead[0].z).abs() < 1e-9));
@@ -2115,10 +2295,82 @@ mod tests {
         let last = *pts.last().unwrap();
         let wall = (last.x - 10.0).min(30.0 - last.x).min(last.y - 10.0).min(30.0 - last.y);
         assert!(wall > 4.0, "{last}");
-        // no room for the lead: back to ramping
+        // then the last lap on the wall offset itself
+        assert!(pts.iter().any(|p| {
+            let wall = (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
+            (wall - 3.0).abs() < 1e-6 && (p.z - lead[0].z).abs() < 1e-9
+        }));
+        // no room for a 20 mm lead: a smaller arc that fits, still not ramping along the wall
         c.op_mut(id).unwrap().lead = 20.0;
-        let ramped = generate(&c, &part).remove(0);
-        assert!(feeds(&ramped).windows(2).any(|w| w[1].z < w[0].z - 1e-6 && w[0].truncate().distance(w[1].truncate()) > 1e-6), "ramps along the wall");
+        let smaller = feeds(&generate(&c, &part).remove(0));
+        let wall = |p: &DVec3| (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
+        assert!(smaller.windows(2).all(|w| !(w[1].z < w[0].z - 1e-6 && wall(&w[1]) < 3.2)), "comes down on the wall");
+        assert!(smaller.iter().all(|p| wall(p) > 3.0 - 0.02));
+    }
+
+    /// The plate's outline from outside, cut to size: the seam is in the middle of a long side, the tool comes
+    /// down clear of the wall, runs on past the start, and rises as it leads off; a seam point moves the start;
+    /// a spring pass goes round once more.
+    #[test]
+    fn contour_seam_overlaps_and_lifts_off() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let id = c.add_op(OpKind::Contour, t);
+        c.op_mut(id).unwrap().max_engagement = Some(1.0);
+        assert!((c.op_mut(id).unwrap().lead - 3.0).abs() < 1e-9, "new contours lead on with half the tool's diameter");
+        let tp = generate(&c, &part).remove(0);
+        let pts = feeds(&tp);
+        let d = |p: &DVec3| (-p.x).max(p.x - 60.0).max(0.0).hypot((-p.y).max(p.y - 40.0).max(0.0));
+        let low = pts.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        // never a Z move on the wall: every move down keeps a quarter of the lead (0.75 mm) off the wall offset
+        for w in pts.windows(2) {
+            if w[1].z < w[0].z - 1e-6 {
+                assert!(d(&w[1]) > 3.0 + 0.25 * 3.0 - 0.05, "comes down at {} ({} off the wall)", w[1], d(&w[1]));
+            }
+        }
+        // the light last lap on the wall offset, started in the middle of a long side (x 30), run on 1.5 past it
+        let on_wall: Vec<&DVec3> = pts.iter().filter(|p| (p.z - low).abs() < 1e-9 && (d(p) - 3.0).abs() < 1e-3 && (p.y < 0.0 || p.y > 40.0)).collect();
+        assert!(on_wall.iter().any(|p| (p.x - 31.5).abs() < 0.02 || (p.x - 28.5).abs() < 0.02), "no overlap past x 30");
+        assert!(pts.iter().any(|p| (p.z - low).abs() < 1e-9 && (d(p) - 3.03).abs() < 1e-3), "no lap 0.03 out");
+        // it leaves rising, away from the wall
+        let last = *pts.last().unwrap();
+        assert!(last.z > low + 0.5 && d(&last) > 3.0 + 2.0, "{last}");
+        // a seam point at the left: it starts on the left side
+        c.op_mut(id).unwrap().seam = Some([-100.0, 20.0]);
+        let left = feeds(&generate(&c, &part).remove(0));
+        let first_on_wall = left.iter().find(|p| (p.z - low).abs() < 1e-9 && (d(p) - 3.03).abs() < 1e-3).unwrap();
+        assert!(first_on_wall.x < 0.0 && (first_on_wall.y - 20.0).abs() < 0.05, "{first_on_wall}");
+        // a spring pass: once more round at the same size
+        c.op_mut(id).unwrap().seam = None;
+        let once = pts.iter().filter(|p| (p.z - low).abs() < 1e-9 && (d(p) - 3.0).abs() < 1e-3).count();
+        c.op_mut(id).unwrap().spring_pass = true;
+        let twice = feeds(&generate(&c, &part).remove(0)).iter().filter(|p| (p.z - low).abs() < 1e-9 && (d(p) - 3.0).abs() < 1e-3).count();
+        assert!(twice >= 2 * once - 2, "{once} {twice}");
+        // roughing (leaving stock) keeps a single lap
+        c.op_mut(id).unwrap().spring_pass = false;
+        c.op_mut(id).unwrap().leave = 0.3;
+        let rough = feeds(&generate(&c, &part).remove(0));
+        assert!(!rough.iter().any(|p| (d(p) - 3.33).abs() < 1e-3), "a lap outside a roughing pass");
+    }
+
+    /// A tool too big for any lead arc in the pocket: it ramps along the wall as before.
+    #[test]
+    fn contour_too_tight_for_a_lead_ramps() {
+        let part = plate();
+        let (mut c, _) = setup();
+        let mut big = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap();
+        big.diameter = 18.0;
+        big.number = 18;
+        let t = c.add_tool(big);
+        let id = c.add_op(OpKind::Contour, t);
+        c.op_mut(id).unwrap().side = Side::Inside;
+        c.op_mut(id).unwrap().max_engagement = Some(1.0);
+        // the 20 mm pocket leaves a 2 mm loop for the tool's centre: no room for even a 2.25 mm arc
+        let pts = feeds(&generate(&c, &part).remove(0));
+        assert!(!pts.is_empty());
+        assert!(pts.windows(2).any(|w| w[1].z < w[0].z - 1e-6 && w[0].truncate().distance(w[1].truncate()) > 1e-6), "ramps along the wall");
+        let wall = |p: &DVec3| (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
+        assert!(pts.iter().all(|p| wall(p) > 9.0 - 0.02), "gouges");
     }
 
     #[test]
@@ -2169,7 +2421,10 @@ mod tests {
         let stock = stock_box(&c, &part);
         let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &paths, 300);
         sim.run_to(usize::MAX, usize::MAX);
-        assert!(sim.events.is_empty(), "{:?}", sim.events);
+        // (the pocket's first pass is a full-width slot at the tool's default step-down: heavier than the load
+        // check lets a light mill take, which is its own business)
+        assert!(sim.events.iter().all(|e| e.kind == crate::cam_sim::EventKind::Overload), "{:?}", sim.events);
+        assert!(sim.events.iter().all(|e| e.op == 3), "only the pocket's slot: {:?}", sim.events);
         assert!(sim.removed > 1000.0);
         // a rapid straight through the stock is a crash
         let bad = Toolpath { op: 1, tool: t, moves: vec![Move::Rapid([-10.0, 20.0, 5.0]), Move::Rapid([70.0, 20.0, 5.0])], ..Default::default() };
@@ -2240,6 +2495,31 @@ mod tests {
                 p.machine.spin_up = 5.0;
                 let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
                 assert!(!g.contains("G38") && !g.contains("G31") && !g.contains("G4 "), "{g}");
+                // probing the stock's top and middle becomes rcnc's Find stock, after loading the probe and before
+                // the first cutter, with no spindle in between
+                let mut t = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Probe).unwrap();
+                t.number = 99;
+                let probe = p.add_tool(t);
+                for cycle in [crate::cam::ProbeCycle::Z, crate::cam::ProbeCycle::Boss] {
+                    let id = p.add_op(OpKind::Probe, probe);
+                    let mut o = p.ops.pop().unwrap();
+                    assert_eq!(o.id, id);
+                    o.probing = Some(crate::cam::ProbeOp { cycle, ..Default::default() });
+                    let at = p.ops.iter().filter(|o| o.kind == OpKind::Probe).count();
+                    p.ops.insert(at, o);
+                }
+                let paths = generate(&p, &part);
+                let stock = Ctx::new(&p, &part).stock;
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                let size = stock.1 - stock.0;
+                let at = DVec3::new((stock.0.x + stock.1.x) / 2.0, (stock.0.y + stock.1.y) / 2.0, stock.1.z) - origin;
+                let n = crate::cam_post::num;
+                let want = format!("(RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL=1 DEPTH=4)", n(size.x), n(size.y), n(size.z), n(at.x), n(at.y), n(at.z));
+                let (probe, req, cutter) = (g.find("T99 M6").unwrap(), g.find(&want).expect(&g), g.find("T1 M6").unwrap());
+                assert!(probe < req && req < cutter, "{g}");
+                assert_eq!(g.matches("FIND_STOCK").count(), 1, "one request for both: {g}");
+                assert!(!g.contains("G31"), "{g}");
+                assert!(!g[..cutter].contains("M3"), "no spindle with the probe in: {g}");
             }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {
@@ -2536,5 +2816,107 @@ mod tests {
         c.stock.material = "Stainless steel".into();
         let hot = generate(&c, &part);
         assert!(hot[0].warnings.iter().any(|w| w.contains("m/min")), "{:?}", hot[0].warnings);
+    }
+
+    /// The phone stand's plinth: a 74 × 74 outline with R10 corners, 30 high, standing on the origin.
+    fn plinth() -> Part {
+        let (h, half, rc) = (30.0, 37.0, 10.0);
+        let mut outline: Vec<DVec2> = vec![];
+        for (k, (sx, sy)) in [(1.0, 1.0), (-1.0, 1.0), (-1.0, -1.0), (1.0, -1.0)].into_iter().enumerate() {
+            let c = DVec2::new(sx * (half - rc), sy * (half - rc));
+            for s in 0..=16 {
+                let a = std::f64::consts::FRAC_PI_2 * (k as f64 + s as f64 / 16.0);
+                outline.push(c + DVec2::new(a.cos(), a.sin()) * rc);
+            }
+        }
+        let n = outline.len();
+        let mut tris: Vec<[DVec3; 3]> = (0..n).map(|i| [DVec3::new(0.0, 0.0, h), outline[i].extend(h), outline[(i + 1) % n].extend(h)]).collect();
+        tris.push([DVec3::new(-half, -half, 0.0), DVec3::new(-half, half, 0.0), DVec3::new(half, -half, 0.0)]);
+        Part::new(&tris, &[], "top")
+    }
+
+    /// Distance from the plinth's outline (outside it).
+    fn plinth_distance(p: DVec2) -> f64 {
+        let q = p.abs() - DVec2::splat(27.0);
+        q.max(DVec2::ZERO).length() - 10.0
+    }
+
+    /// Phone stand op 1 (rcnc jobs/phone-stand/op1-underside.nc): 76 × 76 stock round the 74 × 74 R10 plinth,
+    /// Ø6.35 flat end mill, 4 mm steps to 14.5 deep leaving 0.2 for a finishing pass. The wall pass alone takes
+    /// 1 mm along the sides but about 5.6 mm at the corners; the extra passes must keep every corner under the limit.
+    #[test]
+    fn contour_roughing_keeps_corner_engagement_under_the_limit() {
+        let part = plinth();
+        let mut c = Cam::default();
+        c.stock.size = Some([76.0, 76.0, 30.0]);
+        c.stock.bottom = 0.0;
+        let mut tool = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.35).unwrap();
+        tool.flutes = 3;
+        tool.rpm = 24000.0;
+        tool.feed = 2400.0;
+        tool.flute_length = 19.05;
+        let t = c.add_tool(tool);
+        let id = c.add_op(OpKind::Contour, t);
+        // ramping (the lead arcs are checked further down)
+        c.op_mut(id).unwrap().lead = 0.0;
+        {
+            let o = c.op_mut(id).unwrap();
+            o.side = Side::Outside;
+            o.bottom = Some(-14.5);
+            o.stepdown = Some(4.0);
+            o.leave = 0.2;
+        }
+        let ctx = Ctx::new(&c, &part);
+        let top = ctx.stock.1.z;
+        let material = difference(&rect(ctx.stock.0, ctx.stock.1), &offset(&ctx.geo.shadow(top - 1.0), 0.2));
+        let r = 6.35 / 2.0;
+        // radial engagement on a 0.1 mm grid of the block (the spread of the cells each step takes, never more than the true width)
+        let measure = |tp: &Toolpath| crate::cam_contour::check(&tp.moves, None, &material, top, r, 0.1).unwrap();
+
+        // the old single wall pass (no limit, passes a whole diameter apart): buried at the corners
+        c.op_mut(id).unwrap().max_engagement = Some(1.0);
+        c.op_mut(id).unwrap().stepover = Some(1.0);
+        let single = generate(&c, &part).remove(0);
+        let e = measure(&single);
+        assert!(e.peak > 4.0 && e.at.x.abs() > 27.0 && e.at.y.abs() > 27.0, "the wall pass alone should take about 5.6 mm at a corner: {e:?}");
+        let d = |p: &DVec3| plinth_distance(p.truncate());
+        assert!(feeds(&single).iter().filter(|p| p.z < top - 1e-6).all(|p| d(p) < r + 0.2 + 0.05), "no extra passes without a limit");
+
+        // the default: 25 % of the diameter, everywhere (corners, ramps and all)
+        c.op_mut(id).unwrap().max_engagement = None;
+        c.op_mut(id).unwrap().stepover = None;
+        let limit = 0.25 * 6.35;
+        let tp = generate(&c, &part).remove(0);
+        assert!(tp.warnings.iter().all(|w| !w.contains("radially")), "{:?}", tp.warnings);
+        let e = measure(&tp);
+        assert!(e.peak <= limit, "peak radial engagement {} mm at {} is over the {limit} mm limit", e.peak, e.at);
+        // arcs onto the wall instead of ramping along it keep under the limit too
+        c.op_mut(id).unwrap().lead = 3.0;
+        let led = generate(&c, &part).remove(0);
+        let e = measure(&led);
+        assert!(e.peak <= limit, "with lead arcs: {} mm at {}", e.peak, e.at);
+        assert!(led.warnings.iter().all(|w| !w.contains("radially")), "{:?}", led.warnings);
+        c.op_mut(id).unwrap().lead = 0.0;
+        // the extra passes run only round the corners: along the sides they would be in air
+        let fs = feeds(&tp);
+        let out: Vec<&DVec3> = fs.iter().filter(|p| p.z < top - 1e-6 && d(p) > r + 0.2 + 0.5).collect();
+        assert!(!out.is_empty(), "no extra passes");
+        for p in &out {
+            assert!(p.x.abs() > 18.0 && p.y.abs() > 18.0, "extra pass in air along a side at {p}");
+        }
+        // every pass gets down to 14.5 below the top
+        let low = fs.iter().map(|p| p.z).fold(f64::INFINITY, f64::min);
+        assert!((low - (top - 14.5)).abs() < 1e-6, "lowest {low}");
+        // the simulation agrees: nothing left outside the 0.2 mm leave down to the bottom of the cut
+        let sim = final_stock(&c, &part, std::slice::from_ref(&tp), None);
+        for (x, y) in [(37.9, 37.9), (-37.9, 37.9), (36.0, 37.5), (0.0, 37.9), (37.9, 0.0)] {
+            let left = sim.top(x, y) as f64;
+            assert!(left <= top - 14.5 + 0.3, "stock left at ({x}, {y}) up to {left}");
+        }
+
+        // a part cut out of a much bigger block: the contour can't keep its engagement down on its own, and says so
+        c.stock.size = Some([150.0, 150.0, 30.0]);
+        let big = generate(&c, &part).remove(0);
+        assert!(big.warnings.iter().any(|w| w.contains("radially") && w.contains("adaptive")), "{:?}", big.warnings);
     }
 }

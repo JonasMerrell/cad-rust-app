@@ -1,0 +1,6 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 512 512" width="512" height="512">
+<defs><linearGradient id="bg" x1="0" y1="0" x2="0" y2="1"><stop offset="0" stop-color="#2a7be4"/><stop offset="1" stop-color="#134fa3"/></linearGradient>
+<clipPath id="tc"><rect x="16" y="16" width="480" height="480" rx="108"/></clipPath></defs>
+<rect x="16" y="16" width="480" height="480" rx="108" fill="url(#bg)"/>
+<g clip-path="url(#tc)" stroke="#fff" stroke-opacity=".09" stroke-width="2"><line x1="40" y1="16" x2="40" y2="496"/><line x1="136" y1="16" x2="136" y2="496"/><line x1="232" y1="16" x2="232" y2="496"/><line x1="328" y1="16" x2="328" y2="496"/><line x1="424" y1="16" x2="424" y2="496"/><line x1="16" y1="40" x2="496" y2="40"/><line x1="16" y1="136" x2="496" y2="136"/><line x1="16" y1="232" x2="496" y2="232"/><line x1="16" y1="328" x2="496" y2="328"/><line x1="16" y1="424" x2="496" y2="424"/></g>
+<g fill="none" stroke="#fff" stroke-linecap="round"><path d="M200 392 V262 A112 112 0 0 1 336 150" stroke-width="56"/></g><circle cx="200" cy="392" r="26" fill="#ffb020"/><circle cx="336" cy="150" r="26" fill="#ffb020"/></svg>

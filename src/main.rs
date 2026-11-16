@@ -11,6 +11,7 @@ mod build_cache;
 mod assembly;
 mod cam;
 mod cam_3d;
+mod cam_contour;
 mod cam_engrave;
 mod cam_jaws;
 mod cam_machine;
@@ -20,7 +21,10 @@ mod cam_template;
 mod cam_tool_import;
 mod cam_paths;
 mod cam_post;
+mod cam_probe;
+mod cam_cutting;
 mod cam_sim;
+mod cam_web;
 mod cam_stock;
 mod cam_ui;
 mod palette;
@@ -59,6 +63,7 @@ mod pcb_export;
 mod pcb_fab;
 mod pcb_ipc;
 mod pcb_kicad;
+mod kicad_legacy;
 mod kicad_libs;
 mod kicad_lib_ui;
 mod pcb_annotate;
@@ -66,6 +71,7 @@ mod pcb_tools_ui;
 mod pcb_lib;
 mod pcb_route;
 mod pcb_sheet;
+mod pcb_shove;
 mod pcb_tune;
 mod pcb_trace;
 mod pcb_trace_ui;
@@ -100,6 +106,7 @@ mod stdparts_ui;
 mod text;
 mod theme;
 mod units_switch;
+mod github_ui;
 mod vcs;
 mod vcs_ui;
 mod viewport;
@@ -196,8 +203,15 @@ fn main() -> eframe::Result {
         multisampling: render::MSAA as u16,
         depth_buffer: 32,
         // the window opens at the size it had last time
-        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD"),
+        viewport: egui::ViewportBuilder::default().with_inner_size(session::load_prefs().window.unwrap_or([1600.0, 1000.0])).with_min_inner_size([320.0, 400.0]).with_title("rCAD").with_app_id("rcad").with_icon(app_icon()),
         ..Default::default()
     };
     eframe::run_native("rCAD", options, Box::new(|cc| Ok(Box::new(app::App::new(cc)))))
+}
+
+/// The window/taskbar icon: the sketched "r" alone, since title bars and taskbars show it at 16-32 px where
+/// the full "rCAD" word can't be read. Menus and docks get every size from rcad.desktop (Linux) and the
+/// rcad.ico embedded in the exe (Windows, see build.rs).
+fn app_icon() -> std::sync::Arc<egui::IconData> {
+    std::sync::Arc::new(eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon/rcad-small-256.png")).unwrap_or_default())
 }

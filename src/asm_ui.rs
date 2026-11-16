@@ -9,7 +9,7 @@ use crate::app::{App, ToastKind};
 use crate::assembly::{self, Assembly, Connector, Instance, Mate, MateKind, Pose, Relation, RelationKind};
 use crate::drawing::Drawing;
 use crate::icons;
-use crate::render::{MeshVertex, SceneData, ViewportCallback};
+use crate::render::{ObjDraw, ObjMesh, SceneData, ViewportCallback};
 use crate::theme::{self, vp};
 use crate::workspace::Tab;
 
@@ -80,9 +80,26 @@ pub struct AsmUi {
     /// Playing back the mates a PCB simulation moved.
     pub motion: Option<Motion>,
     /// Viewport right-click menu: where it opened and the instance under the pointer.
-    pub ctx: Option<(Pos2, Option<u64>)>,
+    pub ctx: Option<(Pos2, Option<(u64, usize)>)>,
     /// Motion sliders and animation playback.
     pub anim: crate::asm_anim_ui::AnimUi,
+    /// The group being renamed (its first change took the undo step).
+    pub renaming: Option<u64>,
+    /// GPU-ready copies of the part meshes drawn, by (studio, body), with the fingerprint of the
+    /// mesh they were made from.
+    pub meshes: std::cell::RefCell<std::collections::HashMap<(usize, crate::doc::BodyId), (MeshSig, Arc<ObjMesh>)>>,
+    /// Last hover pick: pointer, camera and scene it was made for, and its result.
+    pick_cache: Option<(Vec2, (Vec3, Vec3, Vec3, f32, Vec2), u64, Option<Hit>)>,
+    /// Realistic lighting and dark theme as last drawn (their colours are in the scene).
+    look: Option<(bool, bool)>,
+}
+
+/// Fingerprint of a part mesh: where its data lives plus its sizes and exact mass properties.
+pub type MeshSig = (usize, usize, usize, usize, u64, u64, [u64; 6]);
+
+fn mesh_sig(m: &crate::kernel::BodyMesh) -> MeshSig {
+    let b = m.bbox;
+    (m.positions.as_ptr() as usize, m.positions.len(), m.indices.len(), m.edges.len(), m.volume.to_bits(), m.area.to_bits(), [b[0][0], b[0][1], b[0][2], b[1][0], b[1][1], b[1][2]].map(f64::to_bits))
 }
 
 /// Playback of a circuit simulation's motors and servos in an assembly.
@@ -276,6 +293,20 @@ pub fn redo(app: &mut App) {
 
 /// The pose an instance is drawn and picked at (moved outwards in an exploded view).
 fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
+    display_pose_in(app, a, inst, explode_centre(app, a))
+}
+
+/// The centre a plain exploded view pushes the instances away from (None when not needed).
+fn explode_centre(app: &App, a: &Assembly) -> Option<DVec3> {
+    if app.asm.explode <= 0.0 || !a.explode_steps.is_empty() {
+        return None;
+    }
+    let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
+    Some(cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64)
+}
+
+/// `display_pose` with the explode centre worked out once for all instances.
+fn display_pose_in(app: &App, a: &Assembly, inst: &Instance, centre: Option<DVec3>) -> Pose {
     if app.asm.explode <= 0.0 {
         return inst.pose;
     }
@@ -290,16 +321,73 @@ fn display_pose(app: &App, a: &Assembly, inst: &Instance) -> Pose {
         }
         return p;
     }
-    let cs: Vec<DVec3> = a.instances.iter().map(|x| x.pose.apply(centroid_local(app, x))).collect();
-    let c = cs.iter().fold(DVec3::ZERO, |s, p| s + *p) / cs.len().max(1) as f64;
+    let c = centre.unwrap_or(DVec3::ZERO);
     let mine = inst.pose.apply(centroid_local(app, inst));
     let mut p = inst.pose;
     p.t = (DVec3::from(p.t) + (mine - c) * app.asm.explode as f64).into();
     p
 }
 
+/// A part in sight in the assembly, at its displayed world pose.
+struct Placed<'a> {
+    studio: usize,
+    inst: u64,
+    leaf: usize,
+    pose: Pose,
+    mesh: &'a crate::kernel::BodyMesh,
+    color: Color32,
+}
+
+/// Every part in sight of assembly `a` at its displayed pose (worked out once per pick or
+/// scene, not again for every part).
+fn placed<'a>(app: &'a App, a: &Assembly) -> Vec<Placed<'a>> {
+    let centre = explode_centre(app, a);
+    let mut out = vec![];
+    for x in a.instances.iter().filter(|x| shown(app, x)) {
+        let dp = display_pose_in(app, a, x, centre);
+        for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
+            let Some(part) = part else { continue };
+            out.push(Placed { studio: part.studio, inst: x.id, leaf, pose: dp.compose(&part.local), mesh: part.mesh, color: part.color });
+        }
+    }
+    out
+}
+
+/// Where a ray (in the part's coordinates) enters its mesh's bounding box, if it does.
+fn ray_box(o: DVec3, d: DVec3, m: &crate::kernel::BodyMesh) -> Option<f64> {
+    let pad = 1e-3 + 1e-6 * (DVec3::from(m.bbox[1]) - DVec3::from(m.bbox[0])).length();
+    let (lo, hi) = (DVec3::from(m.bbox[0]) - pad, DVec3::from(m.bbox[1]) + pad);
+    let (mut t0, mut t1) = (f64::NEG_INFINITY, f64::INFINITY);
+    for k in 0..3 {
+        if d[k].abs() < 1e-15 {
+            if o[k] < lo[k] || o[k] > hi[k] {
+                return None;
+            }
+        } else {
+            let (a, b) = ((lo[k] - o[k]) / d[k], (hi[k] - o[k]) / d[k]);
+            t0 = t0.max(a.min(b));
+            t1 = t1.min(a.max(b));
+        }
+    }
+    (t1 >= t0.max(0.0)).then_some(t0.max(0.0))
+}
+
+/// Whether screen point `s` comes within `r` pixels of a part's bounding box on screen.
+fn near_on_screen(cam: &crate::camera::Camera, p: &Placed, s: Vec2, r: f32) -> bool {
+    let b = p.mesh.bbox;
+    let (mut lo, mut hi) = (Vec2::splat(f32::INFINITY), Vec2::splat(f32::NEG_INFINITY));
+    for c in 0..8 {
+        let w = p.pose.apply(DVec3::new(b[c & 1][0], b[(c >> 1) & 1][1], b[(c >> 2) & 1][2]));
+        let q = cam.project(w.as_vec3());
+        lo = lo.min(q);
+        hi = hi.max(q);
+    }
+    s.x >= lo.x - r && s.x <= hi.x + r && s.y >= lo.y - r && s.y <= hi.y + r
+}
+
 /// A part drawn for an instance: its mesh, pose inside the instance and colour.
 struct Part<'a> {
+    studio: usize,
     local: Pose,
     mesh: &'a crate::kernel::BodyMesh,
     color: Color32,
@@ -317,7 +405,7 @@ fn parts_of<'a>(app: &'a App, inst: &Instance) -> Vec<Option<Part<'a>>> {
             }
             let mesh = app.studio_bodies(l.studio).iter().find(|b| b.id == l.body)?;
             let color = app.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).and_then(|p| p.color).map(|c| Color32::from_rgb(c[0], c[1], c[2])).unwrap_or(vp::body());
-            Some(Part { local: l.pose, mesh, color })
+            Some(Part { studio: l.studio, local: l.pose, mesh, color })
         })
         .collect()
 }
@@ -506,6 +594,15 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "delete", "Delete", "Delete the selected instances (Del)", false, false, has || app.asm.sel_mate.is_some()).clicked() {
             delete_selection(app);
         }
+        let regroup = selection_is_group(app);
+        let (icon, label, tip) = if regroup.is_some() {
+            ("ungroup", "Ungroup", "Ungroup: the selected group's instances move on their own again (Ctrl+Shift+G)")
+        } else {
+            ("group", "Group", "Group the selected instances: they move as one rigid body (Ctrl+G)")
+        };
+        if app.tool_button(ui, icon, label, tip, false, false, regroup.is_some() || app.asm.sel.len() > 1).clicked() {
+            toggle_group(app);
+        }
     });
     App::group(ui, |ui| {
         let before = app.section;
@@ -628,6 +725,7 @@ fn delete_selection(app: &mut App) {
     if let Some(a) = asm_mut(app) {
         a.instances.retain(|x| !sel.contains(&x.id));
         a.mates.retain(|m| Some(m.id) != sel_mate && !m.a.map(|c| sel.contains(&c.inst)).unwrap_or(false) && !m.b.map(|c| sel.contains(&c.inst)).unwrap_or(false));
+        a.prune_groups();
     }
     app.asm.sel.clear();
     prune_isolation(app);
@@ -644,6 +742,13 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             // the instances in sight, as Ctrl+A in a Part Studio
             app.asm.sel = asm(app).map(|a| a.instances.iter().filter(|x| shown(app, x)).map(|x| x.id).collect()).unwrap_or_default();
             app.asm.scene_dirty = true;
+        }
+        if pressed(egui::Key::G) && app.asm.dialog.is_none() {
+            if crate::app::key_mods(ctx).1 {
+                ungroup_selected(app);
+            } else {
+                group_selected(app);
+            }
         }
         return;
     }
@@ -699,6 +804,98 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     }
 }
 
+/// The group whose members are exactly the selection (what Ungroup would undo).
+pub fn selection_is_group(app: &App) -> Option<u64> {
+    let a = asm(app)?;
+    let sel = &app.asm.sel;
+    a.groups.iter().find(|g| !sel.is_empty() && g.members.len() == sel.len() && g.members.iter().all(|m| sel.contains(m))).map(|g| g.id)
+}
+
+/// Group the selected instances (Ctrl+G): they then move as one rigid body.
+pub fn group_selected(app: &mut App) {
+    let sel = app.asm.sel.clone();
+    group_ids(app, &sel);
+}
+
+/// Whether instances `ids` are all in one group already (so Group would change nothing).
+fn same_group(app: &App, ids: &[u64]) -> bool {
+    !ids.is_empty() && asm(app).is_some_and(|a| a.group_of(ids[0]).is_some_and(|g| ids.iter().all(|i| g.members.contains(i))))
+}
+
+pub fn group_ids(app: &mut App, ids: &[u64]) {
+    if ids.len() < 2 {
+        app.flash("Select two or more instances to group", ToastKind::Info);
+        return;
+    }
+    if app.asm.dialog.is_some() {
+        app.flash("Finish the mate first", ToastKind::Info);
+        return;
+    }
+    if same_group(app, ids) && asm(app).and_then(|a| a.group_of(ids[0])).is_some_and(|g| g.members.len() == ids.len()) {
+        app.flash("These instances are a group already", ToastKind::Info);
+        return;
+    }
+    checkpoint(app);
+    let made = asm_mut(app).and_then(|a| a.group(ids, None).map(|g| (g, a.groups.iter().find(|x| x.id == g).map(|x| x.name.clone()).unwrap_or_default())));
+    if let Some((_, name)) = made {
+        app.flash(format!("{name}: {} instances now move as one", ids.len()), ToastKind::Info);
+    }
+    // a member mated elsewhere may have to move with the rest now
+    solve(app, &[]);
+    app.asm.scene_dirty = true;
+}
+
+/// Ctrl+Shift+G: dissolve the groups the selected instances are in.
+pub fn ungroup_selected(app: &mut App) {
+    let sel = app.asm.sel.clone();
+    let gids: Vec<u64> = asm(app).map(|a| a.groups.iter().filter(|g| g.members.iter().any(|m| sel.contains(m))).map(|g| g.id).collect()).unwrap_or_default();
+    if gids.is_empty() {
+        app.flash("The selected instances aren't in a group", ToastKind::Info);
+        return;
+    }
+    ungroup(app, &gids);
+}
+
+pub fn ungroup(app: &mut App, gids: &[u64]) {
+    checkpoint(app);
+    if let Some(a) = asm_mut(app) {
+        a.groups.retain(|g| !gids.contains(&g.id));
+    }
+    app.asm.scene_dirty = true;
+}
+
+/// Toolbar Group button: ungroup when the selection is one group, else group it.
+pub fn toggle_group(app: &mut App) {
+    match selection_is_group(app) {
+        Some(g) => ungroup(app, &[g]),
+        None => group_selected(app),
+    }
+}
+
+/// Take instances out of their groups, leaving the rest grouped.
+pub fn remove_from_group(app: &mut App, ids: &[u64]) {
+    checkpoint(app);
+    if let Some(a) = asm_mut(app) {
+        a.ungroup_instances(ids);
+    }
+    app.asm.scene_dirty = true;
+}
+
+/// Select a group's members (Shift/Ctrl adds them to the selection).
+fn select_group(app: &mut App, gid: u64, add: bool) {
+    let ms = asm(app).and_then(|a| a.groups.iter().find(|g| g.id == gid)).map(|g| g.members.clone()).unwrap_or_default();
+    if !add {
+        app.asm.sel.clear();
+    }
+    for m in ms {
+        if !app.asm.sel.contains(&m) {
+            app.asm.sel.push(m);
+        }
+    }
+    app.asm.sel_mate = None;
+    app.asm.scene_dirty = true;
+}
+
 /// In sight in the viewport: not hidden, or kept by the isolation.
 pub fn shown(app: &App, x: &Instance) -> bool {
     match isolated(app) {
@@ -735,6 +932,47 @@ pub fn isolate(app: &mut App, ids: Vec<u64>) {
         app.asm.clash_stale = true;
     }
     app.asm.scene_dirty = true;
+}
+
+/// What an instance opens: its Part Studio with the part selected, or for a sub-assembly the
+/// part `leaf` inside it (when given) or else the sub-assembly's own tab.
+pub fn open_target(app: &App, inst: u64, leaf: Option<usize>) -> Option<Tab> {
+    let x = asm(app)?.instance(inst)?;
+    match (x.sub, leaf) {
+        (None, _) => Some(Tab::Studio(x.studio)),
+        (Some(_), Some(l)) => assembly::leaves_shown(&app.ws.assemblies, x).get(l).map(|(lf, _)| Tab::Studio(lf.studio)),
+        (Some(k), None) => Some(Tab::Assembly(k)),
+    }
+}
+
+/// Open the Part Studio an instance comes from with its part selected (see `open_target`).
+pub fn open_part(app: &mut App, inst: u64, leaf: Option<usize>) {
+    let Some(x) = asm(app).and_then(|a| a.instance(inst)).cloned() else { return };
+    let body = match (x.sub, leaf) {
+        (None, _) => Some(x.body),
+        (Some(_), Some(l)) => assembly::leaves_shown(&app.ws.assemblies, &x).get(l).map(|(lf, _)| lf.body),
+        (Some(_), None) => None,
+    };
+    let Some(t) = open_target(app, inst, leaf) else { return };
+    let exists = match t {
+        Tab::Studio(i) => i < app.ws.studios.len(),
+        Tab::Assembly(i) => i < app.ws.assemblies.len(),
+        _ => false,
+    };
+    if !exists {
+        app.flash("The source of this instance is gone", ToastKind::Info);
+        return;
+    }
+    app.switch_tab(t);
+    if let Some(b) = body {
+        if app.result.bodies.iter().any(|r| r.id == b) {
+            app.picks = vec![crate::doc::Ref::Body { body: b }];
+            app.parts_open = true;
+            app.scene_dirty = true;
+        } else {
+            app.flash("That part is no longer in its Part Studio", ToastKind::Info);
+        }
+    }
 }
 
 /// Isolate the selected instances, or end the isolation if one is on.
@@ -973,31 +1211,144 @@ pub fn insert(app: &mut App, studio: usize, body: crate::doc::BodyId, sub: Optio
     }
 }
 
+/// One line of the Instances list.
+enum InstRow {
+    /// A group's header: id, name, member count, folded, all members hidden, any member in sight.
+    Group(u64, String, usize, bool, bool, bool),
+    /// An instance: id, name, fixed, hidden, out of sight, in a group (indented).
+    Inst(u64, String, bool, bool, bool, Option<u64>),
+}
+
 fn instances(app: &mut App, ui: &mut Ui) {
     let Some(a) = asm(app) else { return };
     if a.instances.is_empty() {
         ui.label(RichText::new("Use Insert to add parts").color(theme::muted()).size(12.0));
         return;
     }
-    let rows: Vec<(u64, String, bool, bool, bool)> = a.instances.iter().map(|x| (x.id, x.name.clone(), x.fixed, x.hidden, !shown(app, x))).collect();
-    let any_hidden = rows.iter().any(|r| r.3);
+    // each group shows where its first member is, with its members under it
+    let mut rows: Vec<InstRow> = vec![];
+    let mut done: Vec<u64> = vec![];
+    for x in &a.instances {
+        match a.group_of(x.id) {
+            None => rows.push(InstRow::Inst(x.id, x.name.clone(), x.fixed, x.hidden, !shown(app, x), None)),
+            Some(g) if !done.contains(&g.id) => {
+                done.push(g.id);
+                let ms: Vec<&Instance> = a.instances.iter().filter(|m| g.members.contains(&m.id)).collect();
+                rows.push(InstRow::Group(g.id, g.name.clone(), ms.len(), g.folded, ms.iter().all(|m| m.hidden), ms.iter().any(|m| shown(app, m))));
+                if !g.folded {
+                    for m in ms {
+                        rows.push(InstRow::Inst(m.id, m.name.clone(), m.fixed, m.hidden, !shown(app, m), Some(g.id)));
+                    }
+                }
+            }
+            Some(_) => {}
+        }
+    }
+    let any_hidden = a.instances.iter().any(|x| x.hidden);
+    let multi = app.asm.sel.len() > 1;
     let mut hide: Option<(Vec<u64>, bool)> = None;
     let mut others: Option<Vec<u64>> = None;
     let mut show_every = false;
     let mut iso: Option<Option<Vec<u64>>> = None;
     let mut fix: Option<(Vec<u64>, bool)> = None;
-    let fixed_ids: Vec<u64> = rows.iter().filter(|r| r.2).map(|r| r.0).collect();
-    for (id, name, fixed, hidden, out_of_sight) in rows {
+    let mut open: Option<u64> = None;
+    let mut group_these: Option<Vec<u64>> = None;
+    let mut ungroup_g: Option<u64> = None;
+    let mut out_of_group: Option<Vec<u64>> = None;
+    let mut fold: Option<u64> = None;
+    let mut pick_group: Option<(u64, bool)> = None;
+    let mut rename: Option<(u64, String)> = None;
+    let mut group_menu = false;
+    let fixed_ids: Vec<u64> = a.instances.iter().filter(|x| x.fixed).map(|x| x.id).collect();
+    for row in rows {
+        let (id, name, fixed, hidden, out_of_sight, in_group) = match row {
+            InstRow::Group(gid, name, n, folded, all_hidden, any_shown) => {
+                let members = asm(app).and_then(|a| a.groups.iter().find(|g| g.id == gid)).map(|g| g.members.clone()).unwrap_or_default();
+                let picked = !members.is_empty() && members.iter().all(|m| app.asm.sel.contains(m));
+                let w = (ui.available_width() - 22.0).max(40.0);
+                let r = ui
+                    .scope(|ui| {
+                        ui.set_max_width(w);
+                        let text = format!("     {name}  ·  {n}");
+                        ui.add(egui::Button::selectable(picked, RichText::new(text).size(12.5).strong().color(if any_shown { theme::text() } else { theme::muted() })).truncate().min_size(egui::vec2(w, 20.0)))
+                    })
+                    .inner
+                    .on_hover_text("A group moves as one rigid body. Click selects its instances; the arrow folds it");
+                let arrow = r.rect.left() + 22.0;
+                let chevron = egui::Rect::from_center_size(egui::pos2(r.rect.left() + 12.0, r.rect.center().y), egui::vec2(14.0, 14.0));
+                icons::image(if folded { "chevronRight" } else { "chevronDown" }, 14.0).tint(theme::muted()).paint_at(ui, chevron);
+                if crate::app::eye_toggle(ui, &r, r.rect.right() + 11.0, all_hidden, ("asm-group-eye", gid)) {
+                    hide = Some((members.clone(), !all_hidden));
+                } else if r.clicked() {
+                    let on_arrow = r.interact_pointer_pos().is_some_and(|p| p.x < arrow);
+                    if on_arrow {
+                        fold = Some(gid);
+                    } else {
+                        pick_group = Some((gid, ui.input(|i| i.modifiers.shift || i.modifiers.command)));
+                    }
+                }
+                if r.double_clicked() {
+                    fold = Some(gid);
+                }
+                r.context_menu(|ui| {
+                    group_menu = true;
+                    let mut nm = name.clone();
+                    ui.horizontal(|ui| {
+                        ui.label("Name");
+                        if ui.text_edit_singleline(&mut nm).changed() {
+                            rename = Some((gid, nm.clone()));
+                        }
+                    });
+                    ui.separator();
+                    if ui.button("Select instances").clicked() {
+                        pick_group = Some((gid, false));
+                        ui.close();
+                    }
+                    if ui.button(if folded { "Unfold" } else { "Fold" }).clicked() {
+                        fold = Some(gid);
+                        ui.close();
+                    }
+                    if ui.button("Ungroup").on_hover_text("The instances move on their own again (Ctrl+Shift+G)").clicked() {
+                        ungroup_g = Some(gid);
+                        ui.close();
+                    }
+                    ui.separator();
+                    if ui.button(if all_hidden { "Show group" } else { "Hide group" }).clicked() {
+                        hide = Some((members.clone(), !all_hidden));
+                        ui.close();
+                    }
+                    if ui.button("Isolate group").on_hover_text("Show only this group, until Esc, I or Exit isolate").clicked() {
+                        iso = Some(Some(members.clone()));
+                        ui.close();
+                    }
+                    if app.isolation.is_some() && ui.button("Exit isolate").clicked() {
+                        iso = Some(None);
+                        ui.close();
+                    }
+                    let all_fixed = members.iter().all(|i| fixed_ids.contains(i));
+                    if ui.button(if all_fixed { "Unfix group" } else { "Fix group" }).on_hover_text("A group with a fixed instance stays where it is").clicked() {
+                        fix = Some((members.clone(), !all_fixed));
+                        ui.close();
+                    }
+                });
+                continue;
+            }
+            InstRow::Inst(id, name, fixed, hidden, out_of_sight, in_group) => (id, name, fixed, hidden, out_of_sight, in_group),
+        };
         let picked = app.asm.sel.contains(&id);
         let label = if fixed { format!("📌 {name}") } else { name };
-        // room on the right for the eye, so long names don't run under it
-        let w = (ui.available_width() - 22.0).max(40.0);
-        let r = ui
-            .scope(|ui| {
+        let text = RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() });
+        let add = |ui: &mut Ui| {
+            // room on the right for the eye, so long names don't run under it
+            let w = (ui.available_width() - 22.0).max(40.0);
+            ui.scope(|ui| {
                 ui.set_max_width(w);
-                ui.add(egui::Button::selectable(picked, RichText::new(label).size(12.5).color(if out_of_sight { theme::muted() } else { theme::text() })).truncate().min_size(egui::vec2(w, 20.0)))
+                ui.add(egui::Button::selectable(picked, text).truncate().min_size(egui::vec2(w, 20.0)))
             })
-            .inner;
+            .inner
+        };
+        // a group's instances sit indented under its row
+        let r = if in_group.is_some() { ui.indent(("asm-group-row", id), add).inner } else { add(ui) };
         // the selected instances when this row is one of them, else just this one
         let these = if picked { app.asm.sel.clone() } else { vec![id] };
         if crate::app::eye_toggle(ui, &r, r.rect.right() + 11.0, hidden, ("asm-eye", id)) {
@@ -1010,7 +1361,16 @@ fn instances(app: &mut App, ui: &mut Ui) {
             app.asm.sel_mate = None;
             app.asm.scene_dirty = true;
         }
+        if r.double_clicked() {
+            open = Some(id);
+        }
         r.context_menu(|ui| {
+            let sub = asm(app).and_then(|a| a.instance(id)).is_some_and(|x| x.sub.is_some());
+            if ui.button(if sub { "Open sub-assembly" } else { "Open part" }).on_hover_text(if sub { "Go to the sub-assembly's tab (double-click)" } else { "Go to its Part Studio with the part selected (double-click)" }).clicked() {
+                open = Some(id);
+                ui.close();
+            }
+            ui.separator();
             let n = these.len();
             let what = if n > 1 { format!(" {n} instances") } else { String::new() };
             if ui.button(format!("{}{what}", if hidden { "Show" } else { "Hide" })).on_hover_text("H").clicked() {
@@ -1041,7 +1401,52 @@ fn instances(app: &mut App, ui: &mut Ui) {
                 fix = Some((these.clone(), !all_fixed));
                 ui.close();
             }
+            ui.separator();
+            if n > 1 && !same_group(app, &these) && ui.button(format!("Group {n} instances")).on_hover_text("They move as one rigid body (Ctrl+G)").clicked() {
+                group_these = Some(these.clone());
+                ui.close();
+            }
+            if in_group.is_some() {
+                if ui.button(if n > 1 && multi { format!("Remove{what} from group") } else { "Remove from group".into() }).on_hover_text("This instance moves on its own again").clicked() {
+                    out_of_group = Some(these.clone());
+                    ui.close();
+                }
+                if ui.button("Ungroup").on_hover_text("Dissolve the whole group (Ctrl+Shift+G)").clicked() {
+                    ungroup_g = in_group;
+                    ui.close();
+                }
+            }
         });
+    }
+    if let Some((gid, nm)) = rename {
+        // one undo step per rename, not per letter
+        if app.asm.renaming != Some(gid) {
+            checkpoint(app);
+            app.asm.renaming = Some(gid);
+        }
+        if let Some(g) = asm_mut(app).and_then(|a| a.groups.iter_mut().find(|g| g.id == gid)) {
+            g.name = nm;
+        }
+    } else if !group_menu {
+        app.asm.renaming = None;
+    }
+    if let Some(gid) = fold {
+        // folding is a view choice: saved with the assembly, not an undo step
+        if let Some(g) = asm_mut(app).and_then(|a| a.groups.iter_mut().find(|g| g.id == gid)) {
+            g.folded = !g.folded;
+        }
+    }
+    if let Some((gid, add)) = pick_group {
+        select_group(app, gid, add);
+    }
+    if let Some(ids) = group_these {
+        group_ids(app, &ids);
+    }
+    if let Some(g) = ungroup_g {
+        ungroup(app, &[g]);
+    }
+    if let Some(ids) = out_of_group {
+        remove_from_group(app, &ids);
     }
     if let Some((ids, on)) = fix {
         set_fixed(app, &ids, on);
@@ -1059,6 +1464,9 @@ fn instances(app: &mut App, ui: &mut Ui) {
     }
     if show_every {
         show_all(app);
+    }
+    if let Some(id) = open {
+        open_part(app, id, None);
     }
 }
 
@@ -1306,21 +1714,14 @@ fn bom_ui(app: &mut App, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- viewport
 
-fn world_tri(inst: &Instance, m: &crate::kernel::BodyMesh, t: &[u32]) -> [DVec3; 3] {
-    let v = |i: u32| inst.pose.apply(DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64));
-    [v(t[0]), v(t[1]), v(t[2])]
-}
-
 fn pick(app: &App, s: Vec2) -> Option<Hit> {
     let a = asm(app)?;
     let cam = &app.camera;
+    let parts = placed(app, a);
     // edges first: the nearest one on screen that no part hides
     let mut near: Vec<(f32, DVec3, Hit)> = vec![];
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
-        let m = part.mesh;
-        let pose = display_pose(app, a, x).compose(&part.local);
+    for part in parts.iter().filter(|p| near_on_screen(cam, p, s, 6.0)) {
+        let (m, pose) = (part.mesh, &part.pose);
         for (ei, e) in m.edges.iter().enumerate() {
             let world: Vec<DVec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64)))).collect();
             let pts: Vec<Vec2> = world.iter().map(|p| cam.project(p.as_vec3())).collect();
@@ -1331,59 +1732,58 @@ fn pick(app: &App, s: Vec2) -> Option<Hit> {
                 if dist < 6.0 {
                     // the view is orthographic, so the screen parameter carries over to the 3D point
                     let at = world[k] + (world[k + 1] - world[k]) * t as f64;
-                    near.push((dist, at, Hit { inst: x.id, leaf, face: None, edge: Some(ei), local: e.mid }));
+                    near.push((dist, at, Hit { inst: part.inst, leaf: part.leaf, face: None, edge: Some(ei), local: e.mid }));
                 }
             }
         }
-      }
     }
     near.sort_by(|a, b| a.0.total_cmp(&b.0));
-    if let Some((_, _, h)) = near.into_iter().find(|(_, p, _)| !occluded(app, a, *p)) {
+    if let Some((_, _, h)) = near.into_iter().find(|(_, p, _)| !occluded_by(cam, &parts, *p)) {
         return Some(h);
     }
     let (o, d) = cam.ray(s);
     let (o, d) = (o.as_dvec3(), d.as_dvec3());
     let mut best: Option<(f64, Hit)> = None;
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
-        let m = part.mesh;
+    for part in &parts {
+        let (m, pose) = (part.mesh, &part.pose);
         // ray into the part's coordinates
-        let pose = display_pose(app, a, x).compose(&part.local);
         let lo = pose.inverse_apply(o);
         let ld = pose.inverse_dir(d);
+        // parts the ray misses, or only meets behind the nearest hit so far, are skipped whole
+        match ray_box(lo, ld, m) {
+            Some(t) if best.as_ref().map(|b| t <= b.0).unwrap_or(true) => {}
+            _ => continue,
+        }
         for (ti, t) in m.indices.chunks(3).enumerate() {
             let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
             if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
                 if best.as_ref().map(|b| tt < b.0).unwrap_or(true) {
-                    best = Some((tt, Hit { inst: x.id, leaf, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
+                    best = Some((tt, Hit { inst: part.inst, leaf: part.leaf, face: Some(m.tri_face[ti] as usize), edge: None, local: (lo + ld * tt).into() }));
                 }
             }
         }
-      }
     }
     best.map(|b| b.1)
 }
 
 /// Whether a shown part lies in front of world point `p` (an edge behind another part).
-fn occluded(app: &App, a: &Assembly, p: DVec3) -> bool {
-    let cam = &app.camera;
+fn occluded_by(cam: &crate::camera::Camera, parts: &[Placed], p: DVec3) -> bool {
     let (o, d) = cam.ray(cam.project(p.as_vec3()));
     let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
     let depth = (p - o).dot(d);
     // the faces that end at the edge meet the ray at its own depth: a few pixels of slack
     let slack = cam.wpp() as f64 * 3.0;
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-        for part in parts_of(app, x).into_iter().flatten() {
-            let m = part.mesh;
-            let pose = display_pose(app, a, x).compose(&part.local);
-            let (lo, ld) = (pose.inverse_apply(o), pose.inverse_dir(d));
-            for t in m.indices.chunks(3) {
-                let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
-                if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
-                    if tt < depth - slack {
-                        return true;
-                    }
+    for part in parts {
+        let (m, pose) = (part.mesh, &part.pose);
+        let (lo, ld) = (pose.inverse_apply(o), pose.inverse_dir(d));
+        if !ray_box(lo, ld, m).is_some_and(|t| t < depth - slack) {
+            continue;
+        }
+        for t in m.indices.chunks(3) {
+            let v = |i: u32| DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64);
+            if let Some(tt) = ray_tri(lo, ld, v(t[0]), v(t[1]), v(t[2])) {
+                if tt < depth - slack {
+                    return true;
                 }
             }
         }
@@ -1441,40 +1841,42 @@ fn build_scene(app: &App) -> SceneData {
         app.asm.dialog.as_ref().and_then(|d| a.mates.iter().find(|m| m.id == d.mate)).map(|m| m.a.iter().chain(m.b.iter()).copied().collect()).unwrap_or_default();
     let mate_insts: Vec<u64> =
         app.asm.sel_mate.filter(|_| app.asm.dialog.is_none()).and_then(|id| a.mates.iter().find(|m| m.id == id)).map(|m| m.a.iter().chain(m.b.iter()).map(|c| c.inst).collect()).unwrap_or_default();
-    for x in a.instances.iter().filter(|x| shown(app, x)) {
-      for (leaf, part) in parts_of(app, x).into_iter().enumerate() {
-        let Some(part) = part else { continue };
+    let mut cache = app.asm.meshes.borrow_mut();
+    let mut used = std::collections::HashMap::new();
+    let finish = if app.realistic { 2.0 } else { 0.0 };
+    let (edge_col, hover_col, picked_col) = (crate::viewport::rgba(vp::edge(), 1.0), crate::viewport::rgba(vp::hover(), 1.0), crate::viewport::rgba(vp::picked(), 1.0));
+    for part in placed(app, a) {
         let m = part.mesh;
-        let sel = app.asm.sel.contains(&x.id) || mate_insts.contains(&x.id);
-        let base = part.color;
-        let hov_face = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.face);
-        let pose = display_pose(app, a, x).compose(&part.local);
-        let rot = pose.m().as_mat3();
-        for (ti, t) in m.indices.chunks(3).enumerate() {
-            let fi = m.tri_face[ti] as usize;
-            let col = if hov_face == Some(fi) {
-                vp::hover()
-            } else if sel {
-                vp::picked()
-            } else {
-                base
-            };
-            for &i in t {
-                let i = i as usize;
-                let p = pose.apply(DVec3::new(m.positions[3 * i] as f64, m.positions[3 * i + 1] as f64, m.positions[3 * i + 2] as f64));
-                let n = rot * Vec3::new(m.normals[3 * i], m.normals[3 * i + 1], m.normals[3 * i + 2]);
-                s.opaque.push(MeshVertex { pos: p.as_vec3().into(), normal: n.into(), color: crate::viewport::rgba(col, 1.0), finish: if app.realistic { 2.0 } else { 0.0 } });
-            }
+        let key = (part.studio, m.id);
+        let sig = mesh_sig(m);
+        // the GPU copy of the mesh, made once and shared by every instance of the part
+        let obj = match cache.get(&key).filter(|c| c.0 == sig).or_else(|| used.get(&key).filter(|c: &&(MeshSig, Arc<ObjMesh>)| c.0 == sig)) {
+            Some(c) => c.1.clone(),
+            None => Arc::new(ObjMesh::from_body(m)),
+        };
+        used.insert(key, (sig, obj.clone()));
+        let sel = app.asm.sel.contains(&part.inst) || mate_insts.contains(&part.inst);
+        let hov = app.asm.hover.filter(|h| h.inst == part.inst && h.leaf == part.leaf);
+        let (r, t) = (part.pose.m(), DVec3::from(part.pose.t));
+        let model = glam::DMat4::from_cols(r.x_axis.extend(0.0), r.y_axis.extend(0.0), r.z_axis.extend(0.0), t.extend(1.0)).as_mat4();
+        s.objects.push(ObjDraw {
+            mesh: obj,
+            model,
+            color: if sel { picked_col } else { crate::viewport::rgba(part.color, 1.0) },
+            hover_face: hov.and_then(|h| h.face).map(|f| f as i32).unwrap_or(-1),
+            hover_color: hover_col,
+            finish,
+            edge_color: edge_col,
+            edge_width: 1.4,
+        });
+        // the hovered edge, thicker and on top
+        if let Some(e) = hov.and_then(|h| h.edge).and_then(|ei| m.edges.get(ei)) {
+            let pts: Vec<Vec3> = e.pts.iter().map(|p| part.pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
+            s.polyline(&pts, 3.0, hover_col, true);
         }
-        let hov_edge = app.asm.hover.filter(|h| h.inst == x.id && h.leaf == leaf).and_then(|h| h.edge);
-        for (ei, e) in m.edges.iter().enumerate() {
-            let pts: Vec<Vec3> = e.pts.iter().map(|p| pose.apply(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
-            let hov = hov_edge == Some(ei);
-            s.polyline(&pts, if hov { 3.0 } else { 1.4 }, crate::viewport::rgba(if hov { vp::hover() } else { vp::edge() }, 1.0), hov);
-        }
-        let _ = world_tri;
-      }
     }
+    *cache = used;
+    drop(cache);
     // mate connectors being picked
     let size = (app.camera.wpp() * 28.0) as f64;
     for c in &dialog_conns {
@@ -1496,6 +1898,26 @@ fn build_scene(app: &App) -> SceneData {
 }
 
 pub fn viewport(app: &mut App, ui: &mut Ui) {
+    let t0 = std::time::Instant::now();
+    viewport_inner(app, ui);
+    perf_note(t0);
+}
+
+/// With RCAD_PERF set, print each frame's assembly viewport time (picking, solving and making
+/// the scene; not the GPU's drawing) and the time since the frame before, in milliseconds.
+fn perf_note(t0: std::time::Instant) {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static LAST: std::sync::Mutex<Option<std::time::Instant>> = std::sync::Mutex::new(None);
+    if !*ON.get_or_init(|| std::env::var_os("RCAD_PERF").is_some()) {
+        return;
+    }
+    let now = std::time::Instant::now();
+    let gap = LAST.lock().unwrap().replace(now).map(|l| (now - l).as_secs_f64() * 1e3).unwrap_or(0.0);
+    let ms = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis()).unwrap_or(0);
+    eprintln!("rcad-perf {ms} work {:.3} frame {gap:.1}", (now - t0).as_secs_f64() * 1e3);
+}
+
+fn viewport_inner(app: &mut App, ui: &mut Ui) {
     crate::stdparts_ui::window(app, &ui.ctx().clone());
     let rect = ui.available_rect_before_wrap();
     let resp = ui.allocate_rect(rect, Sense::click_and_drag());
@@ -1508,7 +1930,14 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     let before = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height);
     let free = app.asm.hover.is_none() && app.asm.dialog.is_none() && app.asm.measure.is_none();
     crate::viewport::navigate(app, ui, &resp, free);
-    if before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
+    let look = Some((app.realistic, theme::is_dark()));
+    if app.asm.look != look {
+        app.asm.look = look;
+        app.asm.scene_dirty = true;
+    }
+    // the parts are drawn by the GPU from any view: only the mate connectors of an open mate
+    // dialog are sized to the screen and need the scene made again when the view moves
+    if app.asm.dialog.is_some() && before != (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height) {
         app.asm.scene_dirty = true;
     }
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
@@ -1520,7 +1949,19 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
 
     // hover
     if app.nav.is_none() && app.asm.drag.is_none() {
-        let h = resp.hover_pos().and_then(|p| pick(app, local(p)));
+        // picking runs again only when the pointer, the view or the scene changed
+        let cam = (app.camera.target, app.camera.back, app.camera.up, app.camera.half_height, app.camera.size);
+        let h = match resp.hover_pos().map(local) {
+            None => None,
+            Some(p) => match &app.asm.pick_cache {
+                Some((q, c, v, h)) if *q == p && *c == cam && *v == app.scene.version => *h,
+                _ => {
+                    let h = pick(app, p);
+                    app.asm.pick_cache = Some((p, cam, app.scene.version, h));
+                    h
+                }
+            },
+        };
         if h != app.asm.hover {
             app.asm.hover = h;
             app.asm.scene_dirty = true;
@@ -1601,7 +2042,7 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
 
     if resp.secondary_clicked() && app.asm.dialog.is_none() && app.asm.measure.is_none() {
         if let Some(p) = resp.interact_pointer_pos().or(resp.hover_pos()) {
-            app.asm.ctx = Some((p, app.asm.hover.map(|h| h.inst)));
+            app.asm.ctx = Some((p, app.asm.hover.map(|h| (h.inst, h.leaf))));
         }
     }
 
@@ -1609,7 +2050,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     if app.asm.dialog.is_none() {
         if resp.drag_started_by(egui::PointerButton::Primary) {
             if let Some(h) = app.asm.hover {
-                let fixed = asm(app).and_then(|a| a.instance(h.inst)).map(|x| x.fixed).unwrap_or(true);
+                // a group with a fixed member stays put as a whole
+                let fixed = asm(app).map(|a| a.instance(h.inst).is_none() || a.held_fixed(h.inst)).unwrap_or(true);
                 if !fixed {
                     checkpoint(app);
                     let start = asm(app).and_then(|a| a.instance(h.inst)).map(|x| x.pose).unwrap_or_default();
@@ -1660,9 +2102,8 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
             };
             let id = d.inst;
             if let Some(a) = asm_mut(app) {
-                if let Some(x) = a.instances.iter_mut().find(|x| x.id == id) {
-                    x.pose = pose;
-                }
+                // the rest of its group comes along
+                a.move_rigid(id, pose);
             }
             if d.rotate {
                 solve(app, &[id]);
@@ -1733,6 +2174,12 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     }
     mate_dialog(app, ui, rect);
     viewport_menu(app, ui);
+    // double-click a part: open it in its Part Studio
+    if resp.double_clicked_by(egui::PointerButton::Primary) && app.asm.dialog.is_none() && app.asm.measure.is_none() && app.asm.ctx.is_none() {
+        if let Some(h) = app.asm.hover {
+            open_part(app, h.inst, Some(h.leaf));
+        }
+    }
 }
 
 /// Right-click in the viewport: hide, show and isolate.
@@ -1742,8 +2189,11 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
         app.asm.ctx = None;
         return;
     }
-    let target = target.filter(|id| asm(app).is_some_and(|a| a.instance(*id).is_some()));
+    let target = target.filter(|(id, _)| asm(app).is_some_and(|a| a.instance(*id).is_some()));
+    let leaf = target.map(|t| t.1);
+    let target = target.map(|t| t.0);
     let mut close = false;
+    let mut open: Option<(u64, Option<usize>)> = None;
     let area = egui::Area::new(egui::Id::new("asm-ctx-menu")).order(egui::Order::Foreground).fixed_pos(pos).show(ui.ctx(), |ui| {
         egui::Frame::menu(ui.style()).fill(theme::panel_2()).show(ui, |ui| {
             ui.set_min_width(200.0);
@@ -1753,6 +2203,21 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
                 // the selected instances when the clicked one is among them, else just that one
                 let these = if app.asm.sel.contains(&id) { app.asm.sel.clone() } else { vec![id] };
                 let n = these.len();
+                let sub = asm(app).and_then(|a| a.instance(id)).is_some_and(|x| x.sub.is_some());
+                // inside a sub-assembly, say which part the click landed on
+                let part = match (sub, leaf.and_then(|l| open_target(app, id, Some(l)))) {
+                    (true, Some(Tab::Studio(k))) => app.ws.studios.get(k).map(|s| format!("Open part: {}", s.name)),
+                    _ => None,
+                };
+                if ui.button(part.unwrap_or_else(|| "Open part".into())).on_hover_text("Go to its Part Studio with the part selected (double-click)").clicked() {
+                    open = Some((id, leaf));
+                    close = true;
+                }
+                if sub && ui.button("Open sub-assembly").clicked() {
+                    open = Some((id, None));
+                    close = true;
+                }
+                ui.separator();
                 if ui.button(if n > 1 { format!("Hide {n} instances") } else { "Hide".to_string() }).on_hover_text("H").clicked() {
                     set_hidden(app, &these, true);
                     close = true;
@@ -1769,6 +2234,31 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
                 if ui.button(if all_fixed { "Unfix" } else { "Fix" }).on_hover_text("Fixed instances stay where they are when mates are solved").clicked() {
                     set_fixed(app, &these, !all_fixed);
                     close = true;
+                }
+                ui.separator();
+                if n > 1 && !same_group(app, &these) && ui.button(format!("Group {n} instances")).on_hover_text("They move as one rigid body (Ctrl+G)").clicked() {
+                    group_ids(app, &these);
+                    close = true;
+                }
+                let group = asm(app).and_then(|a| a.group_of(id)).map(|g| (g.id, g.name.clone()));
+                if let Some((gid, gname)) = group {
+                    if ui.button(format!("Select {gname}")).on_hover_text("Select every instance in its group").clicked() {
+                        select_group(app, gid, false);
+                        close = true;
+                    }
+                    if ui.button(format!("Isolate {gname}")).clicked() {
+                        let ms = asm(app).map(|a| a.rigid_with(id)).unwrap_or_default();
+                        isolate(app, ms);
+                        close = true;
+                    }
+                    if ui.button("Remove from group").clicked() {
+                        remove_from_group(app, &[id]);
+                        close = true;
+                    }
+                    if ui.button(format!("Ungroup {gname}")).on_hover_text("Ctrl+Shift+G").clicked() {
+                        ungroup(app, &[gid]);
+                        close = true;
+                    }
                 }
                 ui.separator();
             }
@@ -1794,6 +2284,9 @@ fn viewport_menu(app: &mut App, ui: &mut Ui) {
     let clicked_elsewhere = ui.input(|i| i.pointer.any_pressed()) && !area.response.contains_pointer() && !ui.input(|i| i.pointer.secondary_pressed());
     if close || clicked_elsewhere || ui.input(|i| i.key_pressed(egui::Key::Escape)) {
         app.asm.ctx = None;
+    }
+    if let Some((id, leaf)) = open {
+        open_part(app, id, leaf);
     }
 }
 

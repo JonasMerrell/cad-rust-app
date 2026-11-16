@@ -301,6 +301,14 @@ pub struct Visuals {
     /// The finished simulation, from above at an angle and from the top, and what it found.
     pub sim: Option<(Option<Shot>, Option<Shot>)>,
     pub events: Vec<crate::cam_sim::SimEvent>,
+    /// Each operation's heaviest cut in the simulation.
+    pub loads: Vec<crate::cam_sim::OpLoad>,
+    /// Machined surface left with roughing stock on it.
+    pub unfinished: Option<crate::cam_sim::Unfinished>,
+    /// Each operation's feed moves that cut nothing.
+    pub air: Vec<crate::cam_sim::OpAir>,
+    /// Each operation's chip evacuation.
+    pub chips: Vec<crate::cam_sim::OpChips>,
 }
 
 /// The simulation for the sheet: from what the setup before left (`left`), with the setup's machine model
@@ -325,7 +333,7 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     let iso = setup_shot(cam, part, sim.as_ref(), "iso", 760, 540);
     let top = setup_shot(cam, part, sim.as_ref(), "top", 400, 300);
     let front = setup_shot(cam, part, sim.as_ref(), "front", 400, 300);
-    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![] };
+    let mut v = Visuals { iso, top, front, ops: vec![], sim: None, events: vec![], loads: vec![], unfinished: None, air: vec![], chips: vec![] };
     let Some(mut sim) = sim else {
         v.ops = paths.iter().map(|_| None).collect();
         return v;
@@ -373,6 +381,10 @@ pub fn visuals(cam: &Cam, part: &Part, paths: &[Toolpath], sim: Option<Sim>) -> 
     }
     v.sim = Some((sc.shoot("iso", 560, 420, None), sc.shoot("top", 400, 300, None)));
     v.events = sim.events.clone();
+    v.loads = sim.loads.clone();
+    v.unfinished = sim.unfinished(0.1);
+    v.air = sim.air.clone();
+    v.chips = sim.chip_ops.clone();
     v
 }
 
@@ -389,7 +401,8 @@ fn tool_svg(t: &crate::cam::Tool, height: f64) -> String {
     let total = stick + hh;
     let wide = prof.iter().map(|p| p.0).chain(holder.iter().filter(|p| p.1 < hh).map(|p| p.0)).fold(shank.max(r), f64::max);
     let s = height / total;
-    let (w, cx) = (2.0 * wide * s + 8.0, wide * s + 4.0);
+    // room on the right for the stick-out dimension
+    let (w, cx) = (2.0 * wide * s + 8.0 + 34.0, wide * s + 4.0);
     let at = |x: f64, z: f64| format!("{:.1},{:.1}", cx + x * s, height + 2.0 - z * s);
     let shape = |right: &[(f64, f64)], fill: &str| -> String {
         let pts: Vec<String> = right.iter().map(|p| at(p.0, p.1)).chain(right.iter().rev().map(|p| at(-p.0, p.1))).collect();
@@ -411,7 +424,15 @@ fn tool_svg(t: &crate::cam::Tool, height: f64) -> String {
         shape(&hold, "#a3abb6"),
         shape(&[(0.0, len), (shank, len), (shank, stick), (0.0, stick)], "#d3d8df"),
         shape(&cut, "#6f7d90"),
-    )
+    ) .replace("</svg>", &{
+        // the stick-out: from the tip to the holder's (collet nut's) face
+        let x = cx + wide * s + 6.0;
+        let (y0, y1) = (height + 2.0, height + 2.0 - stick * s);
+        format!(
+            "<line x1=\"{x:.1}\" y1=\"{y0:.1}\" x2=\"{x:.1}\" y2=\"{y1:.1}\" stroke=\"#d06a1a\" stroke-width=\"1\"/><line x1=\"{:.1}\" y1=\"{y0:.1}\" x2=\"{:.1}\" y2=\"{y0:.1}\" stroke=\"#d06a1a\"/><line x1=\"{:.1}\" y1=\"{y1:.1}\" x2=\"{:.1}\" y2=\"{y1:.1}\" stroke=\"#d06a1a\"/><text x=\"{:.1}\" y=\"{:.1}\" font-size=\"10\" fill=\"#d06a1a\" transform=\"rotate(-90 {:.1} {:.1})\" text-anchor=\"middle\">{} mm</text></svg>",
+            x - 3.0, x + 3.0, x - 3.0, x + 3.0, x + 11.0, (y0 + y1) / 2.0, x + 11.0, (y0 + y1) / 2.0, fmt_mm(t.stickout)
+        )
+    })
 }
 
 fn b64(png: &[u8]) -> String {
@@ -495,6 +516,10 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
     if vis.sim.is_some() {
         let n = vis.events.len();
         kpis.push(("Simulation", if n == 0 { "no problems".into() } else { format!("{n} problem{}", if n == 1 { "" } else { "s" }) }, n > 0));
+        kpis.push(match vis.unfinished {
+            None => ("Finishing", "every machined surface".into(), false),
+            Some(u) => ("Finishing", format!("{} mm² left rough (up to {} mm)", u.area_mm2.round(), fmt_mm(u.max)), true),
+        });
     }
     s.push_str("<div class=\"kpis\">");
     for (k, v, bad) in kpis {
@@ -568,6 +593,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         "setter" => kv.push(("Tool probing", "tool setter: zero the work Z with the first tool".into())),
         _ => {}
     }
+
     s.push_str("<h2>Setup</h2><div class=\"grid\"><div>");
     s.push_str(&figure(&vis.iso, "The part on the machine", "As on the machine, spindle above: the part, what holds it, the stock outline, and the X, Y and Z axes from the work zero."));
     s.push_str("</div><table class=\"kv\">");
@@ -604,7 +630,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             fmt_mm(t.diameter),
             t.flutes,
             fmt_mm(t.flute_length),
-            fmt_mm(t.stickout),
+            format!("<b style=\"font-size:1.3em\">{} mm</b><div class=\"muted\">from the collet nut face; what the simulation assumed: set it when you load the tool</div>", fmt_mm(t.stickout)),
             if t.kind == ToolKind::Tap && t.tapping_head { format!("{holder}, self-reversing tapping head") } else { holder },
             cam.spindle_rpm(t).round(),
             feed.round(),
@@ -637,7 +663,7 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             prev = p;
         }
         let z = if zlo.is_finite() && zhi.is_finite() { format!("{} / {}", fmt_mm(zhi - o.z), fmt_mm(zlo - o.z)) } else { "-".into() };
-        let step = if matches!(op.kind, OpKind::Drill | OpKind::Tap | OpKind::Thread | OpKind::Chamfer | OpKind::Deburr) {
+        let step = if matches!(op.kind, OpKind::Drill | OpKind::Tap | OpKind::Thread | OpKind::Chamfer | OpKind::Deburr | OpKind::Probe) {
             "-".to_string()
         } else {
             format!("{} mm / {}% Ø", fmt_mm(cam_paths::stepdown(op, t)), (cam_paths::stepover(op, t) / t.diameter.max(1e-9) * 100.0).round())
@@ -654,7 +680,53 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         if op.rest {
             notes.push("rest machining".into());
         }
+        if let Some(plan) = &tp.probe {
+            notes.push(esc(&format!("finds {} and sets {} (G54); jog the probe close to the work zero first", plan.what, plan.sets_text(o))));
+        }
         notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
+        if let Some(l) = vis.loads.iter().find(|l| l.op == op.id) {
+            let (c, u) = (&l.cut, &l.uses);
+            let text = format!(
+                "spindle {}% of the power it has at {} rpm ({} W, {} N·m); heaviest cut {} wide × {} deep at {} mm/min: {} N on the tool, bends {} mm, chip {} mm; worst limit {}%",
+                (u.power * 100.0).round(),
+                l.rpm.round(),
+                c.power.round(),
+                fmt_mm(c.torque),
+                fmt_mm(l.width),
+                fmt_mm(l.depth),
+                l.feed.round(),
+                c.force.round(),
+                fmt_mm(c.deflection),
+                fmt_mm(c.h_max),
+                (l.ratio * 100.0).round()
+            );
+            // over a limit: a problem; within 15% of it: heavier than the cuts the limits were set from
+            notes.push(if l.ratio > 1.0 {
+                format!("<span class=\"warn\">{}</span>", esc(&text))
+            } else if l.ratio > 0.85 {
+                format!("<span class=\"warn\">{} (caution: above 85%)</span>", esc(&text))
+            } else {
+                esc(&text)
+            });
+        }
+        if let Some(a) = vis.air.iter().find(|a| a.op == op.id).filter(|a| a.feed_s > 1.0) {
+            let (air, light) = (a.air_s / a.feed_s * 100.0, a.light_s / a.feed_s * 100.0);
+            let text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
+            notes.push(if air + light > 50.0 && matches!(op.kind, OpKind::Adaptive | OpKind::Clear | OpKind::Pocket | OpKind::Face | OpKind::Contour) { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+        }
+        if let Some(c) = vis.chips.iter().find(|c| c.op == op.id) {
+            let t = (c.open_s + c.slot_s + c.pocket_s).max(1e-9);
+            if t > 1.0 {
+                let text = format!(
+                    "chips: fill up to {}% of the cavity they lie in; cutting {}% in pockets, {}% in slots; {} mm through packed chips",
+                    (c.max_fill * 100.0).round(),
+                    (c.pocket_s / t * 100.0).round(),
+                    (c.slot_s / t * 100.0).round(),
+                    c.recut_mm.round()
+                );
+                notes.push(if c.max_fill > 0.5 { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
+            }
+        }
         let problems = vis.events.iter().filter(|e| e.op == op.id).count();
         if problems > 0 {
             notes.push(format!("<span class=\"warn\">{problems} problem(s) in the simulation</span>"));
@@ -666,7 +738,14 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         let _ = write!(cards, "<div class=\"body\"><table class=\"kv\">");
         for (k, v) in [
             ("Tool", esc(&t.describe())),
-            ("Speed / feed", format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), cam.feeds(t).0.round())),
+            (
+                "Speed / feed",
+                if t.kind == ToolKind::Probe {
+                    format!("probing at {} / {} mm/min", t.feed.round(), t.plunge_feed.round())
+                } else {
+                    format!("{} rpm / {} mm/min", cam.spindle_rpm(t).round(), cam.feeds(t).0.round())
+                },
+            ),
             ("Z top / bottom", z.clone()),
             ("Stepdown / over", step.clone()),
             ("Leave side / floor", leave.clone()),

@@ -335,6 +335,22 @@ pub struct Assembly {
     /// Timelines of those motions.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub animations: Vec<crate::asm_anim::Animation>,
+    /// Groups of instances that move together as one rigid body (see `Group`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub groups: Vec<Group>,
+}
+
+/// Instances held together as one rigid body, as if fastened to each other where they are:
+/// dragging or mating any of them moves them all, and the Instances list shows them under one
+/// foldable row. An instance is in one group at most.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Group {
+    pub id: u64,
+    pub name: String,
+    pub members: Vec<u64>,
+    /// Folded in the Instances list.
+    #[serde(default)]
+    pub folded: bool,
 }
 
 impl Assembly {
@@ -345,6 +361,81 @@ impl Assembly {
 
     pub fn instance(&self, id: u64) -> Option<&Instance> {
         self.instances.iter().find(|i| i.id == id)
+    }
+
+    /// The group instance `id` is in.
+    pub fn group_of(&self, id: u64) -> Option<&Group> {
+        self.groups.iter().find(|g| g.members.contains(&id))
+    }
+
+    /// The instances that move with `id` (its group's members still in the assembly, or itself).
+    pub fn rigid_with(&self, id: u64) -> Vec<u64> {
+        match self.group_of(id) {
+            Some(g) => g.members.iter().copied().filter(|m| self.instance(*m).is_some()).collect(),
+            None => vec![id],
+        }
+    }
+
+    /// Whether `id` stays put when mates are solved: it, or an instance grouped with it, is fixed.
+    pub fn held_fixed(&self, id: u64) -> bool {
+        self.rigid_with(id).iter().any(|m| self.instance(*m).is_some_and(|x| x.fixed))
+    }
+
+    /// Put instance `id` at `pose`, carrying the rest of its group along rigidly.
+    pub fn move_rigid(&mut self, id: u64, pose: Pose) {
+        let Some(old) = self.instance(id).map(|x| x.pose) else { return };
+        // world motion d with d ∘ old = pose
+        let m = pose.m() * old.m().transpose();
+        let t = DVec3::from(pose.t) - m * DVec3::from(old.t);
+        let ids = self.rigid_with(id);
+        for x in self.instances.iter_mut().filter(|x| ids.contains(&x.id)) {
+            if x.id == id {
+                x.pose = pose;
+            } else {
+                let p = x.pose;
+                x.pose = Pose { r: orthonormalize(m * p.m()).to_cols_array(), t: (m * DVec3::from(p.t) + t).into() };
+            }
+        }
+    }
+
+    /// Group instances `ids` (taking them out of any group they were in) and return the new
+    /// group's id; None for fewer than two instances.
+    pub fn group(&mut self, ids: &[u64], name: Option<String>) -> Option<u64> {
+        let mut members: Vec<u64> = vec![];
+        // in the assembly's order, so the list keeps its order
+        for x in &self.instances {
+            if ids.contains(&x.id) {
+                members.push(x.id);
+            }
+        }
+        if members.len() < 2 {
+            return None;
+        }
+        for g in &mut self.groups {
+            g.members.retain(|m| !members.contains(m));
+        }
+        let id = self.new_id();
+        let n = (1..).find(|n| !self.groups.iter().any(|g| g.name == format!("Group {n}"))).unwrap_or(1);
+        self.groups.push(Group { id, name: name.unwrap_or(format!("Group {n}")), members, folded: false });
+        self.prune_groups();
+        Some(id)
+    }
+
+    /// Take instances out of their groups (a group left with fewer than two goes).
+    pub fn ungroup_instances(&mut self, ids: &[u64]) {
+        for g in &mut self.groups {
+            g.members.retain(|m| !ids.contains(m));
+        }
+        self.prune_groups();
+    }
+
+    /// Drop deleted instances from the groups, and groups that no longer hold two.
+    pub fn prune_groups(&mut self) {
+        let have: std::collections::HashSet<u64> = self.instances.iter().map(|x| x.id).collect();
+        for g in &mut self.groups {
+            g.members.retain(|m| have.contains(m));
+        }
+        self.groups.retain(|g| g.members.len() >= 2);
     }
 
     pub fn world(&self, c: &Connector) -> Option<(DVec3, DVec3, DVec3)> {
@@ -590,24 +681,24 @@ fn prealign(asm: &mut Assembly, mates: &[Mate], hold: &[u64]) {
 pub fn place_new_mate(asm: &mut Assembly, mate: u64, hold: &[u64]) {
     let Some(m) = asm.mates.iter().find(|m| m.id == mate).cloned() else { return };
     let (Some(ca), Some(cb)) = (m.a, m.b) else { return };
-    if ca.inst == cb.inst {
+    if ca.inst == cb.inst || asm.rigid_with(ca.inst).contains(&cb.inst) {
         return;
     }
-    let stays = |id: u64| hold.contains(&id) || asm.instance(id).map(|x| x.fixed).unwrap_or(true);
+    let stays = |id: u64| asm.rigid_with(id).iter().any(|r| hold.contains(r)) || asm.instance(id).is_none() || asm.held_fixed(id);
     let b_moves = if !stays(cb.inst) { true } else if !stays(ca.inst) { false } else { return };
     let mover = if b_moves { cb.inst } else { ca.inst };
-    let Some(ix) = asm.instances.iter().position(|x| x.id == mover) else { return };
+    let Some(mut p) = asm.instance(mover).map(|x| x.pose) else { return };
     let (Some(fa), Some(fb)) = (asm.world(&ca), asm.world(&cb)) else { return };
     if let Some(r) = mate_rotation(&m, fa, fb) {
         let (r, pivot) = if b_moves { (r, fb.0) } else { (r.transpose(), fa.0) };
-        let p = &mut asm.instances[ix].pose;
         p.t = (r * (DVec3::from(p.t) - pivot) + pivot).into();
         p.r = orthonormalize(r * p.m()).to_cols_array();
+        asm.move_rigid(mover, p);
     }
     let (Some(fa), Some(fb)) = (asm.world(&ca), asm.world(&cb)) else { return };
     let d = target_frame(&m, fa).0 - fb.0;
-    let p = &mut asm.instances[ix].pose;
     p.t = (DVec3::from(p.t) + if b_moves { d } else { -d }).into();
+    asm.move_rigid(mover, p);
 }
 
 pub struct SolveResult {
@@ -652,6 +743,83 @@ pub fn solve_suspect(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instanc
 }
 
 fn solve_grab(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], suspects: &[u64], grab: Option<(u64, DVec3)>) -> SolveResult {
+    if asm.groups.iter().any(|g| g.members.len() > 1) {
+        return solve_rigid_groups(asm, hold, centers, drives, suspects, grab);
+    }
+    solve_flat(asm, hold, centers, drives, suspects, grab)
+}
+
+/// Solve an assembly with groups: each group becomes one instance (its fixed member, else its
+/// first) carrying the others' mate connectors in its own coordinates, so the solve moves the
+/// group as one body; then the members are put back where the group's body took them.
+fn solve_rigid_groups(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], suspects: &[u64], grab: Option<(u64, DVec3)>) -> SolveResult {
+    // member id -> (leader id, member pose in the leader's coordinates)
+    let mut rel: std::collections::HashMap<u64, (u64, Pose)> = std::collections::HashMap::new();
+    let mut fixed_leaders = vec![];
+    for g in &asm.groups {
+        let ms: Vec<&Instance> = g.members.iter().filter_map(|m| asm.instance(*m)).collect();
+        if ms.len() < 2 {
+            continue;
+        }
+        let lead = ms.iter().find(|x| x.fixed).unwrap_or(&ms[0]);
+        let inv = Pose { r: lead.pose.m().transpose().to_cols_array(), t: lead.pose.inverse_apply(DVec3::ZERO).into() };
+        if ms.iter().any(|x| x.fixed) {
+            fixed_leaders.push(lead.id);
+        }
+        for x in &ms {
+            if x.id != lead.id && !rel.contains_key(&x.id) {
+                rel.insert(x.id, (lead.id, inv.compose(&x.pose)));
+            }
+        }
+    }
+    let lead_of = |id: u64| rel.get(&id).map(|r| r.0).unwrap_or(id);
+    let mut red = asm.clone();
+    red.groups.clear();
+    red.instances.retain(|x| !rel.contains_key(&x.id));
+    for x in &mut red.instances {
+        if fixed_leaders.contains(&x.id) {
+            x.fixed = true;
+        }
+    }
+    let carry = |c: &mut Connector| {
+        if let Some((lead, p)) = rel.get(&c.inst) {
+            c.inst = *lead;
+            c.origin = p.apply(c.origin.into()).into();
+            c.z = p.dir(c.z.into()).into();
+            c.x = p.dir(c.x.into()).into();
+        }
+    };
+    for m in &mut red.mates {
+        if let Some(c) = m.a.as_mut() {
+            carry(c);
+        }
+        if let Some(c) = m.b.as_mut() {
+            carry(c);
+        }
+    }
+    // a mate inside one group holds (or not) whatever the solve does
+    red.mates.retain(|m| !matches!((m.a, m.b), (Some(a), Some(b)) if a.inst == b.inst));
+    let hold: Vec<u64> = hold.iter().map(|h| lead_of(*h)).collect();
+    let grab = grab.map(|(id, g)| match rel.get(&id) {
+        Some((lead, p)) => (*lead, p.apply(g)),
+        None => (id, g),
+    });
+    solve_flat(&mut red, &hold, centers, drives, suspects, grab);
+    asm.turns = red.turns.clone();
+    for x in &mut asm.instances {
+        if let Some((lead, p)) = rel.get(&x.id) {
+            if let Some(l) = red.instance(*lead) {
+                x.pose = l.pose.compose(p);
+            }
+        } else if let Some(r) = red.instance(x.id) {
+            x.pose = r.pose;
+        }
+    }
+    let failed = failed_mates(asm);
+    SolveResult { ok: failed.is_empty(), failed }
+}
+
+fn solve_flat(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], suspects: &[u64], grab: Option<(u64, DVec3)>) -> SolveResult {
     let start = (asm.instances.iter().map(|i| i.pose).collect::<Vec<_>>(), asm.turns.clone());
     let restore = |asm: &mut Assembly, s: &(Vec<Pose>, std::collections::HashMap<u64, f64>)| {
         for (i, p) in asm.instances.iter_mut().zip(&s.0) {
@@ -702,10 +870,86 @@ fn turn_scale(asm: &Assembly, mates: &[Mate], i: usize, ctr: DVec3) -> f64 {
 }
 
 fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], skip: Option<u64>, grab: Option<(u64, DVec3)>) {
-    let free: Vec<usize> = (0..asm.instances.len()).filter(|&i| !asm.instances[i].fixed).collect();
+    let all_mates: Vec<Mate> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some() && Some(m.id) != skip).cloned().collect();
+    prealign(asm, &all_mates, hold);
+    let driven = |id: u64| drives.iter().any(|d| d.mate == id);
+    let all_relations: Vec<Relation> = asm.relations.iter().filter(|r| !r.mates().all(driven)).cloned().collect();
+    let start: std::collections::HashMap<u64, f64> = all_mates
+        .iter()
+        .filter(|m| turning(m))
+        .filter_map(|m| Some((m.id, asm.mate_turn(m, asm.world(m.a.as_ref()?)?, asm.world(m.b.as_ref()?)?))))
+        .collect();
+    // parts that no chain of mates links move independently: solving each group on its own
+    // keeps the (dense, numeric) Newton steps small in a big assembly
+    for (free, mates, relations) in solve_groups(asm, &all_mates, &all_relations) {
+        solve_group(asm, hold, centers, drives, grab, &free, &mates, &relations);
+    }
+    // turning mates' angles, counted on from where they were
+    let mut turns = std::collections::HashMap::new();
+    for m in all_mates.iter().filter(|m| turning(m)) {
+        if let (Some(a), Some(b)) = (asm.world(m.a.as_ref().unwrap()), asm.world(m.b.as_ref().unwrap())) {
+            let t = mate_angle(m, a, b);
+            turns.insert(m.id, start.get(&m.id).map(|p| unwrap_near(*p, t)).unwrap_or(t));
+        }
+    }
+    asm.turns = turns;
+}
+
+/// The independent groups of a solve: the free instances (indices) each chain of mates links,
+/// with the mates and relations acting on them.
+fn solve_groups(asm: &Assembly, mates: &[Mate], relations: &[Relation]) -> Vec<(Vec<usize>, Vec<Mate>, Vec<Relation>)> {
+    let n = asm.instances.len();
+    let idx: std::collections::HashMap<u64, usize> = asm.instances.iter().enumerate().map(|(i, x)| (x.id, i)).collect();
+    let free = |i: usize| !asm.instances[i].fixed;
+    let mut parent: Vec<usize> = (0..n).collect();
+    fn root(p: &mut [usize], mut i: usize) -> usize {
+        while p[i] != i {
+            p[i] = p[p[i]];
+            i = p[i];
+        }
+        i
+    }
+    let ends = |m: &Mate| -> Vec<usize> { [m.a, m.b].into_iter().flatten().filter_map(|c| idx.get(&c.inst).copied()).filter(|&i| free(i)).collect() };
+    let join = |p: &mut Vec<usize>, xs: &[usize]| {
+        for w in xs.windows(2) {
+            let (a, b) = (root(p, w[0]), root(p, w[1]));
+            p[a] = b;
+        }
+    };
+    for m in mates {
+        join(&mut parent, &ends(m));
+    }
+    // a relation ties its mates' parts together
+    for r in relations {
+        let xs: Vec<usize> = mates.iter().filter(|m| r.mates().any(|id| id == m.id)).flat_map(|m| ends(m)).collect();
+        join(&mut parent, &xs);
+    }
+    let mut groups: Vec<(usize, Vec<usize>)> = vec![];
+    for i in (0..n).filter(|&i| free(i)) {
+        let r = root(&mut parent, i);
+        match groups.iter_mut().find(|g| g.0 == r) {
+            Some(g) => g.1.push(i),
+            None => groups.push((r, vec![i])),
+        }
+    }
+    let mut out = vec![];
+    for (r, members) in groups {
+        let gm: Vec<Mate> = mates.iter().filter(|m| ends(m).first().is_some_and(|&i| root(&mut parent, i) == r)).cloned().collect();
+        if gm.is_empty() {
+            // nothing acts on these parts: they stay where they are
+            continue;
+        }
+        let ids: Vec<u64> = gm.iter().map(|m| m.id).collect();
+        let gr: Vec<Relation> = relations.iter().filter(|x| ids.contains(&x.a)).cloned().collect();
+        out.push((members, gm, gr));
+    }
+    out
+}
+
+/// Solve one group of `solve_groups`: move instances `free` to meet `mates` and `relations`.
+#[allow(clippy::too_many_arguments)]
+fn solve_group(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> DVec3, drives: &[Drive], grab: Option<(u64, DVec3)>, free: &[usize], mates: &[Mate], relations: &[Relation]) {
     let n = free.len() * 6;
-    let mates: Vec<Mate> = asm.mates.iter().filter(|m| !m.suppressed && m.a.is_some() && m.b.is_some() && Some(m.id) != skip).cloned().collect();
-    prealign(asm, &mates, hold);
     let base: Vec<Pose> = asm.instances.iter().map(|i| i.pose).collect();
     // a dragged part turns about the grabbed point
     let ctr: Vec<DVec3> = asm.instances.iter().map(|i| i.pose.apply(grab.filter(|g| g.0 == i.id).map(|g| g.1).unwrap_or_else(|| centers(i)))).collect();
@@ -725,8 +969,6 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
         let p = &poses[i];
         Some((p.apply(c.origin.into()), p.dir(c.z.into()).normalize(), p.dir(c.x.into()).normalize()))
     };
-    let driven = |id: u64| drives.iter().any(|d| d.mate == id);
-    let relations: Vec<Relation> = asm.relations.iter().filter(|r| !r.mates().all(driven)).cloned().collect();
     let active: std::cell::RefCell<Vec<(u64, f64)>> = std::cell::RefCell::new(vec![]);
     // turning mates' angles at the start, counted past ±180°: each evaluation is taken as the
     // nearest angle to it (the solver's steps are far smaller than half a turn)
@@ -742,7 +984,7 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
     let residuals = |x: &[f64]| -> Vec<f64> {
         let poses = poses_for(x);
         let mut out = vec![];
-        for m in &mates {
+        for m in mates {
             if let (Some(a), Some(b)) = (world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) {
                 mate_residuals(m, a, b, &mut out);
                 for d in drives.iter().filter(|d| d.mate == m.id) {
@@ -763,8 +1005,8 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
             }
         }
         let frames = |m: &Mate| -> Option<(Frame3, Frame3)> { Some((world(&poses, m.a.as_ref()?)?, world(&poses, m.b.as_ref()?)?)) };
-        for r in &relations {
-            if let Some(v) = relation_value(r, &mates, &frames, &turn) {
+        for r in relations {
+            if let Some(v) = relation_value(r, mates, &frames, &turn) {
                 out.push(v);
             }
         }
@@ -779,7 +1021,7 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
         }
         // turns cost relative to part size, well above sliding: a mate that only needs the part
         // moved shouldn't swing it about; the dragged part turns freely about the grabbed point
-        let r = turn_scale(asm, &mates, i, ctr[i]);
+        let r = turn_scale(asm, mates, i, ctr[i]);
         let dragged = grab.is_some_and(|g| g.0 == asm.instances[i].id);
         for j in 0..3 {
             w[6 * k + j] = if dragged { 1.0 } else { w[6 * k + j] * 100.0 * r * r };
@@ -788,6 +1030,17 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
     let mut x = vec![0.0; n];
     let norm = |r: &[f64]| r.iter().map(|v| v * v).sum::<f64>();
     for _pass in 0..4 {
+    // a dragged part pinned at a limit has to come back off the pointer: holding it there too
+    // leaves the solve too stiff to turn it about its mate (the hinge came apart instead)
+    if _pass > 0 && !active.borrow().is_empty() {
+        for (k, &i) in free.iter().enumerate() {
+            if grab.is_some_and(|g| g.0 == asm.instances[i].id) {
+                for j in 3..6 {
+                    w[6 * k + j] = 1.0;
+                }
+            }
+        }
+    }
     if n > 0 {
         for _ in 0..80 {
             let r = residuals(&x);
@@ -829,7 +1082,7 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
     // enforce travel limits: pin any mate that went past one and solve again
     let poses = poses_for(&x);
     let mut newly = false;
-    for m in &mates {
+    for m in mates {
         let (Some(lim), Some(a), Some(b)) = (m.limits, world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) else { continue };
         if active.borrow().iter().any(|x| x.0 == m.id) {
             continue;
@@ -850,16 +1103,9 @@ fn solve_once(asm: &mut Assembly, hold: &[u64], centers: &dyn Fn(&Instance) -> D
     }
     }
     let poses = poses_for(&x);
-    let mut turns = std::collections::HashMap::new();
-    for m in mates.iter().filter(|m| turning(m)) {
-        if let (Some(a), Some(b)) = (world(&poses, m.a.as_ref().unwrap()), world(&poses, m.b.as_ref().unwrap())) {
-            turns.insert(m.id, turn(m, a, b));
-        }
+    for &i in free {
+        asm.instances[i].pose = poses[i];
     }
-    for (i, p) in poses.into_iter().enumerate() {
-        asm.instances[i].pose = p;
-    }
-    asm.turns = turns;
 }
 
 /// Mates whose conditions do not hold at the current poses (residual above tolerance).
@@ -1181,6 +1427,67 @@ mod tests {
     fn conn(inst: u64, o: [f64; 3], z: [f64; 3]) -> Connector {
         let zz = DVec3::from(z).normalize();
         Connector { inst, origin: o, z: zz.into(), x: connector_x(o.into(), zz).into(), on: None }
+    }
+
+    #[test]
+    fn a_door_dragged_on_past_its_limit_stays_on_its_hinge() {
+        // a 500 mm door on a revolute limited to 0..-90°, its free edge pulled round to -150° a
+        // frame at a time: it stops at the limit, still on its hinge, and swings back shut
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0; 3]));
+        let mut m = mate(3, MateKind::Revolute, conn(1, [0.0; 3], [0.0, 0.0, 1.0]), conn(2, [0.0; 3], [0.0, 0.0, 1.0]));
+        m.flip = true;
+        m.limits = Some([-90.0, 0.0]);
+        a.mates.push(m);
+        let ctr = |_: &Instance| DVec3::new(0.0, -250.0, 300.0);
+        assert!(solve(&mut a, &[], &ctr).ok);
+        let grab = DVec3::new(0.0, -500.0, 300.0);
+        let angle = |a: &Assembly| {
+            let m = &a.mates[0];
+            a.mate_turn(m, a.world(&m.a.unwrap()).unwrap(), a.world(&m.b.unwrap()).unwrap()).to_degrees()
+        };
+        let pull = |a: &mut Assembly, deg: f64| {
+            let t = deg.to_radians();
+            let target = DVec3::new(500.0 * t.sin(), -500.0 * t.cos(), 300.0);
+            let p = a.instances[1].pose;
+            a.instances[1].pose = p.perturbed(DVec3::ZERO, target - p.apply(grab), DVec3::ZERO);
+            solve_drag(a, &ctr, 2, grab)
+        };
+        let mut open = vec![];
+        for k in 1..=100 {
+            assert!(pull(&mut a, -1.5 * k as f64).ok, "the hinge came apart at step {k}");
+            open.push(angle(&a));
+        }
+        let at = open.last().unwrap().abs();
+        assert!((at - 90.0).abs() < 1.0, "stopped at {at}°");
+        for k in 1..=100 {
+            assert!(pull(&mut a, -150.0 + 1.6 * k as f64).ok, "the hinge came apart closing, step {k}");
+        }
+        assert!(angle(&a).abs() < 1.0, "shut at {}°", angle(&a));
+    }
+
+    #[test]
+    fn separate_groups_solve_on_their_own() {
+        // three parts on revolutes to a fixed base, two of them also geared together: two groups
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        for k in 0..3u64 {
+            a.instances.push(inst(10 + k, false, [k as f64 * 40.0 + 1.5, 0.7, 0.4]));
+            a.mates.push(mate(20 + k, MateKind::Revolute, conn(1, [k as f64 * 40.0, 0.0, 0.0], [0.0, 0.0, 1.0]), conn(10 + k, [0.0; 3], [0.0, 0.0, 1.0])));
+        }
+        a.relations.push(Relation { id: 30, name: "g".into(), kind: RelationKind::Gear, a: 20, b: Some(21), ratio: 1.0, reverse: false, phase: 0.0, c: None, reverse_c: false });
+        let groups = solve_groups(&a, &a.mates, &a.relations);
+        let mut sizes: Vec<usize> = groups.iter().map(|g| g.0.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![1, 2]);
+        assert!(groups.iter().any(|g| g.2.len() == 1 && g.1.len() == 2));
+        let r = solve(&mut a, &[], &|_| DVec3::ZERO);
+        assert!(r.ok, "{:?}", r.failed);
+        for k in 0..3 {
+            let (o, _, _) = a.world(&a.mates[k].b.unwrap()).unwrap();
+            assert!((o - DVec3::new(k as f64 * 40.0, 0.0, 0.0)).length() < 1e-5, "{o:?}");
+        }
     }
 
     #[test]
@@ -1537,6 +1844,69 @@ mod tests {
         assert!(res.ok, "{:?}", res.failed);
         let (dx, dy) = (slide(&a, 10) - x0, slide(&a, 11) - y0);
         assert!((dx - 0.25 * r).abs() < 1e-3 && (dy - 0.25 * r).abs() < 1e-3, "{dx} {dy} vs {}", 0.25 * r);
+    }
+
+    #[test]
+    fn group_moves_as_one_body() {
+        // part 2 is mated (revolute) to the fixed part 1; part 3 is only grouped with part 2,
+        // 20 mm along X from it: when 2 is pulled onto its mate, 3 comes along unchanged
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [5.0, 7.0, 9.0]));
+        a.instances.push(inst(3, false, [25.0, 7.0, 9.0]));
+        a.mates.push(revolute(10, 2, [0.0, 0.0, 5.0]));
+        a.next_id = 20;
+        assert!(a.group(&[2, 3], None).is_some());
+        assert_eq!(a.groups[0].name, "Group 1");
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        let p2 = a.instance(2).unwrap().pose;
+        let p3 = a.instance(3).unwrap().pose;
+        assert!((p2.apply(DVec3::ZERO) - DVec3::new(0.0, 0.0, 5.0)).length() < 1e-6, "{:?}", p2.t);
+        // 3 stays 20 mm along 2's own X, turned the same way
+        assert!((p2.inverse_apply(p3.apply(DVec3::ZERO)) - DVec3::new(20.0, 0.0, 0.0)).length() < 1e-6);
+        assert!((p2.m() - p3.m()).abs_diff_eq(DMat3::ZERO, 1e-9));
+    }
+
+    #[test]
+    fn mate_on_a_grouped_part_moves_the_group_and_fixed_member_holds_it() {
+        // group (1 fixed, 2): a mate from free part 3 to part 2 moves 3, never the group
+        let mut a = Assembly::default();
+        a.instances.push(inst(1, true, [0.0; 3]));
+        a.instances.push(inst(2, false, [0.0, 30.0, 0.0]));
+        a.instances.push(inst(3, false, [11.0, 12.0, 13.0]));
+        a.next_id = 20;
+        a.group(&[1, 2], None);
+        let cb = Connector { inst: 3, origin: [0.0; 3], z: [0.0, 0.0, -1.0], x: [1.0, 0.0, 0.0], on: None };
+        let ca = Connector { inst: 2, origin: [0.0, 0.0, 4.0], z: [0.0, 0.0, 1.0], x: [1.0, 0.0, 0.0], on: None };
+        a.mates.push(Mate { id: 30, name: "f".into(), kind: MateKind::Fastened, a: Some(ca), b: Some(cb), flip: false, offset: 0.0, offset_xy: [0.0; 2], rotation: 0.0, limits: None, suppressed: false });
+        assert!(a.held_fixed(2));
+        place_new_mate(&mut a, 30, &[]);
+        assert!(solve(&mut a, &[], &|_| DVec3::ZERO).ok);
+        assert!((DVec3::from(a.instance(2).unwrap().pose.t) - DVec3::new(0.0, 30.0, 0.0)).length() < 1e-9);
+        assert!((DVec3::from(a.instance(3).unwrap().pose.t) - DVec3::new(0.0, 30.0, 4.0)).length() < 1e-6);
+        // dragging the group's free member drags nothing: the group is fixed
+        a.move_rigid(2, Pose { t: [0.0, 40.0, 0.0], ..Default::default() });
+        assert!((DVec3::from(a.instance(1).unwrap().pose.t) - DVec3::new(0.0, 10.0, 0.0)).length() < 1e-9, "move_rigid carries the group");
+    }
+
+    #[test]
+    fn ungroup_and_prune() {
+        let mut a = Assembly::default();
+        for i in 1..=4 {
+            a.instances.push(inst(i, false, [i as f64, 0.0, 0.0]));
+        }
+        a.next_id = 10;
+        let g = a.group(&[1, 2, 3], None).unwrap();
+        assert_eq!(a.rigid_with(2), vec![1, 2, 3]);
+        // regrouping 3 with 4 takes it out of the first group
+        a.group(&[3, 4], Some("B".into()));
+        assert_eq!(a.groups.iter().find(|x| x.id == g).unwrap().members, vec![1, 2]);
+        a.ungroup_instances(&[1]);
+        assert!(a.groups.iter().all(|x| x.id != g), "a group of one goes");
+        a.instances.retain(|x| x.id != 4);
+        a.prune_groups();
+        assert!(a.groups.is_empty());
+        assert!(a.group(&[1], None).is_none());
     }
 
     #[test]

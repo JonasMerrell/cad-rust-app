@@ -217,6 +217,7 @@ fn commands(app: &App) -> Vec<Cmd> {
             }
             v.push(cmd("Simulate", "Manufacture", "camSim", None, "play stock check crash", Action::Run(crate::cam_ui::toggle_sim)));
             v.push(cmd("Export G-code…", "Manufacture", "camGcode", None, "post nc gcode save", Action::Run(crate::cam_ui::export_dialog)));
+            v.push(cmd("Simulation web page…", "Manufacture", "camWebSim", None, "export html browser share playback animation", Action::Run(crate::cam_ui::web_sim_dialog)));
             v.push(cmd("Setup sheet…", "Manufacture", "camSheet", None, "print operator html", Action::Run(crate::cam_ui::sheet_dialog)));
             v.push(cmd("Tool library", "Manufacture", "camTools", None, "tools import fusion", Action::Run(|a| a.cam.library_open = true)));
         }
@@ -228,6 +229,19 @@ fn commands(app: &App) -> Vec<Cmd> {
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo parts", Action::Run(crate::asm_ui::toggle_isolate)));
             v.push(cmd("Hide / show selected instances", "View", "eyeOff", Some("H"), "hide show visibility eye parts", Action::Run(crate::asm_ui::toggle_hide_selected)));
             v.push(cmd("Show all instances", "View", "eye", Some("Shift+H"), "unhide show hidden visibility eye parts", Action::Run(crate::asm_ui::show_all)));
+            if app.asm.sel.len() > 1 {
+                v.push(cmd("Group selected instances", "Assembly", "group", Some("Ctrl+G"), "group rigid together combine lock move as one body", Action::Run(crate::asm_ui::group_selected)));
+            }
+            if crate::asm_ui::asm(app).is_some_and(|a| a.groups.iter().any(|g| g.members.iter().any(|m| app.asm.sel.contains(m)))) {
+                v.push(cmd("Ungroup", "Assembly", "ungroup", Some("Ctrl+Shift+G"), "ungroup dissolve split group rigid", Action::Run(crate::asm_ui::ungroup_selected)));
+            }
+            if app.asm.sel.len() == 1 {
+                v.push(cmd("Open selected part", "Assembly", "partStudio", None, "edit go to part studio source sub-assembly jump", Action::Run(|a| {
+                    if let Some(&id) = a.asm.sel.first() {
+                        crate::asm_ui::open_part(a, id, None);
+                    }
+                })));
+            }
         }
         Tab::Sim(_) => {
             v.push(cmd("Fixed support", "Simulation", "feaFixed", None, "fea constraint hold clamp", Action::Run(|a| crate::fea_ui::add_support(a, crate::fea::SupportKind::Fixed))));
@@ -275,9 +289,20 @@ fn commands(app: &App) -> Vec<Cmd> {
     v.push(cmd("Keyboard shortcuts", "Help", "keyboard", Some("F1"), "keys help hotkeys list", Action::Run(|a| a.session.show_shortcuts = true)));
     v.push(cmd("New document", "File", "file", Some("Ctrl+N"), "new part blank start", Action::Run(|a| a.guard(crate::session::Pending::New))));
     v.push(cmd("Version control (git)", "File", "branch", None, "git github history commit push pull track changes versions repository", Action::Run(crate::vcs_ui::toggle)));
+    v.push(cmd("Open from GitHub…", "File", "branch", None, "github clone repository project sync another computer device download", Action::Run(crate::github_ui::open_repos)));
+    v.push(cmd("GitHub account", "File", "branch", None, "github sign in login link account token oauth sign out", Action::Run(crate::github_ui::open_account)));
+    v.push(cmd("Sync with GitHub", "File", "branch", None, "github sync push pull fetch merge remote", Action::Run(crate::vcs_ui::sync_now)));
     v.push(cmd("New project…", "File", "folder", None, "project folder create start git", Action::Run(crate::vcs_ui::new_project)));
     v.push(cmd("Export project (ZIP)…", "File", "export", None, "project zip archive share backup send", Action::Run(crate::vcs_ui::export_project)));
     v.push(cmd("Import project (ZIP)…", "File", "download", None, "project zip archive unpack open", Action::Run(crate::vcs_ui::import_project)));
+    v.push(cmd(
+        if app.session.prefs.group_tabs { "Ungroup tabs (own order)" } else { "Group tabs by type" },
+        "View",
+        "configurations",
+        None,
+        "tab bar bottom group sort kind type part studios assemblies drawings order",
+        Action::Run(|a| a.toggle_group_tabs()),
+    ));
     v.push(cmd("Rebuild all Part Studios", "File", "history", None, "regenerate rebuild recompute refresh cache saved geometry", Action::Run(|a| a.rebuild_all())));
     v.push(cmd("Design with Claude", "Claude", "chat", Some("Ctrl+L"), "ai chat natural language assistant agent", Action::Run(crate::claude_ui::toggle)));
     v.push(cmd("Undo", "Edit", "undo", Some("Ctrl+Z"), "", Action::Run(|a| a.undo())));

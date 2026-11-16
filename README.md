@@ -182,7 +182,8 @@ adjustable bond factor; see
 
 A PCB tab holds a schematic and a two-layer board that share the same parts. Wire symbols from the
 library, name nets with labels and power ports, then place footprints by hand or automatically and
-route them with 45° tracks and vias or with the autorouter. Copper pours, a ratsnest and a design
+route them with 45° tracks and vias or with the autorouter. While you route by hand, other nets'
+tracks and vias are pushed out of the way (push and shove, ported from KiCad's router). Copper pours, a ratsnest and a design
 rule check are there, and the output is a Gerber and Excellon ZIP for board makers such as JLCPCB,
 BOM and pick-and-place CSVs, and a **3D board** Part Studio to put in your assemblies or export as STEP.
 
@@ -202,6 +203,13 @@ an installed KiCad's libraries, or downloads release 10.0.8 from gitlab.com/kica
 `~/.cache/cad-rust-app/kicad` on first use (about 60 MB, 470 MB unpacked). The libraries are © the
 KiCad Libraries Team and contributors under CC-BY-SA 4.0, with an exception that leaves designs
 made with them, and their outputs, free of the share-alike terms.
+
+**Digi-Key parts:** "Add Digi-Key's library…" in the same window downloads Digi-Key's KiCad library
+(about 1,000 orderable parts, each with its footprint, from github.com/Digi-Key/digikey-kicad-library,
+© Digi-Key Corporation, CC-BY-SA 4.0 with the same design exception). Its parts can be searched by
+Digi-Key or manufacturer part number, "Digi-Key parts only" lists just them, and a placed part takes
+its Digi-Key number, MPN and manufacturer, ready for the Digi-Key BOM. Digi-Key no longer updates
+that library, so check stock. Any other symbol has a "Find on Digi-Key" link that searches digikey.com.
 
 ### Circuit and firmware simulation
 
@@ -274,6 +282,7 @@ Pico controller firmware homes the steppers and runs a pick-and-place cycle in t
 Download a build for Linux or Windows from
 [Releases](https://github.com/JonasMerrell/cad-rust-app/releases) (`rcad-<platform>`), unpack it and run
 `rcad`. The archive also has `AGENTS.md`, `SCRIPTING.md`, `.mcp.json` and the examples.
+On Linux, `./install.sh` in the unpacked folder adds rCAD with its icon to your app menu (`./install.sh --uninstall` removes it).
 
 Or build from source:
 
@@ -346,9 +355,11 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/pcb.rs` | PCB model: parts, schematic wires and labels, the netlist, board copper, ratsnest, copper pours and the design rule check |
 | `src/pcb_lib.rs` | schematic symbols, footprints and the silkscreen stroke font |
 | `src/pcb_route.rs` | the grid autorouter and automatic placement |
+| `src/pcb_shove.rs` | push and shove for interactive routing, ported from KiCad's router (GPL-3.0-or-later notices kept) |
 | `src/pcb_export.rs` | drawing lists for both views, Gerber/Excellon/BOM/CPL output and the 3D board Part Studio |
 | `src/pcb_ui.rs` | PCB tab |
 | `src/kicad_libs.rs`, `src/kicad_lib_ui.rs` | KiCad library download, index, search and loading; the symbol and footprint choosers |
+| `src/kicad_legacy.rs` | KiCad 5 `.lib` symbol libraries (Digi-Key's KiCad library) read as `.kicad_sym` trees |
 | `src/digikey.rs`, `src/digikey_ui.rs` | Digi-Key API client and CSV import, products to parts, the PCB tab's Digi-Key section |
 | `src/circuit.rs` | circuit simulation setup, part models by value, the circuit built from the schematic, results and measurements |
 | `src/circuit_solve.rs` | the circuit solver: MNA with Newton-Raphson, variable-step BDF2 transient with events and an external pin driver, AC sweep |

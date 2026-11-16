@@ -1,0 +1,5 @@
+[env]
+# CMake 4 refuses projects that declare `cmake_minimum_required` below 3.5. The OpenCascade
+# sources vendored by the `occt-sys` crate still declare 3.1, so a fresh build (which compiles
+# OpenCascade from source) fails under CMake 4 without this. Older CMake versions ignore it.
+CMAKE_POLICY_VERSION_MINIMUM = "3.5"

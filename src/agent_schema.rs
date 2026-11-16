@@ -407,6 +407,10 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             ),
             "explode steps, applied in order",
         ),
+        ("assembly_group", "instances") => arr(t("integer", "instance id"), "instances to group (two or more)"),
+        ("assembly_group", "remove") => arr(t("integer", "instance id"), "instances to take out of their groups"),
+        ("assembly_group", "ungroup") => t("integer", "group id to dissolve"),
+        ("assembly_group", "name") => t("string", "group name (default Group N)"),
         ("assembly_info", "interference") => t("boolean", "also list overlapping instances with their overlap volume"),
         ("export_web", "inline") => t("boolean", "one self-contained page (default true); false writes .json and .bin beside it"),
         ("export_web", "assembly") => json!({"type": "integer", "minimum": 0, "description": "the assembly to show (default: the parts of a Part Studio)"}),
@@ -452,14 +456,14 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)")}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)"), "spindle_power": t("number", "spindle's rated electrical input power, W (0: not known, 1500 assumed)"), "spindle_efficiency": t("number", "share of the input power at the shaft (default 0.78)"), "spindle_rated_rpm": t("number", "speed the rated power is at; below it the torque is constant (0: 24000)"), "max_cut_force": t("number", "most sideways force the machine takes at the tool, N (0: 700 assumed)"), "chip_clearing": t("string", "flood-low (default), flood, air or none"), "holder_stiffness": t("number", "holder and spindle stiffness at the tool, N/mm (20000 assumed)"), "tool_damping": t("number", "damping ratio of the tool's mode (0.03)"), "chatter_scale": t("number", "chatter margin scale (0: the built-in 0.078); import_cutlog sets it"), "spindle_rated_slip": t("number", "spindle speed droop at rated load (0.04)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),
             "boxes the toolpaths lift over (replaces the list)",
         ),
         ("create_cam" | "edit_cam", "probe") => obj(
-            json!({"mode": en(&["off", "plate", "setter"], "probing mode"), "plate_at": xyz("touch plate position, work coordinates"), "plate_thickness": t("number", "mm"), "setter": xyz("tool setter, machine coordinates"), "travel": t("number", "probe distance, mm"), "fast": t("number", "mm/min"), "slow": t("number", "mm/min")}),
+            json!({"mode": en(&["off", "plate", "setter"], "probing mode"), "plate_at": xyz("touch plate position, work coordinates"), "plate_thickness": t("number", "mm"), "setter": xyz("tool setter, machine coordinates"), "travel": t("number", "probe distance, mm"), "fast": t("number", "mm/min"), "slow": t("number", "mm/min"), "z_reference": t("string", "rcnc: the Z reference every tool is zeroed on, e.g. Vise (the work zero's Z must be that surface: origin stock_bottom_center / part_bottom_center); empty: Z from probing the stock top")}),
             &[],
             "tool measuring after each tool change",
         ),
@@ -478,6 +482,9 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "program") => t("integer", "program number"),
         ("import_tool_library", "path") => t("string", "Fusion 360 .json/.tools library or a tools.json"),
         ("import_tool_library", "cam") => json!({"type": "integer", "minimum": 0, "description": "also add every tool to this Manufacture tab"}),
+        ("import_cutlog", "path") => t("string", "the <program>.cutlog.json rcnc wrote beside the program"),
+        ("import_cutlog", "apply") => t("boolean", "write the suggested spindle efficiency and chatter scale into the setup's machine"),
+        ("import_tool_library", "material") => t("string", "every imported tool is this material, whatever the file says (carbide, hss, cobalt)"),
         ("cam_tool_library" | "cam_tool", "kind") => en(&cam_keys(&crate::cam::ToolKind::ALL, crate::cam::ToolKind::key), "tool kind"),
         ("cam_tool_library", "search") => t("string", "search words, e.g. '6 flat'"),
         ("cam_tool", "preset") => t("string", "library search, e.g. 'Ø6 flat end mill'"),
@@ -539,6 +546,19 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_tool", "tapping_head") => t("boolean", "taps: held in a self-reversing tapping head (no G84 or spindle reversal)"),
         ("cam_tool", "reverse_ratio") => json!({"type": "number", "exclusiveMinimum": 0, "description": "the tapping head's reverse ratio (default 1.75)"}),
         ("cam_op", "chip_thinning") => t("boolean", "adaptive: raise the cutting feed for radial chip thinning (at most ×1.5)"),
+        ("cam_op", "probing") => json!({"type": "object", "description": "probe: what to find and set", "properties": {
+            "cycle": en(&["z", "edge", "corner", "bore", "boss"], "z: the top (sets Z); edge: one side (X or Y); corner: X and Y; bore / boss: a middle (X and Y)"),
+            "side": t("string", "edge: left, right, front, back; corner: front_left, front_right, back_left, back_right"),
+            "on_part": t("boolean", "the part's faces instead of the stock's"),
+            "size": t("number", "bore/boss diameter (with at as its middle); 0 = found on the part"),
+            "depth": t("number", "mm below the top the ball touches walls"),
+            "clearance": t("number", "start gap to the surface, mm"),
+            "overtravel": t("number", "mm past the expected surface before giving up"),
+            "inset": t("number", "corner: mm from the corner the sides are touched"),
+            "with_z": t("boolean", "corner: touch the top too and set Z"),
+            "tolerance": t("number", "rcnc, stock top or middle (which rcnc's Find stock wizard does): largest difference between probed and stock size, mm (default 1); two bores in a row (rcnc Find bores): largest error in their spacing"),
+            "max_turn": t("number", "rcnc, two bores in a row: how far the part may be turned, degrees (default 0.2)")
+        }}),
         ("cam_soft_jaws", "one_piece") => t("boolean", "printed only: one block between the vise jaws, squeezed round the part, instead of two jaws"),
         ("cam_soft_jaws", "mount") => {
             let presets: Vec<&str> = crate::cam::JAW_MOUNTS.iter().map(|m| m.1).collect();
@@ -558,6 +578,8 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         }
         ("insert_standard_part", "length") => json!({"type": "number", "exclusiveMinimum": 0, "description": "length, mm, for screws, pins, shafts, motors and extrusions"}),
         ("export_setup_sheet", "path") => out_path("the .html setup sheet"),
+        ("export_cam_simulation", "path") => out_path("the .html page"),
+        ("export_cam_simulation", "resolution") => json!({"type": "integer", "minimum": 50, "maximum": 2000, "description": "cells along the longer stock side (default 500)"}),
         ("export_gcode", "path") => out_path("the G-code file"),
         ("create_simulation" | "edit_simulation", "material") => en(&fea_materials(), "material for every part (\"\" = each part's own)"),
         ("create_simulation" | "edit_simulation", "mesh_size") => json!({"type": ["number", "null"], "exclusiveMinimum": 0, "description": "element size, mm (null = auto)"}),
@@ -666,7 +688,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         // fields serde leaves out at their defaults, so serde_fields can't see them
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
-            "cam_op" => &[("chip_thinning", "boolean")],
+            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object"), ("tip_offset", "number")],
             _ => &[],
         };
         for (k, ty) in hidden {

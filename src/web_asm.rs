@@ -110,7 +110,8 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
     let mut notes = vec![];
 
     // a spanning tree from the fixed instances along the mates: (parent instance, the mate, child is its b side)
-    let mut parent: HashMap<u64, Option<(u64, usize, bool)>> = HashMap::new();
+    // (a group member hangs off the member that was reached first, with no mate: it rides rigidly)
+    let mut parent: HashMap<u64, Option<(u64, Option<usize>, bool)>> = HashMap::new();
     for x in insts.iter().filter(|x| x.fixed) {
         parent.insert(x.id, None);
     }
@@ -130,14 +131,25 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
             }
             let (pa, pb) = (parent.contains_key(&a), parent.contains_key(&b));
             if pa && !pb {
-                parent.insert(b, Some((a, k, true)));
+                parent.insert(b, Some((a, Some(k), true)));
             } else if pb && !pa {
-                parent.insert(a, Some((b, k, false)));
+                parent.insert(a, Some((b, Some(k), false)));
             } else {
                 continue;
             }
             used[k] = true;
             grew = true;
+        }
+        // groups move as one body: the rest of a reached group follows its first reached member
+        for g in &asm.groups {
+            let ms: Vec<u64> = g.members.iter().copied().filter(|m| node_of.contains_key(m)).collect();
+            let Some(&root) = ms.iter().find(|m| parent.contains_key(m)) else { continue };
+            for &m in &ms {
+                if !parent.contains_key(&m) {
+                    parent.insert(m, Some((root, None, true)));
+                    grew = true;
+                }
+            }
         }
         if !grew {
             break;
@@ -165,6 +177,7 @@ pub fn assembly_scene(ctx: &dyn DocCtx, ai: usize) -> Result<(Scene, Vec<Mesh>, 
         let ip = inverse(&pp);
         scene.nodes[i].parent = Some(node_of[&p]);
         scene.nodes[i].base = Some(rows(&ip.compose(&x.pose)));
+        let Some(k) = k else { continue };
         let m = &asm.mates[k];
         let kind = match m.kind {
             MateKind::Slider | MateKind::Cylindrical => JointKind::Slider,

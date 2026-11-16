@@ -32,6 +32,25 @@ impl Default for Tab {
     }
 }
 
+impl Tab {
+    /// Which kind of tab this is, in the order the grouped tab bar shows the kinds.
+    pub fn kind(self) -> usize {
+        match self {
+            Tab::Studio(_) => 0,
+            Tab::Assembly(_) => 1,
+            Tab::Drawing(_) => 2,
+            Tab::Cam(_) => 3,
+            Tab::Sim(_) => 4,
+            Tab::Pcb(_) => 5,
+        }
+    }
+
+    /// The group header of a kind in the grouped tab bar (plural).
+    pub fn kind_label(kind: usize) -> &'static str {
+        ["Part Studios", "Assemblies", "Drawings", "Manufacture", "Simulations", "PCBs"].get(kind).copied().unwrap_or("Tabs")
+    }
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 pub struct Workspace {
     pub format: String,
@@ -142,6 +161,30 @@ impl Workspace {
         let j = (i as isize + by).clamp(0, v.len() as isize - 1) as usize;
         let x = v.remove(i);
         v.insert(j, x);
+        self.tab_order = v;
+    }
+
+    /// The tabs with each kind together (Part Studios, Assemblies, Drawings, Manufacture,
+    /// Simulation, PCB), each kind in the order the user arranged it.
+    pub fn tabs_grouped(&self) -> Vec<Tab> {
+        let mut v = self.tabs();
+        v.sort_by_key(|t| t.kind());
+        v
+    }
+
+    /// Move a tab `by` places among the tabs of its own kind (for the grouped tab bar): the
+    /// other kinds keep their places in the manual order.
+    pub fn move_tab_in_kind(&mut self, t: Tab, by: isize) {
+        let mut v = self.tabs();
+        let slots: Vec<usize> = (0..v.len()).filter(|&i| v[i].kind() == t.kind()).collect();
+        let mut kind: Vec<Tab> = slots.iter().map(|&i| v[i]).collect();
+        let Some(i) = kind.iter().position(|x| *x == t) else { return };
+        let j = (i as isize + by).clamp(0, kind.len() as isize - 1) as usize;
+        let x = kind.remove(i);
+        kind.insert(j, x);
+        for (s, k) in slots.into_iter().zip(kind) {
+            v[s] = k;
+        }
         self.tab_order = v;
     }
 
@@ -297,6 +340,24 @@ mod tests {
         assert_eq!(w.tabs(), vec![Tab::Assembly(0), Tab::Studio(0), Tab::Drawing(0)]);
         let back = Workspace::from_json(&w.to_json()).unwrap();
         assert_eq!(back.tabs(), w.tabs());
+    }
+
+    #[test]
+    fn grouped_tabs() {
+        let mut w = Workspace::default();
+        w.studios.push(Studio { name: "B".into(), doc: Document::default() });
+        w.assemblies.push(Default::default());
+        w.drawings.push(Default::default());
+        // own order: A1, S0, D0, S1
+        w.tab_order = vec![Tab::Assembly(0), Tab::Studio(0), Tab::Drawing(0), Tab::Studio(1)];
+        assert_eq!(w.tabs_grouped(), vec![Tab::Studio(0), Tab::Studio(1), Tab::Assembly(0), Tab::Drawing(0)]);
+        // moving inside a group swaps the studios' slots only; the own order is otherwise kept
+        w.move_tab_in_kind(Tab::Studio(1), -1);
+        assert_eq!(w.tabs(), vec![Tab::Assembly(0), Tab::Studio(1), Tab::Drawing(0), Tab::Studio(0)]);
+        assert_eq!(w.tabs_grouped(), vec![Tab::Studio(1), Tab::Studio(0), Tab::Assembly(0), Tab::Drawing(0)]);
+        // past the end of the group stays put
+        w.move_tab_in_kind(Tab::Assembly(0), 3);
+        assert_eq!(w.tabs()[0], Tab::Assembly(0));
     }
 
     #[test]

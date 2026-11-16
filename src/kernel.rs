@@ -66,7 +66,14 @@ pub struct BodyMesh {
     /// An open surface rather than a solid.
     #[serde(default)]
     pub surface: bool,
+    /// The name and colour the imported file gives this part (STEP products and styles), for the
+    /// editor to copy into the document when the file is imported.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub from_file: Option<FileProps>,
 }
+
+/// A part's name ("" when the file has none) and colour as an imported file gives them.
+pub type FileProps = (String, Option<[u8; 3]>);
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
 pub struct CurveMesh {
@@ -214,6 +221,8 @@ pub struct Model<'a> {
     /// The feature being built (0: none), and the references it resolved that should be stored back.
     current: std::cell::Cell<FeatId>,
     updates: std::cell::RefCell<Vec<crate::doc::RefUpdate>>,
+    /// Names and colours of imported parts, from their files.
+    file_props: HashMap<BodyId, FileProps>,
 }
 
 #[derive(Clone, Copy, Debug)]
@@ -254,6 +263,7 @@ impl<'a> Model<'a> {
             named: vec![],
             current: Default::default(),
             updates: Default::default(),
+            file_props: HashMap::new(),
         }
     }
 
@@ -1318,15 +1328,20 @@ impl<'a> Model<'a> {
                 if !(scale > 0.0) {
                     return Err("scale must be positive".into());
                 }
-                let shape = imported_shape(step, format, data, scale, *merge)?;
+                let (shape, props) = imported_named(step, format, data, scale, *merge)?;
                 let solids = solids_of(&shape);
                 if solids.is_empty() {
                     // an open mesh or surface model: keep it as a surface body
                     self.add_surface(fid, shape);
                     return Ok(());
                 }
+                let named = props.len() == solids.len();
                 for (i, so) in solids.into_iter().enumerate() {
-                    self.bodies.push(Body { id: (fid, i as u32), shape: so });
+                    let id = (fid, i as u32);
+                    if named && (!props[i].0.is_empty() || props[i].1.is_some()) {
+                        self.file_props.insert(id, props[i].clone());
+                    }
+                    self.bodies.push(Body { id, shape: so });
                 }
                 Ok(())
             }
@@ -1810,6 +1825,7 @@ pub fn rebuild(doc: &Document, skip: &[FeatId], mut progress: impl FnMut(FeatId)
         if let Ok(mut mesh) = mesh_body(&b.shape) {
             mesh.surface = solids_of(&b.shape).is_empty();
             mesh.id = b.id;
+            mesh.from_file = m.file_props.get(&b.id).cloned();
             out.issues.extend(check_body(&b.shape, &mesh, valid));
             mesh.name = if mesh.surface { format!("Surface {}", i + 1) } else { format!("Part {}", i + 1) };
             // face names, for what refers to the part from outside the Part Studio (mate connectors)
@@ -1881,17 +1897,44 @@ pub fn export(doc: &Document, format: &str, path: &str) -> Result<(), String> {
 
 // ------------------------------------------------------------------ import
 
-/// Imported files are parsed once per worker process and reused on every rebuild.
-static IMPORTS: std::sync::Mutex<Option<HashMap<u64, Shape>>> = std::sync::Mutex::new(None);
+/// Imported files are parsed once per worker process and reused on every rebuild, with the names
+/// and colours their solids have in the file (STEP only).
+static IMPORTS: std::sync::Mutex<Option<HashMap<u64, (Shape, Vec<FileProps>)>>> = std::sync::Mutex::new(None);
 
 fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool) -> R<Shape> {
+    imported_named(step, format, data, scale, merge).map(|(s, _)| s)
+}
+
+/// A STEP file's shape (the same solids in the same order as `Shape::read_step` gives) with each
+/// solid's product name and colour.
+pub fn read_step_named(path: &std::path::Path) -> R<(Shape, Vec<FileProps>)> {
+    let mut names = vec![];
+    let mut cols = vec![];
+    let s = opencascade_sys::extra::ex_read_step_named(&path.to_string_lossy(), &mut names, &mut cols);
+    if s.is_null() {
+        return Err(format!("could not read the STEP file: {}", opencascade_sys::extra::ex_last_error()));
+    }
+    let props = names
+        .into_iter()
+        .enumerate()
+        .map(|(i, n)| {
+            let c = &cols[i * 3..i * 3 + 3];
+            let rgb = if c[0] < 0.0 { None } else { Some([c[0], c[1], c[2]].map(|v| (v * 255.0).round().clamp(0.0, 255.0) as u8)) };
+            (n.trim().to_string(), rgb)
+        })
+        .collect();
+    Ok((Shape::from_shape(&s), props))
+}
+
+fn imported_named(step: &str, format: &str, data: &str, scale: f64, merge: bool) -> R<(Shape, Vec<FileProps>)> {
     use std::hash::{Hash, Hasher};
     let mut h = std::collections::hash_map::DefaultHasher::new();
     (step, format, data, scale.to_bits(), merge).hash(&mut h);
     let key = h.finish();
-    if let Some(s) = IMPORTS.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&key)).map(dup)) {
+    if let Some(s) = IMPORTS.lock().ok().and_then(|m| m.as_ref().and_then(|m| m.get(&key)).map(|(s, p)| (dup(s), p.clone()))) {
         return Ok(s);
     }
+    let mut props = vec![];
     let bytes = if data.is_empty() { step.as_bytes().to_vec() } else { crate::import::unpack(data)? };
     let format = if !format.is_empty() {
         format.to_string()
@@ -1903,7 +1946,17 @@ fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool)
     let shape = match format.as_str() {
         "step" | "iges" => {
             let path = import_temp_file(&bytes, if format == "iges" { "igs" } else { "step" })?;
-            let s = if format == "iges" { Shape::read_iges(&path) } else { Shape::read_step(&path) }.map_err(|e| format!("could not read the {} file: {e:?}", format.to_uppercase()));
+            let s = if format == "iges" {
+                Shape::read_iges(&path).map_err(|e| format!("could not read the IGES file: {e:?}"))
+            } else {
+                // names and colours too; the plain reader if that fails
+                read_step_named(&path)
+                    .map(|(s, p)| {
+                        props = p;
+                        s
+                    })
+                    .or_else(|_| Shape::read_step(&path).map_err(|e| format!("could not read the STEP file: {e:?}")))
+            };
             let _ = std::fs::remove_file(&path);
             let s = s?;
             if (scale - 1.0).abs() > 1e-12 { occ::transform(&s, DMat3::from_diagonal(DVec3::splat(scale)), DVec3::ZERO)? } else { s }
@@ -1919,9 +1972,9 @@ fn imported_shape(step: &str, format: &str, data: &str, scale: f64, merge: bool)
         if m.len() > 16 {
             m.clear();
         }
-        m.insert(key, dup(&shape));
+        m.insert(key, (dup(&shape), props.clone()));
     }
-    Ok(shape)
+    Ok((shape, props))
 }
 
 /// A packed STEP file (see `import::pack`) as one solid: its solids fused (a KiCad 3D model's
@@ -4226,6 +4279,37 @@ mod derived_tests {
         let note = export_assembly(&items, "Parts", &path("parts.step"), false).unwrap();
         assert!(note.is_none());
         assert_eq!(solids_of(&Shape::read_step(&path("parts.step")).unwrap()).len(), 2);
+        // an import takes the parts' names and colours from the file, solid for solid
+        let mut c = Document::default();
+        c.parts.insert(crate::doc::body_key((eid, 0)), crate::doc::PartProps { color: Some([255, 128, 0]), ..Default::default() });
+        c.features = STUDIOS.lock().unwrap()[0].features.clone();
+        *STUDIOS.lock().unwrap() = vec![c];
+        let items: Vec<AsmExportItem> = vec![(0, (eid, 0), at(0.0), "Røde boks".into()), (0, (eid, 0), at(30.0), "Box 2".into())];
+        export_assembly(&items, "Named", &path("named.step"), false).unwrap();
+        let plain = solids_of(&Shape::read_step(&path("named.step")).unwrap());
+        let (shape, props) = read_step_named(std::path::Path::new(&path("named.step"))).unwrap();
+        let named = solids_of(&shape);
+        assert_eq!(named.len(), plain.len());
+        for (a, b) in named.iter().zip(&plain) {
+            assert!((centroid(a) - centroid(b)).length() < 1e-9);
+        }
+        assert_eq!(props.len(), 2);
+        let mut got: Vec<(f64, FileProps)> = named.iter().map(|s| centroid(s).x).zip(props).collect();
+        got.sort_by(|a, b| a.0.total_cmp(&b.0));
+        assert_eq!(got[0].1.1, Some([255, 128, 0]), "{got:?}");
+        assert_eq!(got[1].1.1, Some([255, 128, 0]));
+        assert!(!got[0].1.0.is_empty(), "{got:?}");
+        let mut d = Document::default();
+        let bytes = std::fs::read(path("named.step")).unwrap();
+        let fid = d.insert("Named".into(), Op::Import { name: "Named".into(), step: String::new(), format: "step".into(), data: crate::import::pack(&bytes), scale: "1".into(), merge: true });
+        let r = rebuild(&d, &[], |_| {});
+        assert!(r.bodies.iter().all(|b| b.from_file.as_ref().and_then(|f| f.1) == Some([255, 128, 0])), "{:?}", r.bodies.iter().map(|b| &b.from_file).collect::<Vec<_>>());
+        assert_eq!(d.adopt_file_props(fid, &r.bodies), 2);
+        assert_eq!(d.parts.get(&crate::doc::body_key((fid, 0))).and_then(|p| p.color), Some([255, 128, 0]));
+        // set by hand: kept
+        d.parts.get_mut(&crate::doc::body_key((fid, 0))).unwrap().color = Some([1, 2, 3]);
+        d.adopt_file_props(fid, &r.bodies);
+        assert_eq!(d.parts.get(&crate::doc::body_key((fid, 0))).and_then(|p| p.color), Some([1, 2, 3]));
         let _ = std::fs::remove_dir_all(&dir);
     }
 }
