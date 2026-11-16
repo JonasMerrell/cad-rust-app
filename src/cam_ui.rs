@@ -1658,6 +1658,16 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                             ui.label(RichText::new("ramp along the wall").color(theme::muted()).size(12.0)).on_hover_text(tip);
                         }
                     });
+                    if o.lead > 0.0 {
+                        // the seam: run on past the start, and a light last lap when cutting to size
+                        num(ui, "Overlap", &mut o.overlap, " mm", 0.0..=20.0, 0.05);
+                        if o.leave.abs() < 1e-9 {
+                            num(ui, "Last lap", &mut o.finish_lap, " mm", 0.0..=1.0, 0.005);
+                        }
+                        row(ui, "Spring pass", |ui| {
+                            ui.checkbox(&mut o.spring_pass, "").on_hover_text("Go round the last lap once more at the same size");
+                        });
+                    }
                     // extra passes outside the wall take any stock further out than this down first
                     stepover_row(ui, "Max engagement", &mut o.max_engagement, crate::cam_contour::DEFAULT_MAX_ENGAGEMENT);
                 }

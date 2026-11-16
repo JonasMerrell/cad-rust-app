@@ -227,6 +227,14 @@ pub struct Tool {
     pub stepdown: f64,
     /// Default stepover as a fraction of the diameter.
     pub stepover: f64,
+    /// Measured (tap test) first bending mode at the tip: frequency Hz, stiffness N/mm, damping ratio;
+    /// 0 = worked out from the tool's geometry and the machine's holder stiffness (see docs/cutting-model.md).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_hz: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_k: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub mode_zeta: f64,
 }
 
 impl Default for Tool {
@@ -254,6 +262,9 @@ impl Default for Tool {
             coolant: Coolant::Auto,
             tapping_head: false,
             reverse_ratio: 1.75,
+            mode_hz: 0.0,
+            mode_k: 0.0,
+            mode_zeta: 0.0,
             rpm: 12000.0,
             feed: 1000.0,
             plunge_feed: 300.0,
@@ -911,8 +922,22 @@ pub struct Operation {
     pub sketches: Vec<u64>,
     /// Trace: depth below the surface; V-carve: deepest cut (0 = as deep as the V-bit goes).
     pub depth: f64,
-    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it).
+    /// Contour: radius of the arcs that lead onto and off the wall (0 = ramp straight along it). New contours
+    /// get half the tool's diameter; where that doesn't fit, smaller arcs are tried before ramping.
     pub lead: f64,
+    /// Contour with leads: how far the pass runs on past where it started before it leads off, mm, so its end
+    /// blends over its start instead of leaving a step (the seam's witness mark).
+    pub overlap: f64,
+    /// Contour with leads, cutting to size (leave 0): a light last lap. The lap before it stays this much
+    /// outside the wall (mm), so the last one takes almost nothing and the tool hardly bends: 0 = no lap.
+    pub finish_lap: f64,
+    /// Contour: go round the last lap a second time at the same size (a spring pass).
+    #[serde(skip_serializing_if = "is_false")]
+    pub spring_pass: bool,
+    /// Contour with leads: where passes start and end (work X/Y): on the side nearest this point. None: in the
+    /// middle of the loop's longest straight side, away from corners and arcs.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub seam: Option<[f64; 2]>,
     /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
     /// stock reaches further out than that, extra passes outside the wall take it down first.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1040,6 +1065,10 @@ impl Default for Operation {
             sketches: vec![],
             depth: 0.0,
             lead: 0.0,
+            overlap: 1.5,
+            finish_lap: 0.03,
+            spring_pass: false,
+            seam: None,
             max_engagement: None,
             chip_thinning: false,
             probing: None,
@@ -1177,11 +1206,60 @@ pub struct Machine {
     /// path to a machine file); empty = none.
     #[serde(skip_serializing_if = "String::is_empty")]
     pub model: String,
+    /// The spindle's rated (electrical input) power, W, at `spindle_rated_rpm`; 0 = not known (the load
+    /// check then assumes 1.5 kW at 24000 rpm, a common VFD spindle, and says so).
+    pub spindle_power: f64,
+    /// Share of the input power that reaches the shaft.
+    pub spindle_efficiency: f64,
+    pub spindle_rated_rpm: f64,
+    /// The most sideways force the machine takes at the tool, N; 0 = not known (700 assumed).
+    pub max_cut_force: f64,
+    /// How chips are cleared: "flood-low" (low-pressure flood, the default), "flood", "air", "none".
+    pub chip_clearing: String,
+    /// Holder and spindle stiffness at the tool, N/mm (in series with the tool's own bending; a guess until
+    /// a tap test), and the damping ratio of the tool's mode.
+    pub holder_stiffness: f64,
+    pub tool_damping: f64,
+    /// Scales the chatter margin to observations (0: `cam_cutting::CHATTER_SCALE`); set from a cut log.
+    pub chatter_scale: f64,
+    /// The spindle's speed droop at its rated load (a VFD spindle without speed feedback slows with
+    /// torque), share; a microphone's measured droop gives the load from it.
+    pub spindle_rated_slip: f64,
 }
 
 impl Default for Machine {
     fn default() -> Self {
-        Machine { name: String::new(), travel: [0.0; 3], max_feed: 0.0, rapid_z: 0.0, tool_changer: false, spin_up: 5.0, model: String::new() }
+        Machine {
+            name: String::new(),
+            travel: [0.0; 3],
+            max_feed: 0.0,
+            rapid_z: 0.0,
+            tool_changer: false,
+            spin_up: 5.0,
+            model: String::new(),
+            spindle_power: 0.0,
+            spindle_efficiency: 0.78,
+            spindle_rated_rpm: 0.0,
+            max_cut_force: 0.0,
+            chip_clearing: "flood-low".into(),
+            holder_stiffness: 20_000.0,
+            tool_damping: 0.03,
+            chatter_scale: 0.0,
+            spindle_rated_slip: 0.04,
+        }
+    }
+}
+
+impl Machine {
+    /// What the load check holds cuts to, and whether any of it is assumed rather than set.
+    pub fn cut_limits(&self) -> (crate::cam_cutting::Limits, bool) {
+        let assumed = !(self.spindle_power > 0.0) || !(self.max_cut_force > 0.0);
+        let power = if self.spindle_power > 0.0 { self.spindle_power } else { 1500.0 };
+        let eff = if self.spindle_efficiency > 0.0 { self.spindle_efficiency.min(1.0) } else { 0.78 };
+        let rated = if self.spindle_rated_rpm > 0.0 { self.spindle_rated_rpm } else { 24000.0 };
+        // (the DMC2 took 576 N on a 1 mm × 12.5 mm finishing pass without complaint: the spindle runs out first)
+        let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
+        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, force, deflection: 0.06 }, assumed)
     }
 }
 
@@ -1423,7 +1501,7 @@ pub const MACHINES: [(&str, [f64; 3], f64, f64, f64, f64, bool); 10] = [
 /// Apply a machine preset to a setup by name.
 pub fn set_machine(c: &mut Cam, name: &str) -> bool {
     let Some(m) = MACHINES.iter().find(|m| m.0.eq_ignore_ascii_case(name.trim())) else { return false };
-    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone() };
+    c.machine = Machine { name: m.0.into(), travel: m.1, max_feed: m.3, rapid_z: m.5, tool_changer: m.6, spin_up: c.machine.spin_up, model: c.machine.model.clone(), ..c.machine.clone() };
     c.max_rpm = m.2;
     c.rapid_rate = m.4;
     true
@@ -1583,6 +1661,8 @@ impl Cam {
             }
             OpKind::Parallel | OpKind::Scallop => op.stepover = Some(0.1),
             OpKind::Waterline => op.stepdown = Some(0.3),
+            // arcs onto and off the wall, the seam overlapped and a light last lap (see `lead_loop`)
+            OpKind::Contour => op.lead = tl.as_ref().map(|t| fmt_round(t.diameter * 0.5)).unwrap_or(3.0),
             OpKind::Deburr => op.chamfer = 0.3,
             OpKind::Pencil => {
                 op.stepover = Some(0.1);

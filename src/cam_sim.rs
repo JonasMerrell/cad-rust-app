@@ -87,6 +87,18 @@ struct Cutter {
     /// An end mill whose load is checked (flat, bull, ball): its diameter, and the most cut cross-section it
     /// takes per mm of travel (mm², see `area_limit`).
     load_d: Option<(f64, f64)>,
+    /// The tool for the physical cutting model, and its spindle speed (set in `push`).
+    geom: crate::cam_cutting::ToolGeom,
+    rpm: f64,
+    /// A finishing pass: its bend is a wall error, not a load.
+    finishing: bool,
+    /// Coolant on for this toolpath (flood or mist): it washes chips out.
+    coolant: bool,
+    /// The tool's first bending mode, climb milling, and stable depths already worked out (by engagement
+    /// and feed, both rounded).
+    mode: crate::cam_cutting::Mode,
+    climb: bool,
+    stable: std::collections::HashMap<(u32, u32), f64>,
     /// The operation's own cut cross-section (step-down × stepover, mm²): a feed move taking under 5% of it
     /// is next to nothing.
     nominal: f64,
@@ -169,7 +181,19 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0 }
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0, geom: {
+            let (modulus, stress_limit) = crate::cam_cutting::tool_steel(&t.material);
+            crate::cam_cutting::ToolGeom {
+                diameter: 2.0 * r,
+                ball: matches!(t.kind, ToolKind::Ball | ToolKind::TaperedBall),
+                flutes: t.flutes,
+                stickout: stick,
+                flute_length: flutes,
+                shank: if t.shank_diameter > 0.0 { t.shank_diameter } else { 2.0 * r },
+                modulus,
+                stress_limit,
+            }
+        }, rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
     }
 }
 
@@ -243,6 +267,81 @@ pub struct Sim {
     /// How much of each operation's feed moves cut nothing (see `OpAir`).
     pub air: Vec<OpAir>,
     feed: f64,
+    /// The stock material and the machine's limits for the cutting model; whether the limits are assumed.
+    material: crate::cam_cutting::Material,
+    pub limits: crate::cam_cutting::Limits,
+    pub limits_assumed: bool,
+    chatter_scale: f64,
+    /// Chip evacuation (see `chip_sample`): chips lying in the cut on a coarse grid, mm³, when each cell was
+    /// last brought up to date (s of cutting time), how deep the cavity there is; cutting time so far; the
+    /// last chip's mean thickness; how walled-in the tool is (share of directions, wall height), re-measured
+    /// every few positions.
+    chips: crate::cam_cutting::ChipMap,
+    time: f64,
+    last_chip: f64,
+    confinement: (f64, f64),
+    conf_age: u32,
+    last_width: f64,
+    last_depth: f64,
+    pub chip_ops: Vec<OpChips>,
+    /// Each operation's closest approach to chatter (see `OpChatter`).
+    pub chatter: Vec<OpChatter>,
+}
+
+/// An operation's worst chatter margin: the cut's depth over the deepest stable depth at that
+/// engagement and spindle speed (zero-order stability lobes, see `cam_cutting::stable_depth`); above 1 it
+/// is expected to chatter. Trend-accurate only, until the tool's mode is measured.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct OpChatter {
+    pub op: u64,
+    pub margin: f64,
+    pub at: [f64; 3],
+    pub width: f64,
+    pub depth: f64,
+    pub stable: f64,
+    pub rpm: f64,
+    pub hz: f64,
+    pub k: f64,
+    /// What it takes to work the margin out again at another speed or stick-out.
+    #[serde(skip)]
+    pub kt: f64,
+    #[serde(skip)]
+    pub geom: Option<crate::cam_cutting::ToolGeom>,
+    #[serde(skip)]
+    pub zeta: f64,
+    #[serde(skip)]
+    pub climb: bool,
+    #[serde(skip)]
+    pub scale: f64,
+}
+
+impl OpChatter {
+    /// The margin at another spindle speed, and with another stick-out (same holder; rCAD's `mode_k`/`mode_hz`
+    /// measured values aren't scaled with stick-out).
+    pub fn margin_at(&self, rpm: f64, stickout: Option<f64>, holder_k: f64, kr: f64) -> f64 {
+        let Some(g) = self.geom else { return self.margin };
+        let mode = match stickout {
+            Some(s) => crate::cam_cutting::tool_mode(&crate::cam_cutting::ToolGeom { stickout: s, ..g }, holder_k, self.zeta),
+            None => crate::cam_cutting::Mode { k: self.k, hz: self.hz, zeta: self.zeta },
+        };
+        let stable = crate::cam_cutting::stable_depth(&mode, g.diameter, self.width.max(0.05), g.flutes, self.kt, kr, rpm, self.climb).0;
+        self.scale * self.depth / stable.max(1e-6)
+    }
+}
+
+/// An operation's chip evacuation (a risk index, not chip physics: see docs/cutting-model.md): the most its
+/// chips fill the cavity they lie in, where, and how its cutting time splits between open edges, slots
+/// and pockets; how far it re-cut through packed chips, and cut full-width slots deeper than the diameter.
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct OpChips {
+    pub op: u64,
+    pub max_fill: f64,
+    pub at: [f64; 3],
+    pub open_s: f64,
+    pub slot_s: f64,
+    pub pocket_s: f64,
+    pub recut_mm: f64,
+    pub deep_slot_mm: f64,
 }
 
 /// An operation's feed moves: how far, how long (at the programmed feed), and how much of that cut no
@@ -272,7 +371,15 @@ pub struct OpLoad {
     pub depth: f64,
     pub diameter: f64,
     pub max_area: f64,
+    /// The worst share of a limit the physical model gives (spindle power or torque, force, deflection,
+    /// stress, chip): above 1 is an overload. `geometric` is the older width × depth rule.
     pub ratio: f64,
+    pub geometric: f64,
+    /// Feed and speed at that point, and what the cut does (see `cam_cutting`).
+    pub feed: f64,
+    pub rpm: f64,
+    pub cut: crate::cam_cutting::Cut,
+    pub uses: crate::cam_cutting::Use,
 }
 
 /// Machined part surface left with stock on it (see `Sim::unfinished`): how much area, the most left, where.
@@ -356,6 +463,19 @@ impl Sim {
             loads: vec![],
             air: vec![],
             feed: 1000.0,
+            material: crate::cam_cutting::material(&cam.stock.material),
+            limits: cam.machine.cut_limits().0,
+            limits_assumed: cam.machine.cut_limits().1,
+            chatter_scale: if cam.machine.chatter_scale > 0.0 { cam.machine.chatter_scale } else { crate::cam_cutting::CHATTER_SCALE },
+            chips: crate::cam_cutting::ChipMap::new(stock.0.truncate(), stock.1.truncate(), 2.0, cam.machine.chip_clearing.clone()),
+            time: 0.0,
+            last_chip: 0.02,
+            confinement: (0.0, 0.0),
+            conf_age: 0,
+            last_width: 0.0,
+            last_depth: 0.0,
+            chip_ops: vec![],
+            chatter: vec![],
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -415,6 +535,18 @@ impl Sim {
         };
         let mut cutter = Cutter::new(tool, self.cell, allowance);
         cutter.nominal = op.map(|o| crate::cam_paths::stepdown(o, tool) * crate::cam_paths::stepover(o, tool)).unwrap_or(1.0).max(0.01);
+        cutter.rpm = cam.spindle_rpm(tool);
+        cutter.coolant = cam.coolant_for(tool, op).is_on();
+        cutter.climb = op.map(|o| o.climb).unwrap_or(true);
+        let computed = crate::cam_cutting::tool_mode(&cutter.geom, cam.machine.holder_stiffness, if tool.mode_zeta > 0.0 { tool.mode_zeta } else { cam.machine.tool_damping });
+        cutter.mode = crate::cam_cutting::Mode {
+            k: if tool.mode_k > 0.0 { tool.mode_k } else { computed.k },
+            hz: if tool.mode_hz > 0.0 { tool.mode_hz } else { computed.hz },
+            zeta: computed.zeta,
+        };
+        cutter.finishing = op.is_some_and(|o| {
+            matches!(o.kind, OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil) || (o.kind == OpKind::Contour && o.leave <= 0.0)
+        });
         self.cutters.push(cutter);
         let ci = self.cutters.len() - 1;
         for m in &tp.moves {
@@ -611,6 +743,9 @@ impl Sim {
             if !rapid && dxy >= 2.0 * -dz {
                 self.load_sample(ci, op, step, p, removed, deepest, dxy.hypot(dz));
             }
+            if !rapid && !self.cutters[ci].probe {
+                self.chip_sample(ci, op, p, removed, dxy.hypot(dz));
+            }
         }
         self.pos = to;
         work
@@ -736,6 +871,77 @@ impl Sim {
     }
 
     /// Add a tool position to the load window and check the cut over the last millimetre.
+    /// How walled-in the tool is at `p`: the share of 16 directions in which stock stands more than 1 mm
+    /// above its tip within two diameters of its edge, and how high on average.
+    fn walls(&self, p: DVec3, r: f64) -> (f64, f64) {
+        let (mut walled, mut height) = (0, 0.0);
+        for k in 0..16 {
+            let a = k as f64 * std::f64::consts::PI / 8.0;
+            let (dx, dy) = (a.cos(), a.sin());
+            let mut top = f64::NEG_INFINITY;
+            let mut d = r + 0.3;
+            while d <= r + 4.0 * r {
+                let (x, y) = (p.x + dx * d, p.y + dy * d);
+                let i = ((x - self.x0) / self.cell).round();
+                let j = ((y - self.y0) / self.cell).round();
+                if i >= 0.0 && j >= 0.0 && (i as usize) < self.nx && (j as usize) < self.ny {
+                    let h = self.stock[j as usize * self.nx + i as usize];
+                    if h != EMPTY {
+                        top = top.max(h as f64);
+                    }
+                }
+                d += 0.5;
+            }
+            if top > p.z + 1.0 {
+                walled += 1;
+                height += top - p.z;
+            }
+        }
+        (walled as f64 / 16.0, if walled > 0 { height / walled as f64 } else { 0.0 })
+    }
+
+    /// Chip evacuation, one tool position: see `cam_cutting::ChipMap`.
+    fn chip_sample(&mut self, ci: usize, op: u64, p: DVec3, removed: f32, len: f64) {
+        if len <= 0.0 {
+            return;
+        }
+        let (r, d, coolant) = (self.cutters[ci].radius, 2.0 * self.cutters[ci].radius, self.cutters[ci].coolant);
+        let dt = len / (self.feed.max(1.0) / 60.0);
+        self.time += dt;
+        self.conf_age += 1;
+        if self.conf_age >= 6 || removed > 0.0 && self.confinement == (0.0, 0.0) {
+            self.conf_age = 0;
+            self.confinement = self.walls(p, r);
+        }
+        let (conf, depth) = self.confinement;
+        let fill = self.chips.cut(p, removed as f64, conf, depth, self.last_chip, d, coolant, self.time);
+        let rec = match self.chip_ops.iter_mut().find(|c| c.op == op) {
+            Some(c) => c,
+            None => {
+                self.chip_ops.push(OpChips { op, ..Default::default() });
+                self.chip_ops.last_mut().unwrap()
+            }
+        };
+        if removed > 0.0 {
+            match conf {
+                c if c >= 0.75 => rec.pocket_s += dt,
+                c if c >= 0.4 => rec.slot_s += dt,
+                _ => rec.open_s += dt,
+            }
+        }
+        if fill > rec.max_fill {
+            rec.max_fill = fill;
+            rec.at = p.to_array();
+        }
+        // cutting through packed chips: they get re-cut and welded on
+        if removed > 0.0 && fill > 0.5 {
+            rec.recut_mm += len;
+        }
+        if removed > 0.0 && self.last_width >= 0.9 * d && self.last_depth > d {
+            rec.deep_slot_mm += len;
+        }
+    }
+
     fn load_sample(&mut self, ci: usize, op: u64, step: usize, p: DVec3, removed: f32, deepest: f32, dxy: f64) {
         let Some((d, max_area)) = self.cutters[ci].load_d else { return };
         if self.load_of != Some((ci, op)) {
@@ -758,8 +964,33 @@ impl Sim {
         }
         let area = vol / travel;
         let width = (area / depth).min(d);
-        let ratio = (depth / allowed_depth(d, width)).max(area / max_area);
-        let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio };
+        let geometric = (depth / allowed_depth(d, width)).max(area / max_area);
+        let c = &self.cutters[ci];
+        let (feed, rpm) = (self.feed, c.rpm);
+        let cut = crate::cam_cutting::cut(&c.geom, &self.material, width, depth, feed, rpm, area);
+        let uses = crate::cam_cutting::use_of(&cut, &c.geom, &self.limits, rpm, c.finishing);
+        let (mode, z, climb) = (c.mode, c.geom.flutes, c.climb);
+        (self.last_chip, self.last_width, self.last_depth) = (cut.h_mean, width, depth);
+        // chatter: this depth against the deepest stable one at this engagement and speed
+        if rpm > 0.0 && width > 0.05 {
+            let key = ((width / d * 20.0).round() as u32, (feed / 100.0).round() as u32);
+            let kt = self.material.kc1 * cut.h_mean.max(0.005).powf(-self.material.mc);
+            let kr = self.material.radial;
+            let stable = *self.cutters[ci]
+                .stable
+                .entry(key)
+                .or_insert_with(|| crate::cam_cutting::stable_depth(&mode, d, (key.0 as f64 / 20.0 * d).max(0.05), z, kt, kr, rpm, climb).0);
+            let margin = self.chatter_scale * depth / stable.max(1e-6);
+            let geom = Some(self.cutters[ci].geom);
+            let rec = OpChatter { op, margin, at: p.to_array(), width, depth, stable, rpm, hz: mode.hz, k: mode.k, kt, geom, zeta: mode.zeta, climb, scale: self.chatter_scale };
+            match self.chatter.iter_mut().find(|c| c.op == op) {
+                Some(c) if c.margin < margin => *c = rec,
+                Some(_) => {}
+                None => self.chatter.push(rec),
+            }
+        }
+        let ratio = uses.worst;
+        let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio, geometric, feed, rpm, cut, uses };
         match self.loads.iter_mut().find(|l| l.op == op) {
             Some(l) if l.ratio < ratio => *l = load,
             Some(_) => {}

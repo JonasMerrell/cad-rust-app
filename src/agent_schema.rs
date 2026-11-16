@@ -454,7 +454,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)")}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)"), "spindle_power": t("number", "spindle's rated electrical input power, W (0: not known, 1500 assumed)"), "spindle_efficiency": t("number", "share of the input power at the shaft (default 0.78)"), "spindle_rated_rpm": t("number", "speed the rated power is at; below it the torque is constant (0: 24000)"), "max_cut_force": t("number", "most sideways force the machine takes at the tool, N (0: 700 assumed)"), "chip_clearing": t("string", "flood-low (default), flood, air or none"), "holder_stiffness": t("number", "holder and spindle stiffness at the tool, N/mm (20000 assumed)"), "tool_damping": t("number", "damping ratio of the tool's mode (0.03)"), "chatter_scale": t("number", "chatter margin scale (0: the built-in 0.078); import_cutlog sets it"), "spindle_rated_slip": t("number", "spindle speed droop at rated load (0.04)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),
@@ -480,6 +480,9 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "program") => t("integer", "program number"),
         ("import_tool_library", "path") => t("string", "Fusion 360 .json/.tools library or a tools.json"),
         ("import_tool_library", "cam") => json!({"type": "integer", "minimum": 0, "description": "also add every tool to this Manufacture tab"}),
+        ("import_cutlog", "path") => t("string", "the <program>.cutlog.json rcnc wrote beside the program"),
+        ("import_cutlog", "apply") => t("boolean", "write the suggested spindle efficiency and chatter scale into the setup's machine"),
+        ("import_tool_library", "material") => t("string", "every imported tool is this material, whatever the file says (carbide, hss, cobalt)"),
         ("cam_tool_library" | "cam_tool", "kind") => en(&cam_keys(&crate::cam::ToolKind::ALL, crate::cam::ToolKind::key), "tool kind"),
         ("cam_tool_library", "search") => t("string", "search words, e.g. '6 flat'"),
         ("cam_tool", "preset") => t("string", "library search, e.g. 'Ø6 flat end mill'"),
