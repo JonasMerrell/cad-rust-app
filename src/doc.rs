@@ -790,6 +790,32 @@ pub struct Config {
     pub values: std::collections::BTreeMap<String, String>,
 }
 
+impl Document {
+    /// Give the parts an import feature made the names and colours their file has (see
+    /// `BodyMesh::from_file`), leaving what was already set on them. Returns how many parts changed.
+    pub fn adopt_file_props(&mut self, fid: FeatId, bodies: &[crate::kernel::BodyMesh]) -> usize {
+        let mut n = 0;
+        for b in bodies.iter().filter(|b| b.id.0 == fid) {
+            let Some((name, color)) = &b.from_file else { continue };
+            let mut p = self.parts.get(&body_key(b.id)).cloned().unwrap_or_default();
+            let mut changed = false;
+            if p.name.is_none() && !name.is_empty() {
+                p.name = Some(name.clone());
+                changed = true;
+            }
+            if p.color.is_none() && color.is_some() {
+                p.color = *color;
+                changed = true;
+            }
+            if changed {
+                self.parts.insert(body_key(b.id), p);
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
 impl Default for Document {
     fn default() -> Self {
         Document {
