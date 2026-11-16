@@ -1572,6 +1572,10 @@ pub struct Cam {
     /// retract height (at least 1 mm). Smaller lets the tool cut down close beside low vise jaws.
     #[serde(skip_serializing_if = "is_zero")]
     pub fixture_clearance: f64,
+    /// Work offset the program runs in: 1 = G54 (default) … 6 = G59, e.g. one per vise station so two setups
+    /// can be merged into one program. Probing writes to it.
+    #[serde(skip_serializing_if = "is_one_u8")]
+    pub work_offset: u8,
     /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
     /// at the bottom of the stock or of the lowest fixture.
     #[serde(skip_serializing_if = "is_zero3")]
@@ -1591,7 +1595,16 @@ pub struct Cam {
     pub next_id: u64,
 }
 
+fn is_one_u8(v: &u8) -> bool {
+    *v == 1
+}
+
 impl Cam {
+    /// The work offset's number, 1 (G54) to 6 (G59).
+    pub fn wcs(&self) -> u8 {
+        self.work_offset.clamp(1, 6)
+    }
+
     /// The height over a fixture's top that toolpaths lift to.
     pub fn fixture_lift(&self) -> f64 {
         if self.fixture_clearance > 0.0 {
@@ -1625,6 +1638,7 @@ impl Default for Cam {
             arcs: true,
             fixtures: vec![],
             fixture_clearance: 0.0,
+            work_offset: 1,
             on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),

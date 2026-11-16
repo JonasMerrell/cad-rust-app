@@ -477,6 +477,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "max_rpm") => t("number", "fastest spindle speed"),
         ("create_cam" | "edit_cam", "clearance") => t("number", "rapid height above the stock, mm"),
         ("create_cam" | "edit_cam", "retract") => t("number", "height above the material where feeds start, mm"),
+        ("create_cam" | "edit_cam", "work_offset") => json!({"type": "integer", "minimum": 1, "maximum": 6, "description": "work offset: 1 = G54 (default) … 6 = G59, e.g. one per vise station; probing writes to it"}),
         ("create_cam" | "edit_cam", "fixture_clearance") => t("number", "how far over a fixture's top toolpaths lift where the tool passes over it, mm (default: the retract, at least 1)"),
         ("create_cam" | "edit_cam", "rapid_rate") => t("number", "rapid rate, mm/min (for the cycle time)"),
         ("create_cam" | "edit_cam", "arcs") => t("boolean", "write G2/G3 arcs (default true)"),

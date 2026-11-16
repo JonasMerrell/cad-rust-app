@@ -255,7 +255,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         Dialect::Mach3 => o.line("G21 G17 G40 G49 G80 G90 G91.1 G94"),
         Dialect::Fanuc => o.line("G21 G17 G40 G49 G80 G90 G94"),
     }
-    o.line("G54");
+    o.line(&format!("G{}", 53 + cam.wcs() as u32));
     for l in fill(&cam.post_text.header, cam, None) {
         o.line(&l);
     }
@@ -362,7 +362,7 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
                 continue;
             }
             match &tp.probe {
-                Some(plan) => probe_cycle(&mut o, d, plan, origin, safe_w),
+                Some(plan) => probe_cycle(&mut o, d, cam, plan, origin, safe_w),
                 None => o.line(&comment("nothing to probe")),
             }
             continue;
@@ -635,8 +635,8 @@ fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f
             touch(o);
             // the plate's top is the work Z there
             match d {
-                Dialect::Fanuc => o.line(&format!("G10 L2 P1 Z[#5023-{}]", num(top))),
-                _ => o.line(&format!("G10 L20 P1 Z{}", num(top))),
+                Dialect::Fanuc => o.line(&format!("G10 L2 P{} Z[#5023-{}]", cam.wcs(), num(top))),
+                _ => o.line(&format!("G10 L20 P{} Z{}", cam.wcs(), num(top))),
             }
             o.forget();
             o.z_up(safe_w.max(top + 5.0));
@@ -687,7 +687,7 @@ fn probe(o: &mut Out, d: Dialect, cam: &Cam, tool: &Tool, first: bool, safe_w: f
 
 /// A probing operation's cycle: each touch searches fast, backs off and touches again slowly; then the work
 /// zero (G54) axes are set so the surfaces found are where the setup has them.
-fn probe_cycle(o: &mut Out, d: Dialect, plan: &crate::cam_probe::Plan, origin: DVec3, safe_w: f64) {
+fn probe_cycle(o: &mut Out, d: Dialect, cam: &Cam, plan: &crate::cam_probe::Plan, origin: DVec3, safe_w: f64) {
     use crate::cam_probe::Step;
     let g = if matches!(d, Dialect::Fanuc | Dialect::Mach3) { "G31" } else { "G38.2" };
     // where the controller leaves the trip position (work coordinates)
@@ -750,7 +750,7 @@ fn probe_cycle(o: &mut Out, d: Dialect, plan: &crate::cam_probe::Plan, origin: D
                     o.line(&format!("#{} = #{}", var(*slot), trip + axis));
                 } else if let Some(set) = plan.sets.iter().find(|s| s.touches == [*slot]) {
                     // GRBL: the probe is where it tripped, so set the axis from here
-                    o.line(&format!("G10 L20 P1 {ax}{}", num(((set.target - origin[set.axis] - comp) * 1000.0).round() / 1000.0)));
+                    o.line(&format!("G10 L20 P{} {ax}{}", cam.wcs(), num(((set.target - origin[set.axis] - comp) * 1000.0).round() / 1000.0)));
                 }
                 o.line(&format!("G1 {ax}{} F{}", num(start), num(plan.fast.round())));
                 o.forget();
@@ -759,11 +759,11 @@ fn probe_cycle(o: &mut Out, d: Dialect, plan: &crate::cam_probe::Plan, origin: D
     }
     o.z_up(safe_w);
     if readings && !plan.sets.is_empty() {
-        let mut l = "G10 L2 P1".to_string();
+        let mut l = format!("G10 L2 P{}", cam.wcs());
         for s in &plan.sets {
             let terms: Vec<String> = s.touches.iter().map(|k| format!("#{}{}", var(*k), signed(comp_of(*k).unwrap_or(0.0)))).collect();
             let mean = if terms.len() == 1 { terms[0].clone() } else { format!("[{}] / {}", terms.join(" + "), terms.len()) };
-            let _ = write!(l, " {}[#{} + {mean}{}]", axes[s.axis], 5221 + s.axis, signed(-(s.target - origin[s.axis])));
+            let _ = write!(l, " {}[#{} + {mean}{}]", axes[s.axis], 5221 + 20 * (cam.wcs() as usize - 1) + s.axis, signed(-(s.target - origin[s.axis])));
         }
         o.line(&l);
     }

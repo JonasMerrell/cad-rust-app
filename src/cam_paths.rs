@@ -2502,6 +2502,11 @@ mod tests {
             let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
             assert!(g.contains("G21") && g.contains("M30"), "{post}");
             assert_eq!(g.contains("T1 M6"), post != "grbl", "{post}");
+            // a second station's setup runs in its own work offset
+            let mut w = c.clone();
+            w.work_offset = 2;
+            let g2 = crate::cam_post::gcode(&w, &paths, origin, top + c.clearance);
+            assert!(g2.lines().any(|l| l == "G55") && !g2.lines().any(|l| l == "G54"), "{post}: {g2}");
             if post == "rcnc" {
                 // rcnc's own M6 handles the pause and the measuring
                 assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");
