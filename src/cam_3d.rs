@@ -1459,7 +1459,7 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
     let d = Dropper::new(ctx.geo.part, t, 0.0);
     let w = op.chamfer.max(0.0);
     let dz = w / tanb.max(1e-6);
-    let e = 0.2;
+    let e = if op.tip_offset > 0.0 { op.tip_offset } else { 0.2 };
     let rho = tip + (dz + e) * tanb;
     if rho > c.r + 1e-6 {
         tp.warnings.push(format!("a {} mm chamfer is too wide for this tool", crate::cam::fmt_mm(w)));

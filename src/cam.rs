@@ -1011,11 +1011,26 @@ pub struct ProbeOp {
     pub tolerance: f64,
     /// rcnc, two bores: how far the part may be turned before rcnc stops, degrees.
     pub max_turn: f64,
+    /// rcnc Find stock: take X from the fixed vise jaw on this side of the stock (-1 = −X, 1 = +X, 0 = from
+    /// the stock's two X faces), touched beside the stock at work Z `jaw_z` (between the parallels and the
+    /// jaw's top).
+    #[serde(skip_serializing_if = "is_zero")]
+    pub jaw_x: f64,
+    #[serde(skip_serializing_if = "is_zero")]
+    pub jaw_z: f64,
+    /// rcnc Find stock with `jaw_x`: work X of the face that lies against the fixed jaw, when it isn't the
+    /// stock's (a wall an earlier setup machined, gripped below a wider raw band).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jaw_at: Option<f64>,
+    /// rcnc Find stock: the X and Y size to check instead of the stock box's (e.g. ends an earlier setup
+    /// machined to length).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub find_size: Option<[f64; 2]>,
 }
 
 impl Default for ProbeOp {
     fn default() -> Self {
-        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0, max_turn: 0.2 }
+        ProbeOp { cycle: ProbeCycle::Z, side: "left".into(), on_part: false, size: 0.0, depth: 4.0, clearance: 5.0, overtravel: 5.0, inset: 8.0, with_z: false, tolerance: 1.0, max_turn: 0.2, jaw_x: 0.0, jaw_z: 0.0, jaw_at: None, find_size: None }
     }
 }
 
@@ -1553,6 +1568,10 @@ pub struct Cam {
     pub arcs: bool,
     /// Clamps, vise jaws, screws: boxes the tool keeps clear of (toolpaths lift over them).
     pub fixtures: Vec<Fixture>,
+    /// How far above a fixture's top the toolpaths lift where the tool would pass over it, mm; 0 = the
+    /// retract height (at least 1 mm). Smaller lets the tool cut down close beside low vise jaws.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub fixture_clearance: f64,
     /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
     /// at the bottom of the stock or of the lowest fixture.
     #[serde(skip_serializing_if = "is_zero3")]
@@ -1570,6 +1589,17 @@ pub struct Cam {
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
+}
+
+impl Cam {
+    /// The height over a fixture's top that toolpaths lift to.
+    pub fn fixture_lift(&self) -> f64 {
+        if self.fixture_clearance > 0.0 {
+            self.fixture_clearance
+        } else {
+            self.retract.max(1.0)
+        }
+    }
 }
 
 impl Default for Cam {
@@ -1594,6 +1624,7 @@ impl Default for Cam {
             follows: String::new(),
             arcs: true,
             fixtures: vec![],
+            fixture_clearance: 0.0,
             on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),
