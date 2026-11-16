@@ -418,7 +418,7 @@ pub fn run(m: &Model, moves: &[Move], srcs: &[Src], o: &Options, progress: &mut 
             }
             if let Some([lo, hi]) = m.axes[k].limits {
                 let over = (lo - q0[k].min(q1[k])).max(q0[k].max(q1[k]) - hi);
-                if over > 1e-3 {
+                if over > o.crash {
                     let at_end = if q1[k] > hi || q1[k] < lo { 1.0 } else { 0.0 };
                     let msg = format!("{} at {:.2}, limits {lo} to {hi}", m.axes[k].name, if over == q0[k].max(q1[k]) - hi { q0[k].max(q1[k]) } else { q0[k].min(q1[k]) });
                     log.add("travel_limit", (k as u32, 0), (u32::MAX, u32::MAX), mi, mv, at_end, over, ["X", "Y", "Z"][k].to_string(), msg, DVec3::ZERO);

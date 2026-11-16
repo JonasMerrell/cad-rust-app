@@ -52,7 +52,8 @@ The assembly's three slider mates are the axes.
 - **Which mate is which axis.** The simulator moves each mate a little and sees how the nozzle moves relative to the bed. Each Klipper axis gets the mate that moves the nozzle along its `directions` entry, which defaults to the world axes. CoreXY or cartesian makes no difference: the model's sliders are cartesian. If there aren't exactly three sliders, name them with `axes`.
 - **Where 0 is.**
   - X and Y home to `position_endstop` against the end of their mate's travel. `endstop_clearance` shortens that, and `origin` overrides it.
-  - Z 0 is where the nozzle tip touches the bed under it. The tip is the lowest point of a toolhead part called "nozzle" (or whatever `nozzle_part` names). With no such part it is the toolhead's lowest point, and the report says so. When that lowest point is a probe, such as a Beacon modelled lower than the hotend, the report says how far below the next part it hangs. Give `nozzle_part` or `nozzle` to fix the tip.
+  - Z 0 is where the nozzle tip touches the bed under it. The tip is the lowest point of a toolhead part called "nozzle" (or whatever `nozzle_part` names). With no such part it is the toolhead's lowest point, and the report says so. When that lowest point is a probe, the report says how far below the next part it hangs. Give `nozzle_part` or `nozzle` to fix the tip.
+- **What isn't solid.** A Beacon or Cartographer model carries its sensing volume as round solids (a cylinder or cone about a vertical axis). These are left out of the checks and of the nozzle search (`ignore_sensing: false` keeps them). `ignore_parts` leaves out other parts by name, or one body of a part as `"Name#k"`. The report's notes list what was left out.
 - **What moves.** Each instance moves with the mates as the solver moves it, as rigid groups such as the gantry, the toolhead, the bed and the still frame. Parts that turn, such as motors on belt relations, are held still.
 
 ## What it checks
@@ -63,7 +64,7 @@ Every move is checked over its whole length, not at sample points. Each group on
 |---|---|
 | `collision` | Two parts that move relative to each other touch (within `clearance`, 0.05 mm by default). For example, the toolhead hits the frame, the gantry hits a panel, or the bed hits the toolhead. |
 | `print_collision` | The toolhead, gantry or anything else hits the part being printed. |
-| `travel_limit` | A mate is driven past its limits. |
+| `travel_limit` | A mate is driven past its limits (by more than `clearance`). |
 | `near_miss` | Parts come closer than `near_miss` mm. This is off unless you set `near_miss`. |
 | `nozzle_on_bed` | The nozzle touches the bed at Z 0 during contact probing. This is expected and isn't counted as a problem. |
 

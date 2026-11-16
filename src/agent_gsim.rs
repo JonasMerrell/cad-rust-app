@@ -216,6 +216,12 @@ impl Session {
         let mut gbody: Vec<Vec<u32>> = vec![vec![]; gvel.len()];
         let mut bodies: Vec<Body> = vec![];
         let mut body_leaf: Vec<(u64, usize, crate::doc::BodyId, Pose)> = vec![];
+        // parts that aren't solid: "Name" (every body of it) or "Name#k" (its k-th body, from 1)
+        let ignore: Vec<String> =
+            a.get("ignore_parts").and_then(|v| v.as_array()).map(|v| v.iter().filter_map(|x| x.as_str().map(|s| s.to_lowercase())).collect()).unwrap_or_default();
+        let mut seen: HashMap<(u64, String), usize> = HashMap::new();
+        let mut ignored: Vec<String> = vec![];
+        let auto_sensing = a.get("ignore_sensing").and_then(|v| v.as_bool()).unwrap_or(true);
         for x in ref_asm.instances.iter().filter(|x| !x.hidden) {
             let g = group_of[&x.id];
             for l in assembly::leaves(&self.ws.assemblies, x) {
@@ -223,6 +229,20 @@ impl Session {
                 let pose = x.pose.compose(&l.pose);
                 let bi = bodies.len() as u32;
                 let name = self.studio_doc(l.studio).and_then(|d| d.parts.get(&crate::doc::body_key(l.body))).and_then(|p| p.name.clone()).unwrap_or_else(|| m.name.clone());
+                let k = {
+                    let c = seen.entry((x.id, name.clone())).or_insert(0);
+                    *c += 1;
+                    *c
+                };
+                let low = name.to_lowercase();
+                let listed = ignore.iter().any(|i| *i == low || *i == format!("{low}#{k}"));
+                // a Beacon or Cartographer model carries its sensing volume as a solid (a cylinder
+                // or cone round a vertical axis): it isn't there to hit anything
+                let sensing = auto_sensing && ["beacon", "cartographer"].iter().any(|w| low.contains(w)) && vertical_round(&m.positions, &pose);
+                if listed || sensing {
+                    ignored.push(format!("{name}#{k} ({}){}", x.name, if sensing && !listed { ": a probe's sensing volume" } else { "" }));
+                    continue;
+                }
                 bodies.push(Body { name, instance: x.id, instance_name: x.name.clone(), group: g });
                 body_leaf.push((x.id, l.studio, l.body, pose));
                 let p = |i: u32| pose.apply(DVec3::new(m.positions[3 * i as usize] as f64, m.positions[3 * i as usize + 1] as f64, m.positions[3 * i as usize + 2] as f64));
@@ -231,6 +251,9 @@ impl Session {
                     gbody[g].push(bi);
                 }
             }
+        }
+        if !ignored.is_empty() {
+            notes.push(format!("left out (not solid): {}", ignored.join(", ")));
         }
         let ntris: usize = gtris.iter().map(|t| t.len()).sum();
         let mut groups: Vec<Group> = vec![];
@@ -286,39 +309,35 @@ impl Session {
                     .filter(|(_, b)| b.group == tool && (b.name.to_lowercase().contains(&want) || b.instance_name.to_lowercase().contains(&want)))
                     .map(|(i, _)| i as u32)
                     .collect();
-                if named.is_empty() {
-                    notes.push(format!(
-                        "no toolhead part is called \"{want}\", so the nozzle tip is the toolhead's lowest point (give nozzle_part or nozzle if that isn't the nozzle)"
-                    ));
-                }
-                let mut best = (DVec3::splat(f64::INFINITY), 0u32);
-                for (t, b) in groups[tool].tris() {
-                    if !named.is_empty() && !named.contains(&b) {
-                        continue;
-                    }
-                    for q in t {
-                        if q.z < best.0.z {
-                            best = (*q, b);
-                        }
-                    }
-                }
-                // a probe hanging lower than the hotend is worth saying: Z 0 then comes from the probe
-                let tb = &bodies[best.1 as usize];
-                let low = tb.name.to_lowercase();
-                if named.is_empty() && ["beacon", "probe", "cartographer", "eddy"].iter().any(|k| low.contains(k)) {
-                    let mut next = f64::INFINITY;
+                // with no part called nozzle, the lowest point of the toolhead that isn't a probe: a
+                // probe can hang lower in a model (pin tails, a sensing volume) but it isn't the tip
+                let probe = |b: u32| ["beacon", "probe", "cartographer", "eddy"].iter().any(|k| bodies[b as usize].name.to_lowercase().contains(k));
+                let lowest = |keep: &dyn Fn(u32) -> bool| {
+                    let mut best = (DVec3::splat(f64::INFINITY), u32::MAX);
                     for (t, b) in groups[tool].tris() {
-                        if bodies[b as usize].instance != tb.instance || bodies[b as usize].name != tb.name {
+                        if keep(b) {
                             for q in t {
-                                next = next.min(q.z);
+                                if q.z < best.0.z {
+                                    best = (*q, b);
+                                }
                             }
                         }
                     }
+                    best
+                };
+                let mut best = if named.is_empty() { lowest(&|b| !probe(b)) } else { lowest(&|b| named.contains(&b)) };
+                if best.1 == u32::MAX {
+                    best = lowest(&|_| true);
+                }
+                if named.is_empty() {
                     notes.push(format!(
-                        "the toolhead's lowest point is the probe \"{}\", {} mm below the next lowest part; in the model the probe sits below the nozzle, so Z 0 and the print checks use the probe as the tip",
-                        tb.name,
-                        r2(next - best.0.z)
+                        "no toolhead part is called \"{want}\", so the nozzle tip is the lowest point of \"{}\", the lowest toolhead part that isn't a probe (give nozzle_part or nozzle if that isn't the nozzle)",
+                        bodies[best.1 as usize].name
                     ));
+                }
+                let (pz, pb) = lowest(&|b| probe(b));
+                if pb != u32::MAX && pz.z < best.0.z {
+                    notes.push(format!("the probe \"{}\" reaches {} mm below the nozzle tip in the model", bodies[pb as usize].name, r2(best.0.z - pz.z)));
                 }
                 best
             }
@@ -693,6 +712,8 @@ pub fn tools() -> Vec<Value> {
             "origin": {"type": "object", "description": "mate value (mm) at Klipper 0 for an axis, instead of finding it (X/Y: homing against the mate's limit; Z: the nozzle touching the bed)", "properties": {"x": n("mm"), "y": n("mm"), "z": n("mm")}, "additionalProperties": false},
             "endstop_clearance": n("X/Y home this far short of the end of their travel (mm, default 0)"),
             "nozzle": p3("the nozzle tip (world mm, the assembly as it stands); default the lowest point of the nozzle part"),
+            "ignore_parts": {"type": "array", "items": {"type": "string"}, "description": "parts that aren't solid, left out of the checks: \"Name\" or \"Name#k\" for its k-th body (a Beacon's or Cartographer's sensing cone is left out on its own)"},
+            "ignore_sensing": {"type": "boolean", "description": "leave out round bodies of a Beacon or Cartographer, their sensing volume (default true)"},
             "nozzle_part": s("name (or part of one) of the toolhead part whose lowest point is the nozzle tip (default \"nozzle\"; with no such part, the toolhead's lowest point)"),
             "toolhead_instance": {"type": "integer", "description": "an instance that moves with the toolhead (default: whatever moves with the most axes)"},
             "bed_instance": {"type": "integer", "description": "an instance that moves with the bed (default: the largest that moves with the other axes, or the frame)"},
@@ -711,4 +732,33 @@ pub fn tools() -> Vec<Value> {
             "dump_model": s("also save the machine's moving groups (triangles and how they move) to this file, for debugging"),
         }, "additionalProperties": false},
     })]
+}
+
+/// A body that is round about a vertical axis: every vertex at a height lies on one circle round
+/// the centre of its box (a cylinder, cone or frustum, like a probe's sensing volume).
+fn vertical_round(pos: &[f32], pose: &Pose) -> bool {
+    let pts: Vec<DVec3> = pos.chunks(3).map(|c| pose.apply(DVec3::new(c[0] as f64, c[1] as f64, c[2] as f64))).collect();
+    if pts.len() < 24 {
+        return false;
+    }
+    let mut bb = Aabb::EMPTY;
+    for p in &pts {
+        bb.add(*p);
+    }
+    let c = (bb.lo + bb.hi) / 2.0;
+    let size = bb.hi - bb.lo;
+    if (size.x - size.y).abs() > 0.02 * size.x.max(size.y) || size.x < 1.0 {
+        return false;
+    }
+    let mut rings: HashMap<i64, (f64, f64)> = HashMap::new();
+    for p in &pts {
+        let r = ((p.x - c.x).powi(2) + (p.y - c.y).powi(2)).sqrt();
+        if r < 1e-3 {
+            continue; // the centre of a fanned cap
+        }
+        let e = rings.entry((p.z * 100.0).round() as i64).or_insert((f64::INFINITY, 0.0));
+        e.0 = e.0.min(r);
+        e.1 = e.1.max(r);
+    }
+    rings.len() <= 64 && rings.values().all(|(lo, hi)| hi - lo < 0.02 * hi.max(1.0) && *hi > 0.25 * size.x)
 }
