@@ -4,7 +4,7 @@ use std::fmt::Write;
 
 use glam::{DVec2, DVec3};
 
-use crate::cam::{Cam, Coolant, ProbeCycle, Tool, ToolKind};
+use crate::cam::{Cam, Coolant, OpKind, ProbeCycle, Tool, ToolKind};
 use crate::cam_paths::{Move, Toolpath};
 
 #[derive(Clone, Copy, PartialEq)]
@@ -341,7 +341,9 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             let find = op.and_then(|o| o.probing.as_ref()).filter(|p| cam.post == "rcnc" && !p.on_part && matches!(p.cycle, ProbeCycle::Z | ProbeCycle::Boss));
             if let (Some(p), Some((lo, hi))) = (find, stock) {
                 if !found_stock {
-                    find_stock(&mut o, p, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
+                    // the fixed jaw for X may be set on either of the stock probes (top or middle)
+                    let jaw = cam.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref()).find(|p| p.jaw_x != 0.0);
+                    find_stock(&mut o, p, jaw, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
                     found_stock = true;
                 }
                 continue;
@@ -573,12 +575,15 @@ fn rcnc_bores(cam: &Cam, paths: &[Toolpath], tp: &Toolpath, r: f64, origin: DVec
 /// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
 /// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
 /// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
-fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
-    let size = hi - lo;
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::ProbeOp>, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
+    let mut size = hi - lo;
+    if let Some([x, y]) = p.find_size.or(jaw.and_then(|j| j.find_size)) {
+        size = DVec3::new(x, y, size.z);
+    }
     let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
     o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
     o.line(&comment(&format!(
-        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}",
+        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}{}",
         num(size.x),
         num(size.y),
         num(size.z),
@@ -587,7 +592,14 @@ fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, lo: DVec3, hi: DVec3, origin
         num(top_centre.z),
         num(p.tolerance),
         num(p.depth),
-        if keep_z { " KEEPZ=1" } else { "" }
+        if keep_z { " KEEPZ=1" } else { "" },
+        jaw.map(|j| format!(
+            " JAWX={} JAWZ={}{}",
+            if j.jaw_x < 0.0 { -1 } else { 1 },
+            num(j.jaw_z),
+            j.jaw_at.map(|x| format!(" JAWAT={}", num(x))).unwrap_or_default()
+        ))
+        .unwrap_or_default()
     )));
     o.forget();
 }

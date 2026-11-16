@@ -1412,7 +1412,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
         let mut lifts = 0;
         for (r, z0) in crate::cam_sim::tool_body(tool) {
             let lowered: Vec<_> = boxes.iter().map(|(n, lo, hi)| (n.clone(), *lo, *hi - DVec3::Z * z0)).collect();
-            let (m, n) = avoid_fixtures(moves, &lowered, r, ctx.cam.retract.max(1.0), start);
+            let (m, n) = avoid_fixtures(moves, &lowered, r, ctx.cam.fixture_lift(), start);
             moves = m;
             lifts = lifts.max(n);
         }
@@ -2469,6 +2469,22 @@ mod tests {
         let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &[bad], 300);
         sim.run_to(usize::MAX, usize::MAX);
         assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Fixture));
+        // a fixture clearance of its own: the tool comes down to just over the clamp, no lower
+        c.fixture_clearance = 0.3;
+        let zc = hi.z + 0.3;
+        let lowest = generate(&c, &part)
+            .iter()
+            .flat_map(|tp| {
+                let mut prev = DVec3::new(0.0, 0.0, zc + 10.0);
+                tp.moves.iter().map(move |m| {
+                    prev = m.end(prev);
+                    prev
+                }).collect::<Vec<_>>()
+            })
+            .filter(|q| q.x > lo.x - 4.0 + 1e-6 && q.x < hi.x + 4.0 - 1e-6 && q.y > lo.y - 4.0 + 1e-6 && q.y < hi.y + 4.0 - 1e-6)
+            .map(|q| q.z)
+            .fold(f64::INFINITY, f64::min);
+        assert!((lowest - zc).abs() < 1e-6, "lowest over the clamp {lowest}, want {zc}");
     }
 
     #[test]
@@ -2520,6 +2536,17 @@ mod tests {
                 assert_eq!(g.matches("FIND_STOCK").count(), 1, "one request for both: {g}");
                 assert!(!g.contains("G31"), "{g}");
                 assert!(!g[..cutter].contains("M3"), "no spindle with the probe in: {g}");
+                // X from the fixed jaw, set on either probe
+                p.ops.iter_mut().filter(|o| o.kind == OpKind::Probe).last().unwrap().probing.as_mut().unwrap().jaw_x = -1.0;
+                p.ops.iter_mut().filter(|o| o.kind == OpKind::Probe).last().unwrap().probing.as_mut().unwrap().jaw_z = 2.5;
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                assert!(g.contains(&want.replace(")", " JAWX=-1 JAWZ=2.5)")), "{g}");
+                let pr = p.ops.iter_mut().filter(|o| o.kind == OpKind::Probe).last().unwrap().probing.as_mut().unwrap();
+                pr.jaw_at = Some(-9.8);
+                pr.find_size = Some([25.4, 98.0]);
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                let want2 = format!("(RCNC FIND_STOCK SIZE=25.4,98,{} AT={},{},{} TOL=1 DEPTH=4 JAWX=-1 JAWZ=2.5 JAWAT=-9.8)", n(size.z), n(at.x), n(at.y), n(at.z));
+                assert!(g.contains(&want2), "{g}");
             }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {

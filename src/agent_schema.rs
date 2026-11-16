@@ -477,6 +477,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "max_rpm") => t("number", "fastest spindle speed"),
         ("create_cam" | "edit_cam", "clearance") => t("number", "rapid height above the stock, mm"),
         ("create_cam" | "edit_cam", "retract") => t("number", "height above the material where feeds start, mm"),
+        ("create_cam" | "edit_cam", "fixture_clearance") => t("number", "how far over a fixture's top toolpaths lift where the tool passes over it, mm (default: the retract, at least 1)"),
         ("create_cam" | "edit_cam", "rapid_rate") => t("number", "rapid rate, mm/min (for the cycle time)"),
         ("create_cam" | "edit_cam", "arcs") => t("boolean", "write G2/G3 arcs (default true)"),
         ("create_cam" | "edit_cam", "program") => t("integer", "program number"),
@@ -557,7 +558,11 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             "inset": t("number", "corner: mm from the corner the sides are touched"),
             "with_z": t("boolean", "corner: touch the top too and set Z"),
             "tolerance": t("number", "rcnc, stock top or middle (which rcnc's Find stock wizard does): largest difference between probed and stock size, mm (default 1); two bores in a row (rcnc Find bores): largest error in their spacing"),
-            "max_turn": t("number", "rcnc, two bores in a row: how far the part may be turned, degrees (default 0.2)")
+            "max_turn": t("number", "rcnc, two bores in a row: how far the part may be turned, degrees (default 0.2)"),
+            "jaw_x": t("number", "rcnc Find stock: -1 or 1 takes X from the fixed vise jaw on that side of the stock instead of the stock's two X faces (put it on either stock probe)"),
+            "jaw_z": t("number", "rcnc Find stock with jaw_x: work Z where the probe touches the jaw (between the parallels and the jaw's top)"),
+            "jaw_at": t("number", "rcnc Find stock with jaw_x: work X of the face against the fixed jaw when it isn't the stock's (a wall an earlier setup machined)"),
+            "find_size": json!({"type": "array", "items": {"type": "number"}, "minItems": 2, "maxItems": 2, "description": "rcnc Find stock: [x, y] size to check instead of the stock box's (ends machined to length in an earlier setup)"})
         }}),
         ("cam_soft_jaws", "one_piece") => t("boolean", "printed only: one block between the vise jaws, squeezed round the part, instead of two jaws"),
         ("cam_soft_jaws", "mount") => {
