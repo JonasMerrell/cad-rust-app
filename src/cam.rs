@@ -938,6 +938,16 @@ pub struct Operation {
     /// middle of the loop's longest straight side, away from corners and arcs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seam: Option<[f64; 2]>,
+    /// The spindle speed this operation runs at instead of its tool's (None: the tool's). For test cuts and
+    /// calibration passes that change one thing at a time with one tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<f64>,
+    /// The cutting feed (mm/min) instead of the tool's (None: the tool's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed: Option<f64>,
+    /// The plunge feed (mm/min) instead of the tool's (None: the tool's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plunge_feed: Option<f64>,
     /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
     /// stock reaches further out than that, extra passes outside the wall take it down first.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1085,6 +1095,9 @@ impl Default for Operation {
             spring_pass: false,
             seam: None,
             max_engagement: None,
+            rpm: None,
+            feed: None,
+            plunge_feed: None,
             chip_thinning: false,
             probing: None,
         }
@@ -1733,6 +1746,33 @@ impl Cam {
 
     pub fn op_mut(&mut self, id: u64) -> Option<&mut Operation> {
         self.ops.iter_mut().find(|o| o.id == id)
+    }
+
+    /// The tool as an operation runs it: with the operation's own speed and feeds where it sets them.
+    pub fn tool_for(&self, op: &Operation) -> Option<std::borrow::Cow<'_, Tool>> {
+        let t = self.tool(op.tool)?;
+        if op.rpm.is_none() && op.feed.is_none() && op.plunge_feed.is_none() {
+            return Some(std::borrow::Cow::Borrowed(t));
+        }
+        let mut t = t.clone();
+        if let Some(r) = op.rpm.filter(|r| *r > 0.0) {
+            t.rpm = r;
+        }
+        if let Some(f) = op.feed.filter(|f| *f > 0.0) {
+            t.feed = f;
+        }
+        if let Some(f) = op.plunge_feed.filter(|f| *f > 0.0) {
+            t.plunge_feed = f;
+        }
+        Some(std::borrow::Cow::Owned(t))
+    }
+
+    /// The tool a toolpath was made with, as its operation runs it (see `tool_for`).
+    pub fn path_tool(&self, op: u64, tool: u64) -> Option<std::borrow::Cow<'_, Tool>> {
+        match self.op(op) {
+            Some(o) if o.tool == tool => self.tool_for(o),
+            _ => self.tool(tool).map(std::borrow::Cow::Borrowed),
+        }
     }
 
     /// The speed a tool really runs at: its own, capped at the spindle's maximum.

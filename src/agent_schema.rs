@@ -546,6 +546,11 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ], "description": "coolant"}),
         ("cam_tool", "tapping_head") => t("boolean", "taps: held in a self-reversing tapping head (no G84 or spindle reversal)"),
         ("cam_tool", "reverse_ratio") => json!({"type": "number", "exclusiveMinimum": 0, "description": "the tapping head's reverse ratio (default 1.75)"}),
+        ("cam_op", "seam") => xy("contour: start and end on the side nearest this work point [x, y]; trace: open lines start at the end nearest it"),
+        ("cam_op", "rpm") => t("number", "this operation's spindle speed instead of the tool's"),
+        ("cam_op", "feed") => t("number", "this operation's cutting feed, mm/min, instead of the tool's"),
+        ("cam_op", "plunge_feed") => t("number", "this operation's plunge feed, mm/min, instead of the tool's"),
+        ("cam_op", "spring_pass") => t("boolean", "contour: the last lap once more at the same size"),
         ("cam_op", "chip_thinning") => t("boolean", "adaptive: raise the cutting feed for radial chip thinning (at most ×1.5)"),
         ("cam_op", "probing") => json!({"type": "object", "description": "probe: what to find and set", "properties": {
             "cycle": en(&["z", "edge", "corner", "bore", "boss"], "z: the top (sets Z); edge: one side (X or Y); corner: X and Y; bore / boss: a middle (X and Y)"),
@@ -693,7 +698,16 @@ pub(super) fn complete(tools: &mut [Value]) {
         // fields serde leaves out at their defaults, so serde_fields can't see them
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
-            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object"), ("tip_offset", "number")],
+            "cam_op" => &[
+                ("chip_thinning", "boolean"),
+                ("probing", "object"),
+                ("tip_offset", "number"),
+                ("rpm", "number"),
+                ("feed", "number"),
+                ("plunge_feed", "number"),
+                ("seam", "array"),
+                ("spring_pass", "boolean"),
+            ],
             _ => &[],
         };
         for (k, ty) in hidden {
