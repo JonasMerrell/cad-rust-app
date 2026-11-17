@@ -1320,8 +1320,17 @@ pub fn setup_chain(cams: &[Cam], ci: usize) -> Result<Vec<usize>, String> {
 }
 
 /// Bring the stock boxes of `ci` and the setups before it up to date (each carries the box of the one it follows),
-/// and return the stock the earlier setups leave for it (None for a first setup).
+/// and return the stock the earlier setups leave for it (None for a first setup). Every setup in the chain is
+/// taken to machine the same parts as `ci` (see `link_setups_each` when they pick different bodies).
 pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Option<StockMap>, String> {
+    link_setups_each(cams, ci, &|_| input.clone())
+}
+
+/// `link_setups` with each setup's own parts (`input_of(k)` for setup k): an earlier setup can keep bodies a
+/// later one removes, e.g. a carrier or lugs op 1 leaves on and op 2 machines off. Its stock box and what it
+/// leaves come from its own parts, and the box is carried in part coordinates, so a later setup that picks fewer
+/// bodies still gets the earlier one's stock where it really is.
+pub fn link_setups_each(cams: &mut [Cam], ci: usize, input_of: &dyn Fn(usize) -> PartInput) -> Result<Option<StockMap>, String> {
     let chain = setup_chain(cams, ci)?;
     if chain.is_empty() {
         cams[ci].stock.carried = None;
@@ -1333,7 +1342,7 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Opt
     let mut stock: Option<StockMap> = None;
     for w in order.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let pa = Part::from_input(input, &cams[a]);
+        let pa = Part::from_input(&input_of(a), &cams[a]);
         let (lo, hi) = stock_box(&cams[a], &pa);
         let (p, q) = (pa.to_part(lo), pa.to_part(hi));
         cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);

@@ -143,7 +143,13 @@ impl Session {
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
         }
-        let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &input)?;
+        // each setup in the chain machines its own bodies (op 1 may keep a carrier op 2 takes off)
+        let mut inputs = std::collections::HashMap::new();
+        for k in cam_paths::setup_chain(&self.ws.cams, ci)? {
+            let ik = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, k));
+            inputs.insert(k, crate::cam_jaws::input_for(&self.ws.cams, k, ik)?);
+        }
+        let stock = cam_paths::link_setups_each(&mut self.ws.cams, ci, &|k| inputs.get(&k).cloned().unwrap_or_else(|| input.clone()))?;
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
         let paths = cam_paths::generate_from(c, &part, stock.as_ref());
