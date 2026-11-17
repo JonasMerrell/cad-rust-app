@@ -1253,6 +1253,12 @@ pub struct Machine {
     /// The spindle's speed droop at its rated load (a VFD spindle without speed feedback slows with
     /// torque), share; a microphone's measured droop gives the load from it.
     pub spindle_rated_slip: f64,
+    /// Share of the spindle's power (power x efficiency, best set to what it measurably stalls at) that a
+    /// cut must never exceed, and the share past which it's a caution. 1.0 / 0.85 unless set.
+    #[serde(default)]
+    pub spindle_never_exceed: f64,
+    #[serde(default)]
+    pub spindle_caution: f64,
 }
 
 impl Default for Machine {
@@ -1274,6 +1280,8 @@ impl Default for Machine {
             tool_damping: 0.03,
             chatter_scale: 0.0,
             spindle_rated_slip: 0.04,
+            spindle_never_exceed: 0.0,
+            spindle_caution: 0.0,
         }
     }
 }
@@ -1287,7 +1295,9 @@ impl Machine {
         let rated = if self.spindle_rated_rpm > 0.0 { self.spindle_rated_rpm } else { 24000.0 };
         // (the DMC2 took 576 N on a 1 mm × 12.5 mm finishing pass without complaint: the spindle runs out first)
         let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
-        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, force, deflection: 0.06 }, assumed)
+        let never_exceed = if self.spindle_never_exceed > 0.0 { self.spindle_never_exceed.min(1.0) } else { 1.0 };
+        let caution = if self.spindle_caution > 0.0 { self.spindle_caution.min(never_exceed) } else { 0.85 * never_exceed };
+        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, never_exceed, caution, force, deflection: 0.06 }, assumed)
     }
 }
 

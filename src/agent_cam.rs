@@ -728,12 +728,14 @@ impl Session {
                     .collect();
                 let mut v = json!({"moves": sim.total(), "removed_mm3": sim.removed.round(), "problems": events, "ok": sim.events.is_empty(), "cell_mm": round(sim.cell)});
                 // each operation's heaviest cut: width and depth against what the tool takes at that width
+                let (lim, _) = c.machine.cut_limits();
+                let (lim_ne, lim_ca) = (lim.never_exceed, lim.caution);
                 let loads: Vec<Value> = sim
                     .loads
                     .iter()
                     .map(|l| {
                         let (c, u) = (&l.cut, &l.uses);
-                        json!({"operation": names(l.op), "op_id": l.op, "load": round(l.ratio), "spindle_power_pct": (u.power * 100.0).round(), "power_w": c.power.round(), "torque_nm": round(c.torque),
+                        json!({"operation": names(l.op), "op_id": l.op, "load": round(l.ratio), "spindle_power_pct": (u.power * 100.0).round(), "power_w": c.power.round(), "power_rating": if u.power > lim_ne { "problem: over the spindle's never-exceed" } else if u.power > lim_ca { "caution" } else { "ok" }, "torque_nm": round(c.torque),
                             "force_n": c.force.round(), "deflection_mm": round(c.deflection), "stress_mpa": c.stress.round(), "chip_mm": round(c.h_max), "fz_mm": round(c.fz), "vc_m_min": c.vc.round(), "mrr_cm3_min": round(c.mrr),
                             "uses": {"power": round(u.power), "torque": round(u.torque), "force": round(u.force), "deflection": round(u.deflection), "stress": round(u.stress), "chip": round(u.chip)},
                             "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "geometric": round(l.geometric), "feed": l.feed.round(), "rpm": l.rpm.round(),
