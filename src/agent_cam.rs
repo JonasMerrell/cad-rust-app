@@ -576,7 +576,7 @@ impl Session {
                 };
                 let c = &mut self.ws.cams[ci];
                 let i = c.ops.iter().position(|o| o.id == id).ok_or(format!("no operation {id}"))?;
-                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side", "sketches"])?;
+                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side", "sketches", "build"])?;
                 if let Some(t) = a.get("tool") {
                     op.tool = tool_ref(c, t)?;
                 }
@@ -603,6 +603,14 @@ impl Session {
                 }
                 let c = &mut self.ws.cams[ci];
                 c.ops[i] = op;
+                // build: false skips making the setup's toolpaths now (a script adding many operations to a
+                // setup that follows a long one; cam_info or simulate_cam builds them once at the end)
+                if a.get("build").and_then(|b| b.as_bool()) == Some(false) {
+                    let c = &self.ws.cams[ci];
+                    let mut v = serde_json::to_value(c.op(id).unwrap()).unwrap_or_default();
+                    v["kind"] = json!(c.op(id).unwrap().kind.key());
+                    return Ok((v, None));
+                }
                 let (_, paths) = self.cam_build(ci)?;
                 let tp = paths.iter().find(|p| p.op == id);
                 let c = &self.ws.cams[ci];
