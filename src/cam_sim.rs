@@ -520,10 +520,11 @@ impl Sim {
     /// Queue another toolpath to run after the ones already given.
     pub fn push(&mut self, cam: &Cam, tp: &Toolpath) {
         // every toolpath gets a cutter, so cutter indices match toolpath indices
-        let Some(tool) = cam.tool(tp.tool) else {
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else {
             self.cutters.push(Cutter::new(&Tool::default(), self.cell, 0.0));
             return;
         };
+        let tool: &Tool = &tool;
         let op = cam.op(tp.op);
         let allowance = match op.map(|o| o.kind) {
             Some(OpKind::Chamfer) | Some(OpKind::Deburr) => op.map(|o| o.chamfer * 2.0 + 0.3).unwrap_or(1.0) as f32,

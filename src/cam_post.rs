@@ -272,7 +272,8 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
         if tp.moves.is_empty() {
             continue;
         }
-        let Some(tool) = cam.tool(tp.tool) else { continue };
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let tool: &Tool = &tool;
         let op = cam.op(tp.op);
         o.line("");
         o.line(&comment(&format!("{} - {}", op.map(|o| o.name.as_str()).unwrap_or("operation"), op.map(|o| o.kind.label()).unwrap_or(""))));

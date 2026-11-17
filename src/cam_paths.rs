@@ -1148,7 +1148,8 @@ pub fn final_stock(cam: &Cam, part: &Part, paths: &[Toolpath], stock: Option<&St
 fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
     let m = &cam.machine;
     for tp in paths.iter_mut() {
-        let Some(tool) = cam.tool(tp.tool) else { continue };
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let tool: &Tool = &tool;
         if cam.max_rpm > 0.0 && tool.rpm > cam.max_rpm + 0.5 {
             tp.warnings.push(format!(
                 "T{} is set to {} rpm but the spindle tops out at {}: it runs at {} with its feeds scaled to {}% (same chip load)",
@@ -1344,10 +1345,11 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Opt
 
 pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
     let mut tp = Toolpath { op: op.id, tool: op.tool, ..Default::default() };
-    let Some(tool) = ctx.cam.tool(op.tool) else {
+    let Some(tool) = ctx.cam.tool_for(op) else {
         tp.warnings.push("no tool selected".into());
         return tp;
     };
+    let tool: &Tool = &tool;
     if !op.kind.accepts(tool.kind) {
         tp.warnings.push(format!("a {} can't be used for {}", tool.kind.label().to_lowercase(), op.kind.label().to_lowercase()));
         return tp;
@@ -2125,7 +2127,8 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
     let (mut tool, mut rpm, mut end): (Option<u64>, Option<f64>, Option<DVec3>) = (None, None, None);
     for tp in paths.iter().filter(|p| !p.moves.is_empty()) {
         // the post leaves out operations without a tool
-        let Some(t) = cam.tool(tp.tool) else { continue };
+        let Some(t) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let t: &Tool = &t;
         total += tp.time;
         if tool != Some(t.id) {
             tool = Some(t.id);
@@ -2371,6 +2374,35 @@ mod tests {
         assert!(pts.windows(2).any(|w| w[1].z < w[0].z - 1e-6 && w[0].truncate().distance(w[1].truncate()) > 1e-6), "ramps along the wall");
         let wall = |p: &DVec3| (p.x - 10.0).min(30.0 - p.x).min(p.y - 10.0).min(30.0 - p.y);
         assert!(pts.iter().all(|p| wall(p) > 9.0 - 0.02), "gouges");
+    }
+
+    /// An operation's own speed and feed replace its tool's for that operation only: in the moves, the
+    /// post's S word (a change between two operations of one tool) and the stock simulation's cutter.
+    #[test]
+    fn an_operation_can_set_its_own_speed_and_feed() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.post = "rcnc".into();
+        let a = c.add_op(OpKind::Contour, t);
+        let b = c.add_op(OpKind::Contour, t);
+        let tool = c.tool(t).unwrap().clone();
+        {
+            let o = c.op_mut(b).unwrap();
+            o.rpm = Some(tool.rpm * 0.75);
+            o.feed = Some(777.0);
+        }
+        let paths = generate(&c, &part);
+        let feeds_of = |tp: &Toolpath| tp.moves.iter().filter_map(|m| if let Move::Feed(_, f) = m { Some(*f) } else { None }).collect::<Vec<f64>>();
+        let (fa, fb) = (feeds_of(&paths[0]), feeds_of(&paths[1]));
+        assert!(fa.iter().any(|f| (f - c.feeds(&tool).0).abs() < 1e-6) && !fa.iter().any(|f| (f - 777.0).abs() < 1e-6), "{fa:?}");
+        assert!(fb.iter().any(|f| (f - 777.0).abs() < 1e-6) && !fb.iter().any(|f| (f - c.feeds(&tool).0).abs() < 1e-6), "{fb:?}");
+        assert_eq!(c.path_tool(paths[1].op, paths[1].tool).unwrap().rpm, tool.rpm * 0.75);
+        assert_eq!(c.path_tool(paths[0].op, paths[0].tool).unwrap().rpm, tool.rpm);
+        let _ = a;
+        let g = crate::cam_post::gcode(&c, &paths, DVec3::ZERO, 30.0);
+        let s_words: Vec<&str> = g.lines().filter(|l| l.starts_with('S')).collect();
+        assert_eq!(s_words, vec![format!("S{} M3", tool.rpm.round()).as_str(), format!("S{} M3", (tool.rpm * 0.75).round()).as_str()], "{g}");
+        assert_eq!(g.matches("M6").count(), 1, "one tool change for the two operations");
     }
 
     #[test]
