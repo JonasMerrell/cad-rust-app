@@ -176,7 +176,7 @@ pub fn page(c: &Cam, part: &Part, paths: &[Toolpath], mut sim: Sim) -> Result<St
                 p = q;
             }
             Move::Tap { z, r, pitch } => {
-                let rpm = paths.get(path).and_then(|tp| c.tool(tp.tool)).map(|tl| c.spindle_rpm(tl)).unwrap_or(500.0).max(1.0);
+                let rpm = paths.get(path).and_then(|tp| c.path_tool(tp.op, tp.tool)).map(|tl| c.spindle_rpm(&tl)).unwrap_or(500.0).max(1.0);
                 let f = (pitch.abs() * rpm).max(1.0);
                 let down = DVec3::new(p.x, p.y, z);
                 t += (p.z - z).abs() / f * 60.0;
@@ -279,7 +279,8 @@ pub fn page(c: &Cam, part: &Part, paths: &[Toolpath], mut sim: Sim) -> Result<St
         .enumerate()
         .map(|(i, tp)| {
             let op = c.op(tp.op);
-            let tool = c.tool(tp.tool);
+            let tool = c.path_tool(tp.op, tp.tool);
+            let tool = tool.as_deref();
             let (body, stickout) = sim.cutter_body(i).map(|(b, s)| (b.to_vec(), s)).unwrap_or_default();
             let t0 = if first_seg[i] == usize::MAX {
                 total_t

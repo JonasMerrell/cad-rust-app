@@ -136,6 +136,10 @@ pub struct Limits {
     /// falls with the speed).
     pub power: f64,
     pub rated_rpm: f64,
+    /// Share of `power` a cut may never go over (a problem past it) and the share past which it's a caution:
+    /// with `power` the spindle's measured pull-out (it stalls there), the planning limits sit under it.
+    pub never_exceed: f64,
+    pub caution: f64,
     /// The most sideways force the machine takes at the tool, N.
     pub force: f64,
     /// Bend allowed at the tool's tip, mm (roughing; finishing passes report it as a wall error).
@@ -165,7 +169,9 @@ pub fn use_of(c: &Cut, t: &ToolGeom, l: &Limits, rpm: f64, finishing: bool) -> U
     let deflection = c.deflection / l.deflection.max(1e-6);
     let stress = c.stress / t.stress_limit.max(1.0);
     let chip = c.h_max / (0.025 * t.diameter);
-    let worst = power.max(torque).max(force).max(if finishing { 0.0 } else { deflection }).max(stress).max(chip);
+    // power and torque count against the never-exceed share, so 1 is where a cut becomes a problem
+    let ne = l.never_exceed.clamp(0.1, 1.0);
+    let worst = (power / ne).max(torque / ne).max(force).max(if finishing { 0.0 } else { deflection }).max(stress).max(chip);
     Use { power, torque, force, deflection, stress, chip, worst }
 }
 
@@ -369,8 +375,8 @@ mod tests {
     }
 
     fn dmc2() -> Limits {
-        // 1.5 kW input × 0.78
-        Limits { power: 1170.0, rated_rpm: 24000.0, force: 700.0, deflection: 0.06 }
+        // the measured pull-out at 24000 (the stick-out gauge's broken-tool run): 645 W by this model's watts
+        Limits { power: 645.0, rated_rpm: 24000.0, never_exceed: 0.85, caution: 0.775, force: 700.0, deflection: 0.06 }
     }
 
     #[test]
@@ -388,23 +394,24 @@ mod tests {
         assert!((c.power - p).abs() / p < 0.05, "{} vs {p}", c.power);
     }
 
-    /// The two real cuts on the DMC2: the test part's heaviest (4.65 wide × 3 deep, cut fine) passes, the
-    /// phone stand's plinth corner (5 × 4, overloaded the tool) is over the limit.
+    /// The DMC2's spindle on the 1/4" 3-flute at 24000 rpm, 6061, from the stick-out gauge's broken-tool run
+    /// (2026-11-17, the speed heard from the spindle head): 6 deep at F2400, 0.6 wide sagged 1.8% (steady),
+    /// 1.0 wide 3.2% (steady), 1.4 wide never settled (7.5%: at pull-out), 1.8 wide ran away and broke the tool.
+    /// Jonas: 0.6 x 10 at 2500 comfortable, 0.6 x 12 at 2500 on the edge. The model's 100% is that pull-out
+    /// (645 W of its watts), 550 W (85%) is never to be exceeded, 500 W is a caution.
     #[test]
     fn calibrated_on_the_dmc2() {
         let m = material("6061-T6");
-        let fine = cut(&t24(), &m, 4.65, 3.0, 2400.0, 24000.0, 13.9);
-        let bad = cut(&t24(), &m, 5.0, 4.0, 2400.0, 24000.0, 20.0);
-        let (uf, ub) = (use_of(&fine, &t24(), &dmc2(), 24000.0, false), use_of(&bad, &t24(), &dmc2(), 24000.0, false));
-        // deep and narrow, 0.6 wide × 12 deep at 2500 mm/min: ran comfortably
-        let easy = cut(&t24(), &m, 0.6, 12.0, 2500.0, 24000.0, 7.2);
-        let ue = use_of(&easy, &t24(), &dmc2(), 24000.0, false);
-        println!("easy {easy:?}\n {ue:?}\nfine {fine:?}\n {uf:?}\nbad {bad:?}\n {ub:?}");
-        // it sounded close to bogging: the caution band
-        assert!(uf.power > 0.8 && uf.worst < 1.0, "{fine:?} {uf:?}");
-        // it audibly bogged: over on the spindle's power
-        assert!(ub.power > 1.1, "{bad:?} {ub:?}");
-        assert!(ue.power > 0.45 && ue.power < 0.7 && ue.worst < 0.75, "{easy:?} {ue:?}");
+        let l = dmc2();
+        let at = |w: f64, d: f64, f: f64| use_of(&cut(&t24(), &m, w, d, f, 24000.0, w * d), &t24(), &l, 24000.0, false);
+        let (c1, c2, c3, c4) = (at(0.6, 6.0, 2400.0), at(1.0, 6.0, 2400.0), at(1.4, 6.0, 2400.0), at(1.8, 6.0, 2400.0));
+        // steady cuts stay under the caution, the one at pull-out is a problem, the one that broke is far over
+        assert!(c1.worst < 0.75 && c2.worst < 0.95, "{c1:?} {c2:?}");
+        assert!(c3.power > 0.9 && c3.worst > 1.0, "{c3:?}");
+        assert!(c4.power > 1.2, "{c4:?}");
+        // Jonas's cuts: 0.6 x 10 comfortable (under the never-exceed), 0.6 x 12 on the edge (at pull-out)
+        let (ten, twelve) = (at(0.6, 10.0, 2500.0), at(0.6, 12.0, 2500.0));
+        assert!(ten.worst < 1.0 && twelve.power > 0.95, "{ten:?} {twelve:?}");
     }
 
     /// Chips pile up in a deep pocket, not on an open edge; thin chips stay more than thick ones; coolant
