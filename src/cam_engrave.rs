@@ -219,9 +219,12 @@ pub(crate) fn trace(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
         };
         let j = (0..todo.len()).min_by(|a, b| near(&todo[*a]).total_cmp(&near(&todo[*b]))).unwrap();
         let (mut l, is_closed) = todo.remove(j);
+        // an open line starts at its end nearest the seam point when there is one (so one-way passes all
+        // climb), else at the end nearest the tool
+        let start_near = op.seam.map(|p| DVec2::new(p[0] + ctx.origin.x, p[1] + ctx.origin.y)).unwrap_or(here);
         if is_closed {
             l = from_nearest(&l, pb.pos);
-        } else if l.last().unwrap().distance(here) < l[0].distance(here) {
+        } else if l.last().unwrap().distance(start_near) < l[0].distance(start_near) {
             l.reverse();
         }
         // pass by pass down; open paths go back and forth
@@ -324,6 +327,29 @@ mod tests {
 
     fn feeds(moves: &[Move]) -> Vec<DVec3> {
         moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(DVec3::from(*p)) } else { None }).collect()
+    }
+
+    /// With a seam point every open line starts at its end nearest it: one-way passes all in one direction.
+    #[test]
+    fn trace_lines_start_at_the_seam_end() {
+        // two separate lines drawn in opposite directions
+        let l = vec![(vec![DVec3::new(5.0, 5.0, 10.0), DVec3::new(5.0, 25.0, 10.0)], false), (vec![DVec3::new(15.0, 25.0, 10.0), DVec3::new(15.0, 5.0, 10.0)], false)];
+        let part = block(l);
+        let (mut c, id) = setup(OpKind::Trace, Tool { kind: ToolKind::Engrave, diameter: 6.0, angle: 90.0, stepdown: 0.4, ..Default::default() });
+        c.op_mut(id).unwrap().depth = 0.4;
+        c.op_mut(id).unwrap().seam = Some([-1000.0, -1000.0]);
+        let tp = generate(&c, &part).remove(0);
+        // each cut (feeds between rapids) runs +Y
+        let mut runs: Vec<Vec<DVec3>> = vec![];
+        for m in &tp.moves {
+            match m {
+                Move::Feed(p, _) => runs.last_mut().map(|r| r.push(DVec3::from(*p))).unwrap_or_else(|| runs.push(vec![DVec3::from(*p)])),
+                _ => runs.push(vec![]),
+            }
+        }
+        let runs: Vec<_> = runs.into_iter().filter(|r| r.len() >= 2 && (r[0].y - r[r.len() - 1].y).abs() > 10.0).collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(runs.iter().all(|r| r[r.len() - 1].y > r[0].y), "{runs:?}");
     }
 
     #[test]
