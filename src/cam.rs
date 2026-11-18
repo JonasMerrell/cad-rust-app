@@ -1246,6 +1246,11 @@ pub struct Machine {
     pub travel: [f64; 3],
     /// Highest feed, mm/min.
     pub max_feed: f64,
+    /// Feed for G1 moves that cut nothing (links through cleared ground, moves in air), mm/min; 0 = `max_feed`.
+    /// Cutting moves stay at or under `max_feed`. (G0 rapids run at the controller's own speed; `Cam::rapid_rate`
+    /// and `rapid_z` are only for the time estimates.)
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub link_feed: f64,
     /// Rapid rate along Z when it differs from X/Y (0 = the same).
     pub rapid_z: f64,
     /// Automatic tool changer; without one the program pauses (M0) for each tool change.
@@ -1299,6 +1304,7 @@ impl Default for Machine {
             name: String::new(),
             travel: [0.0; 3],
             max_feed: 0.0,
+            link_feed: 0.0,
             rapid_z: 0.0,
             tool_changer: false,
             spin_up: 5.0,
