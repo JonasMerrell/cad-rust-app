@@ -1265,6 +1265,10 @@ pub struct Machine {
     pub spindle_low_rpm: f64,
     #[serde(default)]
     pub spindle_low_torque: f64,
+    /// Over `spindle_rated_rpm` the power falls as (rated / rpm) to this power (0: constant power). A VFD that can't
+    /// give the motor more voltage there: 1 in theory; the DMC2 (H100 at F004 = 150: rated 9000, 894 W): 0.5.
+    #[serde(default)]
+    pub spindle_above_rated: f64,
 }
 
 impl Default for Machine {
@@ -1290,6 +1294,7 @@ impl Default for Machine {
             spindle_caution: 0.0,
             spindle_low_rpm: 0.0,
             spindle_low_torque: 0.0,
+            spindle_above_rated: 0.0,
         }
     }
 }
@@ -1306,7 +1311,7 @@ impl Machine {
         let never_exceed = if self.spindle_never_exceed > 0.0 { self.spindle_never_exceed.min(1.0) } else { 1.0 };
         let caution = if self.spindle_caution > 0.0 { self.spindle_caution.min(never_exceed) } else { 0.85 * never_exceed };
         (
-            crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, low_rpm: self.spindle_low_rpm, low_torque: self.spindle_low_torque, never_exceed, caution, force, deflection: 0.06 },
+            crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, low_rpm: self.spindle_low_rpm, low_torque: self.spindle_low_torque, above: self.spindle_above_rated, never_exceed, caution, force, deflection: 0.06 },
             assumed,
         )
     }

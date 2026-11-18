@@ -140,6 +140,10 @@ pub struct Limits {
     /// rated torque at `low_rpm`, in a straight line from the rated speed (0 / 1: constant torque).
     pub low_rpm: f64,
     pub low_torque: f64,
+    /// Over the rated speed the power falls as (rated / rpm) to this power (0: it stays constant). A drive that
+    /// can't give the motor more voltage than at its rated speed weakens its field above it: in theory 1 (the
+    /// pull-out torque goes with the square of volts per hertz); the DMC2's H100 (110 V out) at F004 = 150: 0.5.
+    pub above: f64,
     /// Share of `power` a cut may never go over (a problem past it) and the share past which it's a caution:
     /// with `power` the spindle's measured pull-out (it stalls there), the planning limits sit under it.
     pub never_exceed: f64,
@@ -174,14 +178,17 @@ impl Limits {
 
     /// The power the spindle has at `rpm` before it pulls out, W.
     pub fn available(&self, rpm: f64) -> f64 {
-        self.power * (rpm / self.rated_rpm.max(1.0)).min(1.0) * self.torque_share(rpm)
+        let r = rpm / self.rated_rpm.max(1.0);
+        let over = if r > 1.0 && self.above > 0.0 { r.powf(-self.above) } else { 1.0 };
+        self.power * r.min(1.0) * self.torque_share(rpm) * over
     }
 }
 
 /// `finishing`: the bend is a wall error to report, not a load to hold the cut to.
 pub fn use_of(c: &Cut, t: &ToolGeom, l: &Limits, rpm: f64, finishing: bool) -> Use {
     let available = l.available(rpm);
-    let rated_torque = l.power / (2.0 * PI * l.rated_rpm.max(1.0) / 60.0) * l.torque_share(rpm);
+    // the torque it has at this speed: what its power there gives
+    let rated_torque = available / (2.0 * PI * rpm.max(1.0) / 60.0);
     let power = c.power / available.max(1.0);
     let torque = c.torque / rated_torque.max(1e-6);
     let force = c.force / l.force.max(1.0);
@@ -395,8 +402,7 @@ mod tests {
 
     fn dmc2() -> Limits {
         // the measured pull-out at 24000 (the stick-out gauge's broken-tool run): 645 W by this model's watts
-        // and its pull-out torque at 12000 about half of that at 24000 (op1a v2 run 1, below)
-        Limits { power: 645.0, rated_rpm: 24000.0, low_rpm: 12000.0, low_torque: 0.51, never_exceed: 0.85, caution: 0.775, force: 700.0, deflection: 0.06 }
+        Limits { power: 645.0, rated_rpm: 24000.0, low_rpm: 0.0, low_torque: 0.0, above: 0.0, never_exceed: 0.85, caution: 0.775, force: 700.0, deflection: 0.06 }
     }
 
     #[test]
@@ -434,23 +440,44 @@ mod tests {
         assert!(ten.worst < 1.0 && twelve.power > 0.95, "{ten:?} {twelve:?}");
     }
 
-    /// Op1a v2 run 1 (2026-11-18): 0.3 x 12 at the same chip (F = rpm / 10, the same torque, about 0.14 N m by the
-    /// model) at 24k, 21k, 18k, 15k and 12k sagged 2.7, 3.4, 4.1, 4.8 (creeping) and 8.4% (still falling, held):
-    /// a constant slip of about 700 rpm down to 15k, then pull-out at 12k. So the pull-out torque falls under the
-    /// rated speed: about half at 12k, in a straight line, puts 15k right at the never-exceed share.
+    /// The DMC2's VFD (H100, 110 V out) at F004 = 400 gave its 220 V spindle half its flux: op1a v2 run 1 (2026-11-18)
+    /// stalled at 12k on 0.3 x 12 (about 170 W). The pull-out torque at low speed fell: a straight line to half at
+    /// 12k matched what it did then (`low_rpm` / `low_torque`).
     #[test]
-    fn the_pull_out_torque_falls_at_low_speed() {
+    fn half_flux_the_pull_out_torque_fell_at_low_speed() {
         let m = material("6061-T6");
-        let l = dmc2();
+        let l = Limits { low_rpm: 12000.0, low_torque: 0.51, ..dmc2() };
         let at = |rpm: f64| use_of(&cut(&t24(), &m, 0.3, 12.0, rpm / 10.0, rpm, 3.6), &t24(), &l, rpm, false);
         let (r24, r18, r15, r12) = (at(24000.0), at(18000.0), at(15000.0), at(12000.0));
-        // 24k and 18k comfortable, 15k at the line, 12k past the pull-out
         assert!(r24.worst < 0.7 && r18.worst < 0.9, "{r24:?} {r18:?}");
         assert!(r15.worst > 0.9 && r15.worst < 1.1, "{r15:?}");
         assert!(r12.torque > 1.0 && r12.worst > 1.1, "{r12:?}");
-        // constant torque (the old model) would have passed 12k as easily as 24k
-        let flat = Limits { low_rpm: 0.0, low_torque: 0.0, ..l };
-        assert!(use_of(&cut(&t24(), &m, 0.3, 12.0, 1200.0, 12000.0, 3.6), &t24(), &flat, 12000.0, false).worst < 0.7);
+    }
+
+    /// The DMC2 with its VFD at F004 = 150 (full flux up to 9000 rpm, the H100's 110 V ceiling above). Measured
+    /// (op1a v5 and v6, 2026-11-18, 1/4" 3-flute, 12 deep), sag in the cut: at 9k 484/589/676/759 W by this model
+    /// 3.2/3.6/4.2/5.0%, steady; at 12k (the same flux at F004 = 200) 590 W 5.2%, 676 W 5.7%, 759 W 7%, 839 W 9%
+    /// without running away; at 24k 0.4 x 12 (446 W) 4.3-4.7% settled, 1.0 x 6 (499 W) and 0.45 x 12 (494 W) crept.
+    /// Planning: never-exceed 760 W at 9k (the highest proven steady), about 680 at 12k, 450 at 24k: 894 W at
+    /// 9000 (rated), falling as (9000 / rpm)^0.5 above; never-exceed 0.85, caution 0.73.
+    #[test]
+    fn the_dmc2_at_f004_150() {
+        let m = material("6061-T6");
+        let l = Limits { power: 894.0, rated_rpm: 9000.0, low_rpm: 0.0, low_torque: 0.0, above: 0.5, never_exceed: 0.85, caution: 0.73, force: 700.0, deflection: 0.06 };
+        let ne = |rpm: f64| l.available(rpm) * l.never_exceed;
+        assert!((ne(9000.0) - 760.0).abs() < 2.0 && (ne(12000.0) - 680.0).abs() < 25.0 && (ne(24000.0) - 450.0).abs() < 20.0, "{} {} {}", ne(9000.0), ne(12000.0), ne(24000.0));
+        let at = |w: f64, d: f64, f: f64, rpm: f64| use_of(&cut(&t24(), &m, w, d, f, rpm, w * d), &t24(), &l, rpm, false);
+        // 9k: the v6 ladder all within the line, its top at it
+        assert!(at(1.0, 12.0, 1270.0, 9000.0).worst < 0.8);
+        assert!(at(1.0, 12.0, 2310.0, 9000.0).worst < 1.01);
+        // 12k: 590 W comfortable (inside the line), 759 W past it
+        assert!(at(1.0, 12.0, 1500.0, 12000.0).worst < 1.0);
+        assert!(at(1.0, 12.0, 2100.0, 12000.0).worst > 1.0);
+        // 24k: 0.3 x 12 (346 W) fine, 1.0 x 6 (499 W) past the line
+        assert!(at(0.3, 12.0, 2400.0, 24000.0).worst < 0.95);
+        assert!(at(1.0, 6.0, 2400.0, 24000.0).worst > 1.0);
+        // under the rated speed the torque stays: 6k has two thirds of 9k's power
+        assert!((l.available(6000.0) / l.available(9000.0) - 2.0 / 3.0).abs() < 1e-9);
     }
 
     /// Chips pile up in a deep pocket, not on an open edge; thin chips stay more than thick ones; coolant
