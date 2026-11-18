@@ -88,15 +88,20 @@ struct Surface {
     drop: Dropper,
     top: f64,
     scratch: Scratch,
+    /// Measure from this flat Z instead of the part (trace with `top`).
+    flat: Option<f64>,
 }
 
 impl Surface {
     fn new(ctx: &Ctx) -> Surface {
         let probe = Tool { kind: ToolKind::Flat, diameter: 0.02, ..Default::default() };
-        Surface { drop: Dropper::new(ctx.part(), &probe, 0.0), top: ctx.stock.1.z, scratch: Scratch::default() }
+        Surface { drop: Dropper::new(ctx.part(), &probe, 0.0), top: ctx.stock.1.z, scratch: Scratch::default(), flat: None }
     }
 
     fn z(&mut self, p: DVec2) -> f64 {
+        if let Some(z) = self.flat {
+            return z;
+        }
         let z = self.drop.drop(p, &mut self.scratch).0;
         if z.is_finite() {
             z
@@ -194,6 +199,8 @@ pub(crate) fn trace(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let depth = op.depth.max(0.0);
     let passes = ((depth / stepdown(op, t)).ceil() as usize).max(1);
     let mut surf = Surface::new(ctx);
+    // with a top, depth is measured down from that flat Z (passes in stock above or beside the part)
+    surf.flat = ctx.wz(op.top);
     // closed shapes: on the line, or beside them
     let loops: Vec<Vec<DVec2>> = match op.side {
         Side::Both => closed.into_iter().map(|l| if op.climb { l.into_iter().rev().collect() } else { l }).collect(),
@@ -219,9 +226,12 @@ pub(crate) fn trace(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
         };
         let j = (0..todo.len()).min_by(|a, b| near(&todo[*a]).total_cmp(&near(&todo[*b]))).unwrap();
         let (mut l, is_closed) = todo.remove(j);
+        // an open line starts at its end nearest the seam point when there is one (so one-way passes all
+        // climb), else at the end nearest the tool
+        let start_near = op.seam.map(|p| DVec2::new(p[0] + ctx.origin.x, p[1] + ctx.origin.y)).unwrap_or(here);
         if is_closed {
             l = from_nearest(&l, pb.pos);
-        } else if l.last().unwrap().distance(here) < l[0].distance(here) {
+        } else if l.last().unwrap().distance(start_near) < l[0].distance(start_near) {
             l.reverse();
         }
         // pass by pass down; open paths go back and forth
@@ -324,6 +334,35 @@ mod tests {
 
     fn feeds(moves: &[Move]) -> Vec<DVec3> {
         moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(DVec3::from(*p)) } else { None }).collect()
+    }
+
+    /// With a seam point every open line starts at its end nearest it: one-way passes all in one direction.
+    #[test]
+    fn trace_lines_start_at_the_seam_end() {
+        // two separate lines drawn in opposite directions
+        let l = vec![(vec![DVec3::new(5.0, 5.0, 10.0), DVec3::new(5.0, 25.0, 10.0)], false), (vec![DVec3::new(15.0, 25.0, 10.0), DVec3::new(15.0, 5.0, 10.0)], false)];
+        let part = block(l);
+        let (mut c, id) = setup(OpKind::Trace, Tool { kind: ToolKind::Engrave, diameter: 6.0, angle: 90.0, stepdown: 0.4, ..Default::default() });
+        c.op_mut(id).unwrap().depth = 0.4;
+        c.op_mut(id).unwrap().seam = Some([-1000.0, -1000.0]);
+        let tp = generate(&c, &part).remove(0);
+        // each cut (feeds between rapids) runs +Y
+        let mut runs: Vec<Vec<DVec3>> = vec![];
+        for m in &tp.moves {
+            match m {
+                Move::Feed(p, _) => runs.last_mut().map(|r| r.push(DVec3::from(*p))).unwrap_or_else(|| runs.push(vec![DVec3::from(*p)])),
+                _ => runs.push(vec![]),
+            }
+        }
+        let runs: Vec<_> = runs.into_iter().filter(|r| r.len() >= 2 && (r[0].y - r[r.len() - 1].y).abs() > 10.0).collect();
+        assert_eq!(runs.len(), 2, "{runs:?}");
+        assert!(runs.iter().all(|r| r[r.len() - 1].y > r[0].y), "{runs:?}");
+        // with a top the depth is measured from that flat Z, not the part
+        c.op_mut(id).unwrap().top = Some(30.0);
+        let tp = generate(&c, &part).remove(0);
+        let z: Vec<f64> = tp.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).collect();
+        // (moves are in the part's frame: work Z0 is the block's top at z 10 there, so work Z29.6 is 39.6)
+        assert!(z.iter().all(|z| (z - 39.6).abs() < 1e-6), "{z:?}");
     }
 
     #[test]

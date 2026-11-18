@@ -74,16 +74,36 @@ followed).
 
 ## Calibration (DMC2, 6061-T6, 1/4" 3-flute carbide at 24 000 rpm, 24 out of the holder)
 
-| Cut | Observed | Model |
-|---|---|---|
-| 0.6 wide × 12 deep, 2500 mm/min | ran comfortably | 656 W, 56% of the spindle |
-| 4.65 × 3, 2400 mm/min (test part) | ran, sounded close to bogging | 995 W, 85% (caution) |
-| 1 × 12.5 finish pass, 2400 (phone stand op 1) | ran, sounded close to bogging | 1068 W, 91% (caution) |
-| 5 × 4 round a corner, 2400 (phone stand op 1) | audibly bogged | 1422 W, 122% (problem) |
+**Measured, 2026-11-17** (the stick-out gauge's broken-tool run): the spindle's speed was heard from a
+transducer on the spindle head. The cuts were 6 deep at F2400 from the edge of a 32 mm bar.
 
-These are the tests `cam_cutting::tests::calibrated_on_the_dmc2` and
-`cam_3d::tests::load_check_flags_a_contour_into_square_corners_not_adaptive`. Add every new observation the
-same way.
+| Cut | MRR cm³/min | Model W | Heard | Meaning |
+|---|---|---|---|---|
+| 0.6 × 6 | 8.6 | 351 | 1.8% under the air speed, steady | fine |
+| 1.0 × 6 | 14.4 | 531 | 3.2%, steady | fine: the planning target |
+| 1.4 × 6 | 20.2 | 647 | 7.5% and never settled | **at pull-out** |
+| 1.8 × 6 | 25.9 | 872 | ran away below 300 Hz in 1.4 s | broke the tool |
+| 0.6 × 10 at 2500 (Jonas) | 15.0 | about 550 | comfortable | |
+| 0.6 × 12 at 2500 (Jonas) | 18.0 | 656 | on the edge | |
+
+So for the DMC2:
+- the spindle's power is its **pull-out at about 645 W of this model's watts at 24k**: `spindle_power` 1500 ×
+  `spindle_efficiency` 0.43;
+- **`spindle_never_exceed` 0.85 (550 W)**: a cut past it is a problem;
+- **`spindle_caution` 0.775 (500 W)**;
+- the adaptive's 0.7 power share (450 W) is the bulk of a cut;
+- below 24k the torque is taken as constant, which is **not measured yet**; the rpm sweep in the next
+  calibration run measures it.
+
+The earlier observations disagree with this, so the model's scaling between cut shapes isn't right yet:
+- the test part's 4.65 × 3 at 2400 (995 W by the model) and the phone stand's 1 × 12.5 finish (1068 W) both
+  ran;
+- wide and shallow, or short engagements carried by the spindle's inertia, may cost less than the model says.
+
+Until that's measured, keep the 1/4" at a stepover of about 1 mm or less and **14–15 cm³/min (never over 18)**.
+Run every cut beyond a proven one with rcnc's bog guard armed (`(RCNC REQUIRE_GUARD)`).
+
+`cam_cutting::tests::calibrated_on_the_dmc2` holds these points.
 
 ## Chip evacuation (a heuristic risk index, not chip physics)
 

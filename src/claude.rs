@@ -867,7 +867,7 @@ fn output_types(name: &str, a: &Value) -> Vec<(&'static str, Vec<String>)> {
             vec![("path", format.map(|f| vec![f]).unwrap_or_else(|| list(&ALL)))]
         }
         "export_web" | "export_setup_sheet" | "export_cam_simulation" => vec![("path", list(&["html", "htm"]))],
-        "export_gcode" => vec![("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"]))],
+        "export_gcode" | "verify_gcode" => vec![("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"]))],
         "export_pcb" => vec![("path", list(&["zip"]))],
         "cam_soft_jaws" => vec![("export_step", list(&["step", "stp"]))],
         _ => vec![],
