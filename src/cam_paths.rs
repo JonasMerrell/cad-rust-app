@@ -925,9 +925,14 @@ pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> 
 }
 
 /// Operations roughing from the power budget (`power_target`): with the stock simulated move by move, the
-/// feed comes down on any move whose cut would take more than the cap (where the engagement rises: a corner,
-/// an entry), so the peaks stay under it without narrowing the whole operation; and each such operation notes
-/// the power it takes (mean while cutting, peak) and its removal rate.
+/// feed comes down on any level move whose cut would take more than the cap (where the engagement rises: a
+/// corner, the start of a pass), so the peaks stay under it without narrowing the whole operation; and each
+/// such operation notes the power it takes (mean while cutting, peak) and its removal rate.
+///
+/// In: the setup, its part, the stock the setups before left, and the toolpaths (links already made). Out:
+/// the same toolpaths with only the feeds of those level moves lowered, and the note in their warnings.
+/// The power of a move is the cutting model's power per mm² of cut cross-section per mm/min at the op's own
+/// stepover and stepdown, times the simulated cross-section the move takes and its feed.
 pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
     if !paths.iter().any(|tp| cam.op(tp.op).is_some_and(|o| o.power_target.is_some())) {
         return paths;
@@ -968,7 +973,10 @@ pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut path
                 let before = sim.removed;
                 sim.run_to(base + i + 1, usize::MAX);
                 let len = p.distance(q);
-                let area = if len > 1e-6 { (sim.removed - before) / len } else { 0.0 };
+                // a side cut's cross-section; a move down (a helix or ramp into the material) takes the tool's
+                // footprint, not a side cut: its plunge feed is set by the op, so it is left as it is
+                let level = (q.z - p.z).abs() < 1e-6;
+                let area = if len > 1e-6 && level { (sim.removed - before) / len } else { 0.0 };
                 if area > 1e-3 {
                     let mut f2 = f;
                     let power = |f: f64| k(f) * area * f;
