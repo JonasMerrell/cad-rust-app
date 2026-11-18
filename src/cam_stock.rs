@@ -20,6 +20,31 @@ pub struct StockMap {
 }
 
 impl StockMap {
+    /// The material's extent at height `z` through `at`: along X on the row through it and along Y on the
+    /// column through it (as Find stock touches it), or None when there is no material there.
+    pub fn outline_at(&self, z: f64, at: glam::DVec2) -> Option<(glam::DVec2, glam::DVec2)> {
+        let z = z as f32;
+        let has = |i: usize, j: usize| {
+            let k = j * self.nx + i;
+            self.hi[k] != EMPTY && self.hi[k] > z && self.lo[k] <= z
+        };
+        let ci = ((at.x - self.x0) / self.cell).round();
+        let cj = ((at.y - self.y0) / self.cell).round();
+        if ci < 0.0 || cj < 0.0 || ci as usize >= self.nx || cj as usize >= self.ny {
+            return None;
+        }
+        let (ci, cj) = (ci as usize, cj as usize);
+        let xs: Vec<usize> = (0..self.nx).filter(|&i| has(i, cj)).collect();
+        let ys: Vec<usize> = (0..self.ny).filter(|&j| has(ci, j)).collect();
+        let (x0, x1, y0, y1) = (*xs.first()?, *xs.last()?, *ys.first()?, *ys.last()?);
+        // cell centres: the material reaches half a cell further
+        let h = self.cell / 2.0;
+        Some((
+            glam::DVec2::new(self.x0 + x0 as f64 * self.cell - h, self.y0 + y0 as f64 * self.cell - h),
+            glam::DVec2::new(self.x0 + x1 as f64 * self.cell + h, self.y0 + y1 as f64 * self.cell + h),
+        ))
+    }
+
     /// A solid block.
     #[cfg(test)]
     pub fn block(lo: DVec3, hi: DVec3, cell: f64) -> StockMap {
@@ -228,6 +253,26 @@ impl StockMap {
 mod tests {
     use super::*;
     use crate::cam_paths::orient_matrix;
+
+    #[test]
+    fn the_outline_is_read_at_the_probes_height() {
+        // a 10 x 100 bar 20 tall whose +Y end op 1 cut back 5 above Z10 (as the gauge's lugs): Find stock touching
+        // the sides at Z15 finds it 95 long, at Z5 the whole 100
+        let mut m = StockMap::block(DVec3::ZERO, DVec3::new(10.0, 100.0, 20.0), 0.5);
+        for j in 0..m.ny {
+            for i in 0..m.nx {
+                if m.y0 + j as f64 * m.cell > 95.0 {
+                    m.hi[j * m.nx + i] = 10.0;
+                }
+            }
+        }
+        let at = glam::DVec2::new(5.0, 50.0);
+        let (a, b) = m.outline_at(15.0, at).unwrap();
+        assert!((b.y - a.y - 95.0).abs() < 0.6 && (b.x - a.x - 10.0).abs() < 0.6, "{a} {b}");
+        let (a, b) = m.outline_at(5.0, at).unwrap();
+        assert!((b.y - a.y - 100.0).abs() < 0.6, "{a} {b}");
+        assert!(m.outline_at(25.0, at).is_none());
+    }
 
     #[test]
     fn flips_and_turns() {
