@@ -1884,6 +1884,9 @@ fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, seam
     false
 }
 
+/// How far a chamfer mill's cone may reach past the chamfer it cuts into a face beside the edge, mm.
+pub const CHAMFER_GOUGE: f64 = 0.05;
+
 fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let edge = ctx.wz(op.top).unwrap_or(ctx.part().hi.z);
@@ -1908,6 +1911,43 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let sh = ctx.geo.shadow(edge - 0.01);
     let path = offset(&sh, s + op.leave);
     let mut any = false;
+    // The whole cone, tip offset and all, against the part along each edge: past a vertical (or steeper than
+    // the cone) face it touches only the edge, cutting the chamfer; next to a face shallower than the cone
+    // (a dish's rim, a gentle slope) the cone below the edge cuts into that face all along it. Such edges are
+    // left out (a ball edge break is the tool for them).
+    let cone = crate::cam_3d::Dropper::new(ctx.part(), t, 0.0);
+    let mut flat = t.clone();
+    flat.kind = ToolKind::Flat;
+    flat.diameter = (2.0 * tip).max(0.2);
+    flat.corner_radius = 0.0;
+    let under = crate::cam_3d::Dropper::new(ctx.part(), &flat, 0.0);
+    let mut scratch = crate::cam_3d::Scratch::default();
+    let chamfer_z = w / half.tan();
+    let diag = std::env::var_os("RCAD_CHAMFER_DIAG").is_some();
+    // the most the cone cuts past the chamfer, and the tip's clearance over what is under it, along a loop
+    let mut check = |l: &Contour| -> (f64, f64, DVec2) {
+        let (mut worst, mut clear, mut at) = (f64::NEG_INFINITY, f64::INFINITY, DVec2::from(l[0]));
+        let n = l.len();
+        for i in 0..n {
+            let (a, b) = (DVec2::from(l[i]), DVec2::from(l[(i + 1) % n]));
+            let steps = (a.distance(b) / 0.25).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let q = a.lerp(b, k as f64 / steps as f64);
+                // past the chamfer: the cone resting higher than the chamfer's depth, or the tip's flat in the part
+                let (h, _) = cone.drop(q, &mut scratch);
+                let (u, _) = under.drop(q, &mut scratch);
+                let bad = (h - z - chamfer_z).max(u - z);
+                if bad.is_finite() && bad > worst {
+                    worst = bad;
+                    at = q;
+                }
+                if u.is_finite() {
+                    clear = clear.min(z - u);
+                }
+            }
+        }
+        (worst, clear, at)
+    };
     for sp in &path {
         for (i, c) in sp.iter().enumerate() {
             let want = match op.side {
@@ -1918,6 +1958,17 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             if want {
                 let l: Contour = if op.climb { c.iter().rev().copied().collect() } else { c.clone() };
                 if l.len() < 2 {
+                    continue;
+                }
+                let (cut, clear, at) = check(&l);
+                if diag {
+                    eprintln!("chamfer {}: loop of {} points near ({:.2}, {:.2}): cone past the chamfer {:.3} mm at ({:.2}, {:.2}), tip {:.2} mm over what is under it", op.name, l.len(), l[0][0] - ctx.origin.x, l[0][1] - ctx.origin.y, cut, at.x - ctx.origin.x, at.y - ctx.origin.y, clear);
+                }
+                                if cut > CHAMFER_GOUGE {
+                    tp.warnings.push(format!(
+                        "left out the edge near X{} Y{}: the face beside it is shallower than the chamfer mill's cone, which would cut {} mm into it; break that edge with a ball instead",
+                        crate::cam::fmt_mm(at.x - ctx.origin.x), crate::cam::fmt_mm(at.y - ctx.origin.y), crate::cam::fmt_mm(cut)
+                    ));
                     continue;
                 }
                 // come down above the edge, not to the chamfer's bottom: a cone lowered to z + retract would
@@ -2803,6 +2854,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 60 × 40 × 10 plate with a thumb dish: a cone 8 in radius, its face 25° from flat (shallower than a
+    /// 90° chamfer mill's 45°), as on the stick-out gauge.
+    fn dished() -> Part {
+        let mut tris = vec![];
+        let z = |x: f64, y: f64| {
+            let rho = (x - 30.0).hypot(y - 20.0);
+            if rho < 8.0 {
+                10.0 - (8.0 - rho) * 25f64.to_radians().tan()
+            } else {
+                10.0
+            }
+        };
+        let n = 0.25;
+        for j in 0..(40.0 / n) as i32 {
+            for i in 0..(60.0 / n) as i32 {
+                let (x, y) = (i as f64 * n, j as f64 * n);
+                let p = |dx: f64, dy: f64| DVec3::new(x + dx, y + dy, z(x + dx, y + dy));
+                tris.push([p(0.0, 0.0), p(n, 0.0), p(n, n)]);
+                tris.push([p(0.0, 0.0), p(n, n), p(0.0, n)]);
+            }
+        }
+        tris.push([DVec3::ZERO, DVec3::new(0.0, 40.0, 0.0), DVec3::new(60.0, 0.0, 0.0)]);
+        Part::new(&tris, &[], "top")
+    }
+
+    #[test]
+    fn a_chamfer_mill_leaves_out_an_edge_beside_a_shallow_face() {
+        // the stick-out gauge's op 1 (2026-11-18): a 0.3 edge break round the dish's rim with the tip 1 mm
+        // below the chamfer, as for a wall, cut the dish all round: the cone (45°) is steeper than the dish
+        let part = dished();
+        let mut c = Cam::default();
+        let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap());
+        let id = c.add_op(OpKind::Chamfer, t);
+        let op = c.op_mut(id).unwrap();
+        op.chamfer = 0.3;
+        op.tip_offset = 1.0;
+        op.side = Side::Both;
+        let tp = generate(&c, &part).remove(0);
+        assert_eq!(tp.warnings.iter().filter(|w| w.contains("left out the edge")).count(), 1, "{:?}", tp.warnings);
+        // the outline is still broken, and nothing comes near the dish
+        let mut p = DVec3::ZERO;
+        let mut feeds = 0;
+        for m in &tp.moves {
+            p = m.end(p);
+            if matches!(m, Move::Feed(..)) {
+                feeds += 1;
+                assert!(p.truncate().distance(DVec2::new(30.0, 20.0)) > 12.0, "{p}");
+            }
+        }
+        assert!(feeds > 4);
+        let stock = stock_box(&c, &part);
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, std::slice::from_ref(&tp), 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        assert!(sim.events.is_empty(), "{:?}", sim.events);
+        // what it used to do: the same pass round the rim, the tip 1.3 down and 1 in from it. The simulation
+        // now calls that a gouge: the chamfer's allowance holds only beside a face falling away as steeply
+        // as the cone, not over the whole dish
+        let (r, z) = (8.0 - 1.0, 10.0 - 1.3);
+        let mut moves = vec![Move::Rapid([30.0 + r, 20.0, 15.0]), Move::Feed([30.0 + r, 20.0, z], 200.0)];
+        for k in 1..=72 {
+            let a = k as f64 * 5f64.to_radians();
+            moves.push(Move::Feed([30.0 + r * a.cos(), 20.0 + r * a.sin(), z], 1000.0));
+        }
+        moves.push(Move::Rapid([30.0 + r, 20.0, 15.0]));
+        let old = Toolpath { op: id, tool: t, moves, ..Default::default() };
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &[old], 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        let deepest = sim.events.iter().filter(|e| e.kind == crate::cam_sim::EventKind::Gouge).map(|e| e.depth).fold(0.0, f64::max);
+        assert!(deepest > 0.3, "{:?}", sim.events);
     }
 
     #[test]

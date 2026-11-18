@@ -1007,17 +1007,73 @@ impl Session {
                     self.ws.cams[ci].post = p.to_string();
                 }
                 let path = super::str_arg(a, "path")?;
-                let (part, paths) = self.cam_build(ci)?;
+                // the very toolpaths that are posted, simulated: a program goes out only when that is clean
+                let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                let (part, paths, sim) = self.cam_sim(ci, res)?;
                 let c = &self.ws.cams[ci];
-                let text = crate::cam_ui::gcode_for(c, &part, &paths);
+                let problems = self.sim_problems(ci, &part, &sim);
+                let hash = crate::cam_verify::toolpath_hash(&paths);
+                let allow = a.get("allow_problems").and_then(|v| v.as_bool()).unwrap_or(false);
+                let first: Vec<String> = problems.iter().take(5).map(|p| format!("{} in '{}' at {} ({} mm)", p["what"].as_str().unwrap_or(""), p["operation"].as_str().unwrap_or(""), p["at"], p["depth"])).collect();
+                let (path, line) = crate::cam_verify::gate(problems.len(), &first, allow, &path, hash)?;
+                let text = crate::cam_verify::stamped(&crate::cam_ui::gcode_for(c, &part, &paths), &line);
                 super::write_out(&path, &text)?;
                 let warnings: Vec<String> =
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
-                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
+                let mut v = json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings,
+                    "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                if !problems.is_empty() {
+                    v["unsafe"] = json!(format!("written as {path} with an UNSAFE header: {} simulation problem(s); do not run it", problems.len()));
+                    v["problems"] = json!(problems);
+                }
+                v
+            }
+            "verify_gcode" => {
+                let ci = self.cam_idx(a)?;
+                let path = super::str_arg(a, "path")?;
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                let (part, paths, left) = self.cam_build_from(ci)?;
+                let c = self.ws.cams[ci].clone();
+                let o = cam_paths::work_origin(&c, &part);
+                let stock = cam_paths::stock_box(&c, &part);
+                let safe = stock.1.z.max(part.hi.z) + 25.0;
+                let read = crate::cam_verify::parse(&text, &c, o, safe)?;
+                let mut sim = Sim::new(&c, &part, stock, &read, res);
+                if let Some(m) = &left {
+                    sim.start_from(m);
+                }
+                if !c.machine.model.is_empty() {
+                    let l = crate::cam_machine::load(&c.machine.model)?;
+                    let placed = std::sync::Arc::new(Sim::place_machine(&c, &part, stock, l));
+                    sim.set_machine(&c, &part, placed);
+                }
+                sim.run_to(usize::MAX, usize::MAX);
+                let problems = self.sim_problems(ci, &part, &sim);
+                let now = crate::cam_verify::toolpath_hash(&paths);
+                let stamp = crate::cam_verify::read_stamp(&text);
+                let stamp_v = match stamp {
+                    None => json!("none: not posted through the checked export"),
+                    Some((ok, h)) => json!({"says_ok": ok, "hash": h.map(|h| format!("{h:016x}")), "matches_the_setup_now": h == Some(now)}),
+                };
+                let moves: usize = read.iter().map(|p| p.moves.len()).sum();
+                json!({"ok": problems.is_empty() && stamp.map(|s| s.0).unwrap_or(false), "path": path, "moves_read": moves, "problems": problems, "stamp": stamp_v,
+                    "note": "the program's own moves simulated on the setup's stock (pauses, dwells and other edits included); the stamp's hash matches when the setup still makes the same toolpaths"})
             }
             _ => return self.fea_call(name, a),
         };
         Ok((v, None))
+    }
+
+    /// A simulation's problems, as `simulate_cam` lists them.
+    fn sim_problems(&self, ci: usize, part: &Part, sim: &Sim) -> Vec<Value> {
+        let c = &self.ws.cams[ci];
+        let o = cam_paths::work_origin(c, part);
+        let names = |id: u64| c.op(id).map(|o| o.name.clone()).unwrap_or_default();
+        sim.events
+            .iter()
+            .map(|e| json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label() } else { e.what.as_str() }, "operation": names(e.op), "op_id": e.op, "at": [round(e.at[0] - o.x), round(e.at[1] - o.y), round(e.at[2] - o.z)], "depth": round(e.depth)}))
+            .collect()
     }
 
     fn render_sim(&self, sim: &Sim, a: &Value) -> R<Vec<u8>> {
@@ -1086,7 +1142,8 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "import_cutlog", "description": "Calibrate the cutting model from what rcnc heard while running this setup's program (a <program>.cutlog.json): per operation the spindle's speed droop and chatter heard against the model's power and chatter margin; suggests the spindle efficiency (from droop, with the machine's spindle_rated_slip) and the chatter scale (the chattering cuts read 1). apply: true writes them into the setup's machine.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "apply": {"type": "boolean"}}), &["cam", "path"])}),
         json!({"name": "export_cam_simulation", "description": "Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
         json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
-        json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
+        json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). It simulates the exact toolpaths it posts first and refuses (an error, nothing written) when the simulation finds any problem: a rapid into stock, a gouge, a shank, holder or fixture hit, an overload. A clean program gets a \"(SIM OK: 0 problems ..., hash ...)\" line under its title. allow_problems: true writes it anyway, only to look at, as <name>.UNSAFE.<ext> with an UNSAFE header. Reports line count, cycle time, toolpath warnings and the simulation result.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}, "allow_problems": {"type": "boolean"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "verify_gcode", "description": "Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
     ]
 }
 

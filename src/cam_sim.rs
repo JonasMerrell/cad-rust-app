@@ -77,6 +77,9 @@ struct Cutter {
     undercut: bool,
     /// How deep it may cut into the part without it counting (chamfers, taps, threads).
     allowance: f32,
+    /// For chamfers and edge breaks: the cells where `allowance` holds (next to an edge whose face drops away
+    /// at least as steeply as the cone); anywhere else a cut into the part is a gouge as for any tool.
+    near_edge: Option<std::sync::Arc<Vec<bool>>>,
     /// The tool and holder as bands from the tip up: (radius, height of the band's bottom above the tip).
     body: Vec<(f64, f64)>,
     /// Length out of the holder, and the holder's length up to the spindle (for placing it in the machine).
@@ -181,7 +184,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0, geom: {
+        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0, geom: {
             let (modulus, stress_limit) = crate::cam_cutting::tool_steel(&t.material);
             crate::cam_cutting::ToolGeom {
                 diameter: 2.0 * r,
@@ -534,6 +537,9 @@ impl Sim {
             _ => 0.02,
         };
         let mut cutter = Cutter::new(tool, self.cell, allowance);
+        if let Some(o) = op.filter(|o| matches!(o.kind, OpKind::Chamfer | OpKind::Deburr)) {
+            cutter.near_edge = Some(std::sync::Arc::new(self.near_edges(o.chamfer.max(0.05))));
+        }
         cutter.nominal = op.map(|o| crate::cam_paths::stepdown(o, tool) * crate::cam_paths::stepover(o, tool)).unwrap_or(1.0).max(0.01);
         cutter.rpm = cam.spindle_rpm(tool);
         cutter.coolant = cam.coolant_for(tool, op).is_on();
@@ -801,6 +807,40 @@ impl Sim {
         (u.area_mm2 > 1.0).then_some(u)
     }
 
+    /// The cells within reach of a chamfer `w` wide of an edge: a cell whose part surface has, within
+    /// 1.5 w + a cell, a neighbour lower by more than their distance apart plus w / 2 (a face falling away
+    /// at 45° or steeper: a wall, a hole, a step).
+    fn near_edges(&self, w: f64) -> Vec<bool> {
+        let (nx, ny) = (self.nx as i32, self.ny as i32);
+        let reach = 1.5 * w + self.cell;
+        let n = (reach / self.cell).ceil() as i32;
+        let mut out = vec![false; self.part.len()];
+        for j in 0..ny {
+            for i in 0..nx {
+                let k = (j * nx + i) as usize;
+                let h = self.part[k];
+                if !h.is_finite() {
+                    continue;
+                }
+                'near: for dj in -n..=n {
+                    for di in -n..=n {
+                        let d = ((di * di + dj * dj) as f64).sqrt() * self.cell;
+                        if d > reach || (di == 0 && dj == 0) {
+                            continue;
+                        }
+                        let (a, b) = (i + di, j + dj);
+                        let low = if a < 0 || b < 0 || a >= nx || b >= ny { f32::NEG_INFINITY } else { self.part[(b * nx + a) as usize] };
+                        if (h - low) as f64 > d + w / 2.0 {
+                            out[k] = true;
+                            break 'near;
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
     fn slope_factor(&self, i: i32, j: i32) -> f32 {
         let (nx, ny) = (self.nx as i32, self.ny as i32);
         let h = |i: i32, j: i32| if i < 0 || j < 0 || i >= nx || j >= ny { f32::NEG_INFINITY } else { self.part[(j * nx + i) as usize] };
@@ -1046,11 +1086,15 @@ impl Sim {
                             h.rotate_right(1);
                             h[0] = (tag, s);
                         }
-                        if rho <= inner && self.part[k] > z + c.allowance {
+                        let allowance = match &c.near_edge {
+                            Some(m) if !m[k] => 0.02,
+                            _ => c.allowance,
+                        };
+                        if rho <= inner && self.part[k] > z + allowance {
                             // depth across the surface, not straight down: on a steep wall a hair's
                             // breadth sideways reads as a deep cut from above
                             let d = (self.part[k] - z) / self.slope_factor(i, j);
-                            if d > c.allowance {
+                            if d > allowance {
                                 gouge = gouge.max(d);
                                 self.gouged[k] = true;
                             }
