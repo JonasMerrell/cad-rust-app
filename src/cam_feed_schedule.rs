@@ -54,6 +54,9 @@ pub struct Plan {
     pub lookahead: f64,
     /// For the report: the note's name.
     pub budget: bool,
+    /// The op's cutting feed: moves programmed slower (ramps, helices and plunges at the plunge feed, lead-ins)
+    /// keep their feed and don't hold back the moves before them.
+    pub cut_feed: f64,
 }
 
 /// What the schedule did to one operation (for simulate_cam and the setup sheet).
@@ -126,17 +129,18 @@ pub fn plan_for(cam: &Cam, tp: &Toolpath) -> Option<Plan> {
     let scheduled = op.feed_schedule.unwrap_or(cam.feed_schedule) && roughing(op);
     let max_feed = cam.machine.max_feed.max(0.0);
     let lookahead = tool.radius().max(1.0);
+    let cut_feed = cam.feeds(&tool).0;
     if scheduled {
         // the target and cap of the power budget, the setup's feed_target standing in for an op without one
         let mut o = op.clone();
         o.power_target = o.power_target.or(Some(cam.feed_target.unwrap_or(0.0)));
         let (target, cap) = crate::cam_paths::power_budget(cam, &o, &tool)?;
         let max_scale = op.feed_max_scale.filter(|s| *s > 0.0).unwrap_or(2.0);
-        return Some(Plan { target, cap, raise: true, max_scale, min_scale: 0.3, max_feed, min_chip: MIN_CHIP, lookahead, budget: op.power_target.is_some() });
+        return Some(Plan { target, cap, raise: true, max_scale, min_scale: 0.3, max_feed, min_chip: MIN_CHIP, lookahead, budget: op.power_target.is_some(), cut_feed });
     }
     let (target, cap) = crate::cam_paths::power_budget(cam, op, &tool)?;
     let _ = target;
-    Some(Plan { target: cap, cap, raise: false, max_scale: 1.0, min_scale: 0.25, max_feed, min_chip: 0.0, lookahead, budget: true })
+    Some(Plan { target: cap, cap, raise: false, max_scale: 1.0, min_scale: 0.25, max_feed, min_chip: 0.0, lookahead, budget: true, cut_feed })
 }
 
 /// Set the feeds of every toolpath that asks for it (see the module notes). `stock_in`: what an earlier setup left.
@@ -236,7 +240,7 @@ pub fn apply(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec
         let mut p = DVec3::ZERO;
         for (k, m) in tp.moves.iter().enumerate() {
             let q = m.end(p);
-            if let (Move::Feed(_, f), true) = (m, cutting[i][k]) {
+            if let (Move::Feed(_, f), true) = (m, cutting[i][k] && !fixed(&plan, programmed[i][k], k > 0 && plunging(p, q))) {
                 let t = p.distance(q) / f.max(1e-9) * 60.0;
                 let (lo, hi) = bounds(&plan, programmed[i][k], &g, rpm);
                 all += t;
@@ -346,6 +350,12 @@ fn profile(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, paths: &[Toolpat
 /// A plunge or a ramp down steeper than 1 in 2: the end of the tool cuts, which the sideways model doesn't cover.
 fn plunging(from: DVec3, to: DVec3) -> bool {
     to.z < from.z - 1e-9 && (to - from).truncate().length() < 2.0 * (from.z - to.z)
+}
+
+/// A move the schedule leaves at its programmed feed: a plunge or steep ramp, or anything programmed slower than
+/// the op's cutting feed (helix and ramp entries at the plunge feed, lead-ins).
+fn fixed(plan: &Plan, prog: f64, plunge: bool) -> bool {
+    plunge || prog < 0.98 * plan.cut_feed
 }
 
 /// Split long feed moves (not plunges) into pieces of at most `SPLIT` mm.
@@ -458,6 +468,7 @@ pub fn quantize(f: f64) -> f64 {
 fn schedule(plan: &Plan, moves: &[Move], prog: &[f64], need: &[f64], extra: &[f64], g: &ToolGeom, rpm: f64) -> Vec<f64> {
     let n = moves.len();
     let mut want = vec![f64::INFINITY; n];
+    let mut held = vec![false; n];
     let (mut start, mut len) = (vec![0.0; n], vec![0.0; n]);
     let mut p = DVec3::ZERO;
     let mut at = 0.0;
@@ -468,9 +479,12 @@ fn schedule(plan: &Plan, moves: &[Move], prog: &[f64], need: &[f64], extra: &[f6
         at += len[k];
         if let Move::Feed(..) = m {
             let (lo, hi) = bounds(plan, prog[k], g, rpm);
-            want[k] = if k > 0 && plunging(p, q) {
-                prog[k].min(hi)
-            } else if need[k].is_finite() {
+            if fixed(plan, prog[k], k > 0 && plunging(p, q)) {
+                held[k] = true;
+                p = q;
+                continue;
+            }
+            want[k] = if need[k].is_finite() {
                 need[k]
             } else {
                 hi
@@ -488,8 +502,10 @@ fn schedule(plan: &Plan, moves: &[Move], prog: &[f64], need: &[f64], extra: &[f6
         let end = start[k] + len[k] + plan.lookahead;
         let mut f = want[k];
         let mut j = k + 1;
-        while j < n && want[j].is_finite() && start[j] < end {
-            f = f.min(want[j]);
+        while j < n && (want[j].is_finite() || held[j]) && start[j] < end {
+            if !held[j] {
+                f = f.min(want[j]);
+            }
             j += 1;
         }
         out[k] = quantize(f);
