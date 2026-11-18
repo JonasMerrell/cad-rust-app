@@ -1460,8 +1460,10 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
     let w = op.chamfer.max(0.0);
     let dz = w / tanb.max(1e-6);
     let e = if op.tip_offset > 0.0 { op.tip_offset } else { 0.2 };
-    let rho = tip + (dz + e) * tanb;
-    if rho > c.r + 1e-6 {
+    // the tip `e` below the chamfer's lower edge: the cone meets the face under the edge `rho` from the centre
+    // and must still be that wide `dz` higher, at the edge itself (as the chamfer operation)
+    let rho = tip + e * tanb;
+    if rho + dz * tanb > c.r + 1e-6 {
         tp.warnings.push(format!("a {} mm chamfer is too wide for this tool", crate::cam::fmt_mm(w)));
         return;
     }
@@ -3241,10 +3243,24 @@ mod tests {
             .moves
             .iter()
             .filter_map(|m| if let Move::Feed(p, _) = m { Some(*p) } else { None })
-            .find(|p| p[0] > -0.01 && p[0] < 40.01 && p[1] < -0.5 && p[1] > -5.0)
+            .find(|p| p[0] > -0.01 && p[0] < 40.01 && p[1] < -0.1 && p[1] > -5.0)
             .unwrap();
         let reach = tip + (10.0 - 0.3 - on_front[2]) * half.tan();
         assert!((reach - (-on_front[1])).abs() < 0.05, "{on_front:?}");
+        // the tip the tip offset (0.2 by default) under the chamfer's lower edge, not the chamfer deeper still
+        assert!((on_front[2] - (10.0 - 0.3 - 0.2)).abs() < 0.05, "{on_front:?}");
+        // a chamfer whose top the cone can't reach with that tip offset is refused, not cut as a step
+        let (w0, e0) = (c.op(id).unwrap().chamfer, c.op(id).unwrap().tip_offset);
+        c.op_mut(id).unwrap().chamfer = 1.7;
+        c.op_mut(id).unwrap().tip_offset = 1.2;
+        assert!(generate(&c, &part)[0].warnings.iter().any(|w| w.contains("too wide")));
+        c.op_mut(id).unwrap().tip_offset = 0.9;
+        let wide = &generate(&c, &part)[0];
+        assert!(wide.warnings.is_empty(), "{:?}", wide.warnings);
+        let low = wide.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
+        assert!((low - (10.0 - 1.7 - 0.9)).abs() < 0.05, "{low}");
+        c.op_mut(id).unwrap().chamfer = w0;
+        c.op_mut(id).unwrap().tip_offset = e0;
         // only the picked edge
         let o = crate::cam_paths::work_origin(&c, &part);
         c.op_mut(id).unwrap().edges = vec![[20.0 - o.x, -o.y, 10.0 - o.z]];
