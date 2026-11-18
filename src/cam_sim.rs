@@ -289,6 +289,23 @@ pub struct Sim {
     pub chip_ops: Vec<OpChips>,
     /// Each operation's closest approach to chatter (see `OpChatter`).
     pub chatter: Vec<OpChatter>,
+    /// When set (`record_loads`), every load sample of every sideways cut, in order (the feed schedule).
+    pub profile: Option<Vec<LoadSample>>,
+}
+
+/// One tool position of a sideways cut as the load check sees it: the cut over about the last millimetre
+/// (width, depth, cross-section), the move it belongs to, how far the tool went for it, and what the cutting
+/// model makes of it at the move's feed.
+#[derive(Debug, Clone, Copy)]
+pub struct LoadSample {
+    pub step: usize,
+    pub width: f64,
+    pub depth: f64,
+    pub area: f64,
+    pub len: f64,
+    pub feed: f64,
+    pub power: f64,
+    pub worst: f64,
 }
 
 /// An operation's worst chatter margin: the cut's depth over the deepest stable depth at that
@@ -479,6 +496,7 @@ impl Sim {
             last_depth: 0.0,
             chip_ops: vec![],
             chatter: vec![],
+            profile: None,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -1030,6 +1048,9 @@ impl Sim {
                 None => self.chatter.push(rec),
             }
         }
+        if let Some(prof) = self.profile.as_mut() {
+            prof.push(LoadSample { step, width, depth, area, len: dxy, feed, power: cut.power, worst: uses.worst });
+        }
         let ratio = uses.worst;
         let load = OpLoad { op, step, at: p.to_array(), area, width, depth, diameter: d, max_area, ratio, geometric, feed, rpm, cut, uses };
         match self.loads.iter_mut().find(|l| l.op == op) {
@@ -1213,6 +1234,16 @@ impl Sim {
     }
 
     /// Index of the toolpath (and cutter) of move `k`.
+    /// The cutting model's view of cutter `ci`: the tool, its spindle speed, whether it finishes.
+    pub fn cutter_model(&self, ci: usize) -> Option<(crate::cam_cutting::ToolGeom, f64, bool)> {
+        self.cutters.get(ci).map(|c| (c.geom, c.rpm, c.finishing))
+    }
+
+    /// The material and the machine's limits the load check uses.
+    pub fn cut_model(&self) -> (crate::cam_cutting::Material, crate::cam_cutting::Limits) {
+        (self.material, self.limits)
+    }
+
     pub fn cutter_at(&self, k: usize) -> Option<usize> {
         self.moves.get(k).map(|m| m.0)
     }

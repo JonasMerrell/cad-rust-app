@@ -778,20 +778,30 @@ impl Session {
                 let ci = self.cam_idx(a)?;
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 let job = self.cam_job(ci, a)?;
-                let (cam_owned, part, sim) = match &job {
+                let (cam_owned, part, paths, sim) = match &job {
                     Some(j) => {
-                        let (c, part, _paths, mut sim) = j.sim(res)?;
+                        let (c, part, paths, mut sim) = j.sim(res)?;
                         sim.run_to(usize::MAX, usize::MAX);
-                        (c, part, sim)
+                        (c, part, paths, sim)
                     }
                     None => {
-                        let (part, _paths, sim) = self.cam_sim(ci, res)?;
-                        (self.ws.cams[ci].clone(), part, sim)
+                        let (part, paths, sim) = self.cam_sim(ci, res)?;
+                        (self.ws.cams[ci].clone(), part, paths, sim)
                     }
                 };
                 let c = &cam_owned;
                 let o = cam_paths::work_origin(c, &part);
                 let names = |id: u64| c.op(id).map(|o| o.name.clone()).unwrap_or_default();
+                // what the feed schedule did, op by op
+                let sched: Vec<Value> = paths
+                    .iter()
+                    .filter_map(|tp| tp.feed_report.map(|r| (tp, r)))
+                    .map(|(tp, r)| {
+                        json!({"operation": names(tp.op), "op_id": tp.op, "target_w": r.target_w.round(), "time_s": [r.time_before_s.round(), r.time_after_s.round()],
+                            "cut_time_s": [r.cut_before_s.round(), r.cut_after_s.round()], "peak_w": [r.peak_before_w.round(), r.peak_after_w.round()], "mean_cutting_w": [r.mean_before_w.round(), r.mean_after_w.round()],
+                            "at_feed_ceiling_pct": r.at_ceiling_pct.round(), "held_by_other_limits_pct": r.limited_pct.round(), "at_feed_floor_pct": r.at_floor_pct.round(), "moves": [r.moves_before, r.moves_after], "rounds": r.rounds})
+                    })
+                    .collect();
                 let events: Vec<Value> = sim
                     .events
                     .iter()
@@ -814,6 +824,9 @@ impl Session {
                     })
                     .collect();
                 v["loads"] = json!(loads);
+                if !sched.is_empty() {
+                    v["feed_schedule"] = json!({"ops": sched, "note": "pairs are [before, after] the schedule (power from the cutting model, W at the shaft); where much of the cut is at the feed ceiling a wider stepover, not a faster feed, is the next lever"});
+                }
                 v["limits"] = json!({"spindle_shaft_w": sim.limits.power.round(), "rated_rpm": sim.limits.rated_rpm, "max_force_n": sim.limits.force, "deflection_mm": sim.limits.deflection, "assumed": sim.limits_assumed});
                 let air: Vec<Value> = sim
                     .air

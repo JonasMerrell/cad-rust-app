@@ -965,6 +965,15 @@ pub struct Operation {
     pub power_target: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_cap: Option<f64>,
+    /// Feed scheduling for this roughing operation (None: the setup's `feed_schedule`): every cutting move's
+    /// feed set from the simulated cut so the spindle runs at the target (`power_target`, else the setup's
+    /// `feed_target`), faster where the tool is lightly engaged and slower ahead of walls and corners.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_schedule: Option<bool>,
+    /// The most the schedule may raise a move's feed, × the programmed feed (default 2; never past the
+    /// machine's top feed).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_max_scale: Option<f64>,
     /// Probe: what to touch and which work zero axes to set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probing: Option<ProbeOp>,
@@ -1110,6 +1119,8 @@ impl Default for Operation {
             chip_thinning: false,
             power_target: None,
             power_cap: None,
+            feed_schedule: None,
+            feed_max_scale: None,
             probing: None,
         }
     }
@@ -1626,6 +1637,15 @@ pub struct Cam {
     /// through cleared space, rapid down close to the stock before an entry.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stay_down: bool,
+    /// Feed scheduling (`cam_feed_schedule`) for the roughing operations that don't say: each cutting move's
+    /// feed is set from the simulated cut so the spindle runs at `feed_target`, up or down.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub feed_schedule: bool,
+    /// The power the feed schedule aims for, W at the shaft (the cutting model's power), for ops without a
+    /// `power_target`; None = the power budget's default (60 % of what the spindle has at the tool's speed,
+    /// 671 W at 9000 on the DMC2; never over its caution).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_target: Option<f64>,
     /// Work offset the program runs in: 1 = G54 (default) … 6 = G59, e.g. one per vise station so two setups
     /// can be merged into one program. Probing writes to it.
     #[serde(skip_serializing_if = "is_one_u8")]
@@ -1700,6 +1720,8 @@ impl Default for Cam {
             fixtures: vec![],
             fixture_clearance: 0.0,
             stay_down: false,
+            feed_schedule: false,
+            feed_target: None,
             work_offset: 1,
             with: vec![],
             job_notes: vec![],
