@@ -107,7 +107,12 @@ pub struct Measure {
     pub picks: Vec<Ref>,
     /// Kept measurements shown on the model: (a, b) world points and label.
     pub kept: Vec<([f64; 3], [f64; 3], String)>,
+    /// The picks' geometry and numbers, made again when the picks, the model or the units change.
+    pub cache: Option<crate::measure::Cache<MeasureKey>>,
 }
+
+/// What the measure numbers depend on: the picks, the built bodies and the units.
+pub type MeasureKey = (Vec<Ref>, usize, usize, crate::expr::Units);
 
 pub struct App {
     pub doc: Document,
@@ -1419,8 +1424,13 @@ impl App {
                 self.toast = None;
             } else if self.dialog.is_some() {
                 self.dialog_cancel();
-            } else if self.measure.is_some() {
-                self.measure = None;
+            } else if let Some(m) = &mut self.measure {
+                // once clears the measure's picks, again ends measuring
+                if m.picks.is_empty() {
+                    self.measure = None;
+                } else {
+                    m.picks.clear();
+                }
             } else if self.picks.is_empty() && self.isolation.is_some() {
                 // a second Esc (nothing left to clear) ends the isolation
                 self.end_isolation();
@@ -1475,7 +1485,7 @@ impl App {
         if self.measure.is_some() {
             self.measure = None;
         } else {
-            self.measure = Some(Measure { picks: self.picks.clone(), kept: vec![] });
+            self.measure = Some(Measure { picks: self.picks.clone(), ..Default::default() });
             // one mode at a time: measuring ends the printability view
             if self.print_view {
                 self.print_view = false;
@@ -2853,6 +2863,16 @@ impl App {
     }
 
     pub fn pick_from_tree(&mut self, r: Ref, add: bool) {
+        // measuring: a part clicked in the list is measured as a whole
+        if let Some(m) = &mut self.measure {
+            if let Some(i) = m.picks.iter().position(|x| *x == r) {
+                m.picks.remove(i);
+            } else {
+                m.picks.push(r);
+            }
+            self.scene_dirty = true;
+            return;
+        }
         if self.dialog.is_some() {
             crate::dialog::add_pick(self, r);
             return;
@@ -3014,6 +3034,10 @@ impl App {
         if let crate::workspace::Tab::Assembly(_) = self.tab {
             if self.asm.dialog.is_some() {
                 "Click a face, edge or circular edge on each of the two parts · Enter to accept".to_string()
+            } else if self.asm.measure.as_ref().is_some_and(|m| !m.picks.is_empty()) {
+                "Measure: click more faces or edges, a pick again to drop it, empty space to start over · Esc clears, Esc again stops".to_string()
+            } else if self.asm.measure.is_some() {
+                "Measure: click faces and edges of the parts · Esc to stop".to_string()
             } else {
                 "Insert parts, then pick a mate type · drag parts to move them, Shift+drag rotates".to_string()
             }

@@ -56,7 +56,9 @@ build the part from features with a rollback bar, configurations, materials and 
 - **Around them:** variables and configurations, rollback bar, suppress and hide, part names,
   colours, materials and mass properties, raw stock sizes (the smallest standard plate, bar or
   round bar a part fits in, shown in the BOM, the title block and as a CAM stock preset),
-  measure, section view, X-ray, and isolate (I: show only the selected parts or instances).
+  measure (M: click faces, edges, vertices or parts for a window with their diameter, length,
+  area or volume, and between two picks the minimum and centre distances with ΔX/ΔY/ΔZ and the
+  angle), section view, X-ray, and isolate (I: show only the selected parts or instances).
 - **Command search** like Fusion 360: press S (or / or Ctrl+K while sketching) to find and run any
   command by name.
 
@@ -315,6 +317,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/home.rs` | the start screen with recent documents |
 | `src/theme.rs` | colours, fonts and the card style of the panels |
 | `src/viewport.rs` | navigation, scene assembly, picking, measure, overlays |
+| `src/measure.rs` | the measure tool's numbers (sizes, min/centre distances, angles) and its window |
 | `src/render.rs` | wgpu pipelines (shaded meshes, thick lines, points, section clipping) |
 | `src/sketcher.rs` | sketch mode tools, constraints, dimensions |
 | `src/sketch.rs` | sketch data model and constraint solver |

@@ -58,6 +58,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         }
     }
 
+    update_measure(app);
     if app.scene_dirty {
         app.scene_dirty = false;
         let mut s = build_scene(app);
@@ -87,6 +88,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     }
     view_cube(app, ui, rect);
     view_tools(app, ui, rect);
+    if app.sketch.is_none() {
+        measure_window(app, ui, rect);
+    }
     if let Some(n) = app.isolated_parts().map(|b| b.len()) {
         if isolation_banner(ui, rect, &format!("Isolated: {n} part{}", if n == 1 { "" } else { "s" })) {
             app.end_isolation();
@@ -227,6 +231,24 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     }
     if let Some((_, r)) = best {
         return Some(r);
+    }
+    // model vertices (edge ends), while measuring
+    if app.measure.is_some() {
+        let mut best: Option<(f32, DVec3)> = None;
+        for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+            for e in &b.edges {
+                for p in [e.pts.first(), e.pts.last()].into_iter().flatten() {
+                    let w = Vec3::from(*p).as_dvec3();
+                    let d = (to_screen(w) - s).length();
+                    if d < px * 1.2 && best.map(|b| d < b.0).unwrap_or(true) && section_keeps(app, w) && (app.xray || !occluded(app, w)) {
+                        best = Some((d, w));
+                    }
+                }
+            }
+        }
+        if let Some((_, w)) = best {
+            return Some(Ref::Vertex { point: w.into() });
+        }
     }
     // model edges: the nearest one on screen that no face hides
     let mut near: Vec<(f32, DVec3, Ref)> = vec![];
@@ -422,12 +444,14 @@ fn ray_tri(o: DVec3, d: DVec3, a: DVec3, b: DVec3, c: DVec3) -> Option<f64> {
 
 fn click(app: &mut App, hit: Option<Ref>, add: bool) {
     if let Some(m) = &mut app.measure {
+        // clicks add to the measure (or take a pick back out); empty space starts over
         match hit {
             Some(r) => {
-                if m.picks.len() >= 2 {
-                    m.picks.clear();
+                if let Some(i) = m.picks.iter().position(|x| *x == r) {
+                    m.picks.remove(i);
+                } else {
+                    m.picks.push(r)
                 }
-                m.picks.push(r)
             }
             None => m.picks.clear(),
         }
@@ -473,6 +497,13 @@ pub fn plane_size(app: &App) -> f32 {
 }
 
 // ---------------------------------------------------------------- scene
+
+/// The number badge colour of a measure pick, when `r` is one.
+fn measure_color(app: &App, r: &Ref) -> Option<Color32> {
+    let m = app.measure.as_ref()?;
+    let i = m.picks.iter().position(|x| x == r)?;
+    m.cache.as_ref()?.color(i)
+}
 
 fn is_picked(app: &App, r: &Ref) -> bool {
     app.picks.contains(r) || app.measure.as_ref().map(|m| m.picks.contains(r)).unwrap_or(false) || crate::dialog::field_refs(app).iter().any(|x| x == r)
@@ -555,6 +586,13 @@ fn build_scene(app: &App) -> SceneData {
         .chain(crate::dialog::field_refs(app).iter())
         .filter_map(|r| if let Ref::Face { point, .. } = r { Some(DVec3::from(*point)) } else { None })
         .collect();
+    // measured faces take their number's colour
+    let measure_faces: Vec<(DVec3, Color32)> = app
+        .measure
+        .iter()
+        .flat_map(|m| m.picks.iter())
+        .filter_map(|r| if let Ref::Face { point, .. } = r { measure_color(app, r).map(|c| (DVec3::from(*point), c)) } else { None })
+        .collect();
     let body_alpha = if app.xray || in_sketch.is_some() { 0.35 } else { 1.0 };
     // printability colouring: overhangs and thin walls, against the lowest point of all parts
     let floor = app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)).map(|b| b.bbox[0][2]).fold(f64::INFINITY, f64::min);
@@ -563,6 +601,7 @@ fn build_scene(app: &App) -> SceneData {
             app.print_cache.borrow_mut().entry(b.id).or_insert_with(|| crate::printing::classify(b, floor, app.print.overhang, app.print.min_wall)).clone()
         });
         let body_picked = is_picked(app, &Ref::Body { body: b.id });
+        let body_measured = measure_color(app, &Ref::Body { body: b.id });
         // which faces are highlighted
         let face_of = |p: DVec3| -> Option<usize> {
             let mut best = (f64::INFINITY, None);
@@ -577,6 +616,7 @@ fn build_scene(app: &App) -> SceneData {
         };
         let hov_f = hover_face.and_then(face_of);
         let picked_f: Vec<usize> = picked_faces.iter().filter_map(|p| face_of(*p)).collect();
+        let measured_f: Vec<(usize, Color32)> = measure_faces.iter().filter_map(|(p, c)| face_of(*p).map(|f| (f, *c))).collect();
         let transparent = body_alpha < 1.0;
         let list_len = if transparent { s.transparent.len() } else { s.opaque.len() };
         let _ = list_len;
@@ -590,7 +630,11 @@ fn build_scene(app: &App) -> SceneData {
                 break;
             }
             let fi = b.tri_face[ti] as usize;
-            let col = if body_picked || picked_f.contains(&fi) {
+            let col = if let Some((_, c)) = measured_f.iter().find(|x| x.0 == fi) {
+                *c
+            } else if let Some(c) = body_measured {
+                c
+            } else if body_picked || picked_f.contains(&fi) {
                 vp::picked()
             } else if hov_f == Some(fi) {
                 vp::hover()
@@ -617,8 +661,9 @@ fn build_scene(app: &App) -> SceneData {
             let r = Ref::Edge { point: e.mid, name: Default::default() };
             let hov = app.hover.as_ref() == Some(&r);
             let picked = is_picked(app, &r);
+            let pc = measure_color(app, &r).unwrap_or(vp::picked());
             let (col, w) = if picked {
-                (rgba(vp::picked(), 1.0), 3.0)
+                (rgba(pc, 1.0), 3.0)
             } else if hov {
                 (rgba(vp::hover(), 1.0), 3.0)
             } else {
@@ -626,7 +671,7 @@ fn build_scene(app: &App) -> SceneData {
             };
             let pts: Vec<Vec3> = e.pts.iter().map(|p| Vec3::from(*p)).collect();
             if picked {
-                s.polyline(&pts, 10.0, rgba(vp::picked(), 0.28), true);
+                s.polyline(&pts, 10.0, rgba(pc, 0.28), true);
             }
             s.polyline(&pts, if picked { 3.8 } else { w }, col, picked || hov || app.xray || mode == 2);
         }
@@ -714,12 +759,16 @@ fn build_scene(app: &App) -> SceneData {
         crate::sketcher::scene(app, sess, &mut s);
     }
 
-    // measurement lines
-    if let Some(m) = &app.measure {
-        if let Some((a, b, _)) = measure_pair(app, m) {
-            s.polyline(&[a.as_vec3(), b.as_vec3()], 1.5, rgba(vp::dim(), 1.0), true);
-            s.point(a.as_vec3(), 6.0, rgba(vp::dim(), 1.0));
-            s.point(b.as_vec3(), 6.0, rgba(vp::dim(), 1.0));
+    // vertices: the hovered one and the measured ones
+    for r in app.hover.iter().chain(app.measure.iter().flat_map(|m| m.picks.iter())) {
+        if let Ref::Vertex { point } = r {
+            let picked = is_picked(app, r);
+            let pc = measure_color(app, r).unwrap_or(vp::picked());
+            let p = DVec3::from(*point).as_vec3();
+            if picked {
+                s.point(p, 14.0, rgba(pc, 0.3));
+            }
+            s.point(p, if picked { 8.0 } else { 7.0 }, rgba(if picked { pc } else { vp::hover() }, 1.0));
         }
     }
     s
@@ -769,9 +818,8 @@ fn model_overlay(app: &mut App, painter: &egui::Painter, rect: egui::Rect) {
         }
     }
     if let Some(m) = &app.measure {
-        if let Some((a, b, label)) = measure_pair(app, m) {
-            let mid = to_screen((a + b) / 2.0);
-            label_box(painter, mid + egui::vec2(0.0, -14.0), &label, vp::dim());
+        if let Some(c) = &m.cache {
+            crate::measure::paint_overlay(painter, &c.report, &c.items, &to_screen);
         }
         for (a, b, l) in &m.kept {
             let (sa, sb) = (to_screen((*a).into()), to_screen((*b).into()));
@@ -1265,57 +1313,152 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
 
 // ---------------------------------------------------------------- measure
 
-fn ref_point(app: &App, r: &Ref) -> Option<(DVec3, Option<DVec3>)> {
-    match r {
-        Ref::Face { point, normal, .. } => Some((DVec3::from(*point), Some(DVec3::from(*normal)))),
-        Ref::Edge { point, .. } | Ref::Vertex { point } => Some((DVec3::from(*point), None)),
-        Ref::SketchPoint { sketch, point } => {
-            let f = app.doc.feature(*sketch)?;
-            if let Op::Sketch { sketch, frame, .. } = &f.op { Some((frame.to_world(sketch.point(*point)?.v()), None)) } else { None }
+/// The body and face index a picked face point lies on.
+fn face_at_point(app: &App, p: DVec3) -> Option<(&crate::kernel::BodyMesh, usize)> {
+    let mut best: (f64, Option<(&crate::kernel::BodyMesh, usize)>) = (f64::INFINITY, None);
+    for b in app.result.bodies.iter() {
+        let (lo, hi) = (DVec3::from(b.bbox[0]), DVec3::from(b.bbox[1]));
+        let pad = 1e-3 * (1.0 + p.length());
+        if p.cmplt(lo - pad).any() || p.cmpgt(hi + pad).any() {
+            continue;
         }
-        Ref::OriginPlane { plane } => Some((DVec3::ZERO, Some(plane.frame().normal()))),
-        _ => None,
-    }
-}
-
-/// Two picked things → the points to draw between and the label.
-pub fn measure_pair(app: &App, m: &Measure) -> Option<(DVec3, DVec3, String)> {
-    let u = app.doc.units;
-    if m.picks.len() == 1 {
-        if let Ref::Edge { point, .. } = &m.picks[0] {
-            for b in &app.result.bodies {
-                if let Some(e) = b.edges.iter().find(|e| e.mid == *point) {
-                    let a = DVec3::from(e.pts[0].map(|x| x as f64));
-                    let z = DVec3::from(e.pts[e.pts.len() - 1].map(|x| x as f64));
-                    return Some((a, z, format!("length {}", u.fmt_with(e.length))));
-                }
+        for (ti, tri) in b.indices.chunks(3).enumerate() {
+            let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+            let d = crate::kernel::point_triangle_distance(p, v(tri[0]), v(tri[1]), v(tri[2]));
+            if d < best.0 {
+                best = (d, Some((b, b.tri_face[ti] as usize)));
             }
         }
-        return None;
     }
-    if m.picks.len() < 2 {
-        return None;
-    }
-    let (a, na) = ref_point(app, &m.picks[0])?;
-    let (b, nb) = ref_point(app, &m.picks[1])?;
-    if let (Some(na), Some(nb)) = (na, nb) {
-        if na.cross(nb).length() < 1e-6 {
-            // parallel planar faces: normal distance
-            let d = (b - a).dot(na).abs();
-            let foot = b - na * (b - a).dot(na);
-            return Some((foot, b, format!("distance {}", u.fmt_with(d))));
-        }
-        let ang = na.angle_between(nb).to_degrees();
-        return Some((a, b, format!("angle {}°", crate::expr::trim(ang, 2))));
-    }
-    let d = (b - a).length();
-    let dd = b - a;
-    Some((a, b, format!("distance {} (dx {}, dy {}, dz {})", u.fmt_with(d), u.fmt(dd.x.abs()), u.fmt(dd.y.abs()), u.fmt(dd.z.abs()))))
+    if best.0 < 1e-3 * (1.0 + p.length()) { best.1 } else { None }
 }
 
-pub fn measure_text(app: &App, m: &Measure) -> String {
-    match measure_pair(app, m) {
-        Some((_, _, l)) => format!("Measure: {l} · click two things, Esc to stop"),
-        None => "Measure: click a face, edge or point, then another".into(),
+/// The measure picks as geometry in world coordinates.
+pub fn measure_items(app: &App, picks: &[Ref]) -> Vec<crate::measure::Item> {
+    use crate::measure::{body_geo, edge_geo, face_geo, Geo, Item};
+    let id = |p: DVec3| p;
+    let mut out = vec![];
+    for r in picks {
+        let (geo, at, name) = match r {
+            Ref::Face { point, .. } => {
+                let p = DVec3::from(*point);
+                let Some((b, fi)) = face_at_point(app, p) else { continue };
+                let name = if app.result.bodies.len() > 1 { app.part_name(b.id) } else { String::new() };
+                (face_geo(b, fi, &id), p, name)
+            }
+            Ref::Edge { point, .. } => {
+                let found = app.result.bodies.iter().find_map(|b| b.edges.iter().position(|e| e.mid == *point).map(|i| (b, i)));
+                let Some((b, ei)) = found else { continue };
+                let name = if app.result.bodies.len() > 1 { app.part_name(b.id) } else { String::new() };
+                (edge_geo(b, ei, &id), DVec3::from(*point), name)
+            }
+            Ref::Vertex { point } => (Some(Geo::Point((*point).into())), DVec3::from(*point), String::new()),
+            Ref::Body { body } => {
+                let Some(b) = app.result.bodies.iter().find(|b| b.id == *body) else { continue };
+                (Some(body_geo(b, &id)), DVec3::from(b.centroid), app.part_name(b.id))
+            }
+            Ref::OriginPlane { plane } => {
+                let fr = plane.frame();
+                (Some(Geo::Plane { p: DVec3::from(fr.origin), n: fr.normal(), area: 0.0, tris: vec![] }), DVec3::from(fr.origin), plane.name().to_string())
+            }
+            Ref::FeaturePlane { feature } => {
+                let Some(fr) = app.result.frames.get(feature) else { continue };
+                let name = app.doc.feature(*feature).map(|f| f.name.clone()).unwrap_or_default();
+                (Some(Geo::Plane { p: DVec3::from(fr.origin), n: fr.normal(), area: 0.0, tris: vec![] }), DVec3::from(fr.origin), name)
+            }
+            Ref::SketchPoint { sketch, point } => {
+                let Some(Op::Sketch { sketch: sk, frame, .. }) = app.doc.feature(*sketch).map(|f| &f.op) else { continue };
+                let Some(p) = sk.point(*point) else { continue };
+                let w = frame.to_world(p.v());
+                (Some(Geo::Point(w)), w, String::new())
+            }
+            Ref::SketchCurve { sketch, curve } => {
+                let Some(Op::Sketch { sketch: sk, frame, .. }) = app.doc.feature(*sketch).map(|f| &f.op) else { continue };
+                let Some(c) = sk.curve(*curve) else { continue };
+                let pts: Vec<DVec3> = sk.tessellate(c, 0.5).iter().map(|p| frame.to_world(*p)).collect();
+                let len: f64 = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+                let pt = |id| sk.point(id).map(|p| frame.to_world(p.v()));
+                let geo = match &c.geom {
+                    Geom::Line { a, b } => pt(*a).zip(pt(*b)).map(|(a, b)| Geo::Line { a, b }),
+                    Geom::Circle { c: cc, r } => pt(*cc).map(|cw| Geo::Circle { c: cw, n: frame.normal(), r: *r, len: std::f64::consts::TAU * r, pts: pts.clone() }),
+                    Geom::Arc { c: cc, a, .. } => pt(*cc).zip(pt(*a)).map(|(cw, aw)| Geo::Circle { c: cw, n: frame.normal(), r: (aw - cw).length(), len, pts: pts.clone() }),
+                    _ => Some(Geo::Curve { pts: pts.clone(), len }),
+                };
+                let at = if pts.is_empty() { DVec3::ZERO } else { pts[pts.len() / 2] };
+                (geo, at, String::new())
+            }
+            Ref::Curve { feature } => {
+                let Some(c) = app.result.curves.iter().find(|c| c.feature == *feature) else { continue };
+                let pts: Vec<DVec3> = c.pts.iter().map(|p| Vec3::from(*p).as_dvec3()).collect();
+                let len = pts.windows(2).map(|w| (w[1] - w[0]).length()).sum();
+                let at = pts.get(pts.len() / 2).copied().unwrap_or_default();
+                (Some(Geo::Curve { pts, len }), at, String::new())
+            }
+            _ => continue,
+        };
+        if let Some(geo) = geo {
+            out.push(Item { name, geo, at });
+        }
+    }
+    out
+}
+
+/// Make the measure numbers again when the picks, the model or the units changed.
+pub fn update_measure(app: &mut App) {
+    let Some(m) = &app.measure else { return };
+    let key = (m.picks.clone(), app.result.bodies.as_ptr() as usize, app.result.bodies.len(), app.doc.units);
+    if m.cache.as_ref().map(|c| c.key == key).unwrap_or(false) {
+        return;
+    }
+    let (mut items, mut of_pick) = (vec![], vec![]);
+    for r in &m.picks {
+        let it = measure_items(app, std::slice::from_ref(r));
+        of_pick.push((!it.is_empty()).then_some(items.len()));
+        items.extend(it);
+    }
+    let report = crate::measure::report(&items, crate::measure::Fmt(app.doc.units));
+    if let Some(m) = &mut app.measure {
+        m.cache = Some(crate::measure::Cache { key, items, of_pick, report });
+    }
+    // the picks' colours follow their numbers
+    app.scene_dirty = true;
+}
+
+const MEASURE_HINT: &str = "Click faces, edges or vertices to measure them; click parts in the Parts list to measure whole parts. Click a pick again to drop it, or empty space to start over.";
+
+fn measure_window(app: &mut App, ui: &Ui, rect: egui::Rect) {
+    let Some(m) = &app.measure else { return };
+    let empty = crate::measure::Report::default();
+    let (n, report) = match &m.cache {
+        Some(c) => (c.items.len(), &c.report),
+        None => (0, &empty),
+    };
+    match crate::measure::window(ui.ctx(), "measure-window", rect, report, n, MEASURE_HINT) {
+        crate::measure::Action::None => {}
+        crate::measure::Action::Clear => {
+            if let Some(m) = &mut app.measure {
+                m.picks.clear();
+            }
+            app.scene_dirty = true;
+        }
+        crate::measure::Action::Close => app.toggle_measure(),
+        crate::measure::Action::Remove(i) => {
+            // the window numbers the picks it could measure: remove that one
+            if let Some(m) = &mut app.measure {
+                if let Some(p) = m.cache.as_ref().and_then(|c| c.of_pick.iter().position(|x| *x == Some(i))) {
+                    m.picks.remove(p);
+                }
+            }
+            app.scene_dirty = true;
+        }
+    }
+}
+
+pub fn measure_text(_app: &App, m: &Measure) -> String {
+    let n = m.cache.as_ref().map(|c| c.items.len()).unwrap_or(0);
+    match n {
+        0 => "Measure: click a face, edge, vertex or part · Esc to stop".into(),
+        1 => "Measure: click another to measure between them · click empty space to start over".into(),
+        _ => format!("Measure: {n} picked · click a pick again to drop it, empty space to start over, Esc to stop"),
     }
 }

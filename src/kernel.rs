@@ -29,6 +29,10 @@ pub struct FaceInfo {
     /// Persistent name of the face (the feature and role that made it), when it has one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub name: Option<crate::doc::FaceName>,
+    /// Curved faces: surface type (GeomAbs_SurfaceType: 1 cylinder, 2 cone, 3 sphere, 4 torus, …) and,
+    /// for cylinders, cones, spheres and tori, the axis location, direction and radius.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub surf: Option<(i32, Option<([f64; 3], [f64; 3], f64)>)>,
 }
 
 #[derive(Clone, Debug, Default, Serialize, Deserialize)]
@@ -2547,6 +2551,15 @@ pub fn face_geom(face: &Face) -> FaceGeom {
     FaceGeom { center, normal, planar, area }
 }
 
+/// Surface type and axis of a curved face, for the measure tool (radius, axis angles and distances).
+fn face_surf(face: &Face, g: &FaceGeom) -> Option<(i32, Option<([f64; 3], [f64; 3], f64)>)> {
+    if g.planar {
+        return None;
+    }
+    let q = occ::face_at(&Shape::from(face), g.center).ok()?;
+    Some((q.kind, q.axis.map(|(c, d, r)| (c.into(), d.into(), r))))
+}
+
 fn centroid_on_plane(centroid: DVec3, on: DVec3, n: DVec3) -> DVec3 {
     centroid - n * (centroid - on).dot(n)
 }
@@ -2689,7 +2702,7 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
         let Ok(tri) = ffi::poly::Handle_Poly_Triangulation_Get(&th) else {
             // keep `faces` indexed like `unique_faces` (tri_face and face picking rely on it)
             let g = face_geom(&face);
-            out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None });
+            out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None, surf: face_surf(&face, &g) });
             continue;
         };
         let trsf = ffi::top_loc::TopLoc_Location_Transformation(&loc);
@@ -2740,7 +2753,7 @@ fn mesh_body_level(shape: &Shape, level: i32) -> R<BodyMesh> {
             out.indices.extend(t.map(|i| base + i as u32));
             out.tri_face.push(fi as u32);
         }
-        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None });
+        out.faces.push(FaceInfo { center: g.center.into(), normal: g.normal.into(), planar: g.planar, area: g.area, name: None, surf: face_surf(&face, &g) });
     }
     // tight bounds from the triangulation (OCCT's box includes control points and tolerances)
     if !out.positions.is_empty() {

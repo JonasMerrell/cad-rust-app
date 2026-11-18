@@ -45,6 +45,14 @@ pub struct Drag {
 
 pub type Snap = (Vec<Assembly>, Vec<Drawing>);
 
+/// The measure tool in an assembly: picked faces/edges and the numbers made from them (made again
+/// when the picks or the parts' poses change).
+#[derive(Default)]
+pub struct AsmMeasure {
+    pub picks: Vec<Hit>,
+    pub cache: Option<crate::measure::Cache<Vec<(Hit, Pose)>>>,
+}
+
 #[derive(Default)]
 pub struct AsmUi {
     pub scene_dirty: bool,
@@ -73,8 +81,8 @@ pub struct AsmUi {
     pub geom_sig: u64,
     /// Exploded view distance factor (0 = assembled); with explode steps, 0..1 runs through them.
     pub explode: f32,
-    /// Measure tool picks: world point and face normal (None for edges).
-    pub measure: Option<Vec<(DVec3, Option<DVec3>)>>,
+    /// Measure tool picks and their numbers.
+    pub measure: Option<AsmMeasure>,
     /// Standard parts and GrabCAD window.
     pub lib: crate::stdparts_ui::Lib,
     /// Playing back the mates a PCB simulation moved.
@@ -623,8 +631,9 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
             app.asm.scene_dirty = true;
         }
         let measuring = app.asm.measure.is_some();
-        if app.tool_button(ui, "measure", "Measure", "Measure distance or angle between two picks", false, measuring, true).clicked() {
-            app.asm.measure = if measuring { None } else { Some(vec![]) };
+        if app.tool_button(ui, "measure", "Measure", "Measure faces and edges: sizes, distances and angles", false, measuring, true).clicked() {
+            app.asm.measure = if measuring { None } else { Some(AsmMeasure::default()) };
+            app.asm.scene_dirty = true;
         }
         let tip = "Isolate: show only the selected instances (I); again, or Esc, shows the rest";
         if app.tool_button(ui, "isolate", "Isolate", tip, false, app.isolation.is_some(), app.isolation.is_some() || !app.asm.sel.is_empty()).clicked() {
@@ -760,8 +769,14 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
     if pressed(egui::Key::Escape) {
         if app.asm.dialog.is_some() {
             mate_cancel(app);
-        } else if app.asm.measure.is_some() {
-            app.asm.measure = None;
+        } else if let Some(m) = &mut app.asm.measure {
+            // once clears the picks, again ends measuring
+            if m.picks.is_empty() {
+                app.asm.measure = None;
+            } else {
+                m.picks.clear();
+            }
+            app.asm.scene_dirty = true;
         } else if app.asm.sel.is_empty() && app.asm.sel_mate.is_none() && app.isolation.is_some() {
             // a second Esc (nothing left to clear) ends the isolation
             app.end_isolation();
@@ -1654,19 +1669,68 @@ fn explode_ui(app: &mut App, ui: &mut Ui) {
     }
 }
 
-/// Distance / angle text and the two world points of the measure picks.
-fn measure_result(picks: &[(DVec3, Option<DVec3>)]) -> Option<(DVec3, DVec3, String)> {
-    let [(a, na), (b, nb)] = picks else { return None };
-    let f = |v: f64| crate::expr::trim(v, 3);
-    if let (Some(na), Some(nb)) = (na, nb) {
-        if na.cross(*nb).length() < 1e-6 {
-            let d = (*b - *a).dot(*na).abs();
-            return Some((*b - *na * (*b - *a).dot(*na), *b, format!("distance {} mm", f(d))));
-        }
-        return Some((*a, *b, format!("angle {}°", crate::expr::trim(na.angle_between(*nb).to_degrees(), 2))));
+/// A measure pick's pose (part to world) and the part's mesh.
+fn hit_part<'a>(app: &'a App, h: &Hit) -> Option<(Pose, &'a crate::kernel::BodyMesh, String)> {
+    let a = asm(app)?;
+    let x = a.instance(h.inst)?;
+    let part = parts_of(app, x).into_iter().nth(h.leaf)??;
+    Some((display_pose(app, a, x).compose(&part.local), part.mesh, x.name.clone()))
+}
+
+/// Make the measure numbers again when the picks or the parts' poses changed.
+fn update_measure(app: &mut App) {
+    let Some(m) = &app.asm.measure else { return };
+    let key: Vec<(Hit, Pose)> = m.picks.iter().filter_map(|h| hit_part(app, h).map(|(p, _, _)| (*h, p))).collect();
+    if m.cache.as_ref().map(|c| c.key == key).unwrap_or(false) {
+        return;
     }
-    let dd = *b - *a;
-    Some((*a, *b, format!("distance {} mm (dx {}, dy {}, dz {})", f(dd.length()), f(dd.x.abs()), f(dd.y.abs()), f(dd.z.abs()))))
+    let (mut items, mut of_pick) = (vec![], vec![]);
+    for h in &m.picks {
+        of_pick.push(None);
+        let Some((pose, mesh, name)) = hit_part(app, h) else { continue };
+        let xf = |p: DVec3| pose.apply(p);
+        let geo = match (h.edge, h.face) {
+            (Some(e), _) => crate::measure::edge_geo(mesh, e, &xf),
+            (None, Some(f)) => crate::measure::face_geo(mesh, f, &xf),
+            _ => None,
+        };
+        if let Some(geo) = geo {
+            *of_pick.last_mut().unwrap() = Some(items.len());
+            items.push(crate::measure::Item { name, geo, at: pose.apply(h.local.into()) });
+        }
+    }
+    let report = crate::measure::report(&items, crate::measure::Fmt(crate::expr::Units::Mm));
+    if let Some(m) = &mut app.asm.measure {
+        m.cache = Some(crate::measure::Cache { key, items, of_pick, report });
+    }
+    app.asm.scene_dirty = true;
+}
+
+fn measure_window(app: &mut App, ui: &Ui, rect: egui::Rect) {
+    let Some(m) = &app.asm.measure else { return };
+    let empty = crate::measure::Report::default();
+    let (n, report) = match &m.cache {
+        Some(c) => (c.items.len(), &c.report),
+        None => (0, &empty),
+    };
+    let hint = "Click faces and edges to measure them. Click a pick again to drop it, or empty space to start over.";
+    match crate::measure::window(ui.ctx(), "asm-measure-window", rect, report, n, hint) {
+        crate::measure::Action::None => {}
+        crate::measure::Action::Clear => {
+            if let Some(m) = &mut app.asm.measure {
+                m.picks.clear();
+            }
+        }
+        crate::measure::Action::Close => app.asm.measure = None,
+        crate::measure::Action::Remove(i) => {
+            if let Some(m) = &mut app.asm.measure {
+                if let Some(p) = m.cache.as_ref().and_then(|c| c.of_pick.iter().position(|x| *x == Some(i))) {
+                    m.picks.remove(p);
+                }
+            }
+        }
+    }
+    app.asm.scene_dirty = true;
 }
 
 fn bom_ui(app: &mut App, ui: &mut Ui) {
@@ -1877,6 +1941,34 @@ fn build_scene(app: &App) -> SceneData {
     }
     *cache = used;
     drop(cache);
+    // measured faces and edges, on top of their parts
+    if let Some(m) = &app.asm.measure {
+        for (k, h) in m.picks.iter().enumerate() {
+            let Some((pose, mesh, _)) = hit_part(app, h) else { continue };
+            let pc = m.cache.as_ref().and_then(|c| c.color(k)).unwrap_or(vp::picked());
+            let col = crate::viewport::rgba(pc, 1.0);
+            let xf = |p: DVec3| pose.apply(p);
+            match (h.edge, h.face) {
+                (Some(ei), _) => {
+                    if let Some(e) = mesh.edges.get(ei) {
+                        let pts: Vec<Vec3> = e.pts.iter().map(|p| xf(DVec3::from(p.map(|v| v as f64))).as_vec3()).collect();
+                        s.polyline(&pts, 10.0, crate::viewport::rgba(pc, 0.28), true);
+                        s.polyline(&pts, 3.8, col, true);
+                    }
+                }
+                (None, Some(fi)) => {
+                    if let Some(crate::measure::Geo::Plane { tris, .. } | crate::measure::Geo::Surface { tris, .. }) = crate::measure::face_geo(mesh, fi, &xf) {
+                        for t in tris {
+                            // lifted off the face so it doesn't fight with it
+                            let lift = (t[1] - t[0]).cross(t[2] - t[0]).normalize_or_zero() * 0.02;
+                            s.tri(true, t.map(|p| (p + lift).as_vec3()), crate::viewport::rgba(pc, 0.6));
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+    }
     // mate connectors being picked
     let size = (app.camera.wpp() * 28.0) as f64;
     for c in &dialog_conns {
@@ -1971,14 +2063,20 @@ fn viewport_inner(app: &mut App, ui: &mut Ui) {
     // clicks: mate picks or selection
     if resp.clicked_by(egui::PointerButton::Primary) {
         let h = app.asm.hover;
-        if app.asm.measure.is_some() {
-            if let Some(p) = h.and_then(|h| hit_world(app, &h)) {
-                let m = app.asm.measure.as_mut().unwrap();
-                if m.len() >= 2 {
-                    m.clear();
+        if let Some(m) = &mut app.asm.measure {
+            // clicks add a face or edge (or take it back out); empty space starts over
+            match h {
+                Some(h) => {
+                    let same = |x: &Hit| x.inst == h.inst && x.leaf == h.leaf && x.face == h.face && x.edge == h.edge;
+                    if let Some(i) = m.picks.iter().position(same) {
+                        m.picks.remove(i);
+                    } else {
+                        m.picks.push(h);
+                    }
                 }
-                m.push(p);
+                None => m.picks.clear(),
             }
+            app.asm.scene_dirty = true;
         } else if let Some(d) = &app.asm.dialog {
             if let Some(h) = h {
                 // both sides of a mate must be on different parts
@@ -2153,24 +2251,19 @@ fn viewport_inner(app: &mut App, ui: &mut Ui) {
             crate::viewport::label_box(&painter, p + egui::vec2(14.0, 18.0), &format!("{} · {what}", x.name), theme::text());
         }
     }
-    if let Some(m) = &app.asm.measure {
+    if app.asm.measure.is_some() {
+        update_measure(app);
+        if app.asm.scene_dirty {
+            ui.ctx().request_repaint();
+        }
         let to_screen = |p: DVec3| {
             let v = app.camera.project(p.as_vec3());
             rect.min + egui::vec2(v.x, v.y)
         };
-        for (p, _) in m {
-            painter.circle_filled(to_screen(*p), 4.0, vp::dim());
+        if let Some(c) = app.asm.measure.as_ref().and_then(|m| m.cache.as_ref()) {
+            crate::measure::paint_overlay(&painter, &c.report, &c.items, &to_screen);
         }
-        let text = match measure_result(m) {
-            Some((a, b, label)) => {
-                let (sa, sb) = (to_screen(a), to_screen(b));
-                painter.line_segment([sa, sb], Stroke::new(1.4, vp::dim()));
-                crate::viewport::label_box(&painter, sa + (sb - sa) / 2.0 + egui::vec2(0.0, -14.0), &label, vp::dim());
-                format!("Measure: {label} · click again to start over")
-            }
-            None => "Measure: click a face or edge, then another".into(),
-        };
-        crate::viewport::label_box(&painter, rect.left_top() + egui::vec2(rect.width() / 2.0 - 120.0, 16.0), &text, theme::text());
+        measure_window(app, ui, rect);
     }
     mate_dialog(app, ui, rect);
     viewport_menu(app, ui);
