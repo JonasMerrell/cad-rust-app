@@ -2413,7 +2413,7 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         let (lim, _) = ctx.cam.machine.cut_limits();
         let rpm = ctx.cam.spindle_rpm(t);
         let m = crate::cam_cutting::material(&ctx.cam.stock.material);
-        let avail = lim.power * (rpm / lim.rated_rpm.max(1.0)).min(1.0);
+        let avail = lim.available(rpm);
         // the chip at the full stepover sets the specific cutting force (a thinner chip costs more per mm³)
         let fz = feed / (rpm.max(1.0) * t.flutes.max(1) as f64);
         let phi = (1.0 - 2.0 * step.min(t.diameter) / t.diameter.max(1e-9)).clamp(-1.0, 1.0).acos();
@@ -3351,6 +3351,40 @@ mod tests {
         assert!(pts.iter().any(|p| p.z < 5.5), "reaches the floor corner");
         let g: Vec<_> = s.events.iter().filter(|e| e.kind == EventKind::Gouge).take(3).collect();
         assert!(g.is_empty(), "{g:?}");
+    }
+
+    /// Op 1 keeps a carrier body under the part that op 2 (flipped, the part alone) machines off: op 2 starts from
+    /// op 1's stock where it really is, carrier and all, not from a box around its own part.
+    #[test]
+    fn a_later_setup_can_drop_a_body_the_earlier_one_kept() {
+        let part_tris = block().tris.clone();
+        let (lo, hi) = part_tris.iter().flatten().fold((DVec3::splat(f64::INFINITY), DVec3::splat(f64::NEG_INFINITY)), |(a, b), p| (a.min(*p), b.max(*p)));
+        // a 3 mm carrier slab under the part, the part's footprint
+        let c = |k: usize| DVec3::new([lo.x, hi.x][k & 1], [lo.y, hi.y][(k >> 1) & 1], [lo.z - 3.0, lo.z][(k >> 2) & 1]);
+        let carrier: Vec<[DVec3; 3]> = [[0, 2, 3, 1], [4, 5, 7, 6], [0, 1, 5, 4], [2, 6, 7, 3], [0, 4, 6, 2], [1, 3, 7, 5]].iter().flat_map(|q| [[c(q[0]), c(q[1]), c(q[2])], [c(q[0]), c(q[2]), c(q[3])]]).collect();
+        let with_carrier: Vec<[DVec3; 3]> = part_tris.iter().chain(&carrier).copied().collect();
+        let mut a = Cam { name: "Op 1".into(), ..Default::default() };
+        a.stock.side = 3.0;
+        a.stock.top = 1.0;
+        a.stock.bottom = 0.0;
+        let t = tool(&mut a, ToolKind::Flat, 6.0);
+        a.add_op(OpKind::Face, t);
+        let b = Cam { name: "Op 2".into(), follows: "Op 1".into(), orient: "bottom".into(), tools: a.tools.clone(), next_id: a.next_id, ..Default::default() };
+        let mut cams = vec![a, b];
+        let input = |k: usize| crate::cam_paths::PartInput { tris: if k == 0 { with_carrier.clone() } else { part_tris.clone() }, ..Default::default() };
+        let left = crate::cam_paths::link_setups_each(&mut cams, 1, &input).unwrap().expect("carried stock");
+        let pb = Part::new(&part_tris, &[], "bottom");
+        // op 1's box: the part + carrier (hi - lo + 3 tall) + 1 on top, carried over whole
+        let (blo, bhi) = stock_box(&cams[1], &pb);
+        assert!((bhi.z - blo.z - (hi.z - lo.z + 3.0 + 1.0)).abs() < 1e-6, "{blo} {bhi}");
+        // upside down the carrier is on top of the part: 3 mm of it still there over the part's middle
+        let mid = (pb.lo + pb.hi) / 2.0;
+        let (_, h) = left.column(mid.x, mid.y).expect("stock over the part");
+        assert!((h as f64 - (pb.hi.z + 3.0)).abs() < 0.3, "top of the stock {h}, part top {}", pb.hi.z);
+        // with every setup taken to machine op 2's parts (the old behaviour) the carrier would be lost
+        let mut cams2 = cams.clone();
+        let old = crate::cam_paths::link_setups(&mut cams2, 1, &input(1)).unwrap().unwrap();
+        assert!((old.column(mid.x, mid.y).unwrap().1 as f64 - pb.hi.z).abs() < 0.3);
     }
 
     #[test]

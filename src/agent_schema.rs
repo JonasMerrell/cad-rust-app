@@ -456,7 +456,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ),
         ("create_cam" | "edit_cam", "machine") => json!({"oneOf": [
             en(&crate::cam::MACHINES.iter().map(|m| m.0).collect::<Vec<_>>(), "a machine preset"),
-            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)"), "spindle_power": t("number", "spindle's rated electrical input power, W (0: not known, 1500 assumed)"), "spindle_efficiency": t("number", "share of the input power at the shaft (default 0.78)"), "spindle_rated_rpm": t("number", "speed the rated power is at; below it the torque is constant (0: 24000)"), "max_cut_force": t("number", "most sideways force the machine takes at the tool, N (0: 700 assumed)"), "chip_clearing": t("string", "flood-low (default), flood, air or none"), "holder_stiffness": t("number", "holder and spindle stiffness at the tool, N/mm (20000 assumed)"), "tool_damping": t("number", "damping ratio of the tool's mode (0.03)"), "chatter_scale": t("number", "chatter margin scale (0: the built-in 0.078); import_cutlog sets it"), "spindle_rated_slip": t("number", "spindle speed droop at rated load (0.04)")}), &[], "a machine")
+            obj(json!({"name": t("string", "name"), "travel": xyz("travel x, y, z, mm"), "max_feed": t("number", "mm/min"), "rapid_z": t("number", "mm/min"), "tool_changer": t("boolean", "automatic tool changer"), "spin_up": json!({"type": "number", "minimum": 0, "description": "seconds to wait after M3 (default 5)"}), "model": t("string", "machine model from cam_machine (empty: none)"), "spindle_power": t("number", "spindle's rated electrical input power, W (0: not known, 1500 assumed)"), "spindle_efficiency": t("number", "share of the input power at the shaft (default 0.78)"), "spindle_rated_rpm": t("number", "speed the rated power is at; below it the torque is constant (0: 24000)"), "max_cut_force": t("number", "most sideways force the machine takes at the tool, N (0: 700 assumed)"), "chip_clearing": t("string", "flood-low (default), flood, air or none"), "holder_stiffness": t("number", "holder and spindle stiffness at the tool, N/mm (20000 assumed)"), "tool_damping": t("number", "damping ratio of the tool's mode (0.03)"), "chatter_scale": t("number", "chatter margin scale (0: the built-in 0.078); import_cutlog sets it"), "spindle_rated_slip": t("number", "spindle speed droop at rated load (0.04)"), "spindle_never_exceed": t("number", "share of the spindle's power (power x efficiency: best its measured stall) no cut may exceed: a problem past it (default 1)"), "spindle_caution": t("number", "share past which a cut is a caution (default 0.85 x never_exceed)"), "spindle_low_rpm": t("number", "speed at which the pull-out torque has fallen to spindle_low_torque (0: constant torque under the rated speed)"), "spindle_low_torque": t("number", "share of the rated torque the spindle still has at spindle_low_rpm"), "spindle_above_rated": t("number", "over spindle_rated_rpm the power falls as (rated / rpm) to this power (0: constant; a VFD at its voltage ceiling: 1 in theory, the DMC2 0.76)")}), &[], "a machine")
         ], "description": "the machine (preset name or limits)"}),
         ("create_cam" | "edit_cam", "fixtures") => arr(
             obj(json!({"name": t("string", "name"), "min": xyz("box min, work coordinates"), "max": xyz("box max")}), &[], "a clamp or jaw box"),
@@ -549,6 +549,11 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ], "description": "coolant"}),
         ("cam_tool", "tapping_head") => t("boolean", "taps: held in a self-reversing tapping head (no G84 or spindle reversal)"),
         ("cam_tool", "reverse_ratio") => json!({"type": "number", "exclusiveMinimum": 0, "description": "the tapping head's reverse ratio (default 1.75)"}),
+        ("cam_op", "seam") => xy("contour: start and end on the side nearest this work point [x, y]; trace: open lines start at the end nearest it"),
+        ("cam_op", "rpm") => t("number", "this operation's spindle speed instead of the tool's"),
+        ("cam_op", "feed") => t("number", "this operation's cutting feed, mm/min, instead of the tool's"),
+        ("cam_op", "plunge_feed") => t("number", "this operation's plunge feed, mm/min, instead of the tool's"),
+        ("cam_op", "spring_pass") => t("boolean", "contour: the last lap once more at the same size"),
         ("cam_op", "chip_thinning") => t("boolean", "adaptive: raise the cutting feed for radial chip thinning (at most ×1.5)"),
         ("cam_op", "probing") => json!({"type": "object", "description": "probe: what to find and set", "properties": {
             "cycle": en(&["z", "edge", "corner", "bore", "boss"], "z: the top (sets Z); edge: one side (X or Y); corner: X and Y; bore / boss: a middle (X and Y)"),
@@ -700,7 +705,16 @@ pub(super) fn complete(tools: &mut [Value]) {
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
             "create_cam" | "edit_cam" => &[("stay_down", "boolean")],
-            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object"), ("tip_offset", "number")],
+            "cam_op" => &[
+                ("chip_thinning", "boolean"),
+                ("probing", "object"),
+                ("tip_offset", "number"),
+                ("rpm", "number"),
+                ("feed", "number"),
+                ("plunge_feed", "number"),
+                ("seam", "array"),
+                ("spring_pass", "boolean"),
+            ],
             _ => &[],
         };
         for (k, ty) in hidden {
