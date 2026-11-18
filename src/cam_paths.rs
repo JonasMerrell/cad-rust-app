@@ -2279,6 +2279,31 @@ pub fn order_by_region(moves: &[Move], r: f64) -> Vec<Move> {
     out
 }
 
+/// A ramp down starting at `from` (the moves from `i` on): feed moves staying within `reach` of it that come
+/// back over it lower down, the next move going on at that height. The index of the move that comes back,
+/// its height, and the ramp's feed.
+fn ramp_back_to(moves: &[Move], i: usize, from: DVec3, reach: f64) -> Option<(usize, f64, f64)> {
+    let mut found = None;
+    let mut f_ramp = f64::INFINITY;
+    for (m, mv) in moves.iter().enumerate().skip(i) {
+        let Move::Feed(q, f) = *mv else { break };
+        let q = DVec3::from(q);
+        if q.truncate().distance(from.truncate()) > reach || q.z > from.z + 1e-6 {
+            break;
+        }
+        f_ramp = f_ramp.min(f);
+        if q.truncate().distance(from.truncate()) < 1e-6 && q.z < from.z - 1e-6 {
+            found = Some((m, q.z));
+        }
+    }
+    let (m, z) = found?;
+    // what follows runs on at that height (the lead-in), or the ramp just ends there
+    match moves.get(m + 1) {
+        Some(Move::Feed(q, _)) if (q[2] - z).abs() > 1e-6 => None,
+        _ => Some((m, z, f_ramp)),
+    }
+}
+
 /// Margin the tightened links keep over the stock still there, the part and the fixtures, mm.
 pub const LINK_MARGIN: f64 = 1.0;
 
@@ -2402,6 +2427,24 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
                                 }
                                 pos = Some(DVec3::new(b.x, b.y, z));
                                 i = j + 1;
+                                // a ramp down at the entry (a contour's lead-in rocking back and forth, a helix)
+                                // that comes back over the entry point lower down: where the stock simulated up
+                                // to here leaves that column clear, go straight down instead
+                                if let Some((m, z_end, f_ramp)) = ramp_back_to(&paths[k].moves, i, DVec3::new(b.x, b.y, z), 2.0 * r + 2.0) {
+                                    sim.run_to(base + i, usize::MAX);
+                                    let h = high(&sim, b.x, b.y, r);
+                                    if h < z_end + 0.02 {
+                                        let down = (h + LINK_MARGIN).max(z_end);
+                                        if down < z - 1e-6 {
+                                            out.push(Move::Rapid([b.x, b.y, down]));
+                                        }
+                                        if down > z_end + 1e-6 {
+                                            out.push(Move::Feed([b.x, b.y, z_end], f.min(f_ramp)));
+                                        }
+                                        pos = Some(DVec3::new(b.x, b.y, z_end));
+                                        i = m + 1;
+                                    }
+                                }
                             }
                             None => {
                                 // down to the entry: rapid only to over the stock there, feed the rest
@@ -2505,6 +2548,75 @@ fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
 mod tests {
     use super::*;
     use crate::cam::{Cam, OpKind, Side, ToolKind};
+
+    #[test]
+    fn a_ramp_back_over_the_entry_is_found() {
+        // a lead-in's back-and-forth ramp: from (0, 0, 5) out to (2, 1) and back, 1 mm lower each way, then the arc
+        let mut m = vec![];
+        for k in 0..3 {
+            let z = 5.0 - 2.0 * k as f64;
+            m.push(Move::Feed([2.0, 1.0, z - 1.0], 2400.0));
+            m.push(Move::Feed([0.0, 0.0, z - 2.0], 2400.0));
+        }
+        m.push(Move::Feed([3.0, 3.0, -1.0], 2400.0));
+        m.push(Move::Feed([20.0, 3.0, -1.0], 2400.0));
+        assert_eq!(ramp_back_to(&m, 0, DVec3::new(0.0, 0.0, 5.0), 8.0), Some((5, -1.0, 2400.0)));
+        // a ramp that runs off along the wall instead never comes back: left as it is
+        let along = vec![Move::Feed([5.0, 0.0, 4.0], 2400.0), Move::Feed([10.0, 0.0, 3.0], 2400.0)];
+        assert_eq!(ramp_back_to(&along, 0, DVec3::new(0.0, 0.0, 5.0), 8.0), None);
+    }
+
+    #[test]
+    fn cuts_finish_one_region_before_the_next() {
+        // two areas 100 apart, cut level by level and alternating between them, as a path that bounces would
+        let cut = |x: f64, z: f64| {
+            vec![
+                Move::Rapid([x, 0.0, 10.0]),
+                Move::Rapid([x, 0.0, 1.0]),
+                Move::Feed([x, 0.0, z], 300.0),
+                Move::Feed([x + 10.0, 0.0, z], 1000.0),
+                Move::Feed([x + 10.0, 5.0, z], 1000.0),
+                // through what it cleared at depth: still the same cut
+                Move::Rapid([x, 5.0, z]),
+                Move::Feed([x + 10.0, 5.0, z], 1000.0),
+                Move::Rapid([x + 10.0, 5.0, 10.0]),
+            ]
+        };
+        let mut moves = vec![];
+        for (x, z) in [(0.0, -1.0), (100.0, -1.0), (0.0, -2.0), (100.0, -2.0)] {
+            moves.extend(cut(x, z));
+        }
+        moves.push(Move::Rapid([0.0, 0.0, 20.0]));
+        let out = order_by_region(&moves, 3.0);
+        // where each plunge lands: area A's two levels, then area B's, depth order kept
+        let mut p = DVec3::ZERO;
+        let mut plunges = vec![];
+        let mut ends = vec![];
+        for m in &out {
+            let q = m.end(p);
+            if let Move::Feed(_, f) = m {
+                if *f == 300.0 {
+                    plunges.push((q.x, q.z));
+                }
+                // every cut keeps its direction: +X
+                if (q.y - p.y).abs() < 1e-9 && (q.z - p.z).abs() < 1e-9 {
+                    assert!(q.x > p.x, "{p} -> {q}");
+                }
+            }
+            // a rapid down into the work only over the cut's own entry or through what it cleared
+            if let Move::Rapid(_) = m {
+                assert!(q.z >= -2.0);
+            }
+            ends.push(q);
+            p = q;
+        }
+        assert_eq!(plunges, vec![(0.0, -1.0), (0.0, -2.0), (100.0, -1.0), (100.0, -2.0)]);
+        // the same moves, reordered, and the way across at the clearance height (20 here)
+        assert_eq!(out.iter().filter(|m| !matches!(m, Move::Rapid(_))).count(), moves.iter().filter(|m| !matches!(m, Move::Rapid(_))).count());
+        let across = ends.windows(2).find(|w| (w[0].x - w[1].x).abs() > 50.0).unwrap();
+        assert!(across[0].z >= 20.0 && across[1].z >= 20.0, "{across:?}");
+        assert_eq!(*ends.last().unwrap(), DVec3::new(0.0, 0.0, 20.0));
+    }
 
     #[test]
     fn cycle_time_counts_spin_ups_and_moves_between_operations() {
