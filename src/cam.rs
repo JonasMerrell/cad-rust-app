@@ -1259,6 +1259,12 @@ pub struct Machine {
     pub spindle_never_exceed: f64,
     #[serde(default)]
     pub spindle_caution: f64,
+    /// Under the rated speed the spindle's pull-out torque falls to `spindle_low_torque` of the rated torque at
+    /// `spindle_low_rpm`, in a straight line (0: constant torque). The DMC2: 0.51 at 12000.
+    #[serde(default)]
+    pub spindle_low_rpm: f64,
+    #[serde(default)]
+    pub spindle_low_torque: f64,
 }
 
 impl Default for Machine {
@@ -1282,6 +1288,8 @@ impl Default for Machine {
             spindle_rated_slip: 0.04,
             spindle_never_exceed: 0.0,
             spindle_caution: 0.0,
+            spindle_low_rpm: 0.0,
+            spindle_low_torque: 0.0,
         }
     }
 }
@@ -1297,7 +1305,10 @@ impl Machine {
         let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
         let never_exceed = if self.spindle_never_exceed > 0.0 { self.spindle_never_exceed.min(1.0) } else { 1.0 };
         let caution = if self.spindle_caution > 0.0 { self.spindle_caution.min(never_exceed) } else { 0.85 * never_exceed };
-        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, never_exceed, caution, force, deflection: 0.06 }, assumed)
+        (
+            crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, low_rpm: self.spindle_low_rpm, low_torque: self.spindle_low_torque, never_exceed, caution, force, deflection: 0.06 },
+            assumed,
+        )
     }
 }
 

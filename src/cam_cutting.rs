@@ -136,6 +136,10 @@ pub struct Limits {
     /// falls with the speed).
     pub power: f64,
     pub rated_rpm: f64,
+    /// Under the rated speed the pull-out torque falls (a V/f drive without enough boost): to `low_torque` of the
+    /// rated torque at `low_rpm`, in a straight line from the rated speed (0 / 1: constant torque).
+    pub low_rpm: f64,
+    pub low_torque: f64,
     /// Share of `power` a cut may never go over (a problem past it) and the share past which it's a caution:
     /// with `power` the spindle's measured pull-out (it stalls there), the planning limits sit under it.
     pub never_exceed: f64,
@@ -159,10 +163,25 @@ pub struct Use {
     pub worst: f64,
 }
 
+impl Limits {
+    /// The share of the rated pull-out torque the spindle has at `rpm` (1 at and over the rated speed).
+    pub fn torque_share(&self, rpm: f64) -> f64 {
+        if !(self.low_rpm > 0.0 && self.low_rpm < self.rated_rpm && self.low_torque > 0.0 && self.low_torque < 1.0) || rpm >= self.rated_rpm {
+            return 1.0;
+        }
+        (self.low_torque + (1.0 - self.low_torque) * (rpm - self.low_rpm) / (self.rated_rpm - self.low_rpm)).clamp(0.05, 1.0)
+    }
+
+    /// The power the spindle has at `rpm` before it pulls out, W.
+    pub fn available(&self, rpm: f64) -> f64 {
+        self.power * (rpm / self.rated_rpm.max(1.0)).min(1.0) * self.torque_share(rpm)
+    }
+}
+
 /// `finishing`: the bend is a wall error to report, not a load to hold the cut to.
 pub fn use_of(c: &Cut, t: &ToolGeom, l: &Limits, rpm: f64, finishing: bool) -> Use {
-    let available = l.power * (rpm / l.rated_rpm.max(1.0)).min(1.0);
-    let rated_torque = l.power / (2.0 * PI * l.rated_rpm.max(1.0) / 60.0);
+    let available = l.available(rpm);
+    let rated_torque = l.power / (2.0 * PI * l.rated_rpm.max(1.0) / 60.0) * l.torque_share(rpm);
     let power = c.power / available.max(1.0);
     let torque = c.torque / rated_torque.max(1e-6);
     let force = c.force / l.force.max(1.0);
@@ -376,7 +395,8 @@ mod tests {
 
     fn dmc2() -> Limits {
         // the measured pull-out at 24000 (the stick-out gauge's broken-tool run): 645 W by this model's watts
-        Limits { power: 645.0, rated_rpm: 24000.0, never_exceed: 0.85, caution: 0.775, force: 700.0, deflection: 0.06 }
+        // and its pull-out torque at 12000 about half of that at 24000 (op1a v2 run 1, below)
+        Limits { power: 645.0, rated_rpm: 24000.0, low_rpm: 12000.0, low_torque: 0.51, never_exceed: 0.85, caution: 0.775, force: 700.0, deflection: 0.06 }
     }
 
     #[test]
@@ -412,6 +432,25 @@ mod tests {
         // Jonas's cuts: 0.6 x 10 comfortable (under the never-exceed), 0.6 x 12 on the edge (at pull-out)
         let (ten, twelve) = (at(0.6, 10.0, 2500.0), at(0.6, 12.0, 2500.0));
         assert!(ten.worst < 1.0 && twelve.power > 0.95, "{ten:?} {twelve:?}");
+    }
+
+    /// Op1a v2 run 1 (2026-11-18): 0.3 x 12 at the same chip (F = rpm / 10, the same torque, about 0.14 N m by the
+    /// model) at 24k, 21k, 18k, 15k and 12k sagged 2.7, 3.4, 4.1, 4.8 (creeping) and 8.4% (still falling, held):
+    /// a constant slip of about 700 rpm down to 15k, then pull-out at 12k. So the pull-out torque falls under the
+    /// rated speed: about half at 12k, in a straight line, puts 15k right at the never-exceed share.
+    #[test]
+    fn the_pull_out_torque_falls_at_low_speed() {
+        let m = material("6061-T6");
+        let l = dmc2();
+        let at = |rpm: f64| use_of(&cut(&t24(), &m, 0.3, 12.0, rpm / 10.0, rpm, 3.6), &t24(), &l, rpm, false);
+        let (r24, r18, r15, r12) = (at(24000.0), at(18000.0), at(15000.0), at(12000.0));
+        // 24k and 18k comfortable, 15k at the line, 12k past the pull-out
+        assert!(r24.worst < 0.7 && r18.worst < 0.9, "{r24:?} {r18:?}");
+        assert!(r15.worst > 0.9 && r15.worst < 1.1, "{r15:?}");
+        assert!(r12.torque > 1.0 && r12.worst > 1.1, "{r12:?}");
+        // constant torque (the old model) would have passed 12k as easily as 24k
+        let flat = Limits { low_rpm: 0.0, low_torque: 0.0, ..l };
+        assert!(use_of(&cut(&t24(), &m, 0.3, 12.0, 1200.0, 12000.0, 3.6), &t24(), &flat, 12000.0, false).worst < 0.7);
     }
 
     /// Chips pile up in a deep pocket, not on an open edge; thin chips stay more than thick ones; coolant

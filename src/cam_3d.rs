@@ -2252,7 +2252,7 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         let (lim, _) = ctx.cam.machine.cut_limits();
         let rpm = ctx.cam.spindle_rpm(t);
         let m = crate::cam_cutting::material(&ctx.cam.stock.material);
-        let avail = lim.power * (rpm / lim.rated_rpm.max(1.0)).min(1.0);
+        let avail = lim.available(rpm);
         // the chip at the full stepover sets the specific cutting force (a thinner chip costs more per mm³)
         let fz = feed / (rpm.max(1.0) * t.flutes.max(1) as f64);
         let phi = (1.0 - 2.0 * step.min(t.diameter) / t.diameter.max(1e-9)).clamp(-1.0, 1.0).acos();
