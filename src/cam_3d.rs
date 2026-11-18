@@ -2496,7 +2496,7 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         any = true;
         // a deep level at the full stepover can take more than the tool's cut area: narrow the stepover there
         let deep = z_prev - z;
-        let level_step = match op.power_target {
+        let level_step = match crate::cam_paths::power_budget(ctx.cam, op, t).map(|b| b.0) {
             // from the power budget: the stepover whose steady cut takes the target at this depth and feed, within
             // what the tool takes (its whole cut area and width: the corners are held by the feed, not here)
             Some(target) if deep > 1e-6 => power_step(ctx, t, deep, feed, target, area_max.min(area_power / AREA_SHARE) / deep, widest(t.diameter, deep)),

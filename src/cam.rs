@@ -957,9 +957,10 @@ pub struct Operation {
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
     /// Adaptive roughing from the spindle's power budget: the stepover is chosen (within what the tool takes)
-    /// so the steady cut uses this much power at the shaft, W (the cutting model's power), at the feed;
-    /// and the feed comes down on any move whose cut would take more than `power_cap` (default 1.3 × the
-    /// target): corners and entries, rather than a narrower stepover everywhere.
+    /// so the steady cut uses this much power at the shaft, W (the cutting model's power; 0 = 60 % of what the
+    /// spindle has at the op's speed), at the feed; and the feed comes down on any move whose cut would take
+    /// more than `power_cap` (default the spindle's caution at that speed, never over its never-exceed):
+    /// corners and entries, rather than a narrower stepover everywhere. See `cam_paths::power_budget`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub power_target: Option<f64>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

@@ -933,6 +933,22 @@ pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> 
 /// the same toolpaths with only the feeds of those level moves lowered, and the note in their warnings.
 /// The power of a move is the cutting model's power per mm² of cut cross-section per mm/min at the op's own
 /// stepover and stepdown, times the simulated cross-section the move takes and its feed.
+/// The power budget of an operation roughing from it (`power_target` set), W at the shaft: (target, cap) at
+/// the speed it runs. The cap is the spindle's caution at that speed (its `spindle_caution` share of the
+/// power it has there), never over the never-exceed, unless the op gives one (`power_cap`); a target of 0
+/// means 60 % of the power the spindle has at that speed (on the DMC2 at F004 = 150: about 670 W at 9k,
+/// 540 W at 12k), and no target goes over the cap.
+pub fn power_budget(cam: &Cam, op: &Operation, tool: &Tool) -> Option<(f64, f64)> {
+    let want = op.power_target?;
+    let (lim, _) = cam.machine.cut_limits();
+    let rpm = cam.spindle_rpm(tool);
+    let have = lim.available(rpm);
+    let never = have * lim.never_exceed.clamp(0.1, 1.0);
+    let cap = op.power_cap.filter(|c| *c > 0.0).unwrap_or(have * lim.caution.clamp(0.1, 1.0)).min(never);
+    let target = if want > 0.0 { want } else { 0.6 * have };
+    Some((target.min(cap), cap))
+}
+
 pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
     if !paths.iter().any(|tp| cam.op(tp.op).is_some_and(|o| o.power_target.is_some())) {
         return paths;
@@ -946,15 +962,16 @@ pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut path
     let mut base = 0usize;
     for tp in paths.iter_mut() {
         let n = tp.moves.len();
-        let (Some(op), Some(tool)) = (cam.op(tp.op), cam.tool(tp.tool)) else {
+        // (the tool with the op's own speeds and feeds)
+        let (Some(op), Some(tool)) = (cam.op(tp.op), cam.path_tool(tp.op, tp.tool)) else {
             base += n;
             continue;
         };
-        let Some(target) = op.power_target else {
+        let tool: &Tool = &tool;
+        let Some((target, cap)) = power_budget(cam, op, tool) else {
             base += n;
             continue;
         };
-        let cap = op.power_cap.unwrap_or(1.3 * target);
         let rpm = cam.spindle_rpm(tool);
         let g = crate::cam_cutting::tool_geom(tool);
         // power per mm² of cut cross-section per mm/min of feed at the op's own cut (its stepover and stepdown)
@@ -3772,6 +3789,7 @@ mod tests {
         }
         let plain = generate(&c, &part).remove(0);
         c.op_mut(a).unwrap().power_target = Some(450.0);
+        c.op_mut(a).unwrap().power_cap = Some(1.3 * 450.0);
         let tp = generate(&c, &part).remove(0);
         let note = tp.warnings.iter().find(|w| w.starts_with("power budget")).unwrap_or_else(|| panic!("{:?}", tp.warnings));
         let num = |key: &str| -> f64 {
@@ -3783,6 +3801,22 @@ mod tests {
         assert!(mean > 0.5 * 450.0 && mean <= 1.3 * 450.0, "{note}");
         // more removed per minute than the default's narrow stepover, so less time
         assert!(tp.time < plain.time, "{} s against {} s; {note}", tp.time, plain.time);
+        // the defaults from the spindle as measured (F004 = 150): the caution at the op's speed caps it, never
+        // over the never-exceed; target 0 takes 60 % of what the spindle has there
+        c.machine.spindle_above_rated = 0.76;
+        c.machine.spindle_never_exceed = 0.85;
+        c.machine.spindle_caution = 0.76;
+        let op = c.op_mut(a).unwrap();
+        (op.power_target, op.power_cap) = (Some(0.0), None);
+        let budget = |c: &Cam| power_budget(c, c.op(a).unwrap(), &c.path_tool(a, t).unwrap()).unwrap();
+        let (target, cap) = budget(&c);
+        assert!((cap - 850.0).abs() < 2.0 && (target - 671.0).abs() < 2.0, "{target} {cap}");
+        c.op_mut(a).unwrap().rpm = Some(12000.0);
+        let (target, cap) = budget(&c);
+        assert!((cap - 683.0).abs() < 2.0 && target < cap, "{target} {cap}");
+        c.op_mut(a).unwrap().power_cap = Some(2000.0);
+        let (_, cap) = budget(&c);
+        assert!((cap - 765.0).abs() < 2.0, "never over the never-exceed: {cap}");
     }
 
     /// Distance from the plinth's outline (outside it).
