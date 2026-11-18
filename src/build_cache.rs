@@ -23,7 +23,7 @@ use crate::doc::{Document, Op};
 use crate::kernel::RebuildResult;
 
 /// Bump when the kernel's output changes in a way the app version doesn't capture.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 /// The cache folder inside a project folder.
 pub const DIR: &str = ".rcad-cache";
 const EXT: &str = "json.gz";

@@ -1656,8 +1656,8 @@ mod tests {
     fn slab(h: f32) -> BodyMesh {
         let positions = vec![0.0, 0.0, 0.0, 40.0, 0.0, 0.0, 40.0, 40.0, 0.0, 0.0, 40.0, 0.0, 0.0, 0.0, h, 40.0, 0.0, h, 40.0, 40.0, h, 0.0, 40.0, h];
         let faces = vec![
-            FaceInfo { center: [20.0, 20.0, 0.0], normal: [0.0, 0.0, -1.0], planar: true, area: 1600.0, name: None },
-            FaceInfo { center: [20.0, 20.0, h as f64], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: None },
+            FaceInfo { center: [20.0, 20.0, 0.0], normal: [0.0, 0.0, -1.0], planar: true, area: 1600.0, name: None, surf: None },
+            FaceInfo { center: [20.0, 20.0, h as f64], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: None, surf: None },
         ];
         BodyMesh { positions, indices: vec![0, 2, 1, 0, 3, 2, 4, 5, 6, 4, 6, 7], tri_face: vec![0, 0, 1, 1], faces, ..Default::default() }
     }
@@ -1727,7 +1727,7 @@ mod tests {
         // two 40 x 40 faces facing up, one over the other: the connector is on the lower one ("end" of feature 1)
         let level = |z: f32, base: u32| (vec![0.0, 0.0, z, 40.0, 0.0, z, 40.0, 40.0, z, 0.0, 40.0, z], vec![base, base + 1, base + 2, base, base + 2, base + 3]);
         let name = |n: u64| Some(crate::doc::FaceName { feature: 1, role: "end".into(), n });
-        let face = |z: f64, n: u64| FaceInfo { center: [20.0, 20.0, z], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: name(n) };
+        let face = |z: f64, n: u64| FaceInfo { center: [20.0, 20.0, z], normal: [0.0, 0.0, 1.0], planar: true, area: 1600.0, name: name(n), surf: None };
         let mesh = |faces: [(f32, u64); 2]| {
             let (mut positions, mut indices) = (vec![], vec![]);
             for (k, (z, _)) in faces.iter().enumerate() {
