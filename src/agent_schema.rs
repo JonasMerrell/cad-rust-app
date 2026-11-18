@@ -714,6 +714,7 @@ pub(super) fn complete(tools: &mut [Value]) {
                 ("plunge_feed", "number"),
                 ("seam", "array"),
                 ("spring_pass", "boolean"),
+                ("build", "boolean"),
             ],
             _ => &[],
         };

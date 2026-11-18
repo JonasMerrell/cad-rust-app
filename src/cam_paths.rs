@@ -2425,7 +2425,7 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
     let setting = |tp: &Toolpath| -> Option<(u64, i64, bool)> {
         let tool = cam.path_tool(tp.op, tp.tool)?;
         let op = cam.op(tp.op);
-        Some((tp.tool, cam.spindle_rpm(&tool).round() as i64, cam.coolant_for(tool, op).is_on()))
+        Some((tp.tool, cam.spindle_rpm(&tool).round() as i64, cam.coolant_for(&tool, op).is_on()))
     };
     let mut base = 0usize;
     let mut prev: Option<(usize, DVec3)> = None; // the path before and where its last cut ended
