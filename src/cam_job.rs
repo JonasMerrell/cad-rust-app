@@ -201,13 +201,20 @@ impl Job {
             .map(|(i, s)| format!("station {}: {} in G{} (work zero: {})", i + 1, s.cam.name, 53 + s.cam.wcs() as u32, cam_paths::work_zero_note(&s.cam, &s.part)))
             .collect();
 
-        // the toolpaths in job order; between stations, up to the highest station's safe height and over
+        let items: Vec<(usize, Toolpath)> = self.order.iter().map(|&(si, pi)| (si, self.stations[si].paths[pi].clone())).collect();
+        let paths = self.place(items);
+        (c, part, paths, (lo, hi))
+    }
+
+    /// Toolpaths of the stations (in their own setup coordinates and ids), in the order given, as the combined
+    /// setup runs them: renumbered, moved into the lead's coordinates, and up to the highest station's safe
+    /// height and over between stations.
+    pub fn place(&self, items: Vec<(usize, Toolpath)>) -> Vec<Toolpath> {
         let top = self.stations.iter().map(|s| cam_paths::Ctx::new(&s.cam, &s.part).safe() + s.offset.z).fold(f64::NEG_INFINITY, f64::max);
         let mut paths = vec![];
         let mut last: Option<(usize, DVec3)> = None;
-        for &(si, pi) in &self.order {
+        for (si, mut tp) in items {
             let s = &self.stations[si];
-            let mut tp = s.paths[pi].clone();
             let base = si as u64 * ID_STRIDE;
             tp.op += base;
             tp.tool += base;
@@ -242,8 +249,7 @@ impl Job {
             }
             paths.push(tp);
         }
-
-        (c, part, paths, (lo, hi))
+        paths
     }
 
     /// The stock the job starts from on a grid (the simulation's, so nothing is resampled twice): each
@@ -276,6 +282,61 @@ impl Job {
     /// The combined simulation, not yet run, with the lead's machine (if it has one).
     pub fn sim(&self, resolution: usize) -> Result<(Cam, Part, Vec<Toolpath>, Sim), String> {
         let (c, part, paths, stock) = self.combined();
+        self.sim_of(c, part, paths, stock, resolution)
+    }
+
+    /// The combined simulation of other toolpaths (`place`d), e.g. read back from the posted program.
+    pub fn sim_with(&self, paths: Vec<Toolpath>, resolution: usize) -> Result<(Cam, Part, Vec<Toolpath>, Sim), String> {
+        let (c, part, _, stock) = self.combined();
+        self.sim_of(c, part, paths, stock, resolution)
+    }
+
+    /// Split a job's program into its stations' stretches: the first station's from its work-offset line (G54…G59),
+    /// each later one from the post's "(station N: name)" switch comment, each starting with the tool that is in
+    /// at that point, for reading back one station at a time.
+    pub fn split_program(&self, text: &str) -> Vec<(usize, String)> {
+        let first = self.order.first().map(|o| o.0).unwrap_or(0);
+        let switch = |l: &str| {
+            let c = l.strip_prefix("(station ")?.strip_suffix(')')?;
+            let (n, name) = c.split_once(": ")?;
+            let i = n.trim().parse::<usize>().ok()?.checked_sub(1)?;
+            (self.stations.get(i)?.cam.name == name).then_some(i)
+        };
+        let mut out: Vec<(usize, String)> = vec![];
+        let mut cur: Option<usize> = None;
+        let mut tool: Option<String> = None;
+        let mut buf = String::new();
+        for line in text.lines() {
+            let l = line.trim();
+            let start = match cur {
+                None => (l == format!("G{}", 53 + self.stations[first].cam.wcs() as u32)).then_some(first),
+                Some(_) => switch(l),
+            };
+            if let Some(si) = start {
+                if let Some(c) = cur {
+                    out.push((c, std::mem::take(&mut buf)));
+                }
+                if let Some(t) = &tool {
+                    buf.push_str(t);
+                    buf.push('\n');
+                }
+                cur = Some(si);
+            }
+            if l.starts_with('T') && l.ends_with("M6") {
+                tool = Some(l.to_string());
+            }
+            if cur.is_some() {
+                buf.push_str(line);
+                buf.push('\n');
+            }
+        }
+        if let Some(c) = cur {
+            out.push((c, buf));
+        }
+        out
+    }
+
+    fn sim_of(&self, c: Cam, part: Part, paths: Vec<Toolpath>, stock: (DVec3, DVec3), resolution: usize) -> Result<(Cam, Part, Vec<Toolpath>, Sim), String> {
         let mut sim = Sim::new(&c, &part, stock, &paths, resolution);
         let map = self.stock_on(sim.x0, sim.y0, sim.cell, sim.nx, sim.ny, stock.0.z);
         sim.start_from(&map);
@@ -349,6 +410,23 @@ mod tests {
         assert_eq!(g.matches("\nG54\n").count(), 2, "{g}");
         assert_eq!(g.matches("\nG55\n").count(), 2, "{g}");
         assert!(g.contains("station 1: G54 Op1") && g.contains("station 2: G55 Op2"), "{g}");
+    }
+
+    #[test]
+    fn a_job_program_splits_back_into_its_stations() {
+        let a = station("Op1", 1, -50.0, &[(24, OpKind::Face), (1, OpKind::Chamfer)]);
+        let b = station("Op2", 2, 50.0, &[(24, OpKind::Face), (1, OpKind::Chamfer)]);
+        let job = Job::new(vec![a, b]);
+        let g = job.gcode();
+        let parts = job.split_program(&g);
+        assert_eq!(parts.iter().map(|p| p.0).collect::<Vec<_>>(), vec![0, 1, 0, 1], "{g}");
+        // a later stretch starts with the tool that is in, and every move of the program lands in one stretch
+        assert!(parts[1].1.starts_with("T24 M6\n") && parts[3].1.starts_with("T1 M6\n"), "{:?}", parts);
+        let moves = |t: &str| t.lines().filter(|l| l.starts_with("G0") || l.starts_with("G1")).count();
+        let first = g.find("\nG54\n").unwrap();
+        assert_eq!(parts.iter().map(|p| moves(&p.1)).sum::<usize>(), moves(&g[first..]));
+        // the header's station list is not a switch
+        assert!(!parts[0].1.contains("work zero"), "{}", parts[0].1);
     }
 
     #[test]
