@@ -947,7 +947,8 @@ pub fn power_budget(cam: &Cam, op: &Operation, tool: &Tool) -> Option<(f64, f64)
 /// Feeds set from the simulated cut (`cam_feed_schedule`): the power budget's cap (`power_target`) and the
 /// feed schedule (`feed_schedule`).
 pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, paths: Vec<Toolpath>) -> Vec<Toolpath> {
-    crate::cam_feed_schedule::apply(cam, part, stock_in, paths)
+    let paths = crate::cam_feed_schedule::apply(cam, part, stock_in, paths);
+    crate::cam_feed_schedule::link_feeds(cam, part, stock_in, paths)
 }
 
 /// The grid the setup's own simulations use.
@@ -3804,6 +3805,66 @@ mod tests {
             let ends = |t: &Toolpath| t.moves.iter().filter(|m| matches!(m, Move::Rapid(_))).count();
             assert_eq!(ends(&tp), ends(&plain), "{kind:?}");
         }
+    }
+
+    /// link_feed: the plinth's adaptive (stay-down links through cleared ground) at link_feed 5000 over a 3000
+    /// max_feed: links come out at 5000, every move that cuts stays at 3000 or under, nothing new in the simulation,
+    /// and it takes less time.
+    #[test]
+    fn air_moves_run_at_the_link_feed() {
+        let part = plinth();
+        let mut c = Cam::default();
+        c.stock.size = Some([86.0, 86.0, 30.0]);
+        c.stock.bottom = 0.0;
+        c.stock.material = "6061-T6".into();
+        c.machine.spindle_power = 2600.0;
+        c.machine.spindle_efficiency = 0.43;
+        c.machine.spindle_rated_rpm = 9000.0;
+        c.machine.max_feed = 3000.0;
+        c.stay_down = true;
+        let mut tool = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.35).unwrap();
+        (tool.flutes, tool.rpm, tool.feed, tool.flute_length, tool.stickout) = (3, 9000.0, 1500.0, 19.05, 24.0);
+        let t = c.add_tool(tool);
+        let a = c.add_op(OpKind::Adaptive, t);
+        {
+            let o = c.op_mut(a).unwrap();
+            o.bottom = Some(-12.0);
+            o.stepdown = Some(6.0);
+        }
+        let plain = generate(&c, &part).remove(0);
+        c.machine.link_feed = 5000.0;
+        let tp = generate(&c, &part).remove(0);
+        let fast = tp.moves.iter().filter(|m| matches!(m, Move::Feed(_, f) if *f > 4999.0)).count();
+        assert!(fast > 10, "{fast} moves at 5000");
+        assert!(tp.time < plain.time, "{} s against {} s", tp.time, plain.time);
+        // the moves as they run: only air above max_feed
+        let stock = stock_box(&c, &part);
+        for res in [stock_resolution(stock), 500] {
+            let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, std::slice::from_ref(&tp), res);
+            sim.profile = Some(vec![]);
+            sim.removed_by_move = Some(vec![(0.0, 0.0); sim.total()]);
+            sim.run_to(usize::MAX, usize::MAX);
+            assert!(sim.events.is_empty(), "grid {res}: {:?}", sim.events.iter().take(5).collect::<Vec<_>>());
+            let prof = sim.profile.as_ref().unwrap();
+            let bad: Vec<_> = prof.iter().filter(|s| s.feed > 3000.0 + 1e-6 && s.area >= 0.05).collect();
+            for s in bad.iter().take(8) {
+                let (a, b) = (tp.moves[s.step - 1].end(DVec3::ZERO), tp.moves[s.step].end(DVec3::ZERO));
+                println!("grid {res}: {s:?} move {:?} -> {:?} next {:?}", a, b, tp.moves.get(s.step + 1));
+            }
+            assert!(bad.is_empty(), "grid {res}: {} samples cut above max_feed", bad.len());
+            let removed = sim.removed_by_move.as_ref().unwrap();
+            let mut p = DVec3::ZERO;
+            for (k, m) in tp.moves.iter().enumerate() {
+                let q = m.end(p);
+                if let Move::Feed(_, f) = m {
+                    if *f > 3000.0 {
+                        assert!((removed[k].0 as f64) < 0.1 * p.distance(q).max(1.0), "grid {res}: move {k} at {f} removes {:?}", removed[k]);
+                    }
+                }
+                p = q;
+            }
+        }
+        println!("{} → {} s, {fast} moves at 5000", plain.time.round(), tp.time.round());
     }
 
     /// Distance from the plinth's outline (outside it).

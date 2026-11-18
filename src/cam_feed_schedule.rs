@@ -547,3 +547,145 @@ fn op_stats(bases: &[usize], i: usize, prof: &[LoadSample]) -> (f64, f64, f64) {
     }
     (t, peak, if t > 0.0 { e / t } else { 0.0 })
 }
+
+/// Below this much material per mm of travel (mm²) a feed move counts as air (with no stock within two cells of
+/// the tool's side anywhere along it either).
+const AIR_AREA: f64 = 0.05;
+/// Feed moves longer than this are split so their ends can keep the cutting feed (mm).
+const LINK_SPLIT: f64 = 3.0;
+/// Length kept at the cutting feed at the end of a link before the cut it leads into, and at its start after
+/// one (the load check looks a millimetre back), mm.
+const APPROACH: f64 = 1.0;
+const LEAVE: f64 = 1.5;
+
+/// G1 moves that cut nothing run at the machine's `link_feed` (when it is over `max_feed`): links through cleared
+/// ground, stay-down links, moves in air. From a simulation of the setup: a move that removes next to nothing
+/// and takes no load sample. Plunges and ramps down, probing, and the last millimetre before a cut keep their
+/// feeds; cutting moves stay at `max_feed` or under. Moves are split only so a long link's ends can keep the cut
+/// feed, and joined again where they end up at one feed.
+pub fn link_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
+    let link = cam.machine.link_feed;
+    if !(link > cam.machine.max_feed && cam.machine.max_feed > 0.0) {
+        return paths;
+    }
+    let eligible = |tp: &Toolpath| tp.probe.is_none() && cam.op(tp.op).is_some_and(|o| !matches!(o.kind, OpKind::Probe | OpKind::Tap | OpKind::Drill | OpKind::Thread));
+    // split long level-ish feed moves into a head, a middle and an approach
+    let mut origin: Vec<Vec<usize>> = vec![];
+    for tp in paths.iter_mut() {
+        if !eligible(tp) {
+            origin.push((0..tp.moves.len()).collect());
+            continue;
+        }
+        let (mut out, mut o) = (Vec::with_capacity(tp.moves.len()), Vec::with_capacity(tp.moves.len()));
+        let mut p = DVec3::ZERO;
+        for (k, m) in tp.moves.iter().enumerate() {
+            let q = m.end(p);
+            let len = p.distance(q);
+            match *m {
+                Move::Feed(_, f) if k > 0 && !plunging(p, q) && len > LINK_SPLIT => {
+                    for t in [LEAVE / len, 1.0 - APPROACH / len, 1.0] {
+                        let at = if t >= 1.0 { q } else { p + (q - p) * t };
+                        out.push(Move::Feed(at.to_array(), f));
+                        o.push(k);
+                    }
+                }
+                _ => {
+                    out.push(*m);
+                    o.push(k);
+                }
+            }
+            p = q;
+        }
+        tp.moves = out;
+        origin.push(o);
+    }
+    let air = |paths: &[Toolpath]| -> Vec<Vec<bool>> {
+        let stock = stock_box(cam, part);
+        let mut sim = Sim::new(cam, part, stock, paths, crate::cam_paths::sim_resolution(stock));
+        if let Some(m) = stock_in {
+            sim.start_from(m);
+        }
+        sim.profile = Some(vec![]);
+        sim.removed_by_move = Some(vec![(0.0, 0.0); sim.total()]);
+        sim.run_to(usize::MAX, usize::MAX);
+        let removed = sim.removed_by_move.take().unwrap_or_default();
+        let prof = sim.profile.take().unwrap_or_default();
+        let b = bases(paths);
+        let mut out: Vec<Vec<bool>> = paths.iter().map(|tp| vec![true; tp.moves.len()]).collect();
+        for s in prof.iter().filter(|s| s.area > 1e-3) {
+            if let Some((i, k)) = locate(&b, s.step) {
+                out[i][k] = false;
+            }
+        }
+        for (i, tp) in paths.iter().enumerate() {
+            let mut p = DVec3::ZERO;
+            for (k, m) in tp.moves.iter().enumerate() {
+                let q = m.end(p);
+                let (vol, deep) = removed.get(b[i] + k).copied().unwrap_or((0.0, 0.0));
+                // (`deep` is 1 where stock stood within two cells of the tool's side: see `Sim::removed_by_move`)
+                if vol as f64 > AIR_AREA * p.distance(q).max(0.2) || deep > 0.05 {
+                    out[i][k] = false;
+                }
+                p = q;
+            }
+        }
+        out
+    };
+    let a = air(&paths);
+    let mut raised: Vec<Vec<bool>> = paths.iter().map(|tp| vec![false; tp.moves.len()]).collect();
+    for (i, tp) in paths.iter_mut().enumerate() {
+        if !eligible(tp) {
+            continue;
+        }
+        let n = tp.moves.len();
+        let mut ends = vec![DVec3::ZERO; n + 1];
+        let mut p = DVec3::ZERO;
+        for (k, m) in tp.moves.iter().enumerate() {
+            ends[k] = p;
+            p = m.end(p);
+        }
+        ends[n] = p;
+        for k in 1..n {
+            let Move::Feed(to, _) = tp.moves[k] else { continue };
+            let (from, q) = (ends[k], ends[k + 1]);
+            // plunges and ramps keep their feeds
+            if !a[i][k] || q.z < from.z - 1e-6 {
+                continue;
+            }
+            // the approach: the move (a long one's split-off last millimetre) right before a cut, a plunge or a ramp
+            // keeps its feed
+            let next_cuts = match tp.moves.get(k + 1) {
+                Some(Move::Feed(..)) => !a[i][k + 1] || plunging(q, ends[k + 2]) || ends[k + 2].z < q.z - 1e-6,
+                Some(Move::Tap { .. }) => true,
+                _ => false,
+            };
+            if next_cuts {
+                continue;
+            }
+            tp.moves[k] = Move::Feed(to, link);
+            raised[i][k] = true;
+        }
+    }
+    for (i, tp) in paths.iter_mut().enumerate() {
+        tp.moves = join(&tp.moves, &origin[i]);
+    }
+    // check, on the moves as they will run: a raised move that takes any load after all goes back
+    let a2 = air(&paths);
+    for (i, tp) in paths.iter_mut().enumerate() {
+        let mut any = false;
+        for k in 0..tp.moves.len() {
+            if let Move::Feed(to, f) = tp.moves[k] {
+                if f > cam.machine.max_feed && !a2[i][k] {
+                    tp.moves[k] = Move::Feed(to, cam.machine.max_feed);
+                }
+                any |= f > cam.machine.max_feed;
+            }
+        }
+        if any || raised[i].iter().any(|r| *r) {
+            if let Some(tool) = cam.path_tool(tp.op, tp.tool) {
+                crate::cam_paths::toolpath_stats(tp, &tool, cam);
+            }
+        }
+    }
+    paths
+}

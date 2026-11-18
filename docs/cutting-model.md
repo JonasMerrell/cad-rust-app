@@ -107,6 +107,17 @@ and time-weighted mean power while cutting before and after, and the share of th
 9000 rpm with 3 flutes the 3000 mm/min ceiling is 0.11 mm/tooth: where much of the cut sits there, a wider
 stepover (not a faster feed) is what would take more.
 
+### Link feed (`machine.link_feed`)
+
+With `link_feed` over `max_feed`, after the feed schedule (and whether or not it ran), the setup is simulated once
+more with the material each move removes: a G1 move that removes under 0.05 mm² per mm and takes no load sample
+cuts nothing (a link through cleared ground, a stay-down link, a move in air) and runs at `link_feed`. Long moves
+are split first so their first 1.5 mm (the load check looks a millimetre back) and last 1 mm keep the cutting
+feed; a move right before a cut, a plunge or a ramp keeps its feed, and so do plunges, ramps, probing, drilling
+and tapping. A second simulation puts any raised move that takes a load after all back to `max_feed`. Cutting
+moves stay at `max_feed` or under. G0 rapids run at the controller's own speed; `rapid_rate` (X/Y) and
+`machine.rapid_z` only set the time estimates.
+
 ## Calibration (DMC2, 6061-T6, 1/4" 3-flute carbide at 24 000 rpm, 24 out of the holder)
 
 **Measured, 2026-11-17** (the stick-out gauge's broken-tool run): the spindle's speed was heard from a
