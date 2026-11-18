@@ -62,6 +62,23 @@ pub struct ToolGeom {
     pub stress_limit: f64,
 }
 
+/// An end mill's side of a cut, as the simulation models it.
+pub fn tool_geom(t: &crate::cam::Tool) -> ToolGeom {
+    let r = t.radius();
+    let flutes = t.flute_length.max(r);
+    let (modulus, stress_limit) = tool_steel(&t.material);
+    ToolGeom {
+        diameter: 2.0 * r,
+        ball: matches!(t.kind, crate::cam::ToolKind::Ball | crate::cam::ToolKind::TaperedBall),
+        flutes: t.flutes,
+        stickout: t.stickout.max(flutes + 1.0),
+        flute_length: flutes,
+        shank: if t.shank_diameter > 0.0 { t.shank_diameter } else { 2.0 * r },
+        modulus,
+        stress_limit,
+    }
+}
+
 /// What the cut does to the tool, machine and work.
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
 pub struct Cut {

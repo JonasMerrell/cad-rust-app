@@ -715,6 +715,8 @@ pub(super) fn complete(tools: &mut [Value]) {
                 ("seam", "array"),
                 ("spring_pass", "boolean"),
                 ("max_engagement", "number"),
+                ("power_target", "number"),
+                ("power_cap", "number"),
                 ("build", "boolean"),
             ],
             _ => &[],
