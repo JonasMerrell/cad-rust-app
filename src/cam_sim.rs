@@ -251,7 +251,7 @@ pub struct Sim {
     pos: DVec3,
     pub events: Vec<SimEvent>,
     pub removed: f64,
-    max_h: f32,
+    pub(crate) max_h: f32,
     /// Fixtures (setup coordinates).
     fixtures: Vec<(DVec3, DVec3)>,
     /// The highest fixture top: the tool's tip above it can't touch them.

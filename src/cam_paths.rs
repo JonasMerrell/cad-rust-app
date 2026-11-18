@@ -2499,6 +2499,76 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
         paths[k].moves = out;
         prev = last_cut.map(|p| (k, p));
     }
+    // The stock map the links were planned on has its own grid: a sliver of stock thinner than a cell (where two
+    // passes only just met) can be there in one grid and not in another. Check the links the way the post's
+    // simulation does, and lift any that still runs a rapid into the stock right up for that move.
+    let safe = Ctx::new(cam, part).safe().max(sim.max_h as f64 + cam.clearance.max(1.0));
+    for round in 0..3 {
+        let mut check = crate::cam_sim::Sim::new(cam, part, stock, &paths, 500);
+        if let Some(m) = stock_in {
+            check.start_from(m);
+        }
+        check.run_to(usize::MAX, usize::MAX);
+        let mut hits: Vec<usize> = check.events.iter().filter(|e| e.kind == crate::cam_sim::EventKind::Rapid).map(|e| e.step).collect();
+        if hits.is_empty() {
+            break;
+        }
+        hits.sort_unstable();
+        hits.dedup();
+        // global move index -> (path, move)
+        let mut starts = vec![];
+        let mut acc = 0usize;
+        for tp in &paths {
+            starts.push(acc);
+            acc += tp.moves.len();
+        }
+        let mut runs: Vec<(usize, usize, usize)> = vec![];
+        for h in hits {
+            let k = match starts.binary_search(&h) {
+                Ok(k) => k,
+                Err(k) => k - 1,
+            };
+            let mv = &paths[k].moves;
+            let i = h - starts[k];
+            if !matches!(mv.get(i), Some(Move::Rapid(_))) {
+                continue;
+            }
+            let (mut a, mut b) = (i, i + 1);
+            while a > 0 && matches!(mv[a - 1], Move::Rapid(_)) {
+                a -= 1;
+            }
+            while b < mv.len() && matches!(mv[b], Move::Rapid(_)) {
+                b += 1;
+            }
+            if !runs.contains(&(k, a, b)) {
+                runs.push((k, a, b));
+            }
+        }
+        // from the back, so the indices of the runs still to do hold
+        runs.sort_by(|x, y| y.cmp(x));
+        for (k, a, b) in runs {
+            let from = if a > 0 {
+                paths[k].moves[..a].iter().fold(DVec3::ZERO, |p, m| m.end(p))
+            } else {
+                // the run starts the path: from where the one before ended
+                (0..k).rev().find_map(|j| paths[j].moves.iter().rev().find(|m| !matches!(m, Move::Dwell(_))).map(|m| m.end(DVec3::ZERO))).unwrap_or(DVec3::new(0.0, 0.0, safe))
+            };
+            let to = paths[k].moves[b - 1].end(DVec3::ZERO);
+            let mut run = vec![Move::Rapid([from.x, from.y, safe]), Move::Rapid([to.x, to.y, safe])];
+            if round == 0 {
+                run.push(Move::Rapid(to.to_array()));
+            } else {
+                // still into the stock coming down: feed the way down from the top of the stock
+                let f = cam.tool(paths[k].tool).map(|t| t.plunge_feed).unwrap_or(300.0);
+                run.push(Move::Rapid([to.x, to.y, sim.max_h as f64 + 1.0]));
+                run.push(Move::Feed(to.to_array(), f));
+            }
+            paths[k].moves.splice(a..b, run);
+            if a == 0 {
+                paths[k].linked = false;
+            }
+        }
+    }
     for tp in paths.iter_mut() {
         if let Some(tool) = cam.tool(tp.tool) {
             stats(tp, tool, cam);
