@@ -766,7 +766,7 @@ impl<'a> Pb<'a> {
                 let l = loops.remove(j);
                 self.cut_loop(&l, z, z_from, 0.0, None, None);
             }
-            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0 };
+            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0, blocking: Default::default(), hop: None };
             lv.clear(&region, &mat, &core);
         }
     }
@@ -1244,7 +1244,8 @@ pub fn final_stock(cam: &Cam, part: &Part, paths: &[Toolpath], stock: Option<&St
 fn machine_checks(cam: &Cam, ctx: &Ctx, paths: &mut [Toolpath]) {
     let m = &cam.machine;
     for tp in paths.iter_mut() {
-        let Some(tool) = cam.tool(tp.tool) else { continue };
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let tool: &Tool = &tool;
         if cam.max_rpm > 0.0 && tool.rpm > cam.max_rpm + 0.5 {
             tp.warnings.push(format!(
                 "T{} is set to {} rpm but the spindle tops out at {}: it runs at {} with its feeds scaled to {}% (same chip load)",
@@ -1415,8 +1416,17 @@ pub fn setup_chain(cams: &[Cam], ci: usize) -> Result<Vec<usize>, String> {
 }
 
 /// Bring the stock boxes of `ci` and the setups before it up to date (each carries the box of the one it follows),
-/// and return the stock the earlier setups leave for it (None for a first setup).
+/// and return the stock the earlier setups leave for it (None for a first setup). Every setup in the chain is
+/// taken to machine the same parts as `ci` (see `link_setups_each` when they pick different bodies).
 pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Option<StockMap>, String> {
+    link_setups_each(cams, ci, &|_| input.clone())
+}
+
+/// `link_setups` with each setup's own parts (`input_of(k)` for setup k): an earlier setup can keep bodies a
+/// later one removes, e.g. a carrier or lugs op 1 leaves on and op 2 machines off. Its stock box and what it
+/// leaves come from its own parts, and the box is carried in part coordinates, so a later setup that picks fewer
+/// bodies still gets the earlier one's stock where it really is.
+pub fn link_setups_each(cams: &mut [Cam], ci: usize, input_of: &dyn Fn(usize) -> PartInput) -> Result<Option<StockMap>, String> {
     let chain = setup_chain(cams, ci)?;
     if chain.is_empty() {
         cams[ci].stock.carried = None;
@@ -1428,7 +1438,7 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Opt
     let mut stock: Option<StockMap> = None;
     for w in order.windows(2) {
         let (a, b) = (w[0], w[1]);
-        let pa = Part::from_input(input, &cams[a]);
+        let pa = Part::from_input(&input_of(a), &cams[a]);
         let (lo, hi) = stock_box(&cams[a], &pa);
         let (p, q) = (pa.to_part(lo), pa.to_part(hi));
         cams[b].stock.carried = Some([p.min(q).to_array(), p.max(q).to_array()]);
@@ -1440,10 +1450,11 @@ pub fn link_setups(cams: &mut [Cam], ci: usize, input: &PartInput) -> Result<Opt
 
 pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
     let mut tp = Toolpath { op: op.id, tool: op.tool, ..Default::default() };
-    let Some(tool) = ctx.cam.tool(op.tool) else {
+    let Some(tool) = ctx.cam.tool_for(op) else {
         tp.warnings.push("no tool selected".into());
         return tp;
     };
+    let tool: &Tool = &tool;
     if !op.kind.accepts(tool.kind) {
         tp.warnings.push(format!("a {} can't be used for {}", tool.kind.label().to_lowercase(), op.kind.label().to_lowercase()));
         return tp;
@@ -1540,22 +1551,27 @@ fn face(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     }
     let r = t.radius();
     let step = stepover(op, t);
-    let x0 = lo.x - r - 1.0;
-    let x1 = hi.x + r + 1.0;
-    let w = hi.y - lo.y;
+    // passes along X, or along Y with an angle near 90 (e.g. along the way a part slides on the face)
+    let along_y = ((op.angle.rem_euclid(180.0)) - 90.0).abs() < 45.0;
+    let (u0, u1, v0, v1) = if along_y { (lo.y, hi.y, lo.x, hi.x) } else { (lo.x, hi.x, lo.y, hi.y) };
+    let pt = |u: f64, v: f64, z: f64| if along_y { DVec3::new(v, u, z) } else { DVec3::new(u, v, z) };
+    let a0 = u0 - r - 1.0;
+    let a1 = u1 + r + 1.0;
+    let w = v1 - v0;
     let n = (w / step).ceil().max(1.0) as usize;
     let mut z_prev = top;
     for z in levels(top, bottom, stepdown(op, t), &[]) {
         for i in 0..=n {
-            let y = lo.y + w * i as f64 / n as f64;
-            let (a, b) = if i % 2 == 0 { (x0, x1) } else { (x1, x0) };
+            let v = v0 + w * i as f64 / n as f64;
+            let (a, b) = if i % 2 == 0 { (a0, a1) } else { (a1, a0) };
+            let s = pt(a, v, z);
             if i == 0 {
-                pb.approach(a, y, z_prev);
-                pb.cut(DVec3::new(a, y, z), pb.plunge);
+                pb.approach(s.x, s.y, z_prev);
+                pb.cut(s, pb.plunge);
             } else {
-                pb.cut(DVec3::new(a, y, z), pb.feed);
+                pb.cut(s, pb.feed);
             }
-            pb.cut(DVec3::new(b, y, z), pb.feed);
+            pb.cut(pt(b, v, z), pb.feed);
         }
         z_prev = z;
     }
@@ -1980,6 +1996,9 @@ fn lead_loop(pb: &mut Pb, l: &[P2], z: f64, z_from: f64, keep_out: &Shapes, seam
     false
 }
 
+/// How far a chamfer mill's cone may reach past the chamfer it cuts into a face beside the edge, mm.
+pub const CHAMFER_GOUGE: f64 = 0.05;
+
 fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let edge = ctx.wz(op.top).unwrap_or(ctx.part().hi.z);
@@ -2004,6 +2023,43 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let sh = ctx.geo.shadow(edge - 0.01);
     let path = offset(&sh, s + op.leave);
     let mut any = false;
+    // The whole cone, tip offset and all, against the part along each edge: past a vertical (or steeper than
+    // the cone) face it touches only the edge, cutting the chamfer; next to a face shallower than the cone
+    // (a dish's rim, a gentle slope) the cone below the edge cuts into that face all along it. Such edges are
+    // left out (a ball edge break is the tool for them).
+    let cone = crate::cam_3d::Dropper::new(ctx.part(), t, 0.0);
+    let mut flat = t.clone();
+    flat.kind = ToolKind::Flat;
+    flat.diameter = (2.0 * tip).max(0.2);
+    flat.corner_radius = 0.0;
+    let under = crate::cam_3d::Dropper::new(ctx.part(), &flat, 0.0);
+    let mut scratch = crate::cam_3d::Scratch::default();
+    let chamfer_z = w / half.tan();
+    let diag = std::env::var_os("RCAD_CHAMFER_DIAG").is_some();
+    // the most the cone cuts past the chamfer, and the tip's clearance over what is under it, along a loop
+    let mut check = |l: &Contour| -> (f64, f64, DVec2) {
+        let (mut worst, mut clear, mut at) = (f64::NEG_INFINITY, f64::INFINITY, DVec2::from(l[0]));
+        let n = l.len();
+        for i in 0..n {
+            let (a, b) = (DVec2::from(l[i]), DVec2::from(l[(i + 1) % n]));
+            let steps = (a.distance(b) / 0.25).ceil().max(1.0) as usize;
+            for k in 0..steps {
+                let q = a.lerp(b, k as f64 / steps as f64);
+                // past the chamfer: the cone resting higher than the chamfer's depth, or the tip's flat in the part
+                let (h, _) = cone.drop(q, &mut scratch);
+                let (u, _) = under.drop(q, &mut scratch);
+                let bad = (h - z - chamfer_z).max(u - z);
+                if bad.is_finite() && bad > worst {
+                    worst = bad;
+                    at = q;
+                }
+                if u.is_finite() {
+                    clear = clear.min(z - u);
+                }
+            }
+        }
+        (worst, clear, at)
+    };
     for sp in &path {
         for (i, c) in sp.iter().enumerate() {
             let want = match op.side {
@@ -2014,6 +2070,17 @@ fn chamfer(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
             if want {
                 let l: Contour = if op.climb { c.iter().rev().copied().collect() } else { c.clone() };
                 if l.len() < 2 {
+                    continue;
+                }
+                let (cut, clear, at) = check(&l);
+                if diag {
+                    eprintln!("chamfer {}: loop of {} points near ({:.2}, {:.2}): cone past the chamfer {:.3} mm at ({:.2}, {:.2}), tip {:.2} mm over what is under it", op.name, l.len(), l[0][0] - ctx.origin.x, l[0][1] - ctx.origin.y, cut, at.x - ctx.origin.x, at.y - ctx.origin.y, clear);
+                }
+                                if cut > CHAMFER_GOUGE {
+                    tp.warnings.push(format!(
+                        "left out the edge near X{} Y{}: the face beside it is shallower than the chamfer mill's cone, which would cut {} mm into it; break that edge with a ball instead",
+                        crate::cam::fmt_mm(at.x - ctx.origin.x), crate::cam::fmt_mm(at.y - ctx.origin.y), crate::cam::fmt_mm(cut)
+                    ));
                     continue;
                 }
                 // come down above the edge, not to the chamfer's bottom: a cone lowered to z + retract would
@@ -2221,7 +2288,8 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
     let (mut tool, mut rpm, mut end): (Option<u64>, Option<f64>, Option<DVec3>) = (None, None, None);
     for tp in paths.iter().filter(|p| !p.moves.is_empty()) {
         // the post leaves out operations without a tool
-        let Some(t) = cam.tool(tp.tool) else { continue };
+        let Some(t) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let t: &Tool = &t;
         total += tp.time;
         if tool != Some(t.id) {
             tool = Some(t.id);
@@ -2441,9 +2509,9 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
     };
     // what each path runs with: (tool, rpm, coolant)
     let setting = |tp: &Toolpath| -> Option<(u64, i64, bool)> {
-        let tool = cam.tool(tp.tool)?;
+        let tool = cam.path_tool(tp.op, tp.tool)?;
         let op = cam.op(tp.op);
-        Some((tp.tool, cam.spindle_rpm(tool).round() as i64, cam.coolant_for(tool, op).is_on()))
+        Some((tp.tool, cam.spindle_rpm(&tool).round() as i64, cam.coolant_for(&tool, op).is_on()))
     };
     let mut base = 0usize;
     let mut prev: Option<(usize, DVec3)> = None; // the path before and where its last cut ended
@@ -2542,7 +2610,7 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
                                 if down > b.z + 1e-6 {
                                     let f = match paths[k].moves.get(j) {
                                         Some(Move::Feed(_, f)) => *f,
-                                        _ => cam.tool(paths[k].tool).map(|t| t.plunge_feed).unwrap_or(300.0),
+                                        _ => cam.path_tool(paths[k].op, paths[k].tool).map(|t| t.plunge_feed).unwrap_or(300.0),
                                     };
                                     out.push(Move::Feed([b.x, b.y, b.z], f));
                                 }
@@ -2656,8 +2724,8 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
         }
     }
     for tp in paths.iter_mut() {
-        if let Some(tool) = cam.tool(tp.tool) {
-            stats(tp, tool, cam);
+        if let Some(tool) = cam.path_tool(tp.op, tp.tool) {
+            stats(tp, &tool, cam);
         }
     }
     paths
@@ -2960,6 +3028,35 @@ mod tests {
         assert!(pts.iter().all(|p| wall(p) > 9.0 - 0.02), "gouges");
     }
 
+    /// An operation's own speed and feed replace its tool's for that operation only: in the moves, the
+    /// post's S word (a change between two operations of one tool) and the stock simulation's cutter.
+    #[test]
+    fn an_operation_can_set_its_own_speed_and_feed() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.post = "rcnc".into();
+        let a = c.add_op(OpKind::Contour, t);
+        let b = c.add_op(OpKind::Contour, t);
+        let tool = c.tool(t).unwrap().clone();
+        {
+            let o = c.op_mut(b).unwrap();
+            o.rpm = Some(tool.rpm * 0.75);
+            o.feed = Some(777.0);
+        }
+        let paths = generate(&c, &part);
+        let feeds_of = |tp: &Toolpath| tp.moves.iter().filter_map(|m| if let Move::Feed(_, f) = m { Some(*f) } else { None }).collect::<Vec<f64>>();
+        let (fa, fb) = (feeds_of(&paths[0]), feeds_of(&paths[1]));
+        assert!(fa.iter().any(|f| (f - c.feeds(&tool).0).abs() < 1e-6) && !fa.iter().any(|f| (f - 777.0).abs() < 1e-6), "{fa:?}");
+        assert!(fb.iter().any(|f| (f - 777.0).abs() < 1e-6) && !fb.iter().any(|f| (f - c.feeds(&tool).0).abs() < 1e-6), "{fb:?}");
+        assert_eq!(c.path_tool(paths[1].op, paths[1].tool).unwrap().rpm, tool.rpm * 0.75);
+        assert_eq!(c.path_tool(paths[0].op, paths[0].tool).unwrap().rpm, tool.rpm);
+        let _ = a;
+        let g = crate::cam_post::gcode(&c, &paths, DVec3::ZERO, 30.0);
+        let s_words: Vec<&str> = g.lines().filter(|l| l.starts_with('S')).collect();
+        assert_eq!(s_words, vec![format!("S{} M3", tool.rpm.round()).as_str(), format!("S{} M3", (tool.rpm * 0.75).round()).as_str()], "{g}");
+        assert_eq!(g.matches("M6").count(), 1, "one tool change for the two operations");
+    }
+
     #[test]
     fn pocket_stays_inside() {
         let part = plate();
@@ -3019,6 +3116,32 @@ mod tests {
         sim.run_to(usize::MAX, usize::MAX);
         assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Rapid));
         assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Gouge));
+    }
+
+    #[test]
+    fn face_runs_along_y_with_an_angle_of_90() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let id = c.add_op(OpKind::Face, t);
+        let along = |c: &Cam| {
+            let tp = generate(c, &part).remove(0);
+            let (mut dx, mut dy) = (0.0, 0.0);
+            let mut prev = DVec3::ZERO;
+            for m in &tp.moves {
+                let p = m.end(prev);
+                if let Move::Feed(..) = m {
+                    dx += (p.x - prev.x).abs();
+                    dy += (p.y - prev.y).abs();
+                }
+                prev = p;
+            }
+            (dx, dy)
+        };
+        let (dx, dy) = along(&c);
+        assert!(dx > 3.0 * dy, "along X by default: {dx} {dy}");
+        c.op_mut(id).unwrap().angle = 90.0;
+        let (dx, dy) = along(&c);
+        assert!(dy > 3.0 * dx, "along Y at 90: {dx} {dy}");
     }
 
     #[test]
@@ -3089,6 +3212,11 @@ mod tests {
             let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
             assert!(g.contains("G21") && g.contains("M30"), "{post}");
             assert_eq!(g.contains("T1 M6"), post != "grbl", "{post}");
+            // a second station's setup runs in its own work offset
+            let mut w = c.clone();
+            w.work_offset = 2;
+            let g2 = crate::cam_post::gcode(&w, &paths, origin, top + c.clearance);
+            assert!(g2.lines().any(|l| l == "G55") && !g2.lines().any(|l| l == "G54"), "{post}: {g2}");
             if post == "rcnc" {
                 // rcnc's own M6 handles the pause and the measuring
                 assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");
@@ -3390,6 +3518,77 @@ mod tests {
                 }
             }
         }
+    }
+
+    /// A 60 × 40 × 10 plate with a thumb dish: a cone 8 in radius, its face 25° from flat (shallower than a
+    /// 90° chamfer mill's 45°), as on the stick-out gauge.
+    fn dished() -> Part {
+        let mut tris = vec![];
+        let z = |x: f64, y: f64| {
+            let rho = (x - 30.0).hypot(y - 20.0);
+            if rho < 8.0 {
+                10.0 - (8.0 - rho) * 25f64.to_radians().tan()
+            } else {
+                10.0
+            }
+        };
+        let n = 0.25;
+        for j in 0..(40.0 / n) as i32 {
+            for i in 0..(60.0 / n) as i32 {
+                let (x, y) = (i as f64 * n, j as f64 * n);
+                let p = |dx: f64, dy: f64| DVec3::new(x + dx, y + dy, z(x + dx, y + dy));
+                tris.push([p(0.0, 0.0), p(n, 0.0), p(n, n)]);
+                tris.push([p(0.0, 0.0), p(n, n), p(0.0, n)]);
+            }
+        }
+        tris.push([DVec3::ZERO, DVec3::new(0.0, 40.0, 0.0), DVec3::new(60.0, 0.0, 0.0)]);
+        Part::new(&tris, &[], "top")
+    }
+
+    #[test]
+    fn a_chamfer_mill_leaves_out_an_edge_beside_a_shallow_face() {
+        // the stick-out gauge's op 1 (2026-11-18): a 0.3 edge break round the dish's rim with the tip 1 mm
+        // below the chamfer, as for a wall, cut the dish all round: the cone (45°) is steeper than the dish
+        let part = dished();
+        let mut c = Cam::default();
+        let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap());
+        let id = c.add_op(OpKind::Chamfer, t);
+        let op = c.op_mut(id).unwrap();
+        op.chamfer = 0.3;
+        op.tip_offset = 1.0;
+        op.side = Side::Both;
+        let tp = generate(&c, &part).remove(0);
+        assert_eq!(tp.warnings.iter().filter(|w| w.contains("left out the edge")).count(), 1, "{:?}", tp.warnings);
+        // the outline is still broken, and nothing comes near the dish
+        let mut p = DVec3::ZERO;
+        let mut feeds = 0;
+        for m in &tp.moves {
+            p = m.end(p);
+            if matches!(m, Move::Feed(..)) {
+                feeds += 1;
+                assert!(p.truncate().distance(DVec2::new(30.0, 20.0)) > 12.0, "{p}");
+            }
+        }
+        assert!(feeds > 4);
+        let stock = stock_box(&c, &part);
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, std::slice::from_ref(&tp), 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        assert!(sim.events.is_empty(), "{:?}", sim.events);
+        // what it used to do: the same pass round the rim, the tip 1.3 down and 1 in from it. The simulation
+        // now calls that a gouge: the chamfer's allowance holds only beside a face falling away as steeply
+        // as the cone, not over the whole dish
+        let (r, z) = (8.0 - 1.0, 10.0 - 1.3);
+        let mut moves = vec![Move::Rapid([30.0 + r, 20.0, 15.0]), Move::Feed([30.0 + r, 20.0, z], 200.0)];
+        for k in 1..=72 {
+            let a = k as f64 * 5f64.to_radians();
+            moves.push(Move::Feed([30.0 + r * a.cos(), 20.0 + r * a.sin(), z], 1000.0));
+        }
+        moves.push(Move::Rapid([30.0 + r, 20.0, 15.0]));
+        let old = Toolpath { op: id, tool: t, moves, ..Default::default() };
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, &[old], 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        let deepest = sim.events.iter().filter(|e| e.kind == crate::cam_sim::EventKind::Gouge).map(|e| e.depth).fold(0.0, f64::max);
+        assert!(deepest > 0.3, "{:?}", sim.events);
     }
 
     #[test]

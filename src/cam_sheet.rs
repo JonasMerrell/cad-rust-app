@@ -644,7 +644,8 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
     let mut n = 0;
     let mut cards = String::new();
     for (pi, tp) in paths.iter().enumerate().filter(|(_, p)| !p.moves.is_empty()) {
-        let (Some(op), Some(t)) = (cam.op(tp.op), cam.tool(tp.tool)) else { continue };
+        let (Some(op), Some(t)) = (cam.op(tp.op), cam.path_tool(tp.op, tp.tool)) else { continue };
+        let t: &crate::cam::Tool = &t;
         n += 1;
         let mut prev = DVec3::new(0.0, 0.0, hi.z);
         let (mut zlo, mut zhi) = (f64::INFINITY, f64::NEG_INFINITY);

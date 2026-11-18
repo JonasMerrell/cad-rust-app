@@ -938,6 +938,16 @@ pub struct Operation {
     /// middle of the loop's longest straight side, away from corners and arcs.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub seam: Option<[f64; 2]>,
+    /// The spindle speed this operation runs at instead of its tool's (None: the tool's). For test cuts and
+    /// calibration passes that change one thing at a time with one tool.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub rpm: Option<f64>,
+    /// The cutting feed (mm/min) instead of the tool's (None: the tool's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub feed: Option<f64>,
+    /// The plunge feed (mm/min) instead of the tool's (None: the tool's).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub plunge_feed: Option<f64>,
     /// Contour: the most any pass may take radially, as a fraction of the tool diameter (None = 25 %). Where the
     /// stock reaches further out than that, extra passes outside the wall take it down first.
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1093,6 +1103,9 @@ impl Default for Operation {
             spring_pass: false,
             seam: None,
             max_engagement: None,
+            rpm: None,
+            feed: None,
+            plunge_feed: None,
             chip_thinning: false,
             power_target: None,
             power_cap: None,
@@ -1250,6 +1263,22 @@ pub struct Machine {
     /// The spindle's speed droop at its rated load (a VFD spindle without speed feedback slows with
     /// torque), share; a microphone's measured droop gives the load from it.
     pub spindle_rated_slip: f64,
+    /// Share of the spindle's power (power x efficiency, best set to what it measurably stalls at) that a
+    /// cut must never exceed, and the share past which it's a caution. 1.0 / 0.85 unless set.
+    #[serde(default)]
+    pub spindle_never_exceed: f64,
+    #[serde(default)]
+    pub spindle_caution: f64,
+    /// Under the rated speed the spindle's pull-out torque falls to `spindle_low_torque` of the rated torque at
+    /// `spindle_low_rpm`, in a straight line (0: constant torque). The DMC2: 0.51 at 12000.
+    #[serde(default)]
+    pub spindle_low_rpm: f64,
+    #[serde(default)]
+    pub spindle_low_torque: f64,
+    /// Over `spindle_rated_rpm` the power falls as (rated / rpm) to this power (0: constant power). A VFD that can't
+    /// give the motor more voltage there: 1 in theory; the DMC2 (H100 at F004 = 150: rated 9000, 1118 W): 0.76.
+    #[serde(default)]
+    pub spindle_above_rated: f64,
 }
 
 impl Default for Machine {
@@ -1271,6 +1300,11 @@ impl Default for Machine {
             tool_damping: 0.03,
             chatter_scale: 0.0,
             spindle_rated_slip: 0.04,
+            spindle_never_exceed: 0.0,
+            spindle_caution: 0.0,
+            spindle_low_rpm: 0.0,
+            spindle_low_torque: 0.0,
+            spindle_above_rated: 0.0,
         }
     }
 }
@@ -1284,7 +1318,12 @@ impl Machine {
         let rated = if self.spindle_rated_rpm > 0.0 { self.spindle_rated_rpm } else { 24000.0 };
         // (the DMC2 took 576 N on a 1 mm × 12.5 mm finishing pass without complaint: the spindle runs out first)
         let force = if self.max_cut_force > 0.0 { self.max_cut_force } else { 700.0 };
-        (crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, force, deflection: 0.06 }, assumed)
+        let never_exceed = if self.spindle_never_exceed > 0.0 { self.spindle_never_exceed.min(1.0) } else { 1.0 };
+        let caution = if self.spindle_caution > 0.0 { self.spindle_caution.min(never_exceed) } else { 0.85 * never_exceed };
+        (
+            crate::cam_cutting::Limits { power: power * eff, rated_rpm: rated, low_rpm: self.spindle_low_rpm, low_torque: self.spindle_low_torque, above: self.spindle_above_rated, never_exceed, caution, force, deflection: 0.06 },
+            assumed,
+        )
     }
 }
 
@@ -1586,6 +1625,17 @@ pub struct Cam {
     /// through cleared space, rapid down close to the stock before an entry.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub stay_down: bool,
+    /// Work offset the program runs in: 1 = G54 (default) … 6 = G59, e.g. one per vise station so two setups
+    /// can be merged into one program. Probing writes to it.
+    #[serde(skip_serializing_if = "is_one_u8")]
+    pub work_offset: u8,
+    /// Other setups (by name) machined in the same program as this one, each at its own station on the
+    /// machine (its own `on_table` and `work_offset`): this setup leads the job (see cam_job).
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub with: Vec<String>,
+    /// Lines a job's combined setup puts first on its setup sheet (one per station).
+    #[serde(skip)]
+    pub job_notes: Vec<String>,
     /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
     /// at the bottom of the stock or of the lowest fixture.
     #[serde(skip_serializing_if = "is_zero3")]
@@ -1605,7 +1655,16 @@ pub struct Cam {
     pub next_id: u64,
 }
 
+fn is_one_u8(v: &u8) -> bool {
+    *v == 1
+}
+
 impl Cam {
+    /// The work offset's number, 1 (G54) to 6 (G59).
+    pub fn wcs(&self) -> u8 {
+        self.work_offset.clamp(1, 6)
+    }
+
     /// The height over a fixture's top that toolpaths lift to.
     pub fn fixture_lift(&self) -> f64 {
         if self.fixture_clearance > 0.0 {
@@ -1640,6 +1699,9 @@ impl Default for Cam {
             fixtures: vec![],
             fixture_clearance: 0.0,
             stay_down: false,
+            work_offset: 1,
+            with: vec![],
+            job_notes: vec![],
             on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),
@@ -1750,6 +1812,33 @@ impl Cam {
         self.ops.iter_mut().find(|o| o.id == id)
     }
 
+    /// The tool as an operation runs it: with the operation's own speed and feeds where it sets them.
+    pub fn tool_for(&self, op: &Operation) -> Option<std::borrow::Cow<'_, Tool>> {
+        let t = self.tool(op.tool)?;
+        if op.rpm.is_none() && op.feed.is_none() && op.plunge_feed.is_none() {
+            return Some(std::borrow::Cow::Borrowed(t));
+        }
+        let mut t = t.clone();
+        if let Some(r) = op.rpm.filter(|r| *r > 0.0) {
+            t.rpm = r;
+        }
+        if let Some(f) = op.feed.filter(|f| *f > 0.0) {
+            t.feed = f;
+        }
+        if let Some(f) = op.plunge_feed.filter(|f| *f > 0.0) {
+            t.plunge_feed = f;
+        }
+        Some(std::borrow::Cow::Owned(t))
+    }
+
+    /// The tool a toolpath was made with, as its operation runs it (see `tool_for`).
+    pub fn path_tool(&self, op: u64, tool: u64) -> Option<std::borrow::Cow<'_, Tool>> {
+        match self.op(op) {
+            Some(o) if o.tool == tool => self.tool_for(o),
+            _ => self.tool(tool).map(std::borrow::Cow::Borrowed),
+        }
+    }
+
     /// The speed a tool really runs at: its own, capped at the spindle's maximum.
     pub fn spindle_rpm(&self, t: &Tool) -> f64 {
         if self.max_rpm > 0.0 && t.rpm > self.max_rpm {
@@ -1785,7 +1874,7 @@ impl Cam {
     /// What the operator does before running the program: how the part sits (the side up, a 3+2 tilt) and
     /// what holds it. Plain lines for the G-code header and the setup sheet.
     pub fn setup_notes(&self) -> Vec<String> {
-        let mut v = vec![];
+        let mut v = self.job_notes.clone();
         if !self.jaws_of.is_empty() {
             v.push(format!("clamp both soft jaw blanks of {} in the vise on a spacer, tops level", self.jaws_of));
         } else if !self.follows.is_empty() {

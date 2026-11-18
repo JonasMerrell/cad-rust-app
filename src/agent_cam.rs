@@ -1,6 +1,6 @@
 //! Agent tools for Manufacture (CAM) tabs: setups, tools, operations, simulation and G-code.
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use serde_json::{Map, Value, json};
 
 use super::{R, Session, round};
@@ -134,6 +134,41 @@ impl Session {
     }
 
     /// The setup's parts, toolpaths and the stock the setups before it leave.
+    /// The job setup `ci` leads (its `with` setups, or `stations` in the call: names of the job's setups to
+    /// keep, e.g. op 1 alone for the first cycle), built; None for a setup on its own.
+    fn cam_job(&mut self, ci: usize, a: &Value) -> R<Option<crate::cam_job::Job>> {
+        let lead = self.ws.cams[ci].clone();
+        let keep: Option<Vec<String>> = a.get("stations").map(|v| serde_json::from_value(v.clone()).map_err(|_| "stations: names of the job's setups".to_string())).transpose()?;
+        if lead.with.is_empty() && keep.is_none() {
+            return Ok(None);
+        }
+        let mut idx = vec![ci];
+        for n in &lead.with {
+            // with stations given, only those have to exist yet (op 1 posted before op 2's setup is made)
+            if keep.as_ref().is_some_and(|k| !k.contains(n)) {
+                continue;
+            }
+            let i = self.ws.cams.iter().position(|c| &c.name == n).ok_or_else(|| format!("with: no setup called {n}"))?;
+            if !idx.contains(&i) {
+                idx.push(i);
+            }
+        }
+        let mut stations = vec![];
+        for &i in &idx {
+            let (part, paths, left) = self.cam_build_from(i)?;
+            stations.push(crate::cam_job::JobStation::new(self.ws.cams[i].clone(), part, paths, left));
+        }
+        let mut job = crate::cam_job::Job::new(stations);
+        if let Some(k) = keep {
+            let mut keep_idx = vec![];
+            for n in &k {
+                keep_idx.push(job.stations.iter().position(|s| &s.cam.name == n).ok_or_else(|| format!("stations: {n} isn't in {}'s job", lead.name))?);
+            }
+            job.only(&keep_idx);
+        }
+        Ok(Some(job))
+    }
+
     fn cam_build_from(&mut self, ci: usize) -> R<(Part, Vec<Toolpath>, Option<StockMap>)> {
         self.sync();
         let c = self.ws.cams[ci].clone();
@@ -143,7 +178,13 @@ impl Session {
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to machine", c.studio));
         }
-        let stock = cam_paths::link_setups(&mut self.ws.cams, ci, &input)?;
+        // each setup in the chain machines its own bodies (op 1 may keep a carrier op 2 takes off)
+        let mut inputs = std::collections::HashMap::new();
+        for k in cam_paths::setup_chain(&self.ws.cams, ci)? {
+            let ik = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, k));
+            inputs.insert(k, crate::cam_jaws::input_for(&self.ws.cams, k, ik)?);
+        }
+        let stock = cam_paths::link_setups_each(&mut self.ws.cams, ci, &|k| inputs.get(&k).cloned().unwrap_or_else(|| input.clone()))?;
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
         let paths = cam_paths::generate_from(c, &part, stock.as_ref());
@@ -208,6 +249,11 @@ impl Session {
     }
 
     fn cam_sim(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim)> {
+        self.cam_sim_left(ci, resolution).map(|(p, t, s, _)| (p, t, s))
+    }
+
+    /// As `cam_sim`, with the stock the setups before this one leave.
+    fn cam_sim_left(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim, Option<StockMap>)> {
         let (part, paths, left) = self.cam_build_from(ci)?;
         let c = &self.ws.cams[ci];
         let stock = cam_paths::stock_box(c, &part);
@@ -221,7 +267,19 @@ impl Session {
             sim.set_machine(c, &part, placed);
         }
         sim.run_to(usize::MAX, usize::MAX);
-        Ok((part, paths, sim))
+        Ok((part, paths, sim, left))
+    }
+
+    /// rcnc's Find stock on a setup that follows another: the stock's outline where the probe touches its sides
+    /// (its top less the probe's depth), from what the setups before left, when that differs from the box
+    /// (op 1 cut into the sides, or left only part of the bar's length at that height).
+    fn found_outline(c: &crate::cam::Cam, part: &Part, left: Option<&StockMap>) -> Option<(DVec2, DVec2)> {
+        let m = left?;
+        let p = c.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref()).find(|p| !p.on_part && p.find_size.is_none())?;
+        let (lo, hi) = cam_paths::stock_box(c, part);
+        let at = (lo.truncate() + hi.truncate()) / 2.0;
+        let (a, b) = m.outline_at(hi.z - p.depth.max(0.5), at)?;
+        ((a - lo.truncate()).abs().max_element() > 0.05 || (b - hi.truncate()).abs().max_element() > 0.05).then_some((a, b))
     }
 
     /// `cam_machine`: list, import, edit the machine models; `cam` also sets that setup's machine.
@@ -576,7 +634,7 @@ impl Session {
                 };
                 let c = &mut self.ws.cams[ci];
                 let i = c.ops.iter().position(|o| o.id == id).ok_or(format!("no operation {id}"))?;
-                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side", "sketches"])?;
+                let mut op: Operation = overlay(&c.ops[i], args, &["cam", "id", "kind", "tool", "delete", "side", "sketches", "build"])?;
                 if let Some(t) = a.get("tool") {
                     op.tool = tool_ref(c, t)?;
                 }
@@ -603,6 +661,14 @@ impl Session {
                 }
                 let c = &mut self.ws.cams[ci];
                 c.ops[i] = op;
+                // build: false skips making the setup's toolpaths now (a script adding many operations to a
+                // setup that follows a long one; cam_info or simulate_cam builds them once at the end)
+                if a.get("build").and_then(|b| b.as_bool()) == Some(false) {
+                    let c = &self.ws.cams[ci];
+                    let mut v = serde_json::to_value(c.op(id).unwrap()).unwrap_or_default();
+                    v["kind"] = json!(c.op(id).unwrap().kind.key());
+                    return Ok((v, None));
+                }
                 let (_, paths) = self.cam_build(ci)?;
                 let tp = paths.iter().find(|p| p.op == id);
                 let c = &self.ws.cams[ci];
@@ -711,8 +777,19 @@ impl Session {
             "simulate_cam" => {
                 let ci = self.cam_idx(a)?;
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
-                let (part, _paths, sim) = self.cam_sim(ci, res)?;
-                let c = &self.ws.cams[ci];
+                let job = self.cam_job(ci, a)?;
+                let (cam_owned, part, sim) = match &job {
+                    Some(j) => {
+                        let (c, part, _paths, mut sim) = j.sim(res)?;
+                        sim.run_to(usize::MAX, usize::MAX);
+                        (c, part, sim)
+                    }
+                    None => {
+                        let (part, _paths, sim) = self.cam_sim(ci, res)?;
+                        (self.ws.cams[ci].clone(), part, sim)
+                    }
+                };
+                let c = &cam_owned;
                 let o = cam_paths::work_origin(c, &part);
                 let names = |id: u64| c.op(id).map(|o| o.name.clone()).unwrap_or_default();
                 let events: Vec<Value> = sim
@@ -722,12 +799,14 @@ impl Session {
                     .collect();
                 let mut v = json!({"moves": sim.total(), "removed_mm3": sim.removed.round(), "problems": events, "ok": sim.events.is_empty(), "cell_mm": round(sim.cell)});
                 // each operation's heaviest cut: width and depth against what the tool takes at that width
+                let (lim, _) = c.machine.cut_limits();
+                let (lim_ne, lim_ca) = (lim.never_exceed, lim.caution);
                 let loads: Vec<Value> = sim
                     .loads
                     .iter()
                     .map(|l| {
                         let (c, u) = (&l.cut, &l.uses);
-                        json!({"operation": names(l.op), "op_id": l.op, "load": round(l.ratio), "spindle_power_pct": (u.power * 100.0).round(), "power_w": c.power.round(), "torque_nm": round(c.torque),
+                        json!({"operation": names(l.op), "op_id": l.op, "load": round(l.ratio), "spindle_power_pct": (u.power * 100.0).round(), "power_w": c.power.round(), "power_rating": if u.power > lim_ne { "problem: over the spindle's never-exceed" } else if u.power > lim_ca { "caution" } else { "ok" }, "torque_nm": round(c.torque),
                             "force_n": c.force.round(), "deflection_mm": round(c.deflection), "stress_mpa": c.stress.round(), "chip_mm": round(c.h_max), "fz_mm": round(c.fz), "vc_m_min": c.vc.round(), "mrr_cm3_min": round(c.mrr),
                             "uses": {"power": round(u.power), "torque": round(u.torque), "force": round(u.force), "deflection": round(u.deflection), "stress": round(u.stress), "chip": round(u.chip)},
                             "width": round(l.width), "depth": round(l.depth), "area_mm2": round(l.area), "geometric": round(l.geometric), "feed": l.feed.round(), "rpm": l.rpm.round(),
@@ -768,6 +847,9 @@ impl Session {
                 if let Some(u) = sim.unfinished(0.1) {
                     v["unfinished"] = json!({"area_mm2": u.area_mm2.round(), "max": round(u.max), "at": [round(u.at[0] - o.x), round(u.at[1] - o.y), round(u.at[2] - o.z)],
                         "warning": format!("{} mm² of machined part surface still carries up to {} mm of stock: only roughing reached it, no finishing pass", u.area_mm2.round(), round(u.max))});
+                }
+                if let Some(j) = &job {
+                    job_report(j, &mut v);
                 }
                 if let Some(m) = &sim.machine {
                     v["machine"] = json!(m.placed.machine.model.name);
@@ -979,6 +1061,12 @@ impl Session {
             "export_setup_sheet" => {
                 let ci = self.cam_idx(a)?;
                 let path = super::str_arg(a, "path")?;
+                if let Some(j) = self.cam_job(ci, a)? {
+                    let (c, part, paths, sim) = j.sim(320)?;
+                    let text = crate::cam_sheet::sheet(&c, &part, &paths, Some(sim));
+                    super::write_out(&path, &text)?;
+                    return Ok((json!({"exported": path, "bytes": text.len(), "stations": j.stations.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "tool_changes": j.tool_changes(), "cycle_time_s": round(j.cycle_time().round())}), None));
+                }
                 let (part, paths, left) = self.cam_build_from(ci)?;
                 let c = &self.ws.cams[ci];
                 let sim = crate::cam_sheet::new_sim(c, &part, &paths, left.as_ref());
@@ -990,6 +1078,13 @@ impl Session {
                 let ci = self.cam_idx(a)?;
                 let path = super::str_arg(a, "path")?;
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                if let Some(j) = self.cam_job(ci, a)? {
+                    let (c, part, paths, sim) = j.sim(res)?;
+                    let moves = sim.total();
+                    let text = crate::cam_web::page(&c, &part, &paths, sim)?;
+                    super::write_out(&path, &text)?;
+                    return Ok((json!({"exported": path, "bytes": text.len(), "moves": moves, "stations": j.stations.len(), "operations": paths.iter().filter(|p| !p.moves.is_empty()).count(), "tool_changes": j.tool_changes(), "cycle_time_s": round(j.cycle_time().round())}), None));
+                }
                 let (part, paths, left) = self.cam_build_from(ci)?;
                 let c = &self.ws.cams[ci];
                 let sim = crate::cam_web::new_sim(c, &part, &paths, left.as_ref(), res)?;
@@ -1007,17 +1102,113 @@ impl Session {
                     self.ws.cams[ci].post = p.to_string();
                 }
                 let path = super::str_arg(a, "path")?;
-                let (part, paths) = self.cam_build(ci)?;
+                // the very toolpaths that are posted, simulated: a program goes out only when that is clean
+                let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                if let Some(j) = self.cam_job(ci, a)? {
+                    // a job: the whole program's combined simulation gates it the same way
+                    let (jc, jpart, _jpaths, mut sim) = j.sim(res)?;
+                    sim.run_to(usize::MAX, usize::MAX);
+                    let o = cam_paths::work_origin(&jc, &jpart);
+                    let names = |id: u64| jc.op(id).map(|o| o.name.clone()).unwrap_or_default();
+                    let problems: Vec<Value> = sim
+                        .events
+                        .iter()
+                        .map(|e| json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label() } else { e.what.as_str() }, "operation": names(e.op), "op_id": e.op, "at": [round(e.at[0] - o.x), round(e.at[1] - o.y), round(e.at[2] - o.z)], "depth": round(e.depth)}))
+                        .collect();
+                    let all: Vec<Toolpath> = j.stations.iter().flat_map(|s| s.paths.iter().cloned()).collect();
+                    let hash = crate::cam_verify::toolpath_hash(&all);
+                    let allow = a.get("allow_problems").and_then(|v| v.as_bool()).unwrap_or(false);
+                    let first: Vec<String> = problems.iter().take(5).map(|p| format!("{} in '{}' at {} ({} mm)", p["what"].as_str().unwrap_or(""), p["operation"].as_str().unwrap_or(""), p["at"], p["depth"])).collect();
+                    let (path, line) = crate::cam_verify::gate(problems.len(), &first, allow, &path, hash)?;
+                    let text = crate::cam_verify::stamped(&j.gcode(), &line);
+                    super::write_out(&path, &text)?;
+                    let cams: Vec<&cam::Cam> = j.stations.iter().map(|s| &s.cam).collect();
+                    let mut warnings = crate::cam_job::check(&cams);
+                    for s in &j.stations {
+                        warnings.extend(s.paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {}: {w}", s.cam.name, s.cam.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))));
+                    }
+                    let stations: Vec<Value> = j.stations.iter().map(|s| json!({"setup": s.cam.name, "work_offset": format!("G{}", 53 + s.cam.wcs() as u32)})).collect();
+                    let order: Vec<Value> = j.order.iter().map(|&(si, pi)| {
+                        let s = &j.stations[si];
+                        json!([s.cam.name, s.cam.op(s.paths[pi].op).map(|o| o.name.clone()).unwrap_or_default()])
+                    }).collect();
+                    let mut v = json!({"exported": path, "lines": text.lines().count(), "stations": stations, "order": order, "tool_changes": j.tool_changes(), "cycle_time_s": round(j.cycle_time().round()), "warnings": warnings,
+                        "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                    if !problems.is_empty() {
+                        v["unsafe"] = json!(format!("written as {path} with an UNSAFE header: {} simulation problem(s); do not run it", problems.len()));
+                        v["problems"] = json!(problems);
+                    }
+                    return Ok((v, None));
+                }
+                let (part, paths, sim, left) = self.cam_sim_left(ci, res)?;
                 let c = &self.ws.cams[ci];
-                let text = crate::cam_ui::gcode_for(c, &part, &paths);
+                let problems = self.sim_problems(ci, &part, &sim);
+                let found = Self::found_outline(c, &part, left.as_ref());
+                let hash = crate::cam_verify::toolpath_hash(&paths);
+                let allow = a.get("allow_problems").and_then(|v| v.as_bool()).unwrap_or(false);
+                let first: Vec<String> = problems.iter().take(5).map(|p| format!("{} in '{}' at {} ({} mm)", p["what"].as_str().unwrap_or(""), p["operation"].as_str().unwrap_or(""), p["at"], p["depth"])).collect();
+                let (path, line) = crate::cam_verify::gate(problems.len(), &first, allow, &path, hash)?;
+                let text = crate::cam_verify::stamped(&crate::cam_ui::gcode_found(c, &part, &paths, found), &line);
                 super::write_out(&path, &text)?;
                 let warnings: Vec<String> =
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
-                json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings, "hint": "run simulate_cam to check for crashes and gouges"})
+                let mut v = json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings,
+                    "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                if let Some((a, b)) = found {
+                    v["find_stock"] = json!(format!("Find stock looks for {} x {}: the stock the setups before leave where the probe touches its sides (the setup's box is bigger or smaller there)", round(b.x - a.x), round(b.y - a.y)));
+                }
+                if !problems.is_empty() {
+                    v["unsafe"] = json!(format!("written as {path} with an UNSAFE header: {} simulation problem(s); do not run it", problems.len()));
+                    v["problems"] = json!(problems);
+                }
+                v
+            }
+            "verify_gcode" => {
+                let ci = self.cam_idx(a)?;
+                let path = super::str_arg(a, "path")?;
+                let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                let (part, paths, left) = self.cam_build_from(ci)?;
+                let c = self.ws.cams[ci].clone();
+                let o = cam_paths::work_origin(&c, &part);
+                let stock = cam_paths::stock_box(&c, &part);
+                let safe = stock.1.z.max(part.hi.z) + 25.0;
+                let read = crate::cam_verify::parse(&text, &c, o, safe)?;
+                let mut sim = Sim::new(&c, &part, stock, &read, res);
+                if let Some(m) = &left {
+                    sim.start_from(m);
+                }
+                if !c.machine.model.is_empty() {
+                    let l = crate::cam_machine::load(&c.machine.model)?;
+                    let placed = std::sync::Arc::new(Sim::place_machine(&c, &part, stock, l));
+                    sim.set_machine(&c, &part, placed);
+                }
+                sim.run_to(usize::MAX, usize::MAX);
+                let problems = self.sim_problems(ci, &part, &sim);
+                let now = crate::cam_verify::toolpath_hash(&paths);
+                let stamp = crate::cam_verify::read_stamp(&text);
+                let stamp_v = match stamp {
+                    None => json!("none: not posted through the checked export"),
+                    Some((ok, h)) => json!({"says_ok": ok, "hash": h.map(|h| format!("{h:016x}")), "matches_the_setup_now": h == Some(now)}),
+                };
+                let moves: usize = read.iter().map(|p| p.moves.len()).sum();
+                json!({"ok": problems.is_empty() && stamp.map(|s| s.0).unwrap_or(false), "path": path, "moves_read": moves, "problems": problems, "stamp": stamp_v,
+                    "note": "the program's own moves simulated on the setup's stock (pauses, dwells and other edits included); the stamp's hash matches when the setup still makes the same toolpaths"})
             }
             _ => return self.fea_call(name, a),
         };
         Ok((v, None))
+    }
+
+    /// A simulation's problems, as `simulate_cam` lists them.
+    fn sim_problems(&self, ci: usize, part: &Part, sim: &Sim) -> Vec<Value> {
+        let c = &self.ws.cams[ci];
+        let o = cam_paths::work_origin(c, part);
+        let names = |id: u64| c.op(id).map(|o| o.name.clone()).unwrap_or_default();
+        sim.events
+            .iter()
+            .map(|e| json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label() } else { e.what.as_str() }, "operation": names(e.op), "op_id": e.op, "at": [round(e.at[0] - o.x), round(e.at[1] - o.y), round(e.at[2] - o.z)], "depth": round(e.depth)}))
+            .collect()
     }
 
     fn render_sim(&self, sim: &Sim, a: &Value) -> R<Vec<u8>> {
@@ -1071,22 +1262,23 @@ impl Session {
 pub fn tools() -> Vec<Value> {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     vec![
-        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), tilt [about X, about Y] (degrees, 3+2 positioning after orient: an angle block, a tilting vise or a compound-angle bore), axis [x, y, z] (instead of orient and tilt: the part direction that points up at the spindle, e.g. a bore's axis), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), standard_size (true: size it from the part's stock settings: the smallest standard plate or bar, or its bounding box plus allowances), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, min_rpm (slowest useful spindle speed, e.g. 12000 for a high-speed spindle that loses torque below it: suggested speeds stay above it and slower tools get a warning), rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer (default false), spin_up (seconds to wait after M3, default 5 for a VFD spindle), model (a machine from cam_machine: the simulation shows and checks the machine itself)}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 and an operator message at tool changes), coolant (auto (default: flood for metal stock, off for wood, plastic and foam), off, flood, mist: for the tools that don't set their own), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), fixture_clearance (mm over a fixture's top the toolpaths lift to, default the retract (at least 1): e.g. 0.3 lets walls be cut down to just over low vise jaws), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine), save_machine (true: also keep this setup's machine settings (post, spindle, machine, coolant, probing, custom G-code) in ~/.config/cad-rust-app/machine.json as the user's machine). The machine settings not given come from the document's last setup, else from the saved machine. Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "fixture_clearance": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}, "on_table": {"type": "array"}}), &[])}),
-        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "fixture_clearance": {"type": "number"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "machine": {}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}, "on_table": {"type": "array"}}), &["cam"])}),
+        json!({"name": "create_cam", "description": "Add a Manufacture (CAM) tab (a setup) for 2.5D and 3D milling of a Part Studio's parts. Optional: name, studio (default the active one), bodies [[f,i],…] (default every visible part), orient (which part side faces the spindle: top, bottom, front, back, left, right), tilt [about X, about Y] (degrees, 3+2 positioning after orient: an angle block, a tilting vise or a compound-angle bore), axis [x, y, z] (instead of orient and tilt: the part direction that points up at the spindle, e.g. a bore's axis), origin (work zero: stock_top_corner (default), stock_top_center, stock_bottom_corner, part_top_corner, model), stock {side, top, bottom (margins mm), size [x,y,z] (fixed size instead), standard_size (true: size it from the part's stock settings: the smallest standard plate or bar, or its bounding box plus allowances), material (Aluminium, Brass, Mild steel, Stainless steel, Plastic, Hardwood, Softwood / MDF, Foam)}, post (grbl, linuxcnc, fanuc, mach3), clearance, retract, max_rpm, min_rpm (slowest useful spindle speed, e.g. 12000 for a high-speed spindle that loses torque below it: suggested speeds stay above it and slower tools get a warning), rapid_rate, machine (a preset name: \"Desktop router (3018 class)\", \"Hobby router, 600 × 400\", \"Large router, 1200 × 1200\", \"Shapeoko 4 XXL\", \"Carbide 3D Nomad 3\", \"Tormach PCNC 440\", \"Tormach 770M\", \"Haas Mini Mill\", \"Haas VF-2\", \"Generic VMC\"; or {travel [x,y,z], max_feed, rapid_z, tool_changer (default false), spin_up (seconds to wait after M3, default 5 for a VFD spindle), model (a machine from cam_machine: the simulation shows and checks the machine itself)}: toolpaths are checked against travel and feed, and without a tool changer the G-code stops with M0 and an operator message at tool changes), coolant (auto (default: flood for metal stock, off for wood, plastic and foam), off, flood, mist: for the tools that don't set their own), arcs (default true: write G2/G3 arcs where the toolpath runs along circles; false = only straight G1 lines), fixtures ([{name, min [x,y,z], max [x,y,z]}, …]: clamps, vise jaws and screws as boxes in work coordinates; every toolpath lifts over them with clearance and the simulation reports any hit; replaces the whole list), fixture_clearance (mm over a fixture's top the toolpaths lift to, default the retract (at least 1): e.g. 0.3 lets walls be cut down to just over low vise jaws), probe {mode: off | plate (after each tool is loaded, probe a touch plate on the work and set the work Z zero: plate_at [x,y,z] work coordinates with z the surface under it, plate_thickness) | setter (measure each tool on a fixed tool setter and set its length offset against the first tool; LinuxCNC, Mach3, Fanuc only: setter [x,y,z] machine coordinates, z where probing starts), travel, fast, slow (mm/min)}, post_text {header, tool_change (replaces the standard tool change), footer}: your own G-code lines with placeholders {tool} {name} {desc} {diameter} {rpm} {program} {setup}, follows (name of an earlier Manufacture tab: this setup starts from the stock that one leaves, e.g. orient bottom to machine the back after flipping; it takes that setup's stock, tools and machine), with ([setup names]: machine these setups in the same program as this one, each at its own station on the machine with its own on_table and work_offset: this setup leads the job; export_gcode, simulate_cam, export_setup_sheet and export_cam_simulation on it do the whole job, tools grouped across stations), save_machine (true: also keep this setup's machine settings (post, spindle, machine, coolant, probing, custom G-code) in ~/.config/cad-rust-app/machine.json as the user's machine). The machine settings not given come from the document's last setup, else from the saved machine. Returns the cam index and cam_info. Heights and points in CAM tools are work coordinates (relative to the work zero).", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "fixture_clearance": {"type": "number"}, "work_offset": {"type": "integer"}, "with": {"type": "array"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "rapid_rate": {"type": "number"}, "machine": {}, "arcs": {"type": "boolean"}, "fixtures": {"type": "array"}, "probe": {"type": "object"}, "post_text": {"type": "object"}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}, "on_table": {"type": "array"}}), &[])}),
+        json!({"name": "edit_cam", "description": "Change a Manufacture tab's setup (same fields as create_cam).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "orient": {"type": "string"}, "tilt": {"type": "array"}, "axis": {"type": "array"}, "origin": {"type": "string"}, "stock": {"type": "object"}, "post": {"type": "string"}, "clearance": {"type": "number"}, "retract": {"type": "number"}, "fixture_clearance": {"type": "number"}, "work_offset": {"type": "integer"}, "with": {"type": "array"}, "max_rpm": {"type": "number"}, "min_rpm": {"type": "number"}, "machine": {}, "follows": {"type": "string"}, "coolant": {"type": "string"}, "save_machine": {"type": "boolean"}, "on_table": {"type": "array"}}), &["cam"])}),
         json!({"name": "import_tool_library", "description": "Import a tool library file into the user's library (My tools): a Fusion 360 tool library (.json export or .tools) or a tools.json from this app. Tools keep their geometry, holder, tool number and the first feeds-and-speeds preset; entries of the same name are replaced; holders, probes and unsupported types are skipped. With cam, also add every imported tool to that Manufacture tab. Returns the imported tools.", "inputSchema": obj(json!({"path": {"type": "string"}, "cam": {"type": "integer"}, "material": {"type": "string"}}), &["path"])}),
         json!({"name": "cam_tool_library", "description": "List the tool library (the user's tools and built-in presets): flat, ball, bull, tapered_ball, chamfer, engrave, slot, thread_mill, face_mill, drill, spot_drill, center_drill, tap, reamer. Filter by kind and/or search words (e.g. '6 flat', 'M5').", "inputSchema": obj(json!({"kind": {"type": "string"}, "search": {"type": "string"}}), &[])}),
         json!({"name": "cam_tool", "description": "Add a tool to a Manufacture tab: preset (a library search such as 'Ø6 flat end mill' or 'M5 × 0.8 tap'; 'touch probe' for probe operations: diameter = the stylus ball, feed = the search feed, plunge_feed = the slow second touch) and/or kind plus any fields to override: number, name, diameter, corner_radius, tip_diameter, angle (included; per side for tapered_ball), flute_length, stickout, shank_diameter, holder_diameter, holder (a preset: \"ER11 collet, router spindle Ø52\", \"ER11 collet chuck\", \"ER16 collet chuck\", \"ER20 collet, router spindle Ø80\", \"ER20 collet chuck\", \"ER25 collet chuck\", \"ER32 collet chuck\", \"Shrink-fit holder Ø6\", \"Shrink-fit holder Ø12\", \"Side-lock (Weldon) holder\"; or an outline [[diameter, height], …] from the holder's bottom face up, for collision checks), flutes, pitch, cutting_width, neck_diameter, material (carbide/hss/cobalt), coolant (auto = the setup's (default), off, flood, mist; true = flood), tapping_head (taps: held in a self-reversing tapping head, so the G-code feeds in and out with the spindle running forward, no G84 or spindle reversal: the way to tap on a high-speed spindle), reverse_ratio (the head's reverse ratio, default 1.75: it pulls out that much faster), rpm (capped at the setup's max_rpm when posted, with the feeds scaled to match), feed, plunge_feed (mm/min), stepdown, stepover (fraction of Ø). Feeds and speeds are suggested for the stock material. With id: edit that tool, or delete:true. Returns the tool with its id.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "preset": {"type": "string"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "delete": {"type": "boolean"}, "diameter": {"type": "number"}}), &["cam"])}),
-        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; lead = radius of arcs onto and off the wall instead of ramping, 0 = ramp (default half the tool's Ø; smaller arcs are tried where it doesn't fit; the tool comes down on the far half of the arc, clear of the wall); overlap = mm the pass runs on past its start before leading off, default 1.5; finish_lap = with leave 0, the lap before the last stays this far out so the last takes almost nothing, default 0.03, 0 = none; spring_pass true = the last lap once more; seam [x,y] = start and end on the side nearest this work point, default the middle of the longest straight side; max_engagement = most any pass takes radially, fraction of Ø, default 0.25: where the stock (what earlier ops left, else the block) reaches further out, extra passes outside the wall take it down first, skipping air, and the op warns when it can't keep under it (rough with adaptive then); slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; tip_offset = how far the tip goes below the chamfer so it cuts higher up the cone, default 1 mm, less if the cone is too narrow; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing at constant engagement: passes follow the cleared area out a stepover at a time, links at depth through cleared ground at max feed; stepover = optimal load, fraction of Ø, default 0.1, narrowed on deep levels to keep within what the tool takes (the op warns); trochoid = radius of the helix into material that can't be reached from the side, mm, 0 = 40% of Ø; big stepdown; chip_thinning true raises the cutting feed for radial chip thinning at that thin cut, at most ×1.5), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), pencil (clean up inside corners and fillets a bigger tool left material in, with a small ball mill; ref_diameter = that bigger tool as a ball, default the smallest bigger tool used before), trace (follow the curves of sketches depth mm below the part's surface, in passes of stepdown: engraved lines or cutting along a drawing; closed shapes on the line (side both, default) or beside them (outside/inside, offset by the tool radius + leave)), vcarve (carve the closed shapes of sketches, e.g. text, with a V-bit or chamfer mill, deeper where they are wider so walls meet in sharp corners; depth = deepest cut, 0 = as deep as the cone goes; stepover fraction of Ø, default 0.02). trace and vcarve take sketches: [sketch feature id or name, …] (default the latest sketch; cam_info lists them). deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). probe (with a touch probe tool, kind probe: find the stock or the part and set the work zero (G54) from it; probing {cycle: z (the top; sets Z) | edge (side: left, right, front, back; sets X or Y) | corner (side: front_left, front_right, back_left, back_right; sets X and Y, with_z true also touches the top for Z; inset = mm from the corner the sides are touched) | bore (middle of a round hole: the part's hole nearest at [x,y], else the biggest; or size = its diameter with at its middle; sets X Y) | boss (middle from four outside touches: the stock block, or with on_part the part's round boss nearest at (else its outline), or size + at), on_part (false: the stock's faces, true: the part's), depth (mm below the top the ball touches walls), clearance (start gap mm), overtravel (mm past the expected surface)}; the setup's work zero decides the values set, e.g. corner front_left on a stock_top_corner setup sets X0 Y0; the post writes G31 (Mach3, rcnc, Fanuc) or G38.2 (LinuxCNC, GRBL) touches, fast then slow at the probe's feed and plunge_feed, and G10 L2 P1 with the readings; GRBL can only do z, edge and corner). rest:true makes clear, pocket, adaptive and finishing ops cut only the material the operations before them (and earlier setups) left, skipping air; it is on by default for roughing after roughing, and in a setup that follows another every such op starts from that setup's leftover stock. Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
+        json!({"name": "cam_op", "description": "Add (kind) or edit (id) an operation; delete:true removes it. kind: face (top of stock down to the part top; passes along X, or along Y with angle 90), clear (rough all stock around the part, level by level), pocket (closed pockets with floors, spiral out), contour (outline; side outside/inside/both; tabs, tab_width, tab_height; breakthrough for cut-outs; lead = radius of arcs onto and off the wall instead of ramping, 0 = ramp (default half the tool's Ø; smaller arcs are tried where it doesn't fit; the tool comes down on the far half of the arc, clear of the wall); overlap = mm the pass runs on past its start before leading off, default 1.5; finish_lap = with leave 0, the lap before the last stays this far out so the last takes almost nothing, default 0.03, 0 = none; spring_pass true = the last lap once more; seam [x,y] = start and end on the side nearest this work point, default the middle of the longest straight side; max_engagement = most any pass takes radially, fraction of Ø, default 0.25: where the stock (what earlier ops left, else the block) reaches further out, extra passes outside the wall take it down first, skipping air, and the op warns when it can't keep under it (rough with adaptive then); slot mills cut at bottom with slot_depth), chamfer (top edges; chamfer width; tip_offset = how far the tip goes below the chamfer so it cuts higher up the cone, default 1 mm, less if the cone is too narrow; chamfer mill/V-bit/spot drill), drill (drill/spot/center drill/reamer; peck, dwell), bore (helical with an end mill), thread (thread mill; thread_diameter, pitch, left_hand), tap; 3D: adaptive (roughing at constant engagement: passes follow the cleared area out a stepover at a time, links at depth through cleared ground at max feed; stepover = optimal load, fraction of Ø, default 0.1, narrowed on deep levels to keep within what the tool takes (the op warns); trochoid = radius of the helix into material that can't be reached from the side, mm, 0 = 40% of Ø; big stepdown; chip_thinning true raises the cutting feed for radial chip thinning at that thin cut, at most ×1.5), parallel (finishing along lines at angle degrees), waterline (finishing at constant Z; stepdown), scallop (finishing with constant 3D stepover), pencil (clean up inside corners and fillets a bigger tool left material in, with a small ball mill; ref_diameter = that bigger tool as a ball, default the smallest bigger tool used before), trace (follow the curves of sketches depth mm below the part's surface, in passes of stepdown: engraved lines or cutting along a drawing; closed shapes on the line (side both, default) or beside them (outside/inside, offset by the tool radius + leave)), vcarve (carve the closed shapes of sketches, e.g. text, with a V-bit or chamfer mill, deeper where they are wider so walls meet in sharp corners; depth = deepest cut, 0 = as deep as the cone goes; stepover fraction of Ø, default 0.02). trace and vcarve take sketches: [sketch feature id or name, …] (default the latest sketch; cam_info lists them). deburr (chamfer every sharp convex edge in 3D with a chamfer mill/V-bit; chamfer width; edge_angle; edges [[x,y,z],…] work-coordinate points on the edges to do, default all). probe (with a touch probe tool, kind probe: find the stock or the part and set the work zero (G54) from it; probing {cycle: z (the top; sets Z) | edge (side: left, right, front, back; sets X or Y) | corner (side: front_left, front_right, back_left, back_right; sets X and Y, with_z true also touches the top for Z; inset = mm from the corner the sides are touched) | bore (middle of a round hole: the part's hole nearest at [x,y], else the biggest; or size = its diameter with at its middle; sets X Y) | boss (middle from four outside touches: the stock block, or with on_part the part's round boss nearest at (else its outline), or size + at), on_part (false: the stock's faces, true: the part's), depth (mm below the top the ball touches walls), clearance (start gap mm), overtravel (mm past the expected surface)}; the setup's work zero decides the values set, e.g. corner front_left on a stock_top_corner setup sets X0 Y0; the post writes G31 (Mach3, rcnc, Fanuc) or G38.2 (LinuxCNC, GRBL) touches, fast then slow at the probe's feed and plunge_feed, and G10 L2 P1 with the readings; GRBL can only do z, edge and corner). rest:true makes clear, pocket, adaptive and finishing ops cut only the material the operations before them (and earlier setups) left, skipping air; it is on by default for roughing after roughing, and in a setup that follows another every such op starts from that setup's leftover stock. Finishing ops take slope_min/slope_max (degrees from horizontal) to split steep and shallow areas, leave, and bottom (lowest Z). tool: id or tool number (default: the first suitable tool). Optional: top, bottom (work Z; default from the part), stepdown, stepover (fraction of Ø), leave, leave_floor, climb, ramp_angle, rpm / feed / plunge_feed (this operation's own spindle speed and feeds in place of the tool's, e.g. calibration passes that change one thing at a time with one tool; null = the tool's), at [x,y] (only that pocket/hole), points [[x,y],…] (explicit hole positions; need bottom), hole_min, hole_max (diameter range), breakthrough, coolant, suppressed, name. Returns the op with time and warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "kind": {"type": "string"}, "id": {"type": "integer"}, "tool": {"type": "integer"}, "delete": {"type": "boolean"}}), &["cam"])}),
         json!({"name": "cam_info", "description": "A Manufacture tab's setup, stock and part extents (work coordinates), the work zero and what the operator does before running (setup_notes), tools, operations with times and warnings, the holes found in the part, the cycle time, errors (things likely to break a tool, e.g. tapping below the spindle's min_rpm) and hints (operation order and work holding).", "inputSchema": obj(json!({"cam": {"type": "integer"}}), &["cam"])}),
-        json!({"name": "simulate_cam", "description": "Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
+        json!({"name": "simulate_cam", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Run all toolpaths on a height map of the stock and report problems: rapid moves into stock, shank or holder hitting material, cuts into the part (gouges), with where and how deep. render:true (or path) returns a PNG of the machined stock (view as in render; red = gouge, crosses mark problems). resolution: cells along the longer stock side (default 500).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "render": {"type": "boolean"}, "path": {"type": "string"}, "view": {"type": "string"}, "resolution": {"type": "integer"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["cam"])}),
         json!({"name": "render_cam", "description": "PNG of the part with the stock box and the cutting moves (blue) of all operations, or of one (operation: id).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "operation": {"type": "integer"}, "view": {"type": "string"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_template", "description": "Operation templates, kept for the user across documents. No arguments: list them. save: name (with cam; operations [ids], default every operation that isn't suppressed) saves the operations and their tools, leaving out what belongs to the part (top/bottom heights, at, points, edges, sketches). apply: name (with cam) adds the template's operations to that setup, reusing its tools where one is the same cutter and adding the others; trace/vcarve follow the latest sketch. delete: name.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "save": {"type": "string"}, "apply": {"type": "string"}, "delete": {"type": "string"}, "operations": {"type": "array"}}), &[])}),
         json!({"name": "cam_soft_jaws", "description": "Hold a setup's part in soft jaws: vise jaw blanks with a pocket machined to the part's outline below the jaw tops (plus clearance, with reliefs in corners the cutter can't reach), usually for the flipped second setup (follows). The vise closes along Y. The jaws act as fixtures (toolpaths lift over them, the simulation reports hits) and the setup warns when the part is narrower than the gap, the jaws are too thin, or the stock the earlier setup leaves doesn't fit the pocket. Fields (mm, any subset): width, thickness, height (each blank: along the vise, front to back, height; default 150 × 25 × 40), grip (how deep the part sits, default 6), gap (between the jaw faces while the pocket is cut, default 4), clearance (default 0.05), cutter (end mill diameter for the pocket and its reliefs, default 6), material (jaw material), printed (true: 3D printed jaws, no cutter reliefs; use about 0.15 clearance), one_piece (printed only: one block in between the vise jaws, sitting on the vise bed and squeezed round the part, instead of two jaws, no screw holes; gap is then the slit down its middle (about 1), web how far above the bottom the slit stops (default 1.5, 0 for two halves) and flare the radius of the rounds where it opens at the ends (default 5); height is from the vise bed to the block top). mount: how the jaws bolt into the vise, as a preset name (\"gen3_insert_bar\": in place of the Gen3 Smooth Insert Bars of an M12 dual-station vise, 95.5 × 12.7 jaws with four counterbored screws on a 25.4 pitch, the vise's lip and jaw around them as fixtures; \"top_jaw\": in place of its Top Jaws, 95.5 × 48 with two M8 screws), which also sets width and thickness, \"none\", or an object of fields {holes (X from the jaw middle), inset (from the grip face), drill, cbore, seat (under the head), head, fit (thickness the vise takes, 0 any), lip, lip_height, back, back_height}; the holes go in the jaw meshes and the printed solids (machined blanks get them before the pocket is cut). enabled false removes them. print_jaws true puts both jaws in a Part Studio named after the setup plus \" jaws (print)\" (standing on their bases, pocket up, solids built from extrudes) and returns print_studio; export_step (a path) also writes them as STEP for the slicer. machine_jaws true also makes (or finds) the Manufacture tab that machines the jaws: both blanks on a spacer in the vise, work zero top centre, a skim of the tops and a rough and finish of the pocket with a flat end mill no bigger than cutter; returns jaw_cam, its info and held_zero_from_jaw_zero (where the holding setup's work zero is from the jaws').", "inputSchema": obj(json!({"cam": {"type": "integer"}, "enabled": {"type": "boolean"}, "width": {"type": "number"}, "thickness": {"type": "number"}, "height": {"type": "number"}, "grip": {"type": "number"}, "gap": {"type": "number"}, "clearance": {"type": "number"}, "cutter": {"type": "number"}, "material": {"type": "string"}, "printed": {"type": "boolean"}, "one_piece": {"type": "boolean"}, "web": {"type": "number"}, "flare": {"type": "number"}, "mount": {}, "machine_jaws": {"type": "boolean"}, "print_jaws": {"type": "boolean"}, "export_step": {"type": "string"}}), &["cam"])}),
         json!({"name": "cam_machine", "description": "The milling machine's own geometry for the simulation, kept in the user's machine library (~/.config/cad-rust-app/machines). No arguments: list the machines. import (a STEP assembly of the machine; name, default the file name) reads its parts and guesses which axis carries each (from names such as \"X axis\", \"Base\", \"spindle\"; unnamed parts standing on the table ride with it), what rides on what, the spindle (the middle of the lowest face of the spindle's carrier, where the tool comes out) and the table top, and the travel (how far each axis's guides reach). name (an existing machine, or a path to a machine .json file) with fields changes it: carriers {part or assembly name: base | x | y | z, …}, rides [what X, Y and Z ride on], spindle_on, table_on (the work's carrier; base on a gantry router), travel [[min, max] ×3] (mm from where each axis is in the model; equal ends: not checked), spindle [x,y,z], table [x,y,z] (model coordinates), holders (true: the model ends at the spindle face and each tool's holder hangs below it; false (default): the model has the collet nut and tools stick out of it by their stickout), remove [part or assembly names] (things the machine doesn't have), add [{name, step (a file) | cylinder [diameter, height] | box [x, y, z], at [x, y, z]}] (things standing on the table and riding with it, such as a vise or a tool setter: at is where the middle of their bottom goes from the table point; adding a name again replaces it). cam: also make it that setup's machine (machine.model), with on_table [x,y,z] (where the stock's middle, at the bottom of the stock or of the lowest fixture, sits from the table point). simulate_cam then moves the machine with the toolpath and reports machine crashes (head, spindle, column or table into each other, the stock, the part or a fixture; the tool into the table) and moves beyond the travel. Returns the machine's kinematics and any problem with them.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "import": {"type": "string"}, "name": {"type": "string"}, "carriers": {"type": "object"}, "rides": {"type": "array"}, "spindle_on": {"type": "string"}, "table_on": {"type": "string"}, "travel": {"type": "array"}, "spindle": {"type": "array"}, "table": {"type": "array"}, "holders": {"type": "boolean"}, "on_table": {"type": "array"}, "remove": {"type": "array"}, "add": {"type": "array"}}), &[])}),
         json!({"name": "import_cutlog", "description": "Calibrate the cutting model from what rcnc heard while running this setup's program (a <program>.cutlog.json): per operation the spindle's speed droop and chatter heard against the model's power and chatter margin; suggests the spindle efficiency (from droop, with the machine's spindle_rated_slip) and the chatter scale (the chattering cuts read 1). apply: true writes them into the setup's machine.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "apply": {"type": "boolean"}}), &["cam", "path"])}),
-        json!({"name": "export_cam_simulation", "description": "Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
-        json!({"name": "export_setup_sheet", "description": "Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}}), &["cam", "path"])}),
-        json!({"name": "export_gcode", "description": "Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). Reports line count, cycle time and toolpath warnings.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "post": {"type": "string"}}), &["cam", "path"])}),
+        json!({"name": "export_cam_simulation", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "export_setup_sheet", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}}), &["cam", "path"])}),
+        json!({"name": "export_gcode", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). It simulates the exact toolpaths it posts first and refuses (an error, nothing written) when the simulation finds any problem: a rapid into stock, a gouge, a shank, holder or fixture hit, an overload. A clean program gets a \"(SIM OK: 0 problems ..., hash ...)\" line under its title. allow_problems: true writes it anyway, only to look at, as <name>.UNSAFE.<ext> with an UNSAFE header. Reports line count, cycle time, toolpath warnings and the simulation result.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "post": {"type": "string"}, "allow_problems": {"type": "boolean"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "verify_gcode", "description": "Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
     ]
 }
 
@@ -1111,4 +1303,29 @@ fn chatter_advice(c: &crate::cam_sim::OpChatter, holder_k: f64, kr: f64, top_rpm
     }
     let shorter = c.geom.map(|g| c.margin_at(c.rpm, Some((g.stickout - 5.0).max(g.flute_length + 1.0)), holder_k, kr));
     json!({"best_rpm": best.0.round(), "margin_there": (best.1 * 100.0).round() / 100.0, "margin_5mm_shorter_stickout": shorter.map(|m| (m * 100.0).round() / 100.0)})
+}
+
+/// A job's simulation report: each problem, load, chip and chatter entry gets its station and the operation's
+/// own id and name, with `at` in that station's work coordinates; plus the job's stations, tool changes and time.
+fn job_report(j: &crate::cam_job::Job, v: &mut Value) {
+    for key in ["problems", "loads", "chips", "chatter"] {
+        if let Some(items) = v.get_mut(key).and_then(|x| x.as_array_mut()) {
+            for it in items.iter_mut() {
+                let Some(id) = it.get("op_id").and_then(|x| x.as_u64()) else { continue };
+                let (s, own) = j.station_of(id);
+                let Some(st) = j.stations.get(s) else { continue };
+                it["station"] = json!(st.cam.name);
+                it["op_id"] = json!(own);
+                if let Some(o) = st.cam.op(own) {
+                    it["operation"] = json!(o.name);
+                }
+                if let Some(at) = it.get("at").and_then(|x| serde_json::from_value::<[f64; 3]>(x.clone()).ok()) {
+                    let w = j.work_point(s, DVec3::from(at));
+                    it["at"] = json!([round(w.x), round(w.y), round(w.z)]);
+                }
+            }
+        }
+    }
+    let stations: Vec<Value> = j.stations.iter().map(|s| json!({"setup": s.cam.name, "work_offset": format!("G{}", 53 + s.cam.wcs() as u32), "offset": [round(s.offset.x), round(s.offset.y), round(s.offset.z)]})).collect();
+    v["job"] = json!({"stations": stations, "tool_changes": j.tool_changes(), "cycle_time_s": round(j.cycle_time().round())});
 }
