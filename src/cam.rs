@@ -1572,6 +1572,10 @@ pub struct Cam {
     /// retract height (at least 1 mm). Smaller lets the tool cut down close beside low vise jaws.
     #[serde(skip_serializing_if = "is_zero")]
     pub fixture_clearance: f64,
+    /// Travel between cuts only as high as the stock still there needs (`cam_paths::tighten_links`): stay down
+    /// through cleared space, rapid down close to the stock before an entry.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub stay_down: bool,
     /// Where the setup sits on the machine's table, from the table's middle (mm): the middle of the stock,
     /// at the bottom of the stock or of the lowest fixture.
     #[serde(skip_serializing_if = "is_zero3")]
@@ -1625,6 +1629,7 @@ impl Default for Cam {
             arcs: true,
             fixtures: vec![],
             fixture_clearance: 0.0,
+            stay_down: false,
             on_table: [0.0; 3],
             soft_jaws: None,
             jaws_of: String::new(),

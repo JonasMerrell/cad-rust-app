@@ -355,6 +355,44 @@ mod tests {
         assert_eq!(rapids_down, 2);
     }
 
+    /// Two straight strips across a 40 x 30 x 10 block, each from 10 mm off one side to 10 mm off the other, 1 deep
+    /// with a 6 mm flat: with `stay_down` the tool goes from the first to the second only as high as the stock
+    /// still there needs (the block's top + 1 mm), not to the safe height, and down beside the block it rapids to
+    /// the cutting depth (no plunge through air at the plunge feed). The cuts are the same.
+    #[test]
+    fn stay_down_links_only_as_high_as_the_stock_left() {
+        let line = |y: f64| (vec![DVec3::new(-10.0, y, 10.0), DVec3::new(50.0, y, 10.0)], false);
+        let mut part = block(vec![line(10.0)]);
+        part.sketches.push(SketchPaths { id: 8, name: "Sketch 2".into(), paths: vec![line(16.0)] });
+        let (mut c, id) = setup(OpKind::Trace, Tool { kind: ToolKind::Flat, diameter: 6.0, stepdown: 1.0, ..Default::default() });
+        c.clearance = 5.0;
+        c.op_mut(id).unwrap().depth = 1.0;
+        let t = c.op(id).unwrap().tool;
+        let id2 = c.add_op(OpKind::Trace, t);
+        c.op_mut(id2).unwrap().sketches = vec![8];
+        c.op_mut(id2).unwrap().depth = 1.0;
+        let plain = generate(&c, &part);
+        c.stay_down = true;
+        let tight = generate(&c, &part);
+        // the same cuts
+        assert_eq!(feeds(&plain[0].moves).last(), feeds(&tight[0].moves).last());
+        // (the plain one plunges at the plunge feed to (-10, 16, 9) first; the tight one rapids there)
+        let at_depth = |tp: &Toolpath| feeds(&tp.moves).into_iter().filter(|p| p.z < 9.5).collect::<Vec<_>>();
+        assert_eq!(at_depth(&plain[1]).last(), at_depth(&tight[1]).last());
+        assert!(at_depth(&tight[1]).iter().all(|p| at_depth(&plain[1]).contains(p)));
+        assert!(tight[1].linked && !plain[1].linked);
+        // the link: no higher than the block's top + 1 mm (the plain one goes to the safe height, 15)
+        let top_of = |tp: &Toolpath| tp.moves.iter().take_while(|m| matches!(m, Move::Rapid(_))).map(|m| m.end(DVec3::ZERO).z).fold(f64::NEG_INFINITY, f64::max);
+        assert!(top_of(&plain[1]) >= 15.0 - 1e-6, "{}", top_of(&plain[1]));
+        assert!((top_of(&tight[1]) - 11.0).abs() < 0.3, "{:?}", tight[1].moves.iter().take(4).collect::<Vec<_>>());
+        // beside the block the tool rapids right down to the cut: no feed through air before it
+        let k = tight[1].moves.iter().position(|m| matches!(m, Move::Feed(..))).unwrap();
+        let before = tight[1].moves[k - 1].end(DVec3::ZERO);
+        assert!(matches!(tight[1].moves[k - 1], Move::Rapid(_)) && (before.z - 9.0).abs() < 1e-6, "{:?}", &tight[1].moves[..k + 1]);
+        let (tt, tp) = (crate::cam_paths::cycle_time(&c, &tight), crate::cam_paths::cycle_time(&c, &plain));
+        assert!(tt < tp, "{tt} {tp}");
+    }
+
     #[test]
     fn vcarve_cuts_deeper_where_the_shape_is_wider() {
         // a 20 × 10 rectangle with an 8 × 4 hole: carve the ring between them

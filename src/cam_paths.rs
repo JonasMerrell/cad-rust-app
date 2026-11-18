@@ -64,6 +64,10 @@ pub struct Toolpath {
     /// A probing operation's cycle, which the post writes instead of the moves.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub probe: Option<crate::cam_probe::Plan>,
+    /// Its moves carry on from where the toolpath before it ended (`tighten_links`): the post doesn't lift the
+    /// tool to the safe height before them.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub linked: bool,
 }
 
 // ---------------------------------------------------------------- part geometry
@@ -907,13 +911,19 @@ fn stock_resolution(stock: (DVec3, DVec3)) -> usize {
 /// Make the toolpaths starting from `stock`, the material an earlier setup left (None = the full block).
 /// Operations that machine only what is left see the stock as the operations before them leave it.
 pub fn generate_from(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> Vec<Toolpath> {
-    generate_all(cam, part, stock, false).0
+    let paths = generate_all(cam, part, stock, false).0;
+    if cam.stay_down {
+        tighten_links(cam, part, stock, paths)
+    } else {
+        paths
+    }
 }
 
 /// The toolpaths and the stock once they have all run.
 pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> (Vec<Toolpath>, StockMap) {
     let (paths, left) = generate_all(cam, part, stock, true);
     let left = left.unwrap_or_else(|| final_stock(cam, part, &paths, stock));
+    let paths = if cam.stay_down { tighten_links(cam, part, stock, paths) } else { paths };
     (paths, left)
 }
 
@@ -2143,6 +2153,315 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
         end = Some(tp.moves.iter().fold(DVec3::ZERO, |p, m| m.end(p)));
     }
     total
+}
+
+/// The cuts of one toolpath in an order that finishes one region before going to the next: each cut (its moves
+/// down to the work and along it) keeps every earlier cut whose reach (its extent plus the tool's diameter)
+/// overlaps its own before it, so depth levels and an area's own order stay as they were; among the cuts free to
+/// go next, the one starting nearest to where the tool is goes. Cut directions are kept (a climb stays a climb).
+///
+/// A cut ends where the tool lifts: the rapids up to the top of a lift belong to the cut before (its exit), the
+/// rest of them to the next (its approach). Rapids that stay at depth (an adaptive path moving through what it
+/// cleared) don't end a cut. A cut that no longer follows the one it followed goes there over the path's
+/// clearance height, so the program stays safe as it is; `tighten_links` then lowers those links.
+pub fn order_by_region(moves: &[Move], r: f64) -> Vec<Move> {
+    let n = moves.len();
+    let mut ends = vec![DVec3::ZERO; n];
+    let mut p = DVec3::ZERO;
+    for (i, m) in moves.iter().enumerate() {
+        p = m.end(p);
+        ends[i] = p;
+    }
+    let clear = ends.iter().map(|e| e.z).fold(f64::NEG_INFINITY, f64::max);
+    // where each cut starts: after the top of each lift that comes after some cutting
+    let mut starts = vec![0usize];
+    let mut cut_seen = false;
+    let mut i = 0;
+    while i < n {
+        if !matches!(moves[i], Move::Rapid(_)) {
+            cut_seen = true;
+            i += 1;
+            continue;
+        }
+        let mut j = i;
+        while j < n && matches!(moves[j], Move::Rapid(_)) {
+            j += 1;
+        }
+        let z0 = if i > 0 { ends[i - 1].z } else { f64::NEG_INFINITY };
+        let top = (i..j).map(|k| ends[k].z).fold(f64::NEG_INFINITY, f64::max);
+        if cut_seen && j < n && top > z0 + 1e-6 {
+            let k = (i..j).find(|&k| ends[k].z >= top - 1e-9).unwrap();
+            starts.push(k + 1);
+            cut_seen = false;
+        }
+        i = j;
+    }
+    // trailing moves after the last cutting (the final retract) stay last
+    let last_cut = (0..n).rev().find(|&k| !matches!(moves[k], Move::Rapid(_)));
+    let Some(last_cut) = last_cut else { return moves.to_vec() };
+    let tail = last_cut + 1;
+    let cuts: Vec<(usize, usize)> = starts.iter().enumerate().map(|(c, &s)| (s, starts.get(c + 1).copied().unwrap_or(tail).min(tail))).filter(|c| c.0 < c.1).collect();
+    if cuts.len() < 3 {
+        return moves.to_vec();
+    }
+    // each cut's start (where its approach ends), end, and reach box in XY (its cutting moves)
+    let info: Vec<(DVec3, DVec3, DVec2, DVec2)> = cuts
+        .iter()
+        .map(|&(s, e)| {
+            let mut lo = DVec2::splat(f64::INFINITY);
+            let mut hi = DVec2::splat(f64::NEG_INFINITY);
+            let mut start = None;
+            for k in s..e {
+                if !matches!(moves[k], Move::Rapid(_)) {
+                    let from = if k > 0 { ends[k - 1] } else { ends[k] };
+                    start.get_or_insert(from);
+                    for q in [from, ends[k]] {
+                        lo = lo.min(q.truncate());
+                        hi = hi.max(q.truncate());
+                    }
+                }
+            }
+            let start = start.unwrap_or(ends[s]);
+            if lo.x > hi.x {
+                lo = start.truncate();
+                hi = lo;
+            }
+            (start, ends[e - 1], lo - DVec2::splat(2.0 * r), hi + DVec2::splat(2.0 * r))
+        })
+        .collect();
+    let overlap = |a: usize, b: usize| {
+        let (_, _, alo, ahi) = info[a];
+        let (_, _, blo, bhi) = info[b];
+        alo.x <= bhi.x && blo.x <= ahi.x && alo.y <= bhi.y && blo.y <= ahi.y
+    };
+    let m = cuts.len();
+    let before: Vec<Vec<usize>> = (0..m).map(|b| (0..b).filter(|&a| overlap(a, b)).collect()).collect();
+    let mut done = vec![false; m];
+    let mut order = vec![0usize];
+    done[0] = true;
+    let mut at = info[0].1;
+    for _ in 1..m {
+        let next = (0..m)
+            .filter(|&c| !done[c] && before[c].iter().all(|&a| done[a]))
+            .min_by(|&a, &b| info[a].0.truncate().distance(at.truncate()).total_cmp(&info[b].0.truncate().distance(at.truncate())).then(a.cmp(&b)))
+            .unwrap();
+        done[next] = true;
+        order.push(next);
+        at = info[next].1;
+    }
+    let mut out = Vec::with_capacity(n + 2 * m);
+    let mut prev: Option<usize> = None;
+    for c in order {
+        let (s, e) = cuts[c];
+        if let Some(pc) = prev {
+            if pc + 1 != c {
+                // a new neighbour: up to the clearance height here, across, then the cut's own approach
+                let here = ends[cuts[pc].1 - 1];
+                let first = ends[s];
+                if here.z < clear - 1e-9 {
+                    out.push(Move::Rapid([here.x, here.y, clear]));
+                }
+                out.push(Move::Rapid([first.x, first.y, clear]));
+            }
+        }
+        out.extend_from_slice(&moves[s..e]);
+        prev = Some(c);
+    }
+    if let Some(pc) = prev {
+        if pc + 1 != m && tail < n {
+            let here = ends[cuts[pc].1 - 1];
+            if here.z < clear - 1e-9 {
+                out.push(Move::Rapid([here.x, here.y, clear]));
+            }
+        }
+    }
+    out.extend_from_slice(&moves[tail..]);
+    out
+}
+
+/// Margin the tightened links keep over the stock still there, the part and the fixtures, mm.
+pub const LINK_MARGIN: f64 = 1.0;
+
+/// Shorten the moves between cuts (`Cam::stay_down`): with the stock simulated up to each link, the tool travels
+/// to the next cut only as high as the stock still left along the way needs (its highest point under the tool,
+/// with the fixtures, plus `LINK_MARGIN`), so through cleared space or past the stock's end it stays down at its
+/// cutting depth; and it rapids down to `LINK_MARGIN` over the stock under the next entry, feeding only the rest.
+/// Links between operations count too, where they keep the tool, its speed and the coolant. Links that don't
+/// (a tool change, a new speed) keep the full retract. The material each cut removes is the same.
+pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
+    for tp in paths.iter_mut() {
+        if tp.probe.is_none() {
+            let r = cam.tool(tp.tool).map(|t| t.diameter / 2.0).unwrap_or(3.0);
+            tp.moves = order_by_region(&tp.moves, r);
+        }
+    }
+    let stock = stock_box(cam, part);
+    let mut sim = crate::cam_sim::Sim::new(cam, part, stock, &paths, stock_resolution(stock));
+    if let Some(m) = stock_in {
+        sim.start_from(m);
+    }
+    let fixtures: Vec<(DVec3, DVec3)> = fixture_boxes(cam, part, work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect();
+    let fix_clear = if cam.fixture_clearance > 0.0 { cam.fixture_clearance } else { cam.retract.max(1.0) };
+    // the highest stock (or fixture) within `r` of (x, y)
+    let high = |sim: &crate::cam_sim::Sim, x: f64, y: f64, r: f64| -> f64 {
+        let mut h = f64::NEG_INFINITY;
+        let reach = r + 0.5 + sim.cell;
+        let (i0, i1) = (((x - reach - sim.x0) / sim.cell).floor().max(0.0) as usize, ((x + reach - sim.x0) / sim.cell).ceil().max(0.0) as usize);
+        let (j0, j1) = (((y - reach - sim.y0) / sim.cell).floor().max(0.0) as usize, ((y + reach - sim.y0) / sim.cell).ceil().max(0.0) as usize);
+        for j in j0..=j1.min(sim.ny.saturating_sub(1)) {
+            for i in i0..=i1.min(sim.nx.saturating_sub(1)) {
+                let (cx, cy) = (sim.x0 + i as f64 * sim.cell, sim.y0 + j as f64 * sim.cell);
+                if (cx - x).hypot(cy - y) <= reach {
+                    let v = sim.stock[j * sim.nx + i];
+                    if v != crate::cam_stock::EMPTY {
+                        h = h.max(v as f64);
+                    }
+                }
+            }
+        }
+        for (lo, hi) in &fixtures {
+            let dx = (lo.x - x).max(x - hi.x).max(0.0);
+            let dy = (lo.y - y).max(y - hi.y).max(0.0);
+            if dx.hypot(dy) < reach {
+                h = h.max(hi.z + fix_clear - LINK_MARGIN);
+            }
+        }
+        h
+    };
+    // what each path runs with: (tool, rpm, coolant)
+    let setting = |tp: &Toolpath| -> Option<(u64, i64, bool)> {
+        let tool = cam.tool(tp.tool)?;
+        let op = cam.op(tp.op);
+        Some((tp.tool, cam.spindle_rpm(tool).round() as i64, cam.coolant_for(tool, op).is_on()))
+    };
+    let mut base = 0usize;
+    let mut prev: Option<(usize, DVec3)> = None; // the path before and where its last cut ended
+    for k in 0..paths.len() {
+        let n = paths[k].moves.len();
+        if paths[k].probe.is_some() || n == 0 {
+            sim.run_to(base + n, usize::MAX);
+            base += n;
+            prev = None;
+            continue;
+        }
+        let r = cam.tool(paths[k].tool).map(|t| t.diameter / 2.0).unwrap_or(3.0);
+        let mut out: Vec<Move> = Vec::with_capacity(n);
+        let mut pos: Option<DVec3> = None;
+        let mut i = 0usize;
+        // a link into this path from the one before (same tool, speed and coolant): its trailing rapids go
+        let mut from = match prev {
+            Some((pk, a)) if setting(&paths[pk]) == setting(&paths[k]) && setting(&paths[k]).is_some() && matches!(paths[k].moves.first(), Some(Move::Rapid(_))) => {
+                let pm = &mut paths[pk].moves;
+                while matches!(pm.last(), Some(Move::Rapid(_))) {
+                    pm.pop();
+                }
+                paths[k].linked = true;
+                Some(a)
+            }
+            _ => None,
+        };
+        while i < n {
+            let m = paths[k].moves[i];
+            if let Move::Rapid(_) = m {
+                // a run of rapids, and the vertical plunge after it
+                let mut j = i;
+                while j < n && matches!(paths[k].moves[j], Move::Rapid(_)) {
+                    j += 1;
+                }
+                let b = paths[k].moves[j - 1].end(DVec3::ZERO);
+                let plunge = match paths[k].moves.get(j) {
+                    Some(Move::Feed(q, f)) if (q[0] - b.x).abs() < 1e-6 && (q[1] - b.y).abs() < 1e-6 && q[2] < b.z => Some((q[2], *f)),
+                    _ => None,
+                };
+                let a = from.or(pos);
+                match (a, j < n) {
+                    (Some(a), true) => {
+                        sim.run_to(base + i, usize::MAX);
+                        // the highest thing along the way, under the tool
+                        let d = (b - a).truncate().length();
+                        let steps = (d / (sim.cell.min(r / 2.0)).max(0.05)).ceil().max(1.0) as usize;
+                        let mut h_path = f64::NEG_INFINITY;
+                        for s in 0..=steps {
+                            let q = a.truncate().lerp(b.truncate(), s as f64 / steps as f64);
+                            h_path = h_path.max(high(&sim, q.x, q.y, r));
+                        }
+                        let travel = (h_path + LINK_MARGIN).max(a.z);
+                        if travel > a.z + 1e-6 {
+                            out.push(Move::Rapid([a.x, a.y, travel]));
+                        }
+                        out.push(Move::Rapid([b.x, b.y, travel]));
+                        match plunge {
+                            Some((z, f)) => {
+                                let h_b = high(&sim, b.x, b.y, r);
+                                let down = (h_b + LINK_MARGIN).max(z).min(travel);
+                                if down < travel - 1e-6 {
+                                    out.push(Move::Rapid([b.x, b.y, down]));
+                                }
+                                if down > z + 1e-6 {
+                                    out.push(Move::Feed([b.x, b.y, z], f));
+                                }
+                                pos = Some(DVec3::new(b.x, b.y, z));
+                                i = j + 1;
+                            }
+                            None => {
+                                // down to the entry: rapid only to over the stock there, feed the rest
+                                let h_b = high(&sim, b.x, b.y, r);
+                                let down = (h_b + LINK_MARGIN).max(b.z).min(travel);
+                                if down < travel - 1e-6 {
+                                    out.push(Move::Rapid([b.x, b.y, down]));
+                                }
+                                if down > b.z + 1e-6 {
+                                    let f = match paths[k].moves.get(j) {
+                                        Some(Move::Feed(_, f)) => *f,
+                                        _ => cam.tool(paths[k].tool).map(|t| t.plunge_feed).unwrap_or(300.0),
+                                    };
+                                    out.push(Move::Feed([b.x, b.y, b.z], f));
+                                }
+                                pos = Some(b);
+                                i = j;
+                            }
+                        }
+                    }
+                    _ => {
+                        // the first approach, or the retract at the end: as they were
+                        for q in &paths[k].moves[i..j] {
+                            out.push(*q);
+                        }
+                        pos = Some(b);
+                        i = j;
+                    }
+                }
+                from = None;
+                continue;
+            }
+            pos = Some(m.end(pos.unwrap_or(DVec3::ZERO)));
+            out.push(m);
+            from = None;
+            i += 1;
+        }
+        sim.run_to(base + n, usize::MAX);
+        base += n;
+        // where its last cut ended (before its retract)
+        let last_cut = out.iter().rev().find(|m| !matches!(m, Move::Rapid(_))).map(|_| {
+            let mut p = DVec3::ZERO;
+            let mut last = DVec3::ZERO;
+            for m in &out {
+                p = m.end(p);
+                if !matches!(m, Move::Rapid(_)) {
+                    last = p;
+                }
+            }
+            last
+        });
+        paths[k].moves = out;
+        prev = last_cut.map(|p| (k, p));
+    }
+    for tp in paths.iter_mut() {
+        if let Some(tool) = cam.tool(tp.tool) {
+            stats(tp, tool, cam);
+        }
+    }
+    paths
 }
 
 fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
