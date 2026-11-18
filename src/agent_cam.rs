@@ -1,6 +1,6 @@
 //! Agent tools for Manufacture (CAM) tabs: setups, tools, operations, simulation and G-code.
 
-use glam::DVec3;
+use glam::{DVec2, DVec3};
 use serde_json::{Map, Value, json};
 
 use super::{R, Session, round};
@@ -208,6 +208,11 @@ impl Session {
     }
 
     fn cam_sim(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim)> {
+        self.cam_sim_left(ci, resolution).map(|(p, t, s, _)| (p, t, s))
+    }
+
+    /// As `cam_sim`, with the stock the setups before this one leave.
+    fn cam_sim_left(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim, Option<StockMap>)> {
         let (part, paths, left) = self.cam_build_from(ci)?;
         let c = &self.ws.cams[ci];
         let stock = cam_paths::stock_box(c, &part);
@@ -221,7 +226,19 @@ impl Session {
             sim.set_machine(c, &part, placed);
         }
         sim.run_to(usize::MAX, usize::MAX);
-        Ok((part, paths, sim))
+        Ok((part, paths, sim, left))
+    }
+
+    /// rcnc's Find stock on a setup that follows another: the stock's outline where the probe touches its sides
+    /// (its top less the probe's depth), from what the setups before left, when that differs from the box
+    /// (op 1 cut into the sides, or left only part of the bar's length at that height).
+    fn found_outline(c: &crate::cam::Cam, part: &Part, left: Option<&StockMap>) -> Option<(DVec2, DVec2)> {
+        let m = left?;
+        let p = c.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref()).find(|p| !p.on_part && p.find_size.is_none())?;
+        let (lo, hi) = cam_paths::stock_box(c, part);
+        let at = (lo.truncate() + hi.truncate()) / 2.0;
+        let (a, b) = m.outline_at(hi.z - p.depth.max(0.5), at)?;
+        ((a - lo.truncate()).abs().max_element() > 0.05 || (b - hi.truncate()).abs().max_element() > 0.05).then_some((a, b))
     }
 
     /// `cam_machine`: list, import, edit the machine models; `cam` also sets that setup's machine.
@@ -1009,19 +1026,23 @@ impl Session {
                 let path = super::str_arg(a, "path")?;
                 // the very toolpaths that are posted, simulated: a program goes out only when that is clean
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
-                let (part, paths, sim) = self.cam_sim(ci, res)?;
+                let (part, paths, sim, left) = self.cam_sim_left(ci, res)?;
                 let c = &self.ws.cams[ci];
                 let problems = self.sim_problems(ci, &part, &sim);
+                let found = Self::found_outline(c, &part, left.as_ref());
                 let hash = crate::cam_verify::toolpath_hash(&paths);
                 let allow = a.get("allow_problems").and_then(|v| v.as_bool()).unwrap_or(false);
                 let first: Vec<String> = problems.iter().take(5).map(|p| format!("{} in '{}' at {} ({} mm)", p["what"].as_str().unwrap_or(""), p["operation"].as_str().unwrap_or(""), p["at"], p["depth"])).collect();
                 let (path, line) = crate::cam_verify::gate(problems.len(), &first, allow, &path, hash)?;
-                let text = crate::cam_verify::stamped(&crate::cam_ui::gcode_for(c, &part, &paths), &line);
+                let text = crate::cam_verify::stamped(&crate::cam_ui::gcode_found(c, &part, &paths, found), &line);
                 super::write_out(&path, &text)?;
                 let warnings: Vec<String> =
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
                 let mut v = json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings,
                     "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                if let Some((a, b)) = found {
+                    v["find_stock"] = json!(format!("Find stock looks for {} x {}: the stock the setups before leave where the probe touches its sides (the setup's box is bigger or smaller there)", round(b.x - a.x), round(b.y - a.y)));
+                }
                 if !problems.is_empty() {
                     v["unsafe"] = json!(format!("written as {path} with an UNSAFE header: {} simulation problem(s); do not run it", problems.len()));
                     v["problems"] = json!(problems);

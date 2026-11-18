@@ -2305,9 +2305,18 @@ fn library_window(app: &mut App, ctx: &egui::Context) {
 // ---------------------------------------------------------------- G-code
 
 pub fn gcode_for(c: &Cam, part: &Part, paths: &[Toolpath]) -> String {
+    gcode_found(c, part, paths, None)
+}
+
+/// The G-code, with rcnc's Find stock looking for `found` (the stock's outline at the height it touches the
+/// sides, from what the setups before left) in place of the setup's stock box.
+pub fn gcode_found(c: &Cam, part: &Part, paths: &[Toolpath], found: Option<(glam::DVec2, glam::DVec2)>) -> String {
     let ctx = cam_paths::Ctx::new(c, part);
     // a tilted block's bounding box isn't the stock rcnc would find
-    let stock = cam_paths::tilted_block(c, part).is_none().then_some(ctx.stock);
+    let stock = cam_paths::tilted_block(c, part).is_none().then_some(ctx.stock).map(|(lo, hi)| match found {
+        Some((a, b)) => (a.extend(lo.z), b.extend(hi.z)),
+        None => (lo, hi),
+    });
     crate::cam_post::gcode_noted(c, paths, ctx.origin, ctx.safe(), Some(cam_paths::work_zero_note(c, part)), stock)
 }
 
