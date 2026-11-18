@@ -101,7 +101,7 @@ impl Session {
         Ok(())
     }
 
-    fn mesh(&self, studio: usize, body: BodyId) -> Option<&BodyMesh> {
+    pub(super) fn mesh(&self, studio: usize, body: BodyId) -> Option<&BodyMesh> {
         self.bodies(studio).iter().find(|b| b.id == body)
     }
 
@@ -150,7 +150,7 @@ impl Session {
 
     /// Bring an assembly up to date with its parts: connectors follow the geometry and the
     /// mates are solved again when anything moved.
-    fn settle(&mut self, ai: usize) -> Vec<u64> {
+    pub(super) fn settle(&mut self, ai: usize) -> Vec<u64> {
         let before = serde_json::to_string(&self.ws.assemblies[ai].mates).unwrap_or_default();
         let lost = self.refresh_connectors(ai);
         if serde_json::to_string(&self.ws.assemblies[ai].mates).unwrap_or_default() != before || !lost.is_empty() {
@@ -1019,6 +1019,7 @@ impl Session {
                 json!({"steps": self.ws.assemblies[ai].explode_steps.len()})
             }
             "assembly_animation" => return self.anim_call(a),
+            "simulate_gcode" => return self.gsim_call(a),
             "assembly_info" => {
                 let ai = asm_idx(a, self)?;
                 self.sync();
