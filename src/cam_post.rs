@@ -582,6 +582,7 @@ fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::Pro
     }
     let top_centre = DVec3::new((lo.x + hi.x) / 2.0, (lo.y + hi.y) / 2.0, hi.z) - origin;
     o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
+    o.line(&comment(&format!("Find stock touches the sides {} below the top: measure sawn stock there, its ends may not be square", num(p.depth))));
     o.line(&comment(&format!(
         "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}{}",
         num(size.x),
