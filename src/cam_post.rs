@@ -423,8 +423,8 @@ pub fn gcode_noted(cam: &Cam, paths: &[Toolpath], origin: DVec3, safe: f64, work
             match *m {
                 Move::Rapid(p) => {
                     let w = DVec3::from(p) - origin;
-                    if first {
-                        // go up first, then over
+                    if first && !tp.linked {
+                        // go up first, then over (a linked toolpath carries on from where the one before ended)
                         o.z_up(safe_w);
                         o.mv(0, DVec3::new(w.x, w.y, safe_w), None);
                     }
