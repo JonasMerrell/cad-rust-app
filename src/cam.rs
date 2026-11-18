@@ -1266,7 +1266,7 @@ pub struct Machine {
     #[serde(default)]
     pub spindle_low_torque: f64,
     /// Over `spindle_rated_rpm` the power falls as (rated / rpm) to this power (0: constant power). A VFD that can't
-    /// give the motor more voltage there: 1 in theory; the DMC2 (H100 at F004 = 150: rated 9000, 894 W): 0.5.
+    /// give the motor more voltage there: 1 in theory; the DMC2 (H100 at F004 = 150: rated 9000, 1118 W): 0.76.
     #[serde(default)]
     pub spindle_above_rated: f64,
 }

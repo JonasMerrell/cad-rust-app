@@ -142,7 +142,7 @@ pub struct Limits {
     pub low_torque: f64,
     /// Over the rated speed the power falls as (rated / rpm) to this power (0: it stays constant). A drive that
     /// can't give the motor more voltage than at its rated speed weakens its field above it: in theory 1 (the
-    /// pull-out torque goes with the square of volts per hertz); the DMC2's H100 (110 V out) at F004 = 150: 0.5.
+    /// pull-out torque goes with the square of volts per hertz); the DMC2's H100 (110 V out) at F004 = 150: 0.76.
     pub above: f64,
     /// Share of `power` a cut may never go over (a problem past it) and the share past which it's a caution:
     /// with `power` the spindle's measured pull-out (it stalls there), the planning limits sit under it.
@@ -455,24 +455,25 @@ mod tests {
     }
 
     /// The DMC2 with its VFD at F004 = 150 (full flux up to 9000 rpm, the H100's 110 V ceiling above). Measured
-    /// (op1a v5 and v6, 2026-11-18, 1/4" 3-flute, 12 deep), sag in the cut: at 9k 484/589/676/759 W by this model
-    /// 3.2/3.6/4.2/5.0%, steady; at 12k (the same flux at F004 = 200) 590 W 5.2%, 676 W 5.7%, 759 W 7%, 839 W 9%
-    /// without running away; at 24k 0.4 x 12 (446 W) 4.3-4.7% settled, 1.0 x 6 (499 W) and 0.45 x 12 (494 W) crept.
-    /// Planning: never-exceed 760 W at 9k (the highest proven steady), about 680 at 12k, 450 at 24k: 894 W at
-    /// 9000 (rated), falling as (9000 / rpm)^0.5 above; never-exceed 0.85, caution 0.73.
+    /// (op1a v4-v7, 2026-11-18, 1/4" 3-flute, 12 deep), sag in the cut: at 9k 484/589/676/759/850/949/1049 W by this
+    /// model 3.2/3.6/4.2/5.0/6.5/6.6/9.0%, every one steady; at 12k (the same flux) 590 W 5.2%, 676 W 5.7%, 759 W 7%,
+    /// 839 W 9% without running away; at 24k 0.4 x 12 (446 W) 4.3-4.7% settled, 1.0 x 6 (499 W) and 0.45 x 12
+    /// (494 W) crept at the edge. Planning: 9k never-exceed 950 W (the highest proven at moderate slip), caution
+    /// 850; 24k never-exceed about 450, caution about 400: 1118 W at 9000 (rated), falling as (9000 / rpm)^0.76
+    /// above; never-exceed 0.85, caution 0.76.
     #[test]
     fn the_dmc2_at_f004_150() {
         let m = material("6061-T6");
-        let l = Limits { power: 894.0, rated_rpm: 9000.0, low_rpm: 0.0, low_torque: 0.0, above: 0.5, never_exceed: 0.85, caution: 0.73, force: 700.0, deflection: 0.06 };
+        let l = Limits { power: 1118.0, rated_rpm: 9000.0, low_rpm: 0.0, low_torque: 0.0, above: 0.76, never_exceed: 0.85, caution: 0.76, force: 700.0, deflection: 0.06 };
         let ne = |rpm: f64| l.available(rpm) * l.never_exceed;
-        assert!((ne(9000.0) - 760.0).abs() < 2.0 && (ne(12000.0) - 680.0).abs() < 25.0 && (ne(24000.0) - 450.0).abs() < 20.0, "{} {} {}", ne(9000.0), ne(12000.0), ne(24000.0));
+        assert!((ne(9000.0) - 950.0).abs() < 2.0 && (ne(24000.0) - 450.0).abs() < 10.0, "{} {} {}", ne(9000.0), ne(12000.0), ne(24000.0));
         let at = |w: f64, d: f64, f: f64, rpm: f64| use_of(&cut(&t24(), &m, w, d, f, rpm, w * d), &t24(), &l, rpm, false);
-        // 9k: the v6 ladder all within the line, its top at it
-        assert!(at(1.0, 12.0, 1270.0, 9000.0).worst < 0.8);
-        assert!(at(1.0, 12.0, 2310.0, 9000.0).worst < 1.01);
-        // 12k: 590 W comfortable (inside the line), 759 W past it
-        assert!(at(1.0, 12.0, 1500.0, 12000.0).worst < 1.0);
-        assert!(at(1.0, 12.0, 2100.0, 12000.0).worst > 1.0);
+        // 9k: the v6 ladder well inside, v7's 949 W at the line, its 1049 W past it
+        assert!(at(1.0, 12.0, 2310.0, 9000.0).worst < 0.85);
+        assert!(at(1.05, 12.0, 2910.0, 9000.0).worst < 1.01);
+        assert!(at(1.15, 12.0, 2990.0, 9000.0).worst > 1.0);
+        // 12k: 590 W and 676 W inside
+        assert!(at(1.0, 12.0, 1800.0, 12000.0).worst < 1.0);
         // 24k: 0.3 x 12 (346 W) fine, 1.0 x 6 (499 W) past the line
         assert!(at(0.3, 12.0, 2400.0, 24000.0).worst < 0.95);
         assert!(at(1.0, 6.0, 2400.0, 24000.0).worst > 1.0);
