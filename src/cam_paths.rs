@@ -766,7 +766,7 @@ impl<'a> Pb<'a> {
                 let l = loops.remove(j);
                 self.cut_loop(&l, z, z_from, 0.0, None, None);
             }
-            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0 };
+            let mut lv = crate::cam_3d::Level { pb: &mut *self, z, z_from, r, step, feed, fast: feed, climb, helix: 0.4 * 2.0 * r, slack: 0.0, blocking: Default::default(), hop: None };
             lv.clear(&region, &mat, &core);
         }
     }
@@ -1454,22 +1454,27 @@ fn face(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     }
     let r = t.radius();
     let step = stepover(op, t);
-    let x0 = lo.x - r - 1.0;
-    let x1 = hi.x + r + 1.0;
-    let w = hi.y - lo.y;
+    // passes along X, or along Y with an angle near 90 (e.g. along the way a part slides on the face)
+    let along_y = ((op.angle.rem_euclid(180.0)) - 90.0).abs() < 45.0;
+    let (u0, u1, v0, v1) = if along_y { (lo.y, hi.y, lo.x, hi.x) } else { (lo.x, hi.x, lo.y, hi.y) };
+    let pt = |u: f64, v: f64, z: f64| if along_y { DVec3::new(v, u, z) } else { DVec3::new(u, v, z) };
+    let a0 = u0 - r - 1.0;
+    let a1 = u1 + r + 1.0;
+    let w = v1 - v0;
     let n = (w / step).ceil().max(1.0) as usize;
     let mut z_prev = top;
     for z in levels(top, bottom, stepdown(op, t), &[]) {
         for i in 0..=n {
-            let y = lo.y + w * i as f64 / n as f64;
-            let (a, b) = if i % 2 == 0 { (x0, x1) } else { (x1, x0) };
+            let v = v0 + w * i as f64 / n as f64;
+            let (a, b) = if i % 2 == 0 { (a0, a1) } else { (a1, a0) };
+            let s = pt(a, v, z);
             if i == 0 {
-                pb.approach(a, y, z_prev);
-                pb.cut(DVec3::new(a, y, z), pb.plunge);
+                pb.approach(s.x, s.y, z_prev);
+                pb.cut(s, pb.plunge);
             } else {
-                pb.cut(DVec3::new(a, y, z), pb.feed);
+                pb.cut(s, pb.feed);
             }
-            pb.cut(DVec3::new(b, y, z), pb.feed);
+            pb.cut(pt(b, v, z), pb.feed);
         }
         z_prev = z;
     }
@@ -2917,6 +2922,32 @@ mod tests {
     }
 
     #[test]
+    fn face_runs_along_y_with_an_angle_of_90() {
+        let part = plate();
+        let (mut c, t) = setup();
+        let id = c.add_op(OpKind::Face, t);
+        let along = |c: &Cam| {
+            let tp = generate(c, &part).remove(0);
+            let (mut dx, mut dy) = (0.0, 0.0);
+            let mut prev = DVec3::ZERO;
+            for m in &tp.moves {
+                let p = m.end(prev);
+                if let Move::Feed(..) = m {
+                    dx += (p.x - prev.x).abs();
+                    dy += (p.y - prev.y).abs();
+                }
+                prev = p;
+            }
+            (dx, dy)
+        };
+        let (dx, dy) = along(&c);
+        assert!(dx > 3.0 * dy, "along X by default: {dx} {dy}");
+        c.op_mut(id).unwrap().angle = 90.0;
+        let (dx, dy) = along(&c);
+        assert!(dy > 3.0 * dx, "along Y at 90: {dx} {dy}");
+    }
+
+    #[test]
     fn toolpaths_lift_over_fixtures() {
         let part = plate();
         let (mut c, t) = setup();
@@ -2984,6 +3015,11 @@ mod tests {
             let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
             assert!(g.contains("G21") && g.contains("M30"), "{post}");
             assert_eq!(g.contains("T1 M6"), post != "grbl", "{post}");
+            // a second station's setup runs in its own work offset
+            let mut w = c.clone();
+            w.work_offset = 2;
+            let g2 = crate::cam_post::gcode(&w, &paths, origin, top + c.clearance);
+            assert!(g2.lines().any(|l| l == "G55") && !g2.lines().any(|l| l == "G54"), "{post}: {g2}");
             if post == "rcnc" {
                 // rcnc's own M6 handles the pause and the measuring
                 assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");

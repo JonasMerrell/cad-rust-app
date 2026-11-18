@@ -1682,6 +1682,75 @@ pub(crate) struct Level<'a, 'b> {
     /// How much further out than `material` says the stock may really stand (rest machining takes the outline
     /// from the stock map, less slivers a cell or two thin): the tool comes down from above that much clear of it.
     pub slack: f64,
+    /// Passes not cut yet that a link mustn't pass near (the passes run out of ring order, see `emit`).
+    pub blocking: Blocking,
+    /// The highest the part (with its allowance) or the stock stands under the tool along a straight move,
+    /// for hops between passes no higher than they need be; None: up to the safe height.
+    pub hop: Option<&'a dyn Fn(DVec2, DVec2) -> f64>,
+}
+
+/// Where passes not cut yet run: their points on a grid, so a link can tell it would pass through material
+/// they haven't taken yet.
+#[derive(Default)]
+pub(crate) struct Blocking {
+    /// How near a link may come to such a pass.
+    d: f64,
+    grid: std::collections::HashMap<(i64, i64), Vec<usize>>,
+    pts: Vec<Vec<DVec2>>,
+    active: Vec<bool>,
+}
+
+impl Blocking {
+    fn new(d: f64, pts: Vec<Vec<DVec2>>) -> Blocking {
+        let mut grid: std::collections::HashMap<(i64, i64), Vec<usize>> = Default::default();
+        for (i, ps) in pts.iter().enumerate() {
+            for p in ps {
+                let k = ((p.x / d).floor() as i64, (p.y / d).floor() as i64);
+                let v = grid.entry(k).or_default();
+                if v.last() != Some(&i) {
+                    v.push(i);
+                }
+            }
+        }
+        let n = pts.len();
+        Blocking { d, grid, pts, active: vec![false; n] }
+    }
+
+    /// The passes (other than those `skip` says) with a point within `d` of `p`.
+    fn near(&self, p: DVec2, mut keep: impl FnMut(usize) -> bool) -> Vec<usize> {
+        let (cx, cy) = ((p.x / self.d).floor() as i64, (p.y / self.d).floor() as i64);
+        let mut out = vec![];
+        for dx in -1..=1 {
+            for dy in -1..=1 {
+                if let Some(v) = self.grid.get(&(cx + dx, cy + dy)) {
+                    for &i in v {
+                        if !out.contains(&i) && keep(i) && self.pts[i].iter().any(|q| q.distance(p) <= self.d) {
+                            out.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        out
+    }
+
+    /// Whether `p` is within `d` of a pass that is still to be cut and must come first.
+    fn blocks(&self, p: DVec2) -> bool {
+        self.d > 0.0 && !self.near(p, |i| self.active[i]).is_empty()
+    }
+}
+
+/// A pass of one ring of the clearing: a piece of the ring, or a helix down into enclosed material.
+enum Piece {
+    Seg(crate::cam_contour::Seg),
+    Helix(DVec2, f64),
+}
+
+/// What a ring was made from: the centres cleared before it, the material left, and the centres touching it.
+struct Ring {
+    free: Shapes,
+    remaining: Shapes,
+    near: Shapes,
 }
 
 /// A centre counts as clear of material when its tool misses it by this much.
@@ -1704,7 +1773,7 @@ impl Level<'_, '_> {
     /// Can the tool feed straight from `a` to `b` at depth without touching material (`near`: centres that do)?
     fn link_clear(&self, a: DVec2, b: DVec2, area: &Shapes, near: &Shapes, free: &Shapes) -> bool {
         let len = a.distance(b);
-        if len > 12.0 * self.r.max(1.0) {
+        if len > 25.0 * self.r.max(1.0) {
             return false;
         }
         let n = (len / (0.25 * self.r).max(0.05)).ceil().max(1.0) as usize;
@@ -1713,7 +1782,7 @@ impl Level<'_, '_> {
         let cleared = offset(free, 0.1 * self.r);
         (1..=n).all(|k| {
             let p = a.lerp(b, k as f64 / n as f64).to_array();
-            inside(area, p) && !inside(near, p) && inside(&cleared, p)
+            inside(area, p) && !inside(near, p) && inside(&cleared, p) && !self.blocking.blocks(DVec2::from(p))
         })
     }
 
@@ -1727,11 +1796,6 @@ impl Level<'_, '_> {
         }
         if self.at_depth() && self.link_clear(here.unwrap().truncate(), p, area, near, free) {
             self.pb.cut(p.extend(self.z), self.fast);
-            return;
-        }
-        // a short step at depth to a start in material: at the cutting feed, not the link's
-        if self.at_depth() && here.is_some_and(|q| q.truncate().distance(p) < 2.0 * self.step.max(0.2)) {
-            self.pb.cut(p.extend(self.z), self.feed);
             return;
         }
         // retract, and come down beside the material (the column over a clear centre is clear); a start whose
@@ -1751,9 +1815,27 @@ impl Level<'_, '_> {
             }
             _ => p,
         };
-        self.pb.approach(down.x, down.y, self.z_from);
+        self.hop_over(down);
         self.pb.cut(down.extend(self.z), self.fast);
         self.pb.cut(p.extend(self.z), self.feed);
+    }
+
+    /// Up, over to `p` and down to just above the level before: only as high as what stands under the way
+    /// needs (plus the retract), not all the way to the safe height.
+    fn hop_over(&mut self, p: DVec2) {
+        let h = match (self.hop, self.pb.pos) {
+            (Some(f), Some(q)) => Some(f(q.truncate(), p).max(self.z_from) + self.pb.retract.max(1.0)),
+            _ => None,
+        };
+        match (h, self.pb.pos) {
+            (Some(h), Some(q)) if h < self.pb.safe - 1e-6 => {
+                let over = h.max(q.z);
+                self.pb.rapid(DVec3::new(q.x, q.y, over));
+                self.pb.rapid(DVec3::new(p.x, p.y, over));
+                self.pb.rapid(DVec3::new(p.x, p.y, (self.z_from + self.pb.retract).min(over)));
+            }
+            _ => self.pb.approach(p.x, p.y, self.z_from),
+        }
     }
 
     /// Cut along `pts` at depth; `near`: centres whose tool reaches material (tight arcs there are slowed).
@@ -1843,6 +1925,9 @@ impl Level<'_, '_> {
         let r = self.r;
         let h = (0.2 * r).clamp(0.05, 1.0);
         let bridge = (1.5 * r).max(1.0);
+        // the rings first, then their passes in an order that keeps the tool in one place (see `emit`)
+        let mut rings: Vec<Ring> = vec![];
+        let mut pieces: Vec<(usize, Piece)> = vec![];
         for _ in 0..5000 {
             let remaining = opened(&difference(material, &offset(&free, r)), 0.02);
             if shapes_area(&remaining) < 0.05 {
@@ -1892,7 +1977,8 @@ impl Level<'_, '_> {
                 match roomiest(&intersect(a, &near), r) {
                     Some((c, room)) => {
                         let rh = self.helix.min(room * 0.9).max(0.0);
-                        self.helix_in(c, rh);
+                        rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
+                        pieces.push((rings.len() - 1, Piece::Helix(c, rh)));
                         free = union_all(&[flat(&free), flat(&intersect(&vec![vec![circle(c, rh.max(0.02))]], a))].concat());
                         continue;
                     }
@@ -1905,17 +1991,94 @@ impl Level<'_, '_> {
                     segs.extend(crate::cam_contour::clip(&self.orient(c, i == 0), &near, h, bridge));
                 }
             }
-            while !segs.is_empty() {
-                let here = self.pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
-                let d = |s: &crate::cam_contour::Seg| {
-                    if s.closed {
-                        s.pts.iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min)
-                    } else {
-                        DVec2::from(s.pts[0]).distance_squared(here)
+            rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
+            pieces.extend(segs.into_iter().map(|sg| (rings.len() - 1, Piece::Seg(sg))));
+            free = grown;
+        }
+        self.emit(pieces, &rings, a, h);
+        free
+    }
+
+    /// Cut the rings' passes. A pass waits only for the passes of earlier rings near it (they clear what it
+    /// leans on), so the tool finishes one area ring after ring before it goes elsewhere, instead of going round
+    /// every area once per ring; of the passes it may cut, it takes the nearest. Links at depth also keep clear
+    /// of passes still to be cut whose material they would otherwise run into.
+    fn emit(&mut self, pieces: Vec<(usize, Piece)>, rings: &[Ring], a: &Shapes, h: f64) {
+        let r = self.r;
+        let d = 2.0 * r + self.step + 0.5;
+        let sample = |p: &Piece| -> Vec<DVec2> {
+            match p {
+                Piece::Helix(c, rh) => vec![*c + DVec2::new(*rh, 0.0), *c, *c - DVec2::new(*rh, 0.0)],
+                Piece::Seg(sg) => {
+                    // every point, and more along long straight stretches
+                    let mut v: Vec<DVec2> = vec![];
+                    for w in sg.pts.windows(2) {
+                        let (p, q) = (DVec2::from(w[0]), DVec2::from(w[1]));
+                        let n = (p.distance(q) / (0.5 * d)).ceil().max(1.0) as usize;
+                        v.extend((0..n).map(|k| p.lerp(q, k as f64 / n as f64)));
                     }
-                };
-                let j = (0..segs.len()).min_by(|x, y| d(&segs[*x]).total_cmp(&d(&segs[*y]))).unwrap();
-                let s = segs.remove(j);
+                    v.extend(sg.pts.last().map(|p| DVec2::from(*p)));
+                    v
+                }
+            }
+        };
+        let pts: Vec<Vec<DVec2>> = pieces.iter().map(|(_, p)| sample(p)).collect();
+        let n = pieces.len();
+        let mut blocking = Blocking::new(d, pts);
+        // what each pass waits for: passes of earlier rings within reach
+        let deps: Vec<Vec<usize>> = (0..n)
+            .map(|q| {
+                let mut v: Vec<usize> = vec![];
+                for p in blocking.pts[q].clone() {
+                    for i in blocking.near(p, |i| pieces[i].0 < pieces[q].0) {
+                        if !v.contains(&i) {
+                            v.push(i);
+                        }
+                    }
+                }
+                v
+            })
+            .collect();
+        let mut done = vec![false; n];
+        let mut left = n;
+        while left > 0 {
+            let here = self.pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+            let dist = |i: usize| match &pieces[i].1 {
+                Piece::Helix(c, rh) => (*c + DVec2::new(*rh, 0.0)).distance_squared(here),
+                Piece::Seg(sg) if sg.closed => sg.pts.iter().map(|q| DVec2::from(*q).distance_squared(here)).fold(f64::INFINITY, f64::min),
+                Piece::Seg(sg) => DVec2::from(sg.pts[0]).distance_squared(here),
+            };
+            // (ties broken by ring, then the order the rings made them in)
+            let j = (0..n)
+                .filter(|i| !done[*i] && deps[*i].iter().all(|k| done[*k]))
+                .min_by(|x, y| dist(*x).total_cmp(&dist(*y)).then(pieces[*x].0.cmp(&pieces[*y].0)).then(x.cmp(y)))
+                .unwrap_or_else(|| (0..n).find(|i| !done[*i]).unwrap());
+            let ring = pieces[j].0;
+            for i in 0..n {
+                // (only earlier rings: the link stays within the centres cleared before this ring, and what this
+                // ring's other passes take lies beyond those centres' reach)
+                blocking.active[i] = !done[i] && pieces[i].0 < ring;
+            }
+            self.blocking = std::mem::take(&mut blocking);
+            let rg = &rings[ring];
+            match &pieces[j].1 {
+                Piece::Helix(c, rh) => self.helix_in(*c, *rh),
+                Piece::Seg(sg) => self.emit_seg(sg.clone(), rg, a, h),
+            }
+            blocking = std::mem::take(&mut self.blocking);
+            done[j] = true;
+            left -= 1;
+        }
+    }
+
+    /// One pass of a ring, cut from where the tool is.
+    fn emit_seg(&mut self, s: crate::cam_contour::Seg, ring: &Ring, a: &Shapes, h: f64) {
+        let r = self.r;
+        let (free, remaining, near) = (&ring.free, &ring.remaining, &ring.near);
+        let here = self.pb.pos.map(|p| p.truncate()).unwrap_or(DVec2::ZERO);
+        {
+            {
+
                 if s.closed {
                     // the whole loop is in material: ease onto it from the cleared ground beside it over a stretch
                     // behind its start (a blend from the nearest clear centres out to the loop), so the cut deepens
@@ -1984,9 +2147,7 @@ impl Level<'_, '_> {
                     }
                 }
             }
-            free = grown;
         }
-        free
     }
 
     /// Cut an open pass, eased onto from the cleared ground over its first stretch when it starts head-on.
@@ -2263,6 +2424,25 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
     let mut narrowed = f64::INFINITY;
     let mut z_prev = top;
     let mut any = false;
+    // how high the part (with its allowance) and the stock left stand under the tool along a move; above the
+    // level before, this op has taken everything else
+    let part_drop = Dropper::new(ctx.geo.part, t, op.leave.max(0.0));
+    let hop = |a: DVec2, b: DVec2| -> f64 {
+        let n = ((a.distance(b) / (0.5 * r).max(0.2)).ceil() as usize).max(1);
+        let mut sc = Scratch::default();
+        let mut h = f64::NEG_INFINITY;
+        for k in 0..=n {
+            let p = a.lerp(b, k as f64 / n as f64);
+            let z = part_drop.drop(p, &mut sc).0;
+            if z.is_finite() {
+                h = h.max(z);
+            }
+            if let Some(m) = stock {
+                h = h.max(m.top_near(p.x, p.y, r) as f64);
+            }
+        }
+        h
+    };
     for z in levels(top, bottom, stepdown(op, t), &kept) {
         // the floors less than leave_floor below this level stay covered
         let shadow = ctx.geo.shadow(z - op.leave_floor);
@@ -2288,7 +2468,7 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
             narrowed = narrowed.min(level_step);
         }
         let slack = stock.map(|m| 2.5 * m.cell).unwrap_or(0.0);
-        let mut lv = Level { pb: &mut *pb, z, z_from: z_prev, r, step: level_step, feed, fast, climb: op.climb, helix, slack };
+        let mut lv = Level { pb: &mut *pb, z, z_from: z_prev, r, step: level_step, feed, fast, climb: op.climb, helix, slack, blocking: Default::default(), hop: Some(&hop) };
         lv.clear(&a, &material, &vec![]);
         z_prev = z;
     }
@@ -2827,7 +3007,7 @@ mod tests {
         let t = tool(&mut c, ToolKind::Flat, 6.0);
         let r = 3.175;
         let mut pb = Pb { tool: c.tool(t).unwrap(), moves: vec![], pos: None, safe: 10.0, retract: 2.0, ramp: 0.05, feed: 2400.0, plunge: 300.0 };
-        let mut lv = Level { pb: &mut pb, z: 0.0, z_from: 3.0, r, step: 1.2, feed: 2400.0, fast: 3000.0, climb: true, helix: 2.5, slack: 0.0 };
+        let mut lv = Level { pb: &mut pb, z: 0.0, z_from: 3.0, r, step: 1.2, feed: 2400.0, fast: 3000.0, climb: true, helix: 2.5, slack: 0.0, blocking: Default::default(), hop: None };
         lv.clear(a, material, &vec![]);
         let e = crate::cam_contour::check(&pb.moves, None, material, 3.0, r, 0.05).unwrap();
         (pb.moves, e.peak, e.at)
@@ -2906,6 +3086,57 @@ mod tests {
         assert!(3.0 < allowed_depth(d, 4.65) && 4.0 > allowed_depth(d, 5.0));
         assert!(area_limit(d, "carbide") > 13.9 && area_limit(d, "carbide") < 20.0);
         assert!(area_limit(6.0, "hss") < area_limit(6.0, "carbide"));
+    }
+
+    /// Two channels across a plate (as on a 2-up blank of bases): the clearing finishes one before it goes to
+    /// the other, instead of going back and forth once per stepover ring, and its links never cut into material.
+    #[test]
+    fn adaptive_finishes_one_area_before_the_next() {
+        let h = |x: f64, _y: f64| if (20.0..36.0).contains(&x) || (64.0..80.0).contains(&x) { 4.0 } else { 10.0 };
+        let mut tris = vec![];
+        let s = 0.5;
+        for j in 0..80 {
+            for i in 0..200 {
+                let (x, y) = (i as f64 * s, j as f64 * s);
+                let z = h(x + s / 2.0, y + s / 2.0);
+                let p = |dx: f64, dy: f64| DVec3::new(x + dx, y + dy, z);
+                tris.push([p(0.0, 0.0), p(s, 0.0), p(s, s)]);
+                tris.push([p(0.0, 0.0), p(s, s), p(0.0, s)]);
+            }
+        }
+        tris.push([DVec3::ZERO, DVec3::new(0.0, 40.0, 0.0), DVec3::new(100.0, 0.0, 0.0)]);
+        let part = Part::new(&tris, &[], "top");
+        let mut c = Cam::default();
+        c.stock.side = 0.0;
+        c.stock.top = 0.0;
+        let t = tool(&mut c, ToolKind::Flat, 6.0);
+        let id = c.add_op(OpKind::Adaptive, t);
+        c.op_mut(id).unwrap().stepdown = Some(10.0);
+        c.op_mut(id).unwrap().leave_floor = 0.0;
+        let (s, paths) = sim(&c, &part);
+        let tp = &paths[0];
+        // switches between the halves while cutting (feed moves below the top)
+        let mut prev = DVec3::new(0.0, 0.0, 30.0);
+        let (mut side, mut switches, mut retracts) = (None, 0, 0);
+        for m in &tp.moves {
+            let p = m.end(prev);
+            if let Move::Feed(..) = m {
+                if p.z < 9.0 {
+                    let now = p.x > 50.0;
+                    if side.is_some_and(|s| s != now) {
+                        switches += 1;
+                    }
+                    side = Some(now);
+                }
+            }
+            if p.z > prev.z + 0.5 {
+                retracts += 1;
+            }
+            prev = p;
+        }
+        assert!(switches <= 6, "{switches} switches between the parts, {retracts} retracts");
+        // still clean: no gouges, no rapids or links into material
+        assert!(s.events.iter().all(|e| e.kind == EventKind::Overload), "{:?}", s.events.iter().take(5).collect::<Vec<_>>());
     }
 
     #[test]
