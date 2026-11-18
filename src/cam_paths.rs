@@ -912,11 +912,8 @@ fn stock_resolution(stock: (DVec3, DVec3)) -> usize {
 /// Operations that machine only what is left see the stock as the operations before them leave it.
 pub fn generate_from(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> Vec<Toolpath> {
     let paths = generate_all(cam, part, stock, false).0;
-    if cam.stay_down {
-        tighten_links(cam, part, stock, paths)
-    } else {
-        paths
-    }
+    let paths = if cam.stay_down { tighten_links(cam, part, stock, paths) } else { paths };
+    limit_feeds(cam, part, stock, paths)
 }
 
 /// The toolpaths and the stock once they have all run.
@@ -924,7 +921,88 @@ pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> 
     let (paths, left) = generate_all(cam, part, stock, true);
     let left = left.unwrap_or_else(|| final_stock(cam, part, &paths, stock));
     let paths = if cam.stay_down { tighten_links(cam, part, stock, paths) } else { paths };
-    (paths, left)
+    (limit_feeds(cam, part, stock, paths), left)
+}
+
+/// Operations roughing from the power budget (`power_target`): with the stock simulated move by move, the
+/// feed comes down on any move whose cut would take more than the cap (where the engagement rises: a corner,
+/// an entry), so the peaks stay under it without narrowing the whole operation; and each such operation notes
+/// the power it takes (mean while cutting, peak) and its removal rate.
+pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
+    if !paths.iter().any(|tp| cam.op(tp.op).is_some_and(|o| o.power_target.is_some())) {
+        return paths;
+    }
+    let stock = stock_box(cam, part);
+    let mut sim = crate::cam_sim::Sim::new(cam, part, stock, &paths, stock_resolution(stock));
+    if let Some(m) = stock_in {
+        sim.start_from(m);
+    }
+    let m = crate::cam_cutting::material(&cam.stock.material);
+    let mut base = 0usize;
+    for tp in paths.iter_mut() {
+        let n = tp.moves.len();
+        let (Some(op), Some(tool)) = (cam.op(tp.op), cam.tool(tp.tool)) else {
+            base += n;
+            continue;
+        };
+        let Some(target) = op.power_target else {
+            base += n;
+            continue;
+        };
+        let cap = op.power_cap.unwrap_or(1.3 * target);
+        let rpm = cam.spindle_rpm(tool);
+        let g = crate::cam_cutting::tool_geom(tool);
+        // power per mm² of cut cross-section per mm/min of feed at the op's own cut (its stepover and stepdown)
+        let (w0, d0) = (stepover(op, tool).max(0.05), stepdown(op, tool).max(0.1));
+        let k = |f: f64| {
+            let c = crate::cam_cutting::cut(&g, &m, w0, d0, f, rpm, w0 * d0);
+            c.power / (w0 * d0 * f).max(1e-9)
+        };
+        let (mut energy, mut cut_s, mut peak, mut vol) = (0.0, 0.0, 0.0f64, 0.0);
+        let mut p = DVec3::ZERO;
+        for i in 0..n {
+            let mv = tp.moves[i];
+            let q = mv.end(p);
+            if let Move::Feed(to, f) = mv {
+                sim.run_to(base + i, usize::MAX);
+                let before = sim.removed;
+                sim.run_to(base + i + 1, usize::MAX);
+                let len = p.distance(q);
+                let area = if len > 1e-6 { (sim.removed - before) / len } else { 0.0 };
+                if area > 1e-3 {
+                    let mut f2 = f;
+                    let power = |f: f64| k(f) * area * f;
+                    if power(f) > cap {
+                        // (the power runs nearly in step with the feed: a few rounds settle it)
+                        for _ in 0..8 {
+                            f2 = (f2 * 0.995 * cap / power(f2).max(1e-9)).max(0.25 * f);
+                        }
+                        tp.moves[i] = Move::Feed(to, f2);
+                    }
+                    let t = len / f2.max(1e-9) * 60.0;
+                    energy += power(f2) * t;
+                    cut_s += t;
+                    peak = peak.max(power(f2));
+                    vol += area * len;
+                }
+            }
+            p = q;
+        }
+        sim.run_to(base + n, usize::MAX);
+        base += n;
+        if cut_s > 0.0 {
+            tp.warnings.push(format!(
+                "power budget: {} W target (cap {}), {} W mean while cutting, {} W at the most; {} cm³/min while cutting",
+                target.round(),
+                cap.round(),
+                (energy / cut_s).round(),
+                peak.round(),
+                (vol / cut_s * 60.0 / 1000.0 * 10.0).round() / 10.0
+            ));
+        }
+        stats(tp, tool, cam);
+    }
+    paths
 }
 
 /// Toolpaths and stock states worked out before, by the hash of everything they depend on, so an edit
@@ -3462,6 +3540,42 @@ mod tests {
             let (climb, conv) = climb_and_conventional(&c, &part, &tp, top - 1e-6);
             assert!(climb > 20.0 && conv < 0.02 * climb, "{kind:?}: {climb:.0} mm climb, {conv:.0} mm conventional");
         }
+    }
+
+    #[test]
+    fn adaptive_roughing_runs_at_its_power_target_with_the_peaks_capped() {
+        // the plinth from an 86 mm square block, 6 mm levels at S9000 F3000 on the DMC2's spindle (2600 W, 43 %)
+        let part = plinth();
+        let mut c = Cam::default();
+        c.stock.size = Some([86.0, 86.0, 30.0]);
+        c.stock.bottom = 0.0;
+        c.stock.material = "6061-T6".into();
+        c.machine.spindle_power = 2600.0;
+        c.machine.spindle_efficiency = 0.43;
+        c.machine.spindle_rated_rpm = 9000.0;
+        c.machine.max_feed = 3000.0;
+        let mut tool = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.35).unwrap();
+        (tool.flutes, tool.rpm, tool.feed, tool.flute_length, tool.stickout) = (3, 9000.0, 3000.0, 19.05, 24.0);
+        let t = c.add_tool(tool);
+        let a = c.add_op(OpKind::Adaptive, t);
+        {
+            let o = c.op_mut(a).unwrap();
+            o.bottom = Some(-12.0);
+            o.stepdown = Some(6.0);
+        }
+        let plain = generate(&c, &part).remove(0);
+        c.op_mut(a).unwrap().power_target = Some(450.0);
+        let tp = generate(&c, &part).remove(0);
+        let note = tp.warnings.iter().find(|w| w.starts_with("power budget")).unwrap_or_else(|| panic!("{:?}", tp.warnings));
+        let num = |key: &str| -> f64 {
+            let i = note.find(key).unwrap();
+            note[..i].trim_end().rsplit(|c: char| !(c.is_ascii_digit() || c == '.')).next().unwrap().parse().unwrap()
+        };
+        let (mean, peak) = (num(" W mean"), num(" W at the most"));
+        assert!(peak <= 1.3 * 450.0 + 1.0, "{note}");
+        assert!(mean > 0.5 * 450.0 && mean <= 1.3 * 450.0, "{note}");
+        // more removed per minute than the default's narrow stepover, so less time
+        assert!(tp.time < plain.time, "{} s against {} s; {note}", tp.time, plain.time);
     }
 
     /// Distance from the plinth's outline (outside it).

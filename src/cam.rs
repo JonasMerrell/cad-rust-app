@@ -946,6 +946,14 @@ pub struct Operation {
     /// than the feed per tooth); capped at ×1.5, see `chip_thinning`.
     #[serde(skip_serializing_if = "is_false")]
     pub chip_thinning: bool,
+    /// Adaptive roughing from the spindle's power budget: the stepover is chosen (within what the tool takes)
+    /// so the steady cut uses this much power at the shaft, W (the cutting model's power), at the feed;
+    /// and the feed comes down on any move whose cut would take more than `power_cap` (default 1.3 × the
+    /// target): corners and entries, rather than a narrower stepover everywhere.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_target: Option<f64>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub power_cap: Option<f64>,
     /// Probe: what to touch and which work zero axes to set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probing: Option<ProbeOp>,
@@ -1086,6 +1094,8 @@ impl Default for Operation {
             seam: None,
             max_engagement: None,
             chip_thinning: false,
+            power_target: None,
+            power_cap: None,
             probing: None,
         }
     }

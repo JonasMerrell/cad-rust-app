@@ -2214,6 +2214,37 @@ fn widest(d: f64, depth: f64) -> f64 {
     lo
 }
 
+/// The stepover at which a cut `depth` deep at `feed` takes `target` W at the shaft (the cutting model), at
+/// most `max_area` / depth wide and `widest`, and within what the tool takes (force, bend, chip).
+fn power_step(ctx: &Ctx, t: &Tool, depth: f64, feed: f64, target: f64, max_width: f64, widest: f64) -> f64 {
+    let rpm = ctx.cam.spindle_rpm(t);
+    let m = crate::cam_cutting::material(&ctx.cam.stock.material);
+    let g = crate::cam_cutting::tool_geom(t);
+    let (lim, _) = ctx.cam.machine.cut_limits();
+    let hi = max_width.min(widest).min(t.diameter).max(0.02 * t.diameter);
+    let ok = |w: f64| {
+        let c = crate::cam_cutting::cut(&g, &m, w, depth, feed, rpm, w * depth);
+        let u = crate::cam_cutting::use_of(&c, &g, &lim, rpm, false);
+        c.power <= target && u.worst <= 1.0
+    };
+    let (mut lo, mut hi) = (0.02 * t.diameter, hi);
+    if ok(hi) {
+        return hi;
+    }
+    if !ok(lo) {
+        return lo;
+    }
+    for _ in 0..40 {
+        let mid = (lo + hi) / 2.0;
+        if ok(mid) {
+            lo = mid;
+        } else {
+            hi = mid;
+        }
+    }
+    lo
+}
+
 pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let r = t.radius();
@@ -2285,8 +2316,14 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         any = true;
         // a deep level at the full stepover can take more than the tool's cut area: narrow the stepover there
         let deep = z_prev - z;
-        let level_step = if deep > 1e-6 { step.min(AREA_SHARE * area_max.min(area_power) / deep).min(WIDTH_SHARE * widest(t.diameter, deep)) } else { step };
-        if level_step < step - 1e-3 {
+        let level_step = match op.power_target {
+            // from the power budget: the stepover whose steady cut takes the target at this depth and feed, within
+            // what the tool takes (its whole cut area and width: the corners are held by the feed, not here)
+            Some(target) if deep > 1e-6 => power_step(ctx, t, deep, feed, target, area_max.min(area_power / AREA_SHARE) / deep, widest(t.diameter, deep)),
+            _ if deep > 1e-6 => step.min(AREA_SHARE * area_max.min(area_power) / deep).min(WIDTH_SHARE * widest(t.diameter, deep)),
+            _ => step,
+        };
+        if op.power_target.is_none() && level_step < step - 1e-3 {
             narrowed = narrowed.min(level_step);
         }
         let slack = stock.map(|m| 2.5 * m.cell).unwrap_or(0.0);

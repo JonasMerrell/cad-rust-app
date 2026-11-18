@@ -694,7 +694,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
             "create_cam" | "edit_cam" => &[("stay_down", "boolean")],
-            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object"), ("tip_offset", "number"), ("max_engagement", "number")],
+            "cam_op" => &[("chip_thinning", "boolean"), ("probing", "object"), ("tip_offset", "number"), ("max_engagement", "number"), ("power_target", "number"), ("power_cap", "number")],
             _ => &[],
         };
         for (k, ty) in hidden {
