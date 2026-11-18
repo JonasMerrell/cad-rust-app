@@ -684,7 +684,21 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         if let Some(plan) = &tp.probe {
             notes.push(esc(&format!("finds {} and sets {} (G54); jog the probe close to the work zero first", plan.what, plan.sets_text(o))));
         }
-        notes.extend(tp.warnings.iter().map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
+        // the feed schedule's report is information, not a warning
+        notes.extend(tp.warnings.iter().filter(|w| !w.starts_with("feed schedule:")).map(|w| format!("<span class=\"warn\">{}</span>", esc(w))));
+        if let Some(r) = &tp.feed_report {
+            notes.push(esc(&format!(
+                "feed schedule ({} W target): {} → {}, peak {} → {} W, mean while cutting {} → {} W; {}% of the cut at the feed ceiling",
+                r.target_w.round(),
+                time(r.time_before_s),
+                time(r.time_after_s),
+                r.peak_before_w.round(),
+                r.peak_after_w.round(),
+                r.mean_before_w.round(),
+                r.mean_after_w.round(),
+                r.at_ceiling_pct.round()
+            )));
+        }
         if let Some(l) = vis.loads.iter().find(|l| l.op == op.id) {
             let (c, u) = (&l.cut, &l.uses);
             let text = format!(

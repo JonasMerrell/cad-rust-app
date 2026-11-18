@@ -68,6 +68,9 @@ pub struct Toolpath {
     /// tool to the safe height before them.
     #[serde(default, skip_serializing_if = "std::ops::Not::not")]
     pub linked: bool,
+    /// What the feed schedule did to it (`cam_feed_schedule`), when it ran.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub feed_report: Option<crate::cam_feed_schedule::Report>,
 }
 
 // ---------------------------------------------------------------- part geometry
@@ -924,15 +927,6 @@ pub fn generate_with_stock(cam: &Cam, part: &Part, stock: Option<&StockMap>) -> 
     (limit_feeds(cam, part, stock, paths), left)
 }
 
-/// Operations roughing from the power budget (`power_target`): with the stock simulated move by move, the
-/// feed comes down on any level move whose cut would take more than the cap (where the engagement rises: a
-/// corner, the start of a pass), so the peaks stay under it without narrowing the whole operation; and each
-/// such operation notes the power it takes (mean while cutting, peak) and its removal rate.
-///
-/// In: the setup, its part, the stock the setups before left, and the toolpaths (links already made). Out:
-/// the same toolpaths with only the feeds of those level moves lowered, and the note in their warnings.
-/// The power of a move is the cutting model's power per mm² of cut cross-section per mm/min at the op's own
-/// stepover and stepdown, times the simulated cross-section the move takes and its feed.
 /// The power budget of an operation roughing from it (`power_target` set), W at the shaft: (target, cap) at
 /// the speed it runs. The cap is the spindle's caution at that speed (its `spindle_caution` share of the
 /// power it has there), never over the never-exceed, unless the op gives one (`power_cap`); a target of 0
@@ -949,85 +943,21 @@ pub fn power_budget(cam: &Cam, op: &Operation, tool: &Tool) -> Option<(f64, f64)
     Some((target.min(cap), cap))
 }
 
-pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths: Vec<Toolpath>) -> Vec<Toolpath> {
-    if !paths.iter().any(|tp| cam.op(tp.op).is_some_and(|o| o.power_target.is_some())) {
-        return paths;
-    }
-    let stock = stock_box(cam, part);
-    let mut sim = crate::cam_sim::Sim::new(cam, part, stock, &paths, stock_resolution(stock));
-    if let Some(m) = stock_in {
-        sim.start_from(m);
-    }
-    let m = crate::cam_cutting::material(&cam.stock.material);
-    let mut base = 0usize;
-    for tp in paths.iter_mut() {
-        let n = tp.moves.len();
-        // (the tool with the op's own speeds and feeds)
-        let (Some(op), Some(tool)) = (cam.op(tp.op), cam.path_tool(tp.op, tp.tool)) else {
-            base += n;
-            continue;
-        };
-        let tool: &Tool = &tool;
-        let Some((target, cap)) = power_budget(cam, op, tool) else {
-            base += n;
-            continue;
-        };
-        let rpm = cam.spindle_rpm(tool);
-        let g = crate::cam_cutting::tool_geom(tool);
-        // power per mm² of cut cross-section per mm/min of feed at the op's own cut (its stepover and stepdown)
-        let (w0, d0) = (stepover(op, tool).max(0.05), stepdown(op, tool).max(0.1));
-        let k = |f: f64| {
-            let c = crate::cam_cutting::cut(&g, &m, w0, d0, f, rpm, w0 * d0);
-            c.power / (w0 * d0 * f).max(1e-9)
-        };
-        let (mut energy, mut cut_s, mut peak, mut vol) = (0.0, 0.0, 0.0f64, 0.0);
-        let mut p = DVec3::ZERO;
-        for i in 0..n {
-            let mv = tp.moves[i];
-            let q = mv.end(p);
-            if let Move::Feed(to, f) = mv {
-                sim.run_to(base + i, usize::MAX);
-                let before = sim.removed;
-                sim.run_to(base + i + 1, usize::MAX);
-                let len = p.distance(q);
-                // a side cut's cross-section; a move down (a helix or ramp into the material) takes the tool's
-                // footprint, not a side cut: its plunge feed is set by the op, so it is left as it is
-                let level = (q.z - p.z).abs() < 1e-6;
-                let area = if len > 1e-6 && level { (sim.removed - before) / len } else { 0.0 };
-                if area > 1e-3 {
-                    let mut f2 = f;
-                    let power = |f: f64| k(f) * area * f;
-                    if power(f) > cap {
-                        // (the power runs nearly in step with the feed: a few rounds settle it)
-                        for _ in 0..8 {
-                            f2 = (f2 * 0.995 * cap / power(f2).max(1e-9)).max(0.25 * f);
-                        }
-                        tp.moves[i] = Move::Feed(to, f2);
-                    }
-                    let t = len / f2.max(1e-9) * 60.0;
-                    energy += power(f2) * t;
-                    cut_s += t;
-                    peak = peak.max(power(f2));
-                    vol += area * len;
-                }
-            }
-            p = q;
-        }
-        sim.run_to(base + n, usize::MAX);
-        base += n;
-        if cut_s > 0.0 {
-            tp.warnings.push(format!(
-                "power budget: {} W target (cap {}), {} W mean while cutting, {} W at the most; {} cm³/min while cutting",
-                target.round(),
-                cap.round(),
-                (energy / cut_s).round(),
-                peak.round(),
-                (vol / cut_s * 60.0 / 1000.0 * 10.0).round() / 10.0
-            ));
-        }
-        stats(tp, tool, cam);
-    }
-    paths
+
+/// Feeds set from the simulated cut (`cam_feed_schedule`): the power budget's cap (`power_target`) and the
+/// feed schedule (`feed_schedule`).
+pub fn limit_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, paths: Vec<Toolpath>) -> Vec<Toolpath> {
+    crate::cam_feed_schedule::apply(cam, part, stock_in, paths)
+}
+
+/// The grid the setup's own simulations use.
+pub fn sim_resolution(stock: (DVec3, DVec3)) -> usize {
+    stock_resolution(stock)
+}
+
+/// Lengths and time of a toolpath (after its moves change).
+pub fn toolpath_stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
+    stats(tp, tool, cam)
 }
 
 /// Toolpaths and stock states worked out before, by the hash of everything they depend on, so an edit
@@ -3817,6 +3747,63 @@ mod tests {
         c.op_mut(a).unwrap().power_cap = Some(2000.0);
         let (_, cap) = budget(&c);
         assert!((cap - 765.0).abs() < 2.0, "never over the never-exceed: {cap}");
+    }
+
+    /// The feed schedule on the plinth (the DMC2 at S9000, F3000 top feed, 1118 W at the shaft, never past 85 %,
+    /// caution 76 %: a 650 W target): adaptive and level-by-level clearing both come out faster, no load sample
+    /// over the target by more than 5 %, nothing over a limit, and no rapid into stock or gouge.
+    #[test]
+    fn feed_schedule_holds_the_target_and_saves_time() {
+        let part = plinth();
+        for kind in [OpKind::Adaptive, OpKind::Clear] {
+            let mut c = Cam::default();
+            c.stock.size = Some([86.0, 86.0, 30.0]);
+            c.stock.bottom = 0.0;
+            c.stock.material = "6061-T6".into();
+            c.machine.spindle_power = 2600.0;
+            c.machine.spindle_efficiency = 0.43;
+            c.machine.spindle_rated_rpm = 9000.0;
+            c.machine.spindle_never_exceed = 0.85;
+            c.machine.spindle_caution = 0.76;
+            c.machine.max_feed = 3000.0;
+            let mut tool = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.35).unwrap();
+            (tool.flutes, tool.rpm, tool.feed, tool.flute_length, tool.stickout) = (3, 9000.0, 1500.0, 19.05, 24.0);
+            let t = c.add_tool(tool);
+            let a = c.add_op(kind, t);
+            {
+                let o = c.op_mut(a).unwrap();
+                o.bottom = Some(-12.0);
+                o.stepdown = Some(6.0);
+            }
+            let plain = generate(&c, &part).remove(0);
+            c.op_mut(a).unwrap().feed_schedule = Some(true);
+            let target = crate::cam_feed_schedule::default_target(&c, 9000.0);
+            assert!((target - 671.0).abs() < 10.0, "{target}");
+            let tp = generate(&c, &part).remove(0);
+            let r = tp.feed_report.unwrap_or_else(|| panic!("{kind:?}: no report; {:?}", tp.warnings));
+            println!("{kind:?}: {r:?}");
+            assert!(r.peak_after_w <= 1.05 * target, "{kind:?}: {r:?}");
+            assert!(tp.time < plain.time, "{kind:?}: {} s against {} s; {r:?}", tp.time, plain.time);
+            assert!(r.mean_after_w > r.mean_before_w, "{kind:?}: {r:?}");
+            // the moves as they run: every sample under the target (+5 %), no event at all
+            let stock = stock_box(&c, &part);
+            for res in [stock_resolution(stock), 300, 400, 500, 700] {
+                let mut sim = crate::cam_sim::Sim::new(&c, &part, stock, std::slice::from_ref(&tp), res);
+                sim.profile = Some(vec![]);
+                sim.run_to(usize::MAX, usize::MAX);
+                let prof = sim.profile.as_ref().unwrap();
+                let top = prof.iter().fold(None::<&crate::cam_sim::LoadSample>, |a, s| if a.is_none_or(|a| s.power > a.power) { Some(s) } else { a }).unwrap();
+                println!("{kind:?} grid {res}: peak {} W {:?}", top.power.round(), top);
+                // on the schedule's own grid within 5 % of the target; on any other a cell's difference in where
+                // the stock's edge falls, still under the cap (the spindle's caution)
+                let own = res == stock_resolution(stock);
+                assert!(top.power <= if own { 1.05 * target } else { r.cap_w }, "{kind:?} grid {res}: {top:?}");
+                assert!(sim.events.is_empty(), "{kind:?}: {:?}", sim.events.iter().take(5).collect::<Vec<_>>());
+            }
+            // the same path: same moves where it cuts, only the feeds differ (and long moves split, then joined)
+            let ends = |t: &Toolpath| t.moves.iter().filter(|m| matches!(m, Move::Rapid(_))).count();
+            assert_eq!(ends(&tp), ends(&plain), "{kind:?}");
+        }
     }
 
     /// Distance from the plinth's outline (outside it).
