@@ -13,6 +13,7 @@ mod cam;
 mod cam_3d;
 mod cam_contour;
 mod cam_engrave;
+mod cam_feed_schedule;
 mod cam_jaws;
 mod cam_job;
 mod cam_machine;

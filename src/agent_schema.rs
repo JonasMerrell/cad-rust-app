@@ -554,6 +554,10 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_op", "feed") => t("number", "this operation's cutting feed, mm/min, instead of the tool's"),
         ("cam_op", "plunge_feed") => t("number", "this operation's plunge feed, mm/min, instead of the tool's"),
         ("cam_op", "spring_pass") => t("boolean", "contour: the last lap once more at the same size"),
+        ("cam_op", "feed_schedule") => t("boolean", "roughing ops (adaptive, pocket, clear, face, contour with leave > 0): after the toolpath is made, simulate it and set each cutting move's feed so the spindle runs at the target power (power_target, else the setup's feed_target, else 60% of the power the spindle has at the tool's speed: 671 W at 9000 on the DMC2; never over power_cap, default the spindle's caution: 850 W at 9000), faster where the tool is lightly engaged (up to feed_max_scale × the feed and the machine's max_feed), slower a tool radius before walls and corners (down to 0.3 × the feed or a 0.02 mm chip), force, bend, stress and chip kept within limits; long moves are split so the feed can change along them; finishing ops keep their feed. null = the setup's feed_schedule. The op's warnings and the setup sheet report time and peak / mean power before and after"),
+        ("cam_op", "feed_max_scale") => t("number", "feed_schedule: the most a move's feed may be raised, × the programmed feed (default 2; never past the machine's max_feed)"),
+        ("create_cam" | "edit_cam", "feed_schedule") => t("boolean", "default for every roughing op's feed_schedule (see cam_op): feeds set move by move from the simulated cut so the spindle runs at feed_target; off by default"),
+        ("create_cam" | "edit_cam", "feed_target") => t("number", "the power the feed schedule aims at, W at the spindle shaft (the cutting model's power, as simulate_cam's power_w); default 60% of the power the spindle has at the tool's speed, never over its caution"),
         ("cam_op", "chip_thinning") => t("boolean", "adaptive: raise the cutting feed for radial chip thinning (at most ×1.5)"),
         ("cam_op", "probing") => json!({"type": "object", "description": "probe: what to find and set", "properties": {
             "cycle": en(&["z", "edge", "corner", "bore", "boss"], "z: the top (sets Z); edge: one side (X or Y); corner: X and Y; bore / boss: a middle (X and Y)"),
@@ -704,11 +708,13 @@ pub(super) fn complete(tools: &mut [Value]) {
         // fields serde leaves out at their defaults, so serde_fields can't see them
         let hidden: &[(&str, &str)] = match name.as_str() {
             "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
-            "create_cam" | "edit_cam" => &[("stay_down", "boolean")],
+            "create_cam" | "edit_cam" => &[("stay_down", "boolean"), ("feed_schedule", "boolean"), ("feed_target", "number")],
             "cam_op" => &[
                 ("chip_thinning", "boolean"),
                 ("probing", "object"),
                 ("tip_offset", "number"),
+                ("feed_schedule", "boolean"),
+                ("feed_max_scale", "number"),
                 ("rpm", "number"),
                 ("feed", "number"),
                 ("plunge_feed", "number"),
