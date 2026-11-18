@@ -72,6 +72,41 @@ Also per operation: the share of feed time cutting nothing (air) or next to noth
 step-down × stepover), and machined part surface left more than 0.1 mm proud (roughing no finishing pass
 followed).
 
+## Feed scheduling (`feed_schedule`, src/cam_feed_schedule.rs)
+
+The same model, run backwards: keep the toolpath, and set each cutting move's feed so the spindle works at a
+target power (feedrate scheduling, Erdim, Lazoglu & Ozturk 2006; Altintas, *Manufacturing Automation* ch. 2).
+Off unless an op (`cam_op feed_schedule`) or the setup (`create_cam` / `edit_cam` `feed_schedule`) turns it on;
+only roughing ops (adaptive, pocket, clear, face, contour with `leave` > 0) are touched.
+
+1. After the toolpaths and stay-down links are made, feed moves longer than 2 mm are split into pieces (plunges
+   and ramps steeper than 1 in 2 are left alone: the end of the tool cuts there).
+2. The whole setup is simulated once with a load profile: every load sample (width, depth, cross-section over the
+   last millimetre) and the move it belongs to. The geometry doesn't depend on the feed, so one run gives every
+   piece's cut.
+3. For each sample, the highest feed at which the cut takes no more than the target and stays within every other
+   limit (force, bend, stress, torque against the never-exceed share, chip; worst use ≤ 0.97), found by bisection
+   on `cam_cutting::cut` (P ∝ vf^(1−mc), vf^0.75 in aluminium). The width is taken half a grid cell wider: on
+   another grid (the export's own simulation) the stock's edge falls a cell either way, ±10 % of a 2 mm cut.
+4. A piece takes the lowest feed any sample of it, or of the path within one tool radius ahead, needs (the tool
+   slows before it reaches a wall). Pieces cutting nothing run at the ceiling.
+5. Bounds: ceiling `feed_max_scale` (default 2) × the programmed feed and the machine's `max_feed`; floor
+   0.3 × the programmed feed and a 0.02 mm chip per tooth.
+6. Feeds are rounded down (10 mm/min steps under 400, 25 under 1000, 50 above: ≤ 5 %), runs shorter than 3 mm
+   faster than a neighbour come down to it, and the pieces of one move at one feed are joined again so arc fitting
+   finds the same runs.
+7. Re-simulated; a piece still more than 2 % over the target is lowered by (target / P)^(1/(1−mc)) (up to 3 rounds).
+
+Target and cap are the power budget's (`cam_paths::power_budget`): the op's `power_target` / `power_cap`, else
+the setup's `feed_target`, else 60 % of the power the spindle has at the tool's speed, the cap its caution share
+(on the DMC2 at F004 = 150: 671 / 850 W at 9000). `power_target` without `feed_schedule` uses the same code in
+reduce-only mode: feeds only come down to the cap, never under a quarter of the programmed feed.
+
+Reported per op (the op's warnings, `simulate_cam` `feed_schedule`, the setup sheet): time, cutting time, peak
+and time-weighted mean power while cutting before and after, and the share of the cut at the feed ceiling. At
+9000 rpm with 3 flutes the 3000 mm/min ceiling is 0.11 mm/tooth: where much of the cut sits there, a wider
+stepover (not a faster feed) is what would take more.
+
 ## Calibration (DMC2, 6061-T6, 1/4" 3-flute carbide at 24 000 rpm, 24 out of the holder)
 
 **Measured, 2026-11-17** (the stick-out gauge's broken-tool run): the spindle's speed was heard from a
