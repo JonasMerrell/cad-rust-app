@@ -350,7 +350,8 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
         }
         let Station { cam, paths, origin, safe, stock, .. } = st[si];
         let safe_w = safe - origin.z;
-        let Some(tool) = cam.tool(tp.tool) else { continue };
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let tool: &Tool = &tool;
         if si != station {
             o.line("");
             o.line(&comment(&format!("station {}: {}", si + 1, cam.name)));
