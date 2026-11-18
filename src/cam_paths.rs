@@ -3293,6 +3293,107 @@ mod tests {
         Part::new(&tris, &[], "top")
     }
 
+    /// The cutting moves of a toolpath below the top (horizontal feeds), as (from, to).
+    fn level_feeds(tp: &Toolpath, below: f64) -> Vec<(DVec3, DVec3)> {
+        let mut p = DVec3::ZERO;
+        let mut out = vec![];
+        for m in &tp.moves {
+            let q = m.end(p);
+            if matches!(m, Move::Feed(..)) && q.z < below && (q.z - p.z).abs() < 1e-9 && q.truncate().distance(p.truncate()) > 0.05 {
+                out.push((p, q));
+            }
+            p = q;
+        }
+        out
+    }
+
+    /// Length of the cutting moves (horizontal feeds below `below`) that climb and that cut conventional, from
+    /// the simulated stock before each move: with a clockwise spindle a climb cut has the material it takes on
+    /// the right of travel, a conventional one on the left; moves with material on both sides (slotting) or
+    /// neither (air) don't count.
+    fn climb_and_conventional(c: &Cam, part: &Part, tp: &Toolpath, below: f64) -> (f64, f64) {
+        let r = c.tool(tp.tool).unwrap().radius();
+        let stock = stock_box(c, part);
+        let mut sim = crate::cam_sim::Sim::new(c, part, stock, std::slice::from_ref(tp), 400);
+        let at = |sim: &crate::cam_sim::Sim, q: DVec2| -> f32 {
+            let (i, j) = (((q.x - sim.x0) / sim.cell).round(), ((q.y - sim.y0) / sim.cell).round());
+            if i < 0.0 || j < 0.0 || i as usize >= sim.nx || j as usize >= sim.ny {
+                return crate::cam_stock::EMPTY;
+            }
+            sim.stock[j as usize * sim.nx + i as usize]
+        };
+        let (mut climb, mut conv) = (0.0, 0.0);
+        let mut p = DVec3::ZERO;
+        for (i, m) in tp.moves.iter().enumerate() {
+            let q = m.end(p);
+            if matches!(m, Move::Feed(..)) && q.z < below && (q.z - p.z).abs() < 1e-9 && q.truncate().distance(p.truncate()) > 0.05 {
+                sim.run_to(i, usize::MAX);
+                let d = (q - p).truncate().normalize();
+                let mid = (p.truncate() + q.truncate()) / 2.0;
+                // just inside the tool's reach on either side, a little ahead of the middle
+                let side = |s: f64| (0..3).any(|k| at(&sim, mid + d * (0.25 * k as f64 * r) + d.perp() * s * (r - 0.3)) as f64 > q.z + 0.05);
+                let (left, right) = (side(1.0), side(-1.0));
+                let len = p.distance(q);
+                match (left, right) {
+                    (false, true) => climb += len,
+                    (true, false) => conv += len,
+                    _ => {}
+                }
+            }
+            p = q;
+        }
+        (climb, conv)
+    }
+
+    #[test]
+    fn roughing_round_the_part_climbs_all_the_way() {
+        // Jonas (2026-11-18): adaptive and contours climb only, passes all the way round the part, corners
+        // handled (the engagement at the stock's corners is checked in
+        // contour_roughing_keeps_corner_engagement_under_the_limit)
+        let part = plinth();
+        let mut c = Cam::default();
+        c.stock.size = Some([86.0, 86.0, 30.0]);
+        c.stock.bottom = 0.0;
+        let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap());
+        let id = c.add_op(OpKind::Contour, t);
+        {
+            let o = c.op_mut(id).unwrap();
+            o.side = Side::Outside;
+            o.bottom = Some(-6.0);
+            o.stepdown = Some(6.0);
+        }
+        assert!(c.op(id).unwrap().climb, "climb is the default");
+        let top = stock_box(&c, &part).1.z;
+        let tp = generate(&c, &part).remove(0);
+        let (climb, conv) = climb_and_conventional(&c, &part, &tp, top - 1e-6);
+        assert!(climb > 500.0 && conv < 0.02 * climb, "contour: {climb:.0} mm climb, {conv:.0} mm conventional");
+        // passes all the way round: the outermost takes the square stock's corners, beyond the wall's
+        let fs = level_feeds(&tp, top - 1e-6);
+        let outer = fs.iter().map(|(_, q)| plinth_distance(q.truncate())).fold(0.0, f64::max);
+        assert!(outer > 5.0, "{outer}");
+        // and the adaptive
+        let a = c.add_op(OpKind::Adaptive, t);
+        c.op_mut(id).unwrap().suppressed = true;
+        {
+            let o = c.op_mut(a).unwrap();
+            o.bottom = Some(-6.0);
+            o.stepdown = Some(6.0);
+        }
+        let tp = generate(&c, &part).into_iter().find(|p| p.op == a).unwrap();
+        let (climb, conv) = climb_and_conventional(&c, &part, &tp, top - 1e-6);
+        assert!(climb > 500.0 && conv < 0.02 * climb, "adaptive: {climb:.0} mm climb, {conv:.0} mm conventional");
+        // a pocket climbs too
+        let part = plate();
+        for kind in [OpKind::Pocket] {
+            let (mut c, t) = setup();
+            c.add_op(kind, t);
+            let top = stock_box(&c, &part).1.z;
+            let tp = generate(&c, &part).remove(0);
+            let (climb, conv) = climb_and_conventional(&c, &part, &tp, top - 1e-6);
+            assert!(climb > 20.0 && conv < 0.02 * climb, "{kind:?}: {climb:.0} mm climb, {conv:.0} mm conventional");
+        }
+    }
+
     /// Distance from the plinth's outline (outside it).
     fn plinth_distance(p: DVec2) -> f64 {
         let q = p.abs() - DVec2::splat(27.0);

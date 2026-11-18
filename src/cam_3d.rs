@@ -1784,7 +1784,8 @@ impl Level<'_, '_> {
         let turns = (dz / pitch).ceil().max(1.0);
         let seg = (2.0 * (1.0 - (0.01 / rh).min(1.0)).acos()).clamp(0.08, 0.5);
         let n = ((turns * TAU / seg).ceil() as usize).max(8);
-        let dir = if self.climb { -1.0 } else { 1.0 };
+        // climbing the material round the helix: counter-clockwise, with it on the right
+        let dir = if self.climb { 1.0 } else { -1.0 };
         // down, then one more turn at depth
         let m = (TAU / seg).ceil() as usize;
         for i in 1..=n + m {
@@ -1796,11 +1797,12 @@ impl Level<'_, '_> {
     }
 
     /// The loop oriented so the material outside the free region is on the cutting side: climb milling (a
-    /// spindle turning clockwise) has it on the left.
+    /// spindle turning clockwise, M3) has it on the right of travel, as an outside contour going clockwise
+    /// round the part.
     fn orient(&self, c: &Contour, outer: bool) -> Contour {
         let ccw = crate::cam_paths::area(c) > 0.0;
-        // outer loops have the free region inside: clockwise puts what's outside on the left
-        let want_ccw = if outer { !self.climb } else { self.climb };
+        // outer loops have the free region inside: counter-clockwise puts what's outside on the right
+        let want_ccw = if outer { self.climb } else { !self.climb };
         if ccw == want_ccw {
             c.clone()
         } else {
@@ -2784,7 +2786,8 @@ mod tests {
             let (sm, _) = sim(&c, part);
             // round a part's corner close to the stock's edge, the passes that come in from outside veer in to
             // meet the band along the part a little steeply (up to about 25°): a pass takes half as much again there
-            let most = if kind == OpKind::Pocket { step + 0.15 } else { 1.6 * step };
+            // (a hair over 1.6 × with the passes climbing, which meet that corner from the other side)
+            let most = if kind == OpKind::Pocket { step + 0.15 } else { 1.65 * step };
             assert!(e.peak <= most, "{kind:?}: takes {} mm at {:?}, stepover {step}", e.peak, e.at);
             // (the engagement rule: the generic preset's feed is more than the default spindle's power takes)
             assert!(sm.loads.iter().all(|l| l.geometric < 1.0), "{kind:?}: {:?}", sm.loads);
