@@ -2893,7 +2893,13 @@ pub fn viewport(app: &mut App, ui: &mut Ui) {
     if app.cam.computing {
         lines.push("Making toolpaths…".to_string());
     } else if !app.cam.paths.is_empty() {
-        lines.push(format!("Cycle time {}", fmt_time(total)));
+        // with the whole program simulated: how much of it is air cutting (feed moves that remove nothing)
+        let split =
+            app.cam.sim.as_ref().filter(|s| s.done >= s.total() && !s.air.is_empty()).zip(cam(app)).map(|(s, c)| crate::cam_sim::time_split(c, &app.cam.paths, &s.air, total));
+        lines.push(match split {
+            Some(t) => format!("Cycle time {} · {:.0}% air cutting", fmt_time(total), t.pct(t.air_s)),
+            None => format!("Cycle time {}", fmt_time(total)),
+        });
     }
     if let Some(sim) = &app.cam.sim {
         if app.cam.sim_on {
