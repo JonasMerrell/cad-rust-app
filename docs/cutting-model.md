@@ -72,6 +72,20 @@ Also per operation: the share of feed time cutting nothing (air) or next to noth
 step-down × stepover), and machined part surface left more than 0.1 mm proud (roughing no finishing pass
 followed).
 
+### Air cutting and the cycle time (`cam_sim::time_split`)
+
+The simulation times each feed move at its own feed (so scheduled feeds and link feeds count as they run) and
+splits it into cutting, light (under 5%) and air (removes nothing; feed moves above the stock are air too); air
+faster than the machine's `max_feed` is counted again as links. `time_split` puts that against the cycle
+time: each operation's time (`Toolpath::time`) is cutting (feed that cuts, tapping) + air + rapids (its G0s) +
+other (dwells, probing), and what `cycle_time` adds beyond the operations (spin-ups, moves between operations)
+is `between_ops`. The headline is air cutting as a share of the whole cycle time; non-cutting = air + rapids +
+between operations. It is shown in the CAM viewport's corner once the program is simulated ("Cycle time 12:34 ·
+18% air cutting"), on the setup sheet (KPI, a Time split row, per operation), and in `simulate_cam` and
+`export_gcode` results as `air_time` (`air_cut_pct`, `link_pct`, `rapid_pct`, `between_ops_pct`,
+`cutting_pct`, `non_cutting_pct`, `seconds`); `cam_info` gives the split without the simulation (`time_split`,
+air not separated from feed). A job sums its stations in the combined simulation.
+
 ## Feed scheduling (`feed_schedule`, src/cam_feed_schedule.rs)
 
 The same model, run backwards: keep the toolpath, and set each cutting move's feed so the spindle works at a

@@ -270,6 +270,11 @@ pub struct Sim {
     /// How much of each operation's feed moves cut nothing (see `OpAir`).
     pub air: Vec<OpAir>,
     feed: f64,
+    /// Air feed moves faster than this are links (`OpAir::link_s`): the machine's `max_feed`, which only
+    /// link feeds go over.
+    link_above: f64,
+    /// In a tapping cycle: its travel isn't timed at a feed.
+    tapping: bool,
     /// The stock material and the machine's limits for the cutting model; whether the limits are assumed.
     material: crate::cam_cutting::Material,
     pub limits: crate::cam_cutting::Limits,
@@ -364,8 +369,9 @@ pub struct OpChips {
     pub deep_slot_mm: f64,
 }
 
-/// An operation's feed moves: how far, how long (at the programmed feed), and how much of that cut no
-/// material at all (air) or next to none (under 5% of its own step-down × stepover).
+/// An operation's feed moves: how far, how long (at each move's own feed), and how much of that cut no
+/// material at all (air, feed moves above the stock included) or next to none (under 5% of its own
+/// step-down × stepover). `link_*` is the part of the air run faster than the machine's `max_feed` (link feeds).
 #[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
 pub struct OpAir {
     pub op: u64,
@@ -375,6 +381,107 @@ pub struct OpAir {
     pub air_s: f64,
     pub light_mm: f64,
     pub light_s: f64,
+    pub link_mm: f64,
+    pub link_s: f64,
+}
+
+/// Where one operation's time goes, seconds: `time_s` (its `Toolpath::time`) = `cut_s` (feed moves that cut,
+/// `light_s` of them barely, plus tapping) + `air_s` (feed moves that cut nothing, `link_s` of them at a
+/// link feed) + `rapid_s` (its G0 moves) + `other_s` (dwells, and all of a probing cycle).
+#[derive(Debug, Clone, Copy, PartialEq, Default, serde::Serialize)]
+pub struct OpTime {
+    pub op: u64,
+    pub time_s: f64,
+    pub cut_s: f64,
+    pub light_s: f64,
+    pub air_s: f64,
+    pub link_s: f64,
+    pub rapid_s: f64,
+    pub other_s: f64,
+}
+
+/// A program's cycle time split up (see `time_split`): the operations' parts summed, and `between_s`, what the
+/// cycle time adds to them (spindle spin-ups, the moves from one operation to the next, tool changes where
+/// they're timed). The parts add up to `total_s`.
+#[derive(Debug, Clone, PartialEq, Default, serde::Serialize)]
+pub struct TimeSplit {
+    pub total_s: f64,
+    pub cut_s: f64,
+    pub light_s: f64,
+    pub air_s: f64,
+    pub link_s: f64,
+    pub rapid_s: f64,
+    pub other_s: f64,
+    pub between_s: f64,
+    pub ops: Vec<OpTime>,
+}
+
+impl TimeSplit {
+    /// `s` as a percentage of the cycle time.
+    pub fn pct(&self, s: f64) -> f64 {
+        if self.total_s > 0.0 {
+            100.0 * s / self.total_s
+        } else {
+            0.0
+        }
+    }
+
+    /// Time the tool isn't cutting: air feed, rapids and between operations.
+    pub fn non_cutting_s(&self) -> f64 {
+        self.air_s + self.rapid_s + self.between_s
+    }
+
+    /// The JSON the agent tools report.
+    pub fn json(&self) -> serde_json::Value {
+        let r1 = |x: f64| (x * 10.0).round() / 10.0;
+        serde_json::json!({
+            "air_cut_pct": r1(self.pct(self.air_s)),
+            "link_pct": r1(self.pct(self.link_s)),
+            "rapid_pct": r1(self.pct(self.rapid_s)),
+            "between_ops_pct": r1(self.pct(self.between_s)),
+            "cutting_pct": r1(self.pct(self.cut_s)),
+            "light_cut_pct": r1(self.pct(self.light_s)),
+            "other_pct": r1(self.pct(self.other_s)),
+            "non_cutting_pct": r1(self.pct(self.non_cutting_s())),
+            "seconds": {"total": r1(self.total_s), "cutting": r1(self.cut_s), "light_cut": r1(self.light_s), "air_cut": r1(self.air_s), "links": r1(self.link_s), "rapids": r1(self.rapid_s), "between_ops": r1(self.between_s), "other": r1(self.other_s)},
+        })
+    }
+}
+
+/// Split the cycle time `total` of `paths` (`cam_paths::cycle_time`, or a job's) into cutting, air cutting,
+/// rapids and the rest, using the simulation's `air` for each operation's feed moves. Feed and rapid times
+/// come from the toolpaths as their `time` does; the simulation gives the share of each operation's feed
+/// time spent in air (and in links, light cuts), so the parts add up to the toolpath times exactly.
+pub fn time_split(cam: &Cam, paths: &[Toolpath], air: &[OpAir], total: f64) -> TimeSplit {
+    let mut t = TimeSplit { total_s: total, ..Default::default() };
+    let mut sum = 0.0;
+    for tp in paths.iter().filter(|p| !p.moves.is_empty()) {
+        let Some(tool) = cam.path_tool(tp.op, tp.tool) else { continue };
+        let m = crate::cam_paths::move_times(tp, &tool, cam);
+        let mut o = OpTime { op: tp.op, time_s: tp.time, rapid_s: m.rapid_s, ..Default::default() };
+        if tool.kind == ToolKind::Probe {
+            o.rapid_s = 0.0;
+            o.other_s = tp.time;
+        } else {
+            let share = |x: f64, of: f64| if of > 1e-9 { (x / of).clamp(0.0, 1.0) } else { 0.0 };
+            let a = air.iter().find(|a| a.op == tp.op).copied().unwrap_or_default();
+            o.air_s = m.feed_s * share(a.air_s, a.feed_s);
+            o.link_s = m.feed_s * share(a.link_s, a.feed_s);
+            o.light_s = m.feed_s * share(a.light_s, a.feed_s);
+            o.cut_s = m.feed_s - o.air_s + m.tap_s;
+            o.other_s = m.dwell_s;
+        }
+        sum += tp.time;
+        t.cut_s += o.cut_s;
+        t.light_s += o.light_s;
+        t.air_s += o.air_s;
+        t.link_s += o.link_s;
+        t.rapid_s += o.rapid_s;
+        t.other_s += o.other_s;
+        t.ops.push(o);
+    }
+    t.between_s = (total - sum).max(0.0);
+    t
 }
 
 /// How hard an operation works its tool at its heaviest: the cut's cross-section over about a
@@ -483,6 +590,8 @@ impl Sim {
             loads: vec![],
             air: vec![],
             feed: 1000.0,
+            link_above: if cam.machine.max_feed > 0.0 { cam.machine.max_feed + 1.0 } else { f64::INFINITY },
+            tapping: false,
             material: crate::cam_cutting::material(&cam.stock.material),
             limits: cam.machine.cut_limits().0,
             limits_assumed: cam.machine.cut_limits().1,
@@ -714,8 +823,10 @@ impl Sim {
                 }
                 Move::Tap { z, r, .. } => {
                     let a = self.pos;
+                    self.tapping = true;
                     spent += self.travel(ci, op, step, DVec3::new(a.x, a.y, z), false);
                     spent += self.travel(ci, op, step, DVec3::new(a.x, a.y, r), false);
+                    self.tapping = false;
                 }
                 Move::Dwell(_) => {}
             }
@@ -750,8 +861,11 @@ impl Sim {
                     self.check_machine(ci, op, step, p);
                 }
             }
-            // nothing to touch above the stock
+            // nothing to touch above the stock (a feed move there is air)
             if p.z as f32 > self.max_h + 1e-3 {
+                if !rapid && !self.cutters[ci].probe {
+                    self.air_sample(ci, op, 0.0, len / n as f64);
+                }
                 continue;
             }
             work += 1;
@@ -906,7 +1020,7 @@ impl Sim {
     }
 
     fn air_sample(&mut self, ci: usize, op: u64, removed: f32, len: f64) {
-        if len <= 0.0 {
+        if len <= 0.0 || self.tapping {
             return;
         }
         let secs = len / (self.feed.max(1.0) / 60.0);
@@ -923,6 +1037,10 @@ impl Sim {
         if removed <= 1e-6 {
             a.air_mm += len;
             a.air_s += secs;
+            if self.feed > self.link_above {
+                a.link_mm += len;
+                a.link_s += secs;
+            }
         } else if light {
             a.light_mm += len;
             a.light_s += secs;
@@ -1370,5 +1488,64 @@ mod tests {
             assert!(sim.events.is_empty(), "hole at y = {y:?}: {:?}", sim.events);
             assert!(sim.removed > 0.0);
         }
+    }
+
+    /// A slot with a feed move above the stock (air, at a link feed over max_feed), a plunge, a dwell and
+    /// rapids: the split adds up to the cycle time with each part where it belongs.
+    #[test]
+    fn time_split_counts_air_rapids_and_between_operations() {
+        let part = Part::new(&[], &[], "top");
+        let mut cam = Cam { rapid_rate: 6000.0, ..Default::default() };
+        cam.machine.rapid_z = 0.0;
+        cam.machine.spin_up = 5.0;
+        cam.machine.max_feed = 1000.0;
+        let flat = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat).unwrap();
+        let t = cam.add_tool(flat);
+        let stock = (DVec3::new(-10.0, -10.0, 0.0), DVec3::new(90.0, 60.0, 10.0));
+        let moves = vec![
+            Move::Rapid([0.0, 20.0, 15.0]),
+            // 60 mm in air above the stock at 1200 mm/min: 3 s, a link
+            Move::Feed([60.0, 20.0, 15.0], 1200.0),
+            // 5 mm at 6000 mm/min: 0.05 s
+            Move::Rapid([60.0, 20.0, 10.0]),
+            // plunge 1 mm at 300: 0.2 s; slot 40 mm at 600: 4 s
+            Move::Feed([60.0, 20.0, 9.0], 300.0),
+            Move::Feed([20.0, 20.0, 9.0], 600.0),
+            Move::Dwell(2.0),
+            // 0.06 s
+            Move::Rapid([20.0, 20.0, 15.0]),
+        ];
+        let mut tp = Toolpath { op: 1, tool: t, moves, ..Default::default() };
+        let tool = cam.tool(t).unwrap().clone();
+        let m = crate::cam_paths::move_times(&tp, &tool, &cam);
+        assert!((m.feed_s - 7.2).abs() < 1e-9 && (m.rapid_s - 0.11).abs() < 1e-9 && m.dwell_s == 2.0, "{m:?}");
+        tp.time = m.total();
+        let paths = [tp];
+        let mut sim = Sim::new(&cam, &part, stock, &paths, 500);
+        sim.run_to(usize::MAX, usize::MAX);
+        // (the preset's default feed overloads it in a full slot: not what this is about)
+        assert!(sim.events.iter().all(|e| e.kind == EventKind::Overload), "{:?}", sim.events);
+        let a = sim.air[0];
+        assert!((a.feed_s - 7.2).abs() < 1e-6, "{a:?}");
+        assert!((a.air_s - 3.0).abs() < 0.1 && (a.link_s - 3.0).abs() < 1e-6, "{a:?}");
+        let total = crate::cam_paths::cycle_time(&cam, &paths);
+        assert!((total - 14.31).abs() < 1e-9, "{total}");
+        let s = time_split(&cam, &paths, &sim.air, total);
+        let close = |x: f64, y: f64, tol: f64| assert!((x - y).abs() < tol, "{x} vs {y}: {s:?}");
+        close(s.air_s, 3.0, 0.1);
+        close(s.link_s, 3.0, 1e-6);
+        close(s.cut_s, 4.2, 0.1);
+        close(s.rapid_s, 0.11, 1e-9);
+        close(s.other_s, 2.0, 1e-9);
+        close(s.between_s, 5.0, 1e-9);
+        close(s.cut_s + s.air_s + s.rapid_s + s.other_s + s.between_s, total, 1e-9);
+        close(s.pct(s.air_s), 100.0 * 3.0 / 14.31, 0.7);
+        close(s.pct(s.non_cutting_s()), 100.0 * 8.11 / 14.31, 0.7);
+        let j = s.json();
+        close(j["air_cut_pct"].as_f64().unwrap(), 21.0, 0.7);
+        // with no simulation every feed second counts as cutting
+        let none = time_split(&cam, &paths, &[], total);
+        close(none.air_s, 0.0, 1e-12);
+        close(none.cut_s, 7.2, 1e-9);
     }
 }

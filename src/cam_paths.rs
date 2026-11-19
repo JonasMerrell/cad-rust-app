@@ -2678,41 +2678,65 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
     paths
 }
 
-fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
+/// Where a toolpath's time goes, seconds: feed moves (at each move's own feed), rapids (the slower axis sets
+/// the time), tapping cycles and dwells. They add up to `Toolpath::time`; the first move takes no time (the
+/// toolpath's time starts there: `cycle_time` adds the move to it).
+#[derive(Debug, Clone, Copy, PartialEq, Default)]
+pub struct MoveTimes {
+    pub feed_s: f64,
+    pub rapid_s: f64,
+    pub tap_s: f64,
+    pub dwell_s: f64,
+    pub cut_mm: f64,
+    pub rapid_mm: f64,
+}
+
+impl MoveTimes {
+    pub fn total(&self) -> f64 {
+        self.feed_s + self.rapid_s + self.tap_s + self.dwell_s
+    }
+}
+
+pub fn move_times(tp: &Toolpath, tool: &Tool, cam: &Cam) -> MoveTimes {
     let rapid_rate = cam.rapid_rate.max(1.0);
     let rapid_z = if cam.machine.rapid_z > 0.0 { cam.machine.rapid_z } else { rapid_rate };
     let mut p = DVec3::ZERO;
     let mut first = true;
-    let (mut cut, mut rapid, mut time) = (0.0, 0.0, 0.0);
+    let mut t = MoveTimes::default();
     for m in &tp.moves {
         let q = m.end(p);
         let d = if first { 0.0 } else { p.distance(q) };
         match *m {
             Move::Rapid(_) => {
-                rapid += d;
+                t.rapid_mm += d;
                 // the axes move together: the slower of them sets the time
                 let (dxy, dz) = if first { (0.0, 0.0) } else { ((q - p).truncate().length(), (q.z - p.z).abs()) };
-                time += (dxy / rapid_rate).max(dz / rapid_z) * 60.0;
+                t.rapid_s += (dxy / rapid_rate).max(dz / rapid_z) * 60.0;
             }
             Move::Feed(_, f) => {
-                cut += d;
-                time += d / f.max(1.0) * 60.0;
+                t.cut_mm += d;
+                t.feed_s += d / f.max(1.0) * 60.0;
             }
             Move::Tap { z, r, pitch } => {
                 // a tapping head unscrews the tap faster than it went in
                 let back = if tool.tapping_head { 1.0 / tool.reverse_ratio.max(0.1) } else { 1.0 };
                 let l = (r - z).abs();
-                cut += 2.0 * l;
-                time += l * (1.0 + back) / (cam.spindle_rpm(tool).max(1.0) * pitch.max(0.01)) * 60.0 + 1.0;
+                t.cut_mm += 2.0 * l;
+                t.tap_s += l * (1.0 + back) / (cam.spindle_rpm(tool).max(1.0) * pitch.max(0.01)) * 60.0 + 1.0;
             }
-            Move::Dwell(s) => time += s,
+            Move::Dwell(s) => t.dwell_s += s,
         }
         first = false;
         p = q;
     }
-    tp.cut_length = cut;
-    tp.rapid_length = rapid;
-    tp.time = time;
+    t
+}
+
+fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
+    let t = move_times(tp, tool, cam);
+    tp.cut_length = t.cut_mm;
+    tp.rapid_length = t.rapid_mm;
+    tp.time = t.total();
 }
 
 #[cfg(test)]

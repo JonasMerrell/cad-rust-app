@@ -217,6 +217,12 @@ impl Session {
             })
             .collect();
         let total = cam_paths::cycle_time(c, &paths);
+        let time_split = {
+            let t = crate::cam_sim::time_split(c, &paths, &[], total);
+            let r1 = |x: f64| (x * 10.0).round() / 10.0;
+            json!({"feed_pct": r1(t.pct(t.cut_s)), "rapid_pct": r1(t.pct(t.rapid_s)), "between_ops_pct": r1(t.pct(t.between_s)), "other_pct": r1(t.pct(t.other_s)),
+                "note": "feed moves include air cutting: simulate_cam and export_gcode report air_time (air_cut_pct of the cycle time)"})
+        };
         // what will likely break something, and what is likely not meant
         let errors: Vec<String> = c.tools.iter().filter(|t| paths.iter().any(|p| p.tool == t.id && !p.moves.is_empty())).filter_map(|t| cam_paths::tap_danger(c, t)).collect();
         let hints = cam_paths::hints(c, &part, &paths);
@@ -245,6 +251,7 @@ impl Session {
             "sketches": part.sketches.iter().map(|s| json!({"id": s.id, "name": s.name, "curves": s.paths.len(), "closed": s.paths.iter().filter(|p| p.1).count()})).collect::<Vec<_>>(),
             // an empty sum is -0.0
             "cycle_time_s": round(total.round()),
+            "time_split": time_split,
         }))
     }
 
@@ -828,12 +835,33 @@ impl Session {
                     v["feed_schedule"] = json!({"ops": sched, "note": "pairs are [before, after] the schedule (power from the cutting model, W at the shaft); where much of the cut is at the feed ceiling a wider stepover, not a faster feed, is the next lever"});
                 }
                 v["limits"] = json!({"spindle_shaft_w": sim.limits.power.round(), "rated_rpm": sim.limits.rated_rpm, "max_force_n": sim.limits.force, "deflection_mm": sim.limits.deflection, "assumed": sim.limits_assumed});
+                let total = match &job {
+                    Some(j) => j.cycle_time(),
+                    None => cam_paths::cycle_time(c, &paths),
+                };
+                let split = crate::cam_sim::time_split(c, &paths, &sim.air, total);
                 let air: Vec<Value> = sim
                     .air
                     .iter()
-                    .map(|a| json!({"operation": names(a.op), "op_id": a.op, "feed_min": round(a.feed_s / 60.0), "air_pct": (a.air_s / a.feed_s.max(1e-9) * 100.0).round(), "light_pct": (a.light_s / a.feed_s.max(1e-9) * 100.0).round(), "air_mm": a.air_mm.round(), "feed_mm": a.feed_mm.round()}))
+                    .map(|a| {
+                        let mut r = json!({"operation": names(a.op), "op_id": a.op, "feed_min": round(a.feed_s / 60.0), "air_pct": (a.air_s / a.feed_s.max(1e-9) * 100.0).round(), "light_pct": (a.light_s / a.feed_s.max(1e-9) * 100.0).round(), "air_mm": a.air_mm.round(), "feed_mm": a.feed_mm.round()});
+                        if let Some(t) = split.ops.iter().find(|t| t.op == a.op) {
+                            let of = |x: f64| (x / t.time_s.max(1e-9) * 1000.0).round() / 10.0;
+                            r["op_time_s"] = json!(t.time_s.round());
+                            r["air_s"] = json!(t.air_s.round());
+                            r["rapid_s"] = json!(t.rapid_s.round());
+                            r["air_pct_of_op"] = json!(of(t.air_s));
+                            r["rapid_pct_of_op"] = json!(of(t.rapid_s));
+                            r["air_pct_of_cycle"] = json!((split.pct(t.air_s) * 10.0).round() / 10.0);
+                            if a.link_s > 0.0 {
+                                r["link_s"] = json!(t.link_s.round());
+                            }
+                        }
+                        r
+                    })
                     .collect();
                 v["air"] = json!(air);
+                v["air_time"] = split.json();
                 let chips: Vec<Value> = sim
                     .chip_ops
                     .iter()
@@ -1119,7 +1147,7 @@ impl Session {
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 if let Some(j) = self.cam_job(ci, a)? {
                     // a job: the whole program's combined simulation gates it the same way
-                    let (jc, jpart, _jpaths, mut sim) = j.sim(res)?;
+                    let (jc, jpart, jpaths, mut sim) = j.sim(res)?;
                     sim.run_to(usize::MAX, usize::MAX);
                     let o = cam_paths::work_origin(&jc, &jpart);
                     let names = |id: u64| jc.op(id).map(|o| o.name.clone()).unwrap_or_default();
@@ -1147,6 +1175,7 @@ impl Session {
                     }).collect();
                     let mut v = json!({"exported": path, "lines": text.lines().count(), "stations": stations, "order": order, "tool_changes": j.tool_changes(), "cycle_time_s": round(j.cycle_time().round()), "warnings": warnings,
                         "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                    v["air_time"] = crate::cam_sim::time_split(&jc, &jpaths, &sim.air, j.cycle_time()).json();
                     if !problems.is_empty() {
                         v["unsafe"] = json!(format!("written as {path} with an UNSAFE header: {} simulation problem(s); do not run it", problems.len()));
                         v["problems"] = json!(problems);
@@ -1167,6 +1196,7 @@ impl Session {
                     paths.iter().flat_map(|p| p.warnings.iter().map(move |w| format!("{}: {w}", c.op(p.op).map(|o| o.name.as_str()).unwrap_or("?")))).collect();
                 let mut v = json!({"exported": path, "lines": text.lines().count(), "post": c.post, "cycle_time_s": round(cam_paths::cycle_time(c, &paths).round()), "warnings": warnings,
                     "sim": {"ok": problems.is_empty(), "problems": problems.len(), "hash": format!("{hash:016x}")}});
+                v["air_time"] = crate::cam_sim::time_split(c, &paths, &sim.air, cam_paths::cycle_time(c, &paths)).json();
                 if let Some((a, b)) = found {
                     v["find_stock"] = json!(format!("Find stock looks for {} x {}: the stock the setups before leave where the probe touches its sides (the setup's box is bigger or smaller there)", round(b.x - a.x), round(b.y - a.y)));
                 }

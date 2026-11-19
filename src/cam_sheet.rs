@@ -471,6 +471,8 @@ pub fn html(cam: &Cam, part: &Part, paths: &[Toolpath], vis: &Visuals) -> String
     let o = cam_paths::work_origin(cam, part);
     let (lo, hi) = cam_paths::stock_box(cam, part);
     let total = cam_paths::cycle_time(cam, paths);
+    // where the cycle time goes, once the program has been simulated
+    let split = (vis.sim.is_some() && !vis.air.is_empty()).then(|| crate::cam_sim::time_split(cam, paths, &vis.air, total));
     let used: Vec<u64> = cam.tools.iter().map(|t| t.id).filter(|id| paths.iter().any(|p| p.tool == *id && !p.moves.is_empty())).collect();
     let mut s = String::new();
     let _ = write!(
@@ -513,6 +515,9 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         ("Tools", used.len().to_string(), false),
         ("Operations", n_ops.to_string(), false),
     ];
+    if let Some(t) = &split {
+        kpis.push(("Air cutting", format!("{:.0}% of cycle time", t.pct(t.air_s)), false));
+    }
     if vis.sim.is_some() {
         let n = vis.events.len();
         kpis.push(("Simulation", if n == 0 { "no problems".into() } else { format!("{n} problem{}", if n == 1 { "" } else { "s" }) }, n > 0));
@@ -543,8 +548,21 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         ("Tool changes", if cam.machine.tool_changer { "automatic".into() } else { "by hand (the program stops)".into() }),
         ("Spindle", format!("{} rpm, {} s to spin up", if cam.min_rpm > 0.0 { format!("{}–{}", fmt_mm(cam.min_rpm), fmt_mm(cam.max_rpm)) } else { format!("up to {}", fmt_mm(cam.max_rpm)) }, fmt_mm(cam.machine.spin_up))),
         ("Cycle time", time(total)),
-        ("Tools / operations", format!("{} / {}", used.len(), paths.iter().filter(|p| !p.moves.is_empty()).count())),
     ];
+    if let Some(t) = &split {
+        let part = |s: f64| format!("{} ({:.0}%)", time(s), t.pct(s));
+        let mut text = format!("cutting {}, air cutting {}", part(t.cut_s), part(t.air_s));
+        if t.link_s > 0.5 {
+            let _ = write!(text, " ({} of it links)", time(t.link_s));
+        }
+        let _ = write!(text, ", rapids {}, between operations {}", part(t.rapid_s), part(t.between_s));
+        if t.other_s > 0.5 {
+            let _ = write!(text, ", dwells and probing {}", part(t.other_s));
+        }
+        let _ = write!(text, "; not cutting {:.0}% in all", t.pct(t.non_cutting_s()));
+        kv.push(("Time split", text));
+    }
+    kv.extend([("Tools / operations", format!("{} / {}", used.len(), paths.iter().filter(|p| !p.moves.is_empty()).count()))]);
     if let (Some(sj), Some(j)) = (&cam.soft_jaws, crate::cam_jaws::jaws(cam, part)) {
         kv.push((
             "Soft jaws",
@@ -726,7 +744,18 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
         }
         if let Some(a) = vis.air.iter().find(|a| a.op == op.id).filter(|a| a.feed_s > 1.0) {
             let (air, light) = (a.air_s / a.feed_s * 100.0, a.light_s / a.feed_s * 100.0);
-            let text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
+            let mut text = format!("feeding through air {}% of its feed time, next to nothing {}% more", air.round(), light.round());
+            if let Some(o) = split.as_ref().and_then(|t| t.ops.iter().find(|o| o.op == op.id)).filter(|o| o.time_s > 0.0) {
+                let _ = write!(
+                    text,
+                    "; of its {}: air cutting {} ({:.0}%), rapids {} ({:.0}%)",
+                    time(o.time_s),
+                    time(o.air_s),
+                    100.0 * o.air_s / o.time_s,
+                    time(o.rapid_s),
+                    100.0 * o.rapid_s / o.time_s
+                );
+            }
             notes.push(if air + light > 50.0 && matches!(op.kind, OpKind::Adaptive | OpKind::Clear | OpKind::Pocket | OpKind::Face | OpKind::Contour) { format!("<span class=\"warn\">{}</span>", esc(&text)) } else { esc(&text) });
         }
         if let Some(c) = vis.chips.iter().find(|c| c.op == op.id) {
