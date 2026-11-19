@@ -477,7 +477,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("create_cam" | "edit_cam", "max_rpm") => t("number", "fastest spindle speed"),
         ("create_cam" | "edit_cam", "clearance") => t("number", "rapid height above the stock, mm"),
         ("create_cam" | "edit_cam", "retract") => t("number", "height above the material where feeds start, mm"),
-        ("simulate_cam" | "export_cam_simulation" | "export_setup_sheet" | "export_gcode", "stations") => json!({"type": "array", "items": {"type": "string"}, "description": "for a job's lead setup: only these of the job's setups (names), e.g. op 1 alone for the first cycle"}),
+        ("simulate_cam" | "export_cam_simulation" | "export_setup_sheet" | "export_gcode" | "verify_gcode", "stations") => json!({"type": "array", "items": {"type": "string"}, "description": "for a job's lead setup: only these of the job's setups (names), e.g. op 1 alone for the first cycle"}),
         ("create_cam" | "edit_cam", "with") => json!({"type": "array", "items": {"type": "string"}, "description": "setups machined in the same program as this one, each at its own station (its own on_table and work_offset); this setup leads the job"}),
         ("create_cam" | "edit_cam", "work_offset") => json!({"type": "integer", "minimum": 1, "maximum": 6, "description": "work offset: 1 = G54 (default) … 6 = G59, e.g. one per vise station; probing writes to it"}),
         ("create_cam" | "edit_cam", "fixture_clearance") => t("number", "how far over a fixture's top toolpaths lift where the tool passes over it, mm (default: the retract, at least 1)"),
