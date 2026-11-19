@@ -62,6 +62,21 @@ pub struct Session {
     /// A tool panicked part way; the caller should not trust what it changed outside the active
     /// Part Studio (the Part Studio itself is put back for modelling tools).
     pub crashed: bool,
+    /// Built setups (parts, toolpaths, the stock they start from), keyed by everything they depend on: the
+    /// setups of their chain and what each machines. Every CAM query (info, simulation, render, export,
+    /// sheet, the setups that follow) used to regenerate them all from scratch.
+    pub(crate) cam_cache: HashMap<usize, CamBuild>,
+}
+
+/// One setup built: its key, the parts, the toolpaths, the stock the setups before it leave, and the stock
+/// boxes the chain's link sets on each setup it passes (`stock.carried`).
+#[derive(Clone)]
+pub(crate) struct CamBuild {
+    pub key: u64,
+    pub part: crate::cam_paths::Part,
+    pub paths: Vec<crate::cam_paths::Toolpath>,
+    pub stock: Option<crate::cam_stock::StockMap>,
+    pub carried: Vec<(usize, Option<[[f64; 3]; 2]>)>,
 }
 
 type R<T> = Result<T, String>;
@@ -81,6 +96,7 @@ impl Session {
             rebuilds: 0,
             cancel: None,
             crashed: false,
+            cam_cache: HashMap::new(),
         }
     }
 

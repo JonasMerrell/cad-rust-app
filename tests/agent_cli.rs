@@ -173,6 +173,53 @@ fn failed_cam_op_adds_nothing() {
     assert_eq!(lines[5]["result"]["operations"], json!([]), "{}", lines[5]);
 }
 
+/// CAM builds are cached between calls, and the cache follows every change: an operation edited, the part
+/// changed, or the setup a following setup starts from changed.
+#[test]
+fn cam_builds_follow_every_change() {
+    let dir = scratch("camcache");
+    let script = dir.join("cam.json");
+    let steps = json!([
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [40, 30]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 10}}},
+        {"tool": "create_cam", "args": {"stock": {"side": 3, "top": 2}}},
+        {"tool": "cam_tool", "args": {"cam": 0, "kind": "flat", "diameter": 6, "number": 1}},
+        {"tool": "cam_op", "args": {"cam": 0, "kind": "contour", "tool": 1}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "cam_op", "args": {"cam": 0, "id": 2, "stepdown": 1.0}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 3, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [60, 30]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 3}], "depth": 10}}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "create_cam", "args": {"name": "Op 2", "follows": "Manufacture 1", "orient": "bottom"}},
+        {"tool": "cam_op", "args": {"cam": 1, "kind": "adaptive", "tool": 1}},
+        {"tool": "cam_info", "args": {"cam": 1}},
+        {"tool": "cam_op", "args": {"cam": 0, "id": 2, "delete": true}},
+        {"tool": "cam_info", "args": {"cam": 1}}
+    ]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let o = Command::new(exe()).arg("run").arg(&script).current_dir(&dir).output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 19, "{}", String::from_utf8_lossy(&o.stderr));
+    for l in &lines {
+        assert!(l.get("error").is_none(), "{l}");
+    }
+    let info = |i: usize| &lines[i]["result"];
+    let op = |i: usize| info(i)["operations"][0].clone();
+    // the same build twice
+    assert_eq!(op(6), op(7));
+    // an edited operation: more passes, so more moves
+    assert!(op(9)["moves"].as_u64().unwrap() > op(7)["moves"].as_u64().unwrap(), "{} {}", op(7), op(9));
+    // a longer part: a longer contour
+    assert!(op(13)["cut_length"].as_f64().unwrap() > op(9)["cut_length"].as_f64().unwrap() + 30.0, "{} {}", op(9), op(13));
+    // the setup that follows starts from what op 1 leaves: with op 1's contour gone there is more to clear
+    let rough = |i: usize| info(i)["operations"][0]["cut_length"].as_f64().unwrap();
+    assert!(rough(18) > rough(16) + 1.0, "{} {}", rough(16), rough(18));
+}
+
 /// A Rhai script builds a feature tree, not baked solids: the saved document has the variables,
 /// dimensioned sketches and features, and changing a variable resizes the part when it reopens.
 #[test]
