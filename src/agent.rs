@@ -66,6 +66,9 @@ pub struct Session {
     /// setups of their chain and what each machines. Every CAM query (info, simulation, render, export,
     /// sheet, the setups that follow) used to regenerate them all from scratch.
     pub(crate) cam_cache: HashMap<usize, CamBuild>,
+    /// Finished stock simulations of built setups and jobs, by their build keys and resolution: the pictures,
+    /// simulate_cam and the export gate of the same toolpaths share one run instead of each simulating.
+    pub(crate) sim_cache: HashMap<(u64, usize), (crate::cam::Cam, crate::cam_paths::Part, Vec<crate::cam_paths::Toolpath>, crate::cam_sim::Sim)>,
 }
 
 /// One setup built: its key, the parts, the toolpaths, the stock the setups before it leave, and the stock
@@ -76,6 +79,8 @@ pub(crate) struct CamBuild {
     pub part: crate::cam_paths::Part,
     pub paths: Vec<crate::cam_paths::Toolpath>,
     pub stock: Option<crate::cam_stock::StockMap>,
+    /// The stock once all the setup's toolpaths have run: where a following setup starts.
+    pub after: crate::cam_stock::StockMap,
     pub carried: Vec<(usize, Option<[[f64; 3]; 2]>)>,
 }
 
@@ -97,6 +102,7 @@ impl Session {
             cancel: None,
             crashed: false,
             cam_cache: HashMap::new(),
+            sim_cache: HashMap::new(),
         }
     }
 

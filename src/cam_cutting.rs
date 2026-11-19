@@ -226,6 +226,7 @@ pub fn use_of(c: &Cut, t: &ToolGeom, l: &Limits, rpm: f64, finishing: bool) -> U
 /// cells within two diameters; each cell drains at a rate set by the machine's chip clearing, slower the
 /// deeper the cavity. Fill = chips in a cell ÷ its free volume (cell area × cavity depth). The constants
 /// (`BULK`, `THROW_CHIP`, the clearing rates) are for tuning from what Jonas sees on the machine.
+#[derive(Clone)]
 pub struct ChipMap {
     lo: glam::DVec2,
     cell: f64,
