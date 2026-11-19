@@ -126,6 +126,14 @@ pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Tool
         let line = raw.trim();
         // a whole-line comment naming an operation: "(Rough the slots - Pocket)"
         if let Some(c) = line.strip_prefix('(').and_then(|c| c.strip_suffix(')')) {
+            // a manual tool change (posts without T words, e.g. GRBL): "(load T1: D6 flat end mill ...)"
+            if let Some(t) = c.trim_start().strip_prefix("load T") {
+                let num: String = t.chars().take_while(|ch| ch.is_ascii_digit()).collect();
+                if let Ok(t) = num.parse::<u32>() {
+                    tool = cam.tools.iter().find(|x| x.number == t).map(|x| x.id).unwrap_or(0);
+                }
+                continue;
+            }
             if let Some((name, _kind)) = c.rsplit_once(" - ") {
                 if let Some((_, id)) = ops.iter().find(|(o, _)| o == name.trim()) {
                     op = *id;
@@ -236,6 +244,10 @@ pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Tool
             }
         }
         pos = to;
+    }
+    // a move read with no tool would simulate nothing: refuse rather than call the program clean
+    if let Some(p) = paths.iter().find(|p| p.tool == 0 && p.moves.iter().any(|m| matches!(m, Move::Feed(..)))) {
+        return Err(format!("can't tell which tool cuts in '{}': no T<n> M6 or (load T<n>) before its moves", cam.op(p.op).map(|o| o.name.as_str()).unwrap_or("the program")));
     }
     Ok(paths)
 }
