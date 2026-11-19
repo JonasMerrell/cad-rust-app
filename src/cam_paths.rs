@@ -114,7 +114,35 @@ pub struct PartInput {
     pub sketches: Vec<SketchPaths>,
 }
 
+impl PartInput {
+    /// Feed what the setup machines into a hasher (to tell whether a cached build still holds).
+    pub fn hash_into(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.tris.len().hash(h);
+        for t in &self.tris {
+            for v in t {
+                for c in v.to_array() {
+                    c.to_bits().hash(h);
+                }
+            }
+        }
+        format!("{:?}", self.circles).hash(h);
+        for sk in &self.sketches {
+            (sk.id, &sk.name).hash(h);
+            for (pts, closed) in &sk.paths {
+                closed.hash(h);
+                for v in pts {
+                    for c in v.to_array() {
+                        c.to_bits().hash(h);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The parts being machined, in setup coordinates.
+#[derive(Clone)]
 pub struct Part {
     pub tris: Vec<[DVec3; 3]>,
     pub circles: Vec<(DVec3, DVec3, f64)>,

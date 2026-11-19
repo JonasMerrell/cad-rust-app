@@ -184,10 +184,33 @@ impl Session {
             let ik = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, k));
             inputs.insert(k, crate::cam_jaws::input_for(&self.ws.cams, k, ik)?);
         }
+        // everything the build depends on: the setups of the chain (without the stock boxes the link itself
+        // sets) and what each machines
+        let chain = cam_paths::setup_chain(&self.ws.cams, ci)?;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &k in chain.iter().chain(std::iter::once(&ci)) {
+                let mut ck = self.ws.cams[k].clone();
+                ck.stock.carried = None;
+                k.hash(&mut h);
+                serde_json::to_string(&ck).unwrap_or_default().hash(&mut h);
+                inputs.get(&k).unwrap_or(&input).hash_into(&mut h);
+            }
+            h.finish()
+        };
+        if let Some(b) = self.cam_cache.get(&ci).filter(|b| b.key == key) {
+            for (k, carried) in &b.carried {
+                self.ws.cams[*k].stock.carried = *carried;
+            }
+            return Ok((b.part.clone(), b.paths.clone(), b.stock.clone()));
+        }
         let stock = cam_paths::link_setups_each(&mut self.ws.cams, ci, &|k| inputs.get(&k).cloned().unwrap_or_else(|| input.clone()))?;
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
         let paths = cam_paths::generate_from(c, &part, stock.as_ref());
+        let carried = chain.iter().chain(std::iter::once(&ci)).map(|&k| (k, self.ws.cams[k].stock.carried)).collect();
+        self.cam_cache.insert(ci, super::CamBuild { key, part: part.clone(), paths: paths.clone(), stock: stock.clone(), carried });
         Ok((part, paths, stock))
     }
 
