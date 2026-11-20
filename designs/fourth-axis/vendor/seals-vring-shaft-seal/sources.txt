@@ -1,0 +1,3 @@
+Retrieved 2026-11-20
+allseals_rotary_seals_vrings.pdf <- https://www.allsealsinc.com/rotary_seals_vrings.pdf (Trelleborg/Forsheda V-ring catalogue, type A table)
+FST_productdatasheet_va_en.pdf   <- https://products.fst.com/pim/assets/category/datasheet/productdatasheet_va_en.pdf (Freudenberg V-ring VA datasheet)

@@ -1,0 +1,121 @@
+# Iteration 5: calculated results
+
+Tags: D datasheet, C calculated, F finite elements (rCAD), G guess.
+
+## Loads
+
+| Case | Tangential N | Sideways mean N | Peak N (x2) | Axial N | Torque at 46 mm N·m (mean / peak) |
+|---|---|---|---|---|---|
+| Roughing 850 W, 9000 rpm | 284 | 391 | 782 | 111 | 18.1 / 36.2 |
+| Never-exceed 950 W, 9000 rpm | 317 | 437 | 875 | 124 | 20.2 / 40.4 |
+| Finishing 450 W, 24 000 rpm | 56 | 78 | 155 | 22 | 3.6 / 7.2 |
+
+## Deflection at the tool point, headstock only (no tailstock)
+
+Load at the end of a 40 x 40 test bar gripped in the vise. 'Structure' is the bonded FE model (F; every part aluminium, so the steel vise is modelled too soft); the bearing (C) and the bolted joints (G: contact stiffness 2000 N/mm3) are added in series. µm per the mean roughing force 391 N, and per the finishing force 78 N.
+
+| Load point | Dir | Structure F | of which the test bar C | Bearing C | Joints G | Total rough µm | Total less the bar, rough µm | Finishing µm (less the bar) |
+|---|---|---|---|---|---|---|---|---|
+| chuck, 10 mm past the jaws | Fz | 6.6 | 0.1 | 5.5 | 1.8 | 13.8 | 13.7 | 2.73 |
+| chuck, 10 mm past the jaws | Fy | 4.7 | 0.1 | 5.5 | 1.5 | 11.7 | 11.7 | 2.31 |
+| overhang, 100 mm past the jaws | Fz | 38.5 | 12.1 | 19.2 | 8.9 | 66.6 | 54.4 | 10.81 |
+| overhang, 100 mm past the jaws | Fy | 30.8 | 12.1 | 19.2 | 8.1 | 58.1 | 46.0 | 9.13 |
+
+Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.2 µm instead of 38.5 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about 15 µm at that point.
+
+## With and without the tailstock (aluminium bar between the jaws and the centre)
+
+Tailstock stiffness at the centre: 34 N/µm vertical, 42 N/µm sideways (F, bonded); centre-in-hole contact 100 N/µm (G).
+
+| Part | No tailstock, at the free end, rough µm | No tailstock, mid-length µm | With tailstock, mid-length, rough µm | With tailstock, finishing µm |
+|---|---|---|---|---|
+| Ø25 x 120 mm | 209 | 41.2 | 13.2 | 2.61 |
+| Ø40 x 120 mm | 64 | 23.1 | 8.5 | 1.69 |
+| Ø16 x 100 mm | 619 | 91.5 | 24.6 | 4.88 |
+
+## Torsion: windup at the work surface
+
+Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: disc 7.4e+05 N·m/rad (C: ring formula, hub share from iteration 3's FE) in series with the lining 1.67e+07 (G) = 7.09e+05 N·m/rad.
+
+| Case | Radius mm | Torque N·m | Gear only: windup mrad | Gear only: µm at the surface | With brake: µm |
+|---|---|---|---|---|---|
+| roughing mean | 46 | 18.1 | 0.533 | 24.6 | 1.13 |
+| roughing mean | 25 | 9.8 | 0.316 | 7.9 | 0.33 |
+| roughing peak | 46 | 36.2 | 0.895 | 41.3 | 2.26 |
+| roughing peak | 25 | 19.6 | 0.563 | 14.1 | 0.66 |
+| finishing mean | 46 | 3.6 | 0.116 | 5.3 | 0.22 |
+| finishing mean | 25 | 1.9 | 0.063 | 1.6 | 0.07 |
+
+## Brake
+
+- Piston ring Ø93 to Ø122.4: 4974 mm² (C). At 0.6 MPa (G: shop pressure not confirmed) less 120 N seal drag (G): clamp force 2864 N (C).
+- Holding torque at mean radius 58 mm: 37 N·m with µ 0.3, 74 N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).
+- Needed: 18.1 N·m mean, 36.2 N·m peak at the 46 mm radius (C).
+- The disc's 1.0 mm web, 16 mm wide, bends 0.15 mm to reach the lining: 121 MPa and 729 N of the clamp force (C); with the gap 0.1 mm larger, 202 MPa and 1215 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
+- Clamp force left on the lining: 2135 N.
+
+## Lost motion, accuracy, repeatability
+
+| Source | arc-sec | µm at 46 mm | µm at 25 mm |
+|---|---|---|---|
+| Gear backlash (D: at most) | 20.0 | 4.5 | 2.4 |
+| Gear hysteresis loss on torque reversal (D) | 60.0 | 13.4 | 7.3 |
+| Wave generator on the motor shaft: key bonded with Loctite 638 (C: none) | 0.0 | 0.0 | 0.0 |
+| Friction joints rotor / bearing / nose / faceplate / vise (C: none below their slip torque) | 0.0 | 0.0 | 0.0 |
+| Closed-loop drive: +/- 1 encoder count (C) | 6.5 | 1.5 | 0.8 |
+| Motor step accuracy 5 % of a step (D) | 6.5 | 1.5 | 0.8 |
+| **Sum, worst case (reversing direction under load)** | 93 | 20.8 | 11.3 |
+| Root-sum-square | 64 | 14.3 | 7.7 |
+| Positioning accuracy: gear transmission error (D, cyclic and repeatable) | 60 | 13.4 | 7.3 |
+| Repeatability approaching from one side: 2 counts + 5 arc-sec for the gear (G) | 11.5 | 2.6 | 1.4 |
+
+## Motor, speed, inertia
+
+- Rotating group without a workpiece: 1.96 kg, 2712 kg·mm² about the axis (C, from the CAD). A Ø40 x 100 aluminium part adds 68, a Ø90 x 120 part 2087 kg·mm².
+- Reflected to the motor through 100:1: 2.78 g·cm² (typical part), 4.80 g·cm² (largest part), against 2213 g·cm² of rotor plus wave generator (D). Inertia ratio 0.0013 to 0.0022.
+- Motor torque for 500 °/s² with the largest part: 0.28 N·m (C); for cutting through the gear at 70 % efficiency (G): 51 mN·m finishing, 258 mN·m roughing at 46 mm.
+- Motor has 4.5 N·m holding (D) and 3.24 N·m at 600 rpm (D: vendor curve at 60 V; a 48 V supply gives a little less at speed): margin 6.0x over acceleration plus roughing.
+- 600 motor rpm = 6 rpm = 36 °/s at the axis. 1111.111 steps per degree with the drive set to 4000 pulses per rev; 40 kHz step rate at top speed.
+
+## Natural frequencies
+
+Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rotation 150 and 400 Hz.
+
+| Mode | Hz | Source |
+|---|---|---|
+| Structure mode 1 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 650 | F |
+| Structure mode 2 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 816 | F |
+| Structure mode 3 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1234 | F |
+| Structure mode 4 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1482 | F |
+| Structure mode 5 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1889 | F |
+| Structure mode 6 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 2019 | F |
+| torsion gear no part | 538 | C |
+| torsion brake no part | 2628 | C |
+| torsion gear Ø40 x 100 | 531 | C |
+| torsion brake Ø40 x 100 | 2596 | C |
+| torsion gear Ø90 x 120 | 404 | C |
+| torsion brake Ø90 x 120 | 1976 | C |
+| tilt lumped no part | 1516 | C |
+| tilt lumped typ part | 1016 | C |
+| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 495 | C from F |
+
+## Bearing
+
+- Roughing at 100 mm past the jaws: moment 70 N·m, equivalent load 2079 N (C) against C = 20.3 kN (D): L10 = 3.32e+06 h at 10 rpm (C).
+- Static: peak equivalent 4155 N against C0 = 29.5 kN (D): safety 7.1 (C).
+
+## Bolted joints (slip against the roughing peak torque at 46 mm)
+
+| Joint | Screws | Tightening N·m | Preload each N | Share of proof | Slip torque N·m (µ 0.15) | Margin |
+|---|---|---|---|---|---|---|
+| vise to faceplate | 4 x M6 12.9 | 12.0 | 10000 | 51 % | 120 | 3.3x |
+| faceplate to nose | 6 x M6 8.8 | 8.0 | 6667 | 57 % | 300 | 8.3x |
+| nose to bearing inner ring | 8 x M5 12.9 | 7.0 | 7000 | 51 % | 273 | 7.6x |
+| rotor to bearing inner ring | 8 x M5 12.9 | 7.0 | 7000 | 51 % | 273 | 7.6x |
+| rotor to gear output flange | 8 x M8 12.9 | 30.0 | 18750 | 53 % | 472 | 13.1x |
+
+Vise prying: peak force 100 mm past the jaws puts 113 N·m on the vise base; the far pair of M6 sees 1369 N extra against 10000 N preload (14 %): the joint stays closed (C).
+
+## Thermal growth
+
+A 10 K rise of the aluminium housing (G: motor at holding current) lifts the axis 18 µm and grows 120 mm of stack 28 µm (C).

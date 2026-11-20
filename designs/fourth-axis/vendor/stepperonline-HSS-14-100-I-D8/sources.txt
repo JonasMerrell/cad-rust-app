@@ -1,0 +1,3 @@
+product page: https://www.omc-stepperonline.com/hss-series-harmonic-drive-gearbox-73mm-ratio-100-1-backlash-20arcsec-8mm-input-diameter-hss-14-100-i-d8
+datasheet: https://files.omc-stepperonline.com/HSS-14-100-I-D8_Full_Datasheet.pdf
+retrieved 2026-11-20

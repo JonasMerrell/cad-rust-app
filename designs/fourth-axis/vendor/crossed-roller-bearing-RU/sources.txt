@@ -1,0 +1,11 @@
+Retrieved 2026-11-20
+RU85CC0_THK.stp  <- https://raw.githubusercontent.com/stefangolas/assemblybot/main/cad/_ru85_extract/RU85CC0______CAD_NO.stp
+  (repo stefangolas/assemblybot, repo licence MIT; the model itself is THK's CAD exported from PARTcommunity/3Dfindit (CADENAS)
+   on 2026-06-22 and carries THK/CADENAS terms of use - see RU85_readme-and-terms-of-use-3d-cad-models.txt from the same folder)
+THK_en_a18_022.pdf  <- https://tech.thk.com/en/products/pdf/en_a18_022.pdf  (RU dimension table A18-22/23)
+THK_en_a18_012.pdf  <- https://tech.thk.com/en/products/pdf/en_a18_012.pdf  (accuracy standards A18-12..17)
+THK_en_a18_018.pdf  <- https://tech.thk.com/en/products/pdf/en_a18_018.pdf  (radial clearance / CC0 starting torque)
+THK_en_a18_019.pdf  <- https://tech.thk.com/en/products/pdf/en_a18_019.pdf  (moment rigidity graphs, RA/RB types)
+THK_en_a18_008..011.pdf <- https://tech.thk.com/en/products/pdf/en_a18_0NN.pdf (static safety factor, static permissible moment, life)
+BRS_RU-crossed-roller-bearing.pdf <- https://ranczlab.github.io/RPM/platform/Datasheets%20and%20documents/Crossed%20roller%20bearing/RU-crossed-roller-bearing-BRS-Bearing.pdf (third-party clone datasheet)
+RU66 / RU124 STEP: not found on any open source (THK CAD needs member login: https://www.thk.com/jp/en/products/cross_roller_ring/cross_roller_ring/ru/ru/)

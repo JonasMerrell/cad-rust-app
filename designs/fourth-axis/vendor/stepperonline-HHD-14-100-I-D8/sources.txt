@@ -1,0 +1,5 @@
+product page: https://www.omc-stepperonline.com/hhd-series-harmonic-drive-gearbox-70mm-ratio-100-1-backlash-20arcsec-8mm-input-diameter-hhd-14-100-i-d8
+datasheet: https://files.omc-stepperonline.com/HHD-14-100-I-D8_Full_Datasheet.pdf
+STEP: https://files.omc-stepperonline.com/HHD-14-100-I-D8.STEP  (fetched with browser UA + Referer https://www.omc-stepperonline.com/ ; site download tab otherwise asks for login)
+retrieved 2026-11-20
+note: HHD-14-100-I-D8.STEP header FILE_NAME says HHD-14-50-I-D8.STEP (vendor serves the ratio-50 model under the ratio-100 name; AP214, surface model, 0 MANIFOLD_SOLID_BREP)

@@ -1,0 +1,1 @@
+Downloaded 2026-11-20 from https://files.omc-stepperonline.com/<MODEL>.STEP and <MODEL>_Full_Datasheet.pdf (StepperOnline file host; product pages https://www.omc-stepperonline.com/). No licence stated.

@@ -1,0 +1,1025 @@
+{
+ "placement": {
+  "x_faceplate": 51.0,
+  "y_axis": -325.3,
+  "z_axis": 88.44,
+  "table_offset_tool_over_axis": 15.227599999999995
+ },
+ "poses": [
+  {
+   "name": "Y sweep, head right, dy -150.7",
+   "dx": 219.3,
+   "dy": -150.7,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head left, dy -150.7",
+   "dx": -123.7,
+   "dy": -150.7,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head right, dy -75.0",
+   "dx": 219.3,
+   "dy": -75.0,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head left, dy -75.0",
+   "dx": -123.7,
+   "dy": -75.0,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head right, dy +0.0",
+   "dx": 219.3,
+   "dy": 0.0,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head left, dy +0.0",
+   "dx": -123.7,
+   "dy": 0.0,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head right, dy +83.1",
+   "dx": 219.3,
+   "dy": 83.1,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head left, dy +83.1",
+   "dx": -123.7,
+   "dy": 83.1,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X -123.7, -46 mm from the axis",
+   "dx": -123.7,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X -123.7, +0 mm from the axis",
+   "dx": -123.7,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X -123.7, +46 mm from the axis",
+   "dx": -123.7,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X -60.0, -46 mm from the axis",
+   "dx": -60.0,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: D motor plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 497.213
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X -60.0, +0 mm from the axis",
+   "dx": -60.0,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: D motor plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 480.8036
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X -60.0, +46 mm from the axis",
+   "dx": -60.0,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: D motor plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 497.213
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X +0.0, -46 mm from the axis",
+   "dx": 0.0,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: P1 bearing plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 497.213
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X +0.0, +0 mm from the axis",
+   "dx": 0.0,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: P1 bearing plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 217.1039
+    },
+    {
+     "a": "A: Rotor with brake disc",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 0.8389
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X +0.0, +46 mm from the axis",
+   "dx": 0.0,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: P1 bearing plate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 497.213
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X +45.0, -46 mm from the axis",
+   "dx": 45.0,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +45.0, +0 mm from the axis",
+   "dx": 45.0,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "A: Faceplate",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 120.1645
+    }
+   ]
+  },
+  {
+   "name": "Z top, tool at X +45.0, +46 mm from the axis",
+   "dx": 45.0,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +73.0, -46 mm from the axis",
+   "dx": 73.0,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +73.0, +0 mm from the axis",
+   "dx": 73.0,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +73.0, +46 mm from the axis",
+   "dx": 73.0,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +120.0, -46 mm from the axis",
+   "dx": 120.0,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +120.0, +0 mm from the axis",
+   "dx": 120.0,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +120.0, +46 mm from the axis",
+   "dx": 120.0,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +219.3, -46 mm from the axis",
+   "dx": 219.3,
+   "dy": 61.727599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +219.3, +0 mm from the axis",
+   "dx": 219.3,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top, tool at X +219.3, +46 mm from the axis",
+   "dx": 219.3,
+   "dy": -31.272400000000005,
+   "dz": 14.7,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "top of a 90 mm part, 4 mm past the jaws",
+   "dx": 99.0,
+   "dy": 15.227599999999995,
+   "dz": 11.200199999999995,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "side of a 90 mm part at centre height, 4 mm past the jaws",
+   "dx": 99.0,
+   "dy": -33.2474,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 3.9283
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: vise",
+     "volume_mm3": 30.1061
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 31.9018
+    }
+   ]
+  },
+  {
+   "name": "side of a 90 mm part, back, 4 mm past the jaws",
+   "dx": 99.0,
+   "dy": 63.70259999999999,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 21",
+     "b": "A: Faceplate",
+     "volume_mm3": 2357.5481
+    },
+    {
+     "a": "Z 21",
+     "b": "swing envelope: vise",
+     "volume_mm3": 266.3728
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Faceplate",
+     "volume_mm3": 3724.2152
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 3.9276
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: vise",
+     "volume_mm3": 8578.1001
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 10567.232
+    },
+    {
+     "a": "Z 23",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 691.5618
+    }
+   ]
+  },
+  {
+   "name": "top of a 90 mm part, 60 mm past the jaws",
+   "dx": 155.0,
+   "dy": 15.227599999999995,
+   "dz": 11.200199999999995,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "side of a 90 mm part at centre height, 60 mm past the jaws",
+   "dx": 155.0,
+   "dy": -33.2474,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 35.568
+    }
+   ]
+  },
+  {
+   "name": "side of a 90 mm part, back, 60 mm past the jaws",
+   "dx": 155.0,
+   "dy": 63.70259999999999,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 21",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 691.5618
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 17738.3779
+    },
+    {
+     "a": "Z 23",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 64.7765
+    }
+   ]
+  },
+  {
+   "name": "top of a 90 mm part, 8 mm before the centre",
+   "dx": 193.0,
+   "dy": 15.227599999999995,
+   "dz": 11.200199999999995,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "side of a 90 mm part at centre height, 8 mm before the centre",
+   "dx": 193.0,
+   "dy": -33.2474,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 35.568
+    }
+   ]
+  },
+  {
+   "name": "side of a 90 mm part, back, 8 mm before the centre",
+   "dx": 193.0,
+   "dy": 63.70259999999999,
+   "dz": -37.099800000000016,
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 21",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 691.5618
+    },
+    {
+     "a": "Z 22",
+     "b": "swing envelope: largest part",
+     "volume_mm3": 11175.384
+    }
+   ]
+  },
+  {
+   "name": "top of a 20 mm part 4 mm past the jaws, A 0",
+   "dx": 99.0,
+   "dy": 15.227599999999995,
+   "dz": -23.79980000000002,
+   "env": false,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "side of a 20 mm part 4 mm past the jaws at centre height, A 0",
+   "dx": 99.0,
+   "dy": 1.752599999999994,
+   "dz": -37.099800000000016,
+   "env": false,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 64.8792
+    }
+   ]
+  },
+  {
+   "name": "tool on the jaw tops (facing the jaw step), A 0",
+   "dx": 92.0,
+   "dy": 15.227599999999995,
+   "dz": -22.099800000000016,
+   "env": false,
+   "a": 0.0,
+   "kind": "informative",
+   "hits": []
+  },
+  {
+   "name": "top of a 20 mm part 4 mm past the jaws, A 90",
+   "dx": 99.0,
+   "dy": 15.227599999999995,
+   "dz": -23.79980000000002,
+   "env": false,
+   "a": 90.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 489.0166
+    }
+   ]
+  },
+  {
+   "name": "side of a 20 mm part 4 mm past the jaws at centre height, A 90",
+   "dx": 99.0,
+   "dy": 1.752599999999994,
+   "dz": -37.099800000000016,
+   "env": false,
+   "a": 90.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 64.8792
+    }
+   ]
+  },
+  {
+   "name": "tool on the jaw tops (facing the jaw step), A 90",
+   "dx": 92.0,
+   "dy": 15.227599999999995,
+   "dz": -22.099800000000016,
+   "env": false,
+   "a": 90.0,
+   "kind": "informative",
+   "hits": [
+    {
+     "a": "Z 22",
+     "b": "A: Vise XinDian H54-8-55",
+     "volume_mm3": 719.0168
+    },
+    {
+     "a": "A: Vise XinDian H54-8-55",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 502.8047
+    }
+   ]
+  },
+  {
+   "name": "Z fully down over the headstock (expected to collide)",
+   "dx": -9.0,
+   "dy": 15.227599999999995,
+   "dz": -135.3,
+   "env": true,
+   "a": 0.0,
+   "kind": "expected collision",
+   "hits": [
+    {
+     "a": "table 20",
+     "b": "tool 6.35 x 24",
+     "volume_mm3": 760.0612
+    },
+    {
+     "a": "Z 21",
+     "b": "A: Base plate",
+     "volume_mm3": 278.7074
+    },
+    {
+     "a": "Z 21",
+     "b": "A: D motor plate",
+     "volume_mm3": 11385.5527
+    },
+    {
+     "a": "Z 21",
+     "b": "A: ISO 4762 M8x120 <5>",
+     "volume_mm3": 144.1617
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Faceplate",
+     "volume_mm3": 28704.4433
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Spindle nose",
+     "volume_mm3": 26303.0709
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Base plate",
+     "volume_mm3": 9233.6291
+    },
+    {
+     "a": "Z 22",
+     "b": "A: P1 bearing plate",
+     "volume_mm3": 113685.5708
+    },
+    {
+     "a": "Z 22",
+     "b": "A: C cylinder plate",
+     "volume_mm3": 193936.2653
+    },
+    {
+     "a": "Z 22",
+     "b": "A: D motor plate",
+     "volume_mm3": 90952.2185
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Rotor with brake disc",
+     "volume_mm3": 59751.5375
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Brake piston",
+     "volume_mm3": 14669.6088
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 0",
+     "volume_mm3": 5238.1189
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 1",
+     "volume_mm3": 21783.0235
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 2",
+     "volume_mm3": 28182.9551
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 3",
+     "volume_mm3": 29133.4908
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 4",
+     "volume_mm3": 3820.9817
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 5",
+     "volume_mm3": 5014.9331
+    },
+    {
+     "a": "Z 22",
+     "b": "A: HSS-25 61",
+     "volume_mm3": 1187.2809
+    },
+    {
+     "a": "Z 22",
+     "b": "A: Motor 34E1KIP65-45",
+     "volume_mm3": 339.2912
+    },
+    {
+     "a": "Z 22",
+     "b": "A: RU85UUCC0",
+     "volume_mm3": 56474.532
+    },
+    {
+     "a": "Z 22",
+     "b": "A: ISO 4762 M8x120 <1>",
+     "volume_mm3": 5572.3705
+    },
+    {
+     "a": "Z 22",
+     "b": "A: ISO 4762 M8x120 <5>",
+     "volume_mm3": 4367.1677
+    },
+    {
+     "a": "Z 23",
+     "b": "A: Base plate",
+     "volume_mm3": 278.7074
+    },
+    {
+     "a": "Z 23",
+     "b": "A: ISO 4762 M8x120 <5>",
+     "volume_mm3": 4.4399
+    }
+   ]
+  }
+ ],
+ "instances": [
+  {
+   "id": 1,
+   "name": "base 0",
+   "grp": "base"
+  },
+  {
+   "id": 2,
+   "name": "base 1",
+   "grp": "base"
+  },
+  {
+   "id": 3,
+   "name": "base 2",
+   "grp": "base"
+  },
+  {
+   "id": 4,
+   "name": "base 3",
+   "grp": "base"
+  },
+  {
+   "id": 5,
+   "name": "base 4",
+   "grp": "base"
+  },
+  {
+   "id": 6,
+   "name": "X 5",
+   "grp": "x"
+  },
+  {
+   "id": 7,
+   "name": "X 6",
+   "grp": "x"
+  },
+  {
+   "id": 8,
+   "name": "X 7",
+   "grp": "x"
+  },
+  {
+   "id": 9,
+   "name": "X 8",
+   "grp": "x"
+  },
+  {
+   "id": 10,
+   "name": "X 9",
+   "grp": "x"
+  },
+  {
+   "id": 11,
+   "name": "X 10",
+   "grp": "x"
+  },
+  {
+   "id": 12,
+   "name": "X 11",
+   "grp": "x"
+  },
+  {
+   "id": 13,
+   "name": "X 12",
+   "grp": "x"
+  },
+  {
+   "id": 14,
+   "name": "X 13",
+   "grp": "x"
+  },
+  {
+   "id": 15,
+   "name": "X 14",
+   "grp": "x"
+  },
+  {
+   "id": 16,
+   "name": "X 15",
+   "grp": "x"
+  },
+  {
+   "id": 17,
+   "name": "table 16",
+   "grp": "y"
+  },
+  {
+   "id": 18,
+   "name": "table 17",
+   "grp": "y"
+  },
+  {
+   "id": 19,
+   "name": "table 18",
+   "grp": "y"
+  },
+  {
+   "id": 20,
+   "name": "table 19",
+   "grp": "y"
+  },
+  {
+   "id": 21,
+   "name": "table 20",
+   "grp": "y"
+  },
+  {
+   "id": 22,
+   "name": "Z 21",
+   "grp": "z"
+  },
+  {
+   "id": 23,
+   "name": "Z 22",
+   "grp": "z"
+  },
+  {
+   "id": 24,
+   "name": "Z 23",
+   "grp": "z"
+  },
+  {
+   "id": 25,
+   "name": "A: Faceplate",
+   "grp": "rot"
+  },
+  {
+   "id": 26,
+   "name": "A: Spindle nose",
+   "grp": "rot"
+  },
+  {
+   "id": 27,
+   "name": "A: Base plate",
+   "grp": "axis"
+  },
+  {
+   "id": 28,
+   "name": "A: P1 bearing plate",
+   "grp": "axis"
+  },
+  {
+   "id": 29,
+   "name": "A: C cylinder plate",
+   "grp": "axis"
+  },
+  {
+   "id": 30,
+   "name": "A: D motor plate",
+   "grp": "axis"
+  },
+  {
+   "id": 31,
+   "name": "A: Rotor with brake disc",
+   "grp": "rot"
+  },
+  {
+   "id": 32,
+   "name": "A: Brake piston",
+   "grp": "axis"
+  },
+  {
+   "id": 33,
+   "name": "A: Tailstock plate",
+   "grp": "axis"
+  },
+  {
+   "id": 34,
+   "name": "A: Tailstock base",
+   "grp": "axis"
+  },
+  {
+   "id": 35,
+   "name": "A: Tail centre (12 mm 90 deg spot drill)",
+   "grp": "axis"
+  },
+  {
+   "id": 36,
+   "name": "A: Vise XinDian H54-8-55",
+   "grp": "rot"
+  },
+  {
+   "id": 37,
+   "name": "A: HSS-25 0",
+   "grp": "axis"
+  },
+  {
+   "id": 38,
+   "name": "A: HSS-25 1",
+   "grp": "axis"
+  },
+  {
+   "id": 39,
+   "name": "A: HSS-25 2",
+   "grp": "axis"
+  },
+  {
+   "id": 40,
+   "name": "A: HSS-25 3",
+   "grp": "axis"
+  },
+  {
+   "id": 41,
+   "name": "A: HSS-25 4",
+   "grp": "axis"
+  },
+  {
+   "id": 42,
+   "name": "A: HSS-25 5",
+   "grp": "axis"
+  },
+  {
+   "id": 43,
+   "name": "A: HSS-25 61",
+   "grp": "axis"
+  },
+  {
+   "id": 44,
+   "name": "A: Motor 34E1KIP65-45",
+   "grp": "axis"
+  },
+  {
+   "id": 45,
+   "name": "A: RU85UUCC0",
+   "grp": "axis"
+  },
+  {
+   "id": 46,
+   "name": "A: ISO 4762 M8x120 <1>",
+   "grp": "axis"
+  },
+  {
+   "id": 47,
+   "name": "A: ISO 4762 M8x120 <2>",
+   "grp": "axis"
+  },
+  {
+   "id": 48,
+   "name": "A: ISO 4762 M8x120 <3>",
+   "grp": "axis"
+  },
+  {
+   "id": 49,
+   "name": "A: ISO 4762 M8x120 <4>",
+   "grp": "axis"
+  },
+  {
+   "id": 50,
+   "name": "A: ISO 4762 M8x120 <5>",
+   "grp": "axis"
+  },
+  {
+   "id": 51,
+   "name": "A: ISO 4762 M8x120 <6>",
+   "grp": "axis"
+  },
+  {
+   "id": 52,
+   "name": "tool 6.35 x 24",
+   "grp": "tool"
+  },
+  {
+   "id": 53,
+   "name": "swing envelope: vise",
+   "grp": "env"
+  },
+  {
+   "id": 54,
+   "name": "swing envelope: largest part",
+   "grp": "env"
+  }
+ ]
+}

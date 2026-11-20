@@ -1,0 +1,886 @@
+{
+ "head": {
+  "chuck": {
+   "bar_len": 10.0,
+   "x_load": 54.0,
+   "material": "Aluminium 6061 for every part (advanced mode)",
+   "static": {
+    "Fz": {
+     "max_disp_mm": 0.004841,
+     "at": [
+      54.0,
+      1.2581,
+      20.0
+     ],
+     "max_vm_mpa": 5.116,
+     "vm_at": [
+      -106.25,
+      21.5917,
+      48.9091
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 326454,
+      "nodes": 505774,
+      "smallest_dihedral_deg": 10.1068,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.16,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       0.0008445,
+       4.895e-06,
+       -0.00437
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.00445,
+      "node": [
+       54.0,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       54.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       0.0006752,
+       3.319e-06,
+       -0.001476
+      ],
+      "distance_mm": 4.032,
+      "magnitude_mm": 0.001623,
+      "node": [
+       0.7594,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       0.001688,
+       -2.277e-06,
+       -0.0004974
+      ],
+      "distance_mm": 0.2158,
+      "magnitude_mm": 0.00176,
+      "node": [
+       -26.4,
+       -0.2158,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    },
+    "Fy": {
+     "max_disp_mm": 0.003413,
+     "at": [
+      54.0,
+      -17.6129,
+      11.3625
+     ],
+     "max_vm_mpa": 4.025,
+     "vm_at": [
+      -26.4,
+      -40.3361,
+      9.6436
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 326454,
+      "nodes": 505771,
+      "smallest_dihedral_deg": 10.1068,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.159,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       2.091e-06,
+       0.003293,
+       -1.062e-05
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.003293,
+      "node": [
+       54.0,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       54.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       -6.403e-05,
+       0.001247,
+       -5.326e-06
+      ],
+      "distance_mm": 4.032,
+      "magnitude_mm": 0.001249,
+      "node": [
+       0.7594,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       6.451e-06,
+       0.0006614,
+       -3.347e-06
+      ],
+      "distance_mm": 3.815e-07,
+      "magnitude_mm": 0.0006614,
+      "node": [
+       -26.4,
+       0.0,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    },
+    "Fx": {
+     "max_disp_mm": 0.001258,
+     "at": [
+      54.0,
+      0.0,
+      20.0
+     ],
+     "max_vm_mpa": 2.356,
+     "vm_at": [
+      -106.25,
+      21.5917,
+      48.9091
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 326454,
+      "nodes": 505778,
+      "smallest_dihedral_deg": 10.1068,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.159,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       -0.0008167,
+       4.354e-06,
+       0.0007891
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.001136,
+      "node": [
+       54.0,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       54.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       -0.0006611,
+       4.684e-06,
+       0.000406
+      ],
+      "distance_mm": 4.032,
+      "magnitude_mm": 0.0007758,
+      "node": [
+       0.7594,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       -0.0008369,
+       2.265e-06,
+       0.0002174
+      ],
+      "distance_mm": 0.2158,
+      "magnitude_mm": 0.0008646,
+      "node": [
+       -26.4,
+       0.2158,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    }
+   }
+  },
+  "mass": {
+   "chuck": {
+    "Faceplate": 347.1597,
+    "Spindle nose": 299.9896,
+    "Base plate": 936.4128,
+    "P1 bearing plate": 856.0197,
+    "C spacer plate": 1282.9287,
+    "D motor plate": 1164.7708,
+    "Rotor": 148.0805,
+    "Vise": 1134.2385,
+    "Bearing ring": 1051.9672,
+    "Gear flange": 420.7869,
+    "Gear body": 729.5797,
+    "Motor dummy": 1943.9147,
+    "Test bar": 263.76
+   },
+   "overhang": {
+    "Faceplate": 347.1597,
+    "Spindle nose": 299.9896,
+    "Base plate": 936.4128,
+    "P1 bearing plate": 856.0197,
+    "C spacer plate": 1282.9287,
+    "D motor plate": 1164.7708,
+    "Rotor": 148.0805,
+    "Vise": 1134.2385,
+    "Bearing ring": 1051.9672,
+    "Gear flange": 420.7869,
+    "Gear body": 729.5797,
+    "Motor dummy": 1943.9147,
+    "Test bar": 1394.16
+   }
+  },
+  "overhang": {
+   "bar_len": 100.0,
+   "x_load": 144.0,
+   "material": "Aluminium 6061 for every part (advanced mode)",
+   "static": {
+    "Fz": {
+     "max_disp_mm": 0.03384,
+     "at": [
+      144.0,
+      -6.2903,
+      20.0
+     ],
+     "max_vm_mpa": 10.86,
+     "vm_at": [
+      42.7639,
+      -20.0001,
+      -18.3692
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 340404,
+      "nodes": 526711,
+      "smallest_dihedral_deg": 10.0196,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.547,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       0.001698,
+       0.0001378,
+       -0.033
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.03304,
+      "node": [
+       143.9999,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       144.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       0.001106,
+       6.122e-06,
+       -0.002499
+      ],
+      "distance_mm": 4.034,
+      "magnitude_mm": 0.002732,
+      "node": [
+       0.7693,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       0.002956,
+       -1.106e-05,
+       -0.0006712
+      ],
+      "distance_mm": 6.65e-05,
+      "magnitude_mm": 0.003031,
+      "node": [
+       -26.4,
+       -0.0001,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    },
+    "Fy": {
+     "max_disp_mm": 0.02662,
+     "at": [
+      144.0,
+      17.6129,
+      6.3018
+     ],
+     "max_vm_mpa": 8.877,
+     "vm_at": [
+      42.7639,
+      -20.0001,
+      -18.3692
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 340404,
+      "nodes": 526709,
+      "smallest_dihedral_deg": 10.0196,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.546,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       -1.015e-05,
+       0.02622,
+       -0.0001459
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.02622,
+      "node": [
+       143.9999,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       144.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       -0.0001771,
+       0.001951,
+       -4.545e-06
+      ],
+      "distance_mm": 4.034,
+      "magnitude_mm": 0.001959,
+      "node": [
+       0.7693,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       3.541e-07,
+       0.0008502,
+       -1.398e-06
+      ],
+      "distance_mm": 6.65e-05,
+      "magnitude_mm": 0.0008502,
+      "node": [
+       -26.4,
+       -0.0001,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    },
+    "Fx": {
+     "max_disp_mm": 0.001833,
+     "at": [
+      144.0,
+      5.0323,
+      20.0
+     ],
+     "max_vm_mpa": 1.988,
+     "vm_at": [
+      -106.25,
+      21.5917,
+      48.9091
+     ],
+     "mesh": {
+      "element": "10-node tetrahedron",
+      "element_size_mm": 5.0,
+      "elements": 340404,
+      "nodes": 526713,
+      "smallest_dihedral_deg": 10.0196,
+      "smallest_element_mm": 5.0
+     },
+     "mass_kg": 8.548,
+     "warnings": [
+      "The smallest hole or fillet (radius 1.999 mm) is only about 1 elements across, so the peak stress there is rough: try an element size of 0.8 mm or less",
+      "Advanced mode uses one material for every part: Aluminium 6061"
+     ],
+     "tool": {
+      "displacement_mm": [
+       -0.001113,
+       1.259e-05,
+       0.00133
+      ],
+      "distance_mm": 1.241,
+      "magnitude_mm": 0.001735,
+      "node": [
+       143.9999,
+       0.0,
+       1.2411
+      ],
+      "probe": [
+       144.0,
+       0.0,
+       0.0
+      ]
+     },
+     "faceplate": {
+      "displacement_mm": [
+       -0.0006419,
+       2.42e-06,
+       0.0003868
+      ],
+      "distance_mm": 4.034,
+      "magnitude_mm": 0.0007494,
+      "node": [
+       0.7693,
+       2.6145,
+       -2.9738
+      ],
+      "probe": [
+       0.0,
+       0.0,
+       0.0
+      ]
+     },
+     "plate_top": {
+      "displacement_mm": [
+       -0.0007915,
+       -5.024e-08,
+       0.0002064
+      ],
+      "distance_mm": 6.65e-05,
+      "magnitude_mm": 0.000818,
+      "node": [
+       -26.4,
+       -0.0001,
+       64.5
+      ],
+      "probe": [
+       -26.4,
+       0.0,
+       64.5
+      ]
+     }
+    }
+   }
+  }
+ },
+ "tail": {
+  "Fz": {
+   "force_n": 100.0,
+   "max_disp_mm": 0.01089,
+   "at": [
+    150.0,
+    -0.0116,
+    6.0096
+   ],
+   "tip": {
+    "displacement_mm": [
+     -0.0007664,
+     0.0002352,
+     -0.01002
+    ],
+    "distance_mm": 0.6412,
+    "magnitude_mm": 0.01005,
+    "node": [
+     150.0,
+     0.0,
+     -0.6412
+    ],
+    "probe": [
+     150.0,
+     0.0,
+     0.0
+    ]
+   },
+   "plate_top": {
+    "displacement_mm": [
+     -0.00199,
+     -0.000145,
+     -0.000506
+    ],
+    "distance_mm": 3.827,
+    "magnitude_mm": 0.002059,
+    "node": [
+     170.875,
+     3.25,
+     27.2463
+    ],
+    "probe": [
+     169.0,
+     0.0,
+     28.0
+    ]
+   }
+  },
+  "Fy": {
+   "force_n": 100.0,
+   "max_disp_mm": 0.008866,
+   "at": [
+    150.0,
+    -5.9714,
+    -0.6426
+   ],
+   "tip": {
+    "displacement_mm": [
+     -6.831e-06,
+     0.008411,
+     -8.369e-05
+    ],
+    "distance_mm": 0.6412,
+    "magnitude_mm": 0.008411,
+    "node": [
+     150.0,
+     0.0,
+     -0.6412
+    ],
+    "probe": [
+     150.0,
+     0.0,
+     0.0
+    ]
+   },
+   "plate_top": {
+    "displacement_mm": [
+     0.0004991,
+     0.000482,
+     0.0001363
+    ],
+    "distance_mm": 3.827,
+    "magnitude_mm": 0.0007071,
+    "node": [
+     170.875,
+     3.25,
+     27.2463
+    ],
+    "probe": [
+     169.0,
+     0.0,
+     28.0
+    ]
+   }
+  }
+ },
+ "modal": {
+  "mesh_size": 7.0,
+  "modes": [
+   {
+    "decay_60db_s": 7.829,
+    "frequency_hz": 790.8,
+    "loss_factor": 0.0003551,
+    "mass_participation_xyz": [
+     0.1378,
+     0.0,
+     0.089
+    ],
+    "mode": 1
+   },
+   {
+    "decay_60db_s": 5.756,
+    "frequency_hz": 1012.0,
+    "loss_factor": 0.0003774,
+    "mass_participation_xyz": [
+     0.0,
+     0.1889,
+     0.0
+    ],
+    "mode": 2
+   },
+   {
+    "decay_60db_s": 4.231,
+    "frequency_hz": 1419.0,
+    "loss_factor": 0.0003663,
+    "mass_participation_xyz": [
+     0.2646,
+     0.0,
+     0.1279
+    ],
+    "mode": 3
+   },
+   {
+    "decay_60db_s": 3.887,
+    "frequency_hz": 1768.0,
+    "loss_factor": 0.0003199,
+    "mass_participation_xyz": [
+     0.0,
+     0.2134,
+     0.0
+    ],
+    "mode": 4
+   },
+   {
+    "decay_60db_s": 2.637,
+    "frequency_hz": 2318.0,
+    "loss_factor": 0.0003597,
+    "mass_participation_xyz": [
+     0.2432,
+     0.0001,
+     0.0695
+    ],
+    "mode": 5
+   },
+   {
+    "decay_60db_s": 2.577,
+    "frequency_hz": 2428.0,
+    "loss_factor": 0.0003514,
+    "mass_participation_xyz": [
+     0.0001,
+     0.3637,
+     0.0
+    ],
+    "mode": 6
+   }
+  ],
+  "mass_kg": 11.57,
+  "probes": [
+   {
+    "distance_mm": 0.735,
+    "mode_shapes": [
+     [
+      -0.1261,
+      0.004528,
+      0.9691
+     ],
+     [
+      0.0002175,
+      -0.988,
+      0.006234
+     ],
+     [
+      -0.1666,
+      -0.004856,
+      -0.8728
+     ],
+     [
+      -9.474e-05,
+      0.1359,
+      0.000223
+     ],
+     [
+      0.5183,
+      0.01569,
+      0.6837
+     ],
+     [
+      0.01178,
+      -0.8068,
+      0.01059
+     ]
+    ],
+    "mode_shapes_mass_normalised": [
+     [
+      -4.147311099686373,
+      0.14886685913074515,
+      31.8638444512277
+     ],
+     [
+      0.008057869488617007,
+      -36.6034422601013,
+      0.23097333372847698
+     ],
+     [
+      -4.346846702742015,
+      -0.12671182704130043,
+      -22.774734351661323
+     ],
+     [
+      -0.0032206786894202074,
+      4.621298857198948,
+      0.007580922713059241
+     ],
+     [
+      10.899048931507018,
+      0.3299559791282903,
+      14.376632743142181
+     ],
+     [
+      0.23936090279130692,
+      -16.399543400814302,
+      0.21521813615839747
+     ]
+    ],
+    "node": [
+     143.9999,
+     0.0,
+     0.735
+    ],
+    "probe": [
+     144.0,
+     0.0,
+     0.0
+    ]
+   },
+   {
+    "distance_mm": 3.579,
+    "mode_shapes": [
+     [
+      -0.1053,
+      0.001328,
+      0.1589
+     ],
+     [
+      0.0003209,
+      -0.1632,
+      0.0002086
+     ],
+     [
+      -0.1788,
+      -0.0002126,
+      0.03748
+     ],
+     [
+      -8.111e-05,
+      0.009773,
+      2.398e-05
+     ],
+     [
+      0.4965,
+      -0.007624,
+      -0.2617
+     ],
+     [
+      0.01108,
+      0.4757,
+      -0.00433
+     ]
+    ],
+    "mode_shapes_mass_normalised": [
+     [
+      -3.4628304675493125,
+      0.043647728885642056,
+      5.225755617634142
+     ],
+     [
+      0.01189040097904525,
+      -6.044711930317685,
+      0.007727169668374808
+     ],
+     [
+      -4.666600331547169,
+      -0.00554734144880295,
+      0.9781329446883851
+     ],
+     [
+      -0.0027573440985732755,
+      0.3322367310815816,
+      0.0008151174054469915
+     ],
+     [
+      10.440254522009264,
+      -0.1603079095540729,
+      -5.502773941444841
+     ],
+     [
+      0.22513046122969854,
+      9.66889265812074,
+      -0.08802251785808157
+     ]
+    ],
+    "node": [
+     0.0,
+     0.0,
+     -3.5785
+    ],
+    "probe": [
+     0.0,
+     0.0,
+     0.0
+    ]
+   }
+  ],
+  "mesh": {
+   "element": "10-node tetrahedron",
+   "element_size_mm": 7.0,
+   "elements": 129783,
+   "nodes": 209849,
+   "smallest_dihedral_deg": 7.6323,
+   "smallest_element_mm": 7.0
+  }
+ }
+}

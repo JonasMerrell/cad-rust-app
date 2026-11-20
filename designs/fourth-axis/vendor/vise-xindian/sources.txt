@@ -1,0 +1,30 @@
+# Downloaded 2026-11-20. Product page: https://www.amazon.com/dp/B0CKWBBHGS (XinDian/XinDianPAF H54-8-55)
+amazon_img_01.jpg <- https://m.media-amazon.com/images/I/41MY0JClVHL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_02.jpg <- https://m.media-amazon.com/images/I/51A-a6HGFlL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_03.jpg <- https://m.media-amazon.com/images/I/51Brb0YkxDL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_04.jpg <- https://m.media-amazon.com/images/I/51EFHJpcVpL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_05.jpg <- https://m.media-amazon.com/images/I/51G-i3OFZkL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+PHOTO_underside.jpg <- https://m.media-amazon.com/images/I/51VpD7LxWbL._AC_SL1200_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_07.jpg <- https://m.media-amazon.com/images/I/51WDSMP0FgL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_08.jpg <- https://m.media-amazon.com/images/I/51YkyaRgwKL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_09.jpg <- https://m.media-amazon.com/images/I/51aX3jriJaL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+PHOTO_H54-8-55_main.jpg <- https://m.media-amazon.com/images/I/51aXVgeZCNL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_11.jpg <- https://m.media-amazon.com/images/I/51cc2ODz99L._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_12.jpg <- https://m.media-amazon.com/images/I/51fs5qZ1K0L._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+DRAWING_base_underside_hole_pattern.jpg <- https://m.media-amazon.com/images/I/51oOsTkvjZL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_14.jpg <- https://m.media-amazon.com/images/I/51wQiDw1utL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_15.jpg <- https://m.media-amazon.com/images/I/51xnOAedKgL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+PHOTO_connection_plate_10mm.jpg <- https://m.media-amazon.com/images/I/51xueYVZWeL._AC_SL1500_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_img_17.jpg <- https://m.media-amazon.com/images/I/51yzUXjuBIL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+DRAWING_iso_overall_dims.jpg <- https://m.media-amazon.com/images/I/61LwLaWretL._AC_SL1000_.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_aplus_01.png <- https://m.media-amazon.com/images/S/aplus-media-library-service-media/6676a97a-f60c-402d-966c-6bb1abf89105.png (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_aplus_02.png <- https://m.media-amazon.com/images/S/aplus-media-library-service-media/86940969-cf24-4197-b380-5193bb2379e6.png (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_aplus_03.png <- https://m.media-amazon.com/images/S/aplus-media-library-service-media/a0842b88-2674-4725-a728-aa6ce0c2dfa0.png (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_aplus_04.png <- https://m.media-amazon.com/images/S/aplus-media-library-service-media/b80a1223-2f6d-4514-ab49-d00b1d887dce.png (from https://www.amazon.com/dp/B0CKWBBHGS)
+amazon_aplus_05.jpg <- https://m.media-amazon.com/images/S/aplus-media-library-service-media/c94774a1-7e21-4884-b623-16704e70cf38.jpg (from https://www.amazon.com/dp/B0CKWBBHGS)
+# Connection plate listing: https://www.amazon.com/dp/B0CKW9272C (XinDianPAF H54/H54L universal connection plate)
+# Notes
+# - amazon_img_* are gallery images shared across style variants (H54-8-55, H54-50-75, H54-8-55L, H54-L26, H54L-*); H54L photos are the longer-body model, not the H54-8-55.
+# - PHOTO_connection_plate_10mm.jpg also appears on https://www.amazon.com/dp/B0CKW9272C (H54/H54L universal connection plate, 10 mm thick); no drawing of the plate was published.
+# - Listing text (bullets/spec table) was read from https://www.amazon.com/dp/B0CKWBBHGS on 2026-11-20.
+# - Vendor site https://xindianprecise.com/products/milling-machine-vise-h54 returned HTTP 429 to every request; not retrieved. No STEP/CAD file found.

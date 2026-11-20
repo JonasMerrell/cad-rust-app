@@ -1,0 +1,60 @@
+item,description,kind,vendor,part number,qty,unit price USD,price source,link,material / stock / note
+1,Faceplate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1/2 in (12.7) 6061 plate, 125 x 125"
+2,Spindle nose,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 5/8 in (15.9) 6061 plate, 115 x 115"
+3,Base plate,machined on the DMC2,made,,1,,,,Aluminium 6061; stock: 1/2 in (12.7) 6061 plate
+4,P1 bearing plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1-1/4 in (31.75) 6061 plate, 160 x 135"
+5,C cylinder plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1-1/2 in (38.1) 6061 plate, 160 x 135"
+6,D motor plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1-1/4 in (31.75) 6061 plate, 160 x 135"
+7,Rotor with brake disc,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1 in (25.4) 6061 plate, 130 x 130"
+8,Brake piston,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1/4 in (6.35) 6061 plate, 130 x 130"
+9,Tailstock plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1 in (25.4) 6061 plate, 115 x 100"
+10,Tailstock base,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 3/4 in (19.05) 6061 plate, 115 x 105"
+11,Splash ring,"3D printed, no supports",made,,1,,,,ASA (coolant resistant)
+12,Sensor bracket,"3D printed, no supports",made,,1,,,,ASA (coolant resistant)
+13,Friction lining,cut by hand,made,,1,,,,"P400 silicon carbide paper, bonded"
+14,"Strain wave reducer, size 25, 100:1, crossed-roller output",bought,StepperOnline,HSS-25-100-I-D14,1,268.84,page (pre-order),https://www.omc-stepperonline.com/hss-series-harmonic-drive-gearbox-107mm-ratio-100-1-backlash-20arcsec-14mm-input-diameter-hss-25-100-i-d14,vendor STEP in the model
+15,"Closed-loop stepper NEMA 34, IP65, 4.5 N·m, 14 mm keyed shaft, 1000-line encoder",bought,StepperOnline (price: Oyostepper),34E1KIP65-45,1,125.70,page (reseller),https://www.omc-stepperonline.com/p-series-ip65-waterproof-nema-34-closed-loop-stepper-motor-4-5nm-637-38oz-in-with-encoder-1000ppr-4000cpr-34e1kip65-45,vendor STEP in the model
+16,"Closed-loop stepper drive, 24-110 VDC, step/dir to 200 kHz",bought,StepperOnline,CL86T-V41,1,46.31,page,https://www.omc-stepperonline.com/closed-loop-stepper-driver-v4-1-0-8-2a-18-80vac-24-110vdc-for-nema-34-stepper-motor-cl86t-v41,not in the model (lives in the control cabinet)
+17,48 V 350 W power supply,bought,Mean Well (Jameco),LRS-350-48,1,33.30,snippet,https://www.jameco.com/z/LRS-350-48-MEAN-WELL-350W-48V-7-3A-Single-Output-Enclosed-Switching-Power-Supply_2219840.html,not in the model
+18,"Crossed roller bearing 55 x 120 x 15, both rings with mounting holes, P5",bought,THK type (eBay LKPB store),RU85UUCC0 P5,1,179.00,snippet,https://www.ebay.de/itm/134210207312,THK CAD in the model; genuine THK is about 700-820 USD
+19,"Self-centring vise 75 x 54 x 44, 8-55 mm",bought,XinDian (PAF),H54-8-55,1,0.00,owned / chosen by Jonas,https://www.amazon.com/dp/B0CKWBBHGS,no vendor CAD exists: drawn from the vendor's two dimension drawings
+20,"O-ring NBR 70, 92 x 2.5",bought,The O-Ring Store,N2.50X092,1,0.45,page,https://www.theoringstore.com/store/index.php?main_page=advanced_search_result&keyword=2.50X092,"brake piston, inner"
+21,"O-ring NBR 70, 118 x 2.5",bought,The O-Ring Store,N2.50X118,1,0.58,page,https://www.theoringstore.com/store/index.php?main_page=advanced_search_result&keyword=2.50X118,"brake piston, outer"
+22,"3/2 solenoid valve, 1/8 in ports, 24 V DC, normally closed",bought,Airtac type (STC Valve),3V110-06-NC 24VDC,1,40.76,snippet,https://www.stcvalve.com/Solenoid_Valve.htm,brake; not in the model
+23,Push-in union 6 mm,bought,"Aignep (Zoro), pack of 5",50040N-6,1,28.15,snippet,https://www.zoro.com/aignep-usa-tube-union-6mm-tube-sz-brass-pk5-50040n-6-pk5/i/G0252147/,tube stub to hose; not in the model
+24,"Polyurethane tube 6 x 4 mm, 20 m",bought,SMC (Motion),TU0604,1,19.19,snippet,https://www.motion.com/products/sku/02005429,not in the model
+25,"Brass tube 6 mm OD x 300 mm, 2 pieces (cut one 60 mm stub)",bought,K&S,9824,1,10.99,snippet,https://ksmetals.com/products/br45mm-6,"air port, bonded into plate C"
+26,"Inductive sensor M8, NPN NO, 2 mm, 6-36 V",bought,generic (Abra Electronics),LJ8A3-2-Z/BX,1,9.96,snippet,https://abra-electronics.com/,home sensor; drawn from listing dimensions
+27,"Spotting drill 12 mm, 90 degrees, solid carbide, 65 mm long",bought,Garr Tool (Zoro),91568,1,67.89,snippet,https://www.zoro.com/garr-tool-nc-spotting-drill-general-purpose-series-1600-12-mm-diameter-65-mm-overall-length-91568/i/G216069782/,tailstock centre (used as a dead centre); check the point is 90 degrees
+28,"Shim washers 8 x 14 or 16 mm, assorted 0.1 / 0.2 / 0.5 mm",bought,generic (DIN 988),DIN 988 8x14 assortment,1,12.00,est,,"6 stacks between plates C and D, thickness chosen at assembly"
+29,Heat-set insert M5 x 7,bought,generic,M5 x 7 brass,2,0.20,est,,sensor bracket
+30,"Loctite 638 retaining compound, 10 ml",bought,Henkel (Hisco),1835937,1,20.44,snippet,https://www.hisco.com/Product/1835937-30769,"wave generator key, home target pin"
+31,"RTV silicone gasket maker, 3.5 oz",bought,Permatex (Zoro),82194,1,9.55,snippet,https://zoro.com/permatex-rtv-silicone-sealant-35-oz-tube-gray-82194/i/G0600415,"plate joints, splash ring"
+32,"Wet-and-dry silicon carbide paper P400, 5 sheets",bought,3M (Zoro),32038,1,7.49,snippet,https://www.zoro.com/3m-3m-wetordry-sandpaper-32038-400-grit-9-inch-x-11-inch-5pk-7010328058/i/G712337491/,"friction lining, bonded with epoxy"
+33,"Slow epoxy, small pack",bought,generic,,1,8.00,est,,lining and air tube
+34,Strain wave gear grease,bought,Harmonic Drive,SK-1A (or the grease StepperOnline specifies),1,40.00,est,https://www.harmonicdrive.net/products/harmonicgrease,the unit ships greased; top up per the vendor manual
+35,"Hex nut, class 8 M5",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4032 M5,8,0.10,est (M6: page),https://monsterbolts.com/,
+36,"Hex nut, class 8 M6",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4032 M6,11,0.10,est (M6: page),https://monsterbolts.com/,
+37,"Hex nut, class 8 M8",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4032 M8,12,0.10,est (M6: page),https://monsterbolts.com/,
+38,Thin hex nut M8,bought,any metric fastener shop (e.g. Monster Bolts),ISO 4035 M8,2,0.10,est (M6: page),https://monsterbolts.com/,
+39,"Socket head cap screw, class 12.9 M5x12",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M5x12,10,0.15,est (M6: page),https://monsterbolts.com/,
+40,"Socket head cap screw, class 12.9 M5x20",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M5x20,16,0.15,est (M6: page),https://monsterbolts.com/,
+41,"Socket head cap screw, class 12.9 M5x30",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M5x30,2,0.15,est (M6: page),https://monsterbolts.com/,
+42,"Socket head cap screw, class 12.9 M6x16",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M6x16,10,0.20,est (M6: page),https://monsterbolts.com/,
+43,"Socket head cap screw, class 12.9 M6x30",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M6x30,5,0.20,est (M6: page),https://monsterbolts.com/,
+44,"Socket head cap screw, class 12.9 M8x120",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M8x120,6,1.20,est (M6: page),https://monsterbolts.com/,
+45,"Socket head cap screw, class 12.9 M8x16",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M8x16,4,0.35,est (M6: page),https://monsterbolts.com/,
+46,"Socket head cap screw, class 12.9 M8x20",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M8x20,8,0.35,est (M6: page),https://monsterbolts.com/,
+47,"Socket head cap screw, class 12.9 M8x25",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M8x25,4,0.35,est (M6: page),https://monsterbolts.com/,
+48,"Socket head cap screw, class 12.9 M8x30",bought,any metric fastener shop (e.g. Monster Bolts),ISO 4762 M8x30,6,0.35,est (M6: page),https://monsterbolts.com/,
+49,Flat washer M6,bought,any metric fastener shop (e.g. Monster Bolts),ISO 7089 M6,4,0.05,est (M6: page),https://monsterbolts.com/,
+50,Flat washer M8,bought,any metric fastener shop (e.g. Monster Bolts),ISO 7089 M8,16,0.05,est (M6: page),https://monsterbolts.com/,
+51,"Dowel pin, hardened (home target) Ø6x10",bought,any metric fastener shop (e.g. Monster Bolts),ISO 8734 Ø6x10,1,0.30,est (M6: page),https://monsterbolts.com/,
+52,6061-T6 plate 1/2 in x 8 x 9 in,stock,Midwest Steel Supply (or any 6061 supplier),,2,115.82,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,"for: Base plate, Faceplate (second piece 1/2 x 5 x 5). base plate (212 x 156) is larger: order 1/2 x 7 x 9 in"
+53,6061-T6 plate 5/8 in x 5 x 5 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,101.42,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,for: Spindle nose. 
+54,6061-T6 plate 3/4 in x 5 x 5 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,118.86,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,for: Tailstock base. 
+55,6061-T6 plate 1 in x 6 x 12 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,150.00,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,"for: Rotor, Tailstock plate. "
+56,6061-T6 plate 1-1/4 in x 7 x 12 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,200.33,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,"for: P1 bearing plate, D motor plate. "
+57,6061-T6 plate 1-1/2 in x 7 x 6 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,126.67,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,for: C cylinder plate. 
+58,6061-T6 plate 1/4 in x 6 x 6 in,stock,Midwest Steel Supply (or any 6061 supplier),,1,65.70,"est: the shop's formula, not a quote",https://www.midweststeelsupply.com/store/6061aluminumplate,for: Brake piston. 
+,TOTAL of the priced lines,,,,,1950.32,,,vise not counted; plate prices are for small cut pieces and fall a lot with bar stock or offcuts

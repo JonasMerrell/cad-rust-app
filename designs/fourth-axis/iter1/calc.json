@@ -1,0 +1,312 @@
+{
+ "iteration": 1,
+ "loads": {
+  "rough_side": 391.2376087400466,
+  "rough_peak": 782.4752174800932,
+  "never_side": 437.26556270946384,
+  "fin_side": 77.6721723233916,
+  "fin_peak": 155.3443446467832,
+  "rough_ft": 284.05606641073183,
+  "fin_ft": 56.393483772718824,
+  "rough_axial": 110.96446090437117,
+  "fin_axial": 22.029709150132515,
+  "tooth_hz_9k": 450.0,
+  "tooth_hz_24k": 1200.0,
+  "straight_tooth_peak_over_mean": 4.13285628931268
+ },
+ "bearing": {
+  "kind": "gear unit's own crossed-roller bearing",
+  "k_tilt": 242000.0,
+  "k_rad": 236328092.26405966,
+  "k_ax": 472656160.2144214,
+  "tag": "tilt D, radial C (scaled model)"
+ },
+ "joints": [
+  {
+   "name": "nose / gear output flange (r 10..30)",
+   "k_tilt_nm_per_rad": 1253251.8971769037
+  },
+  {
+   "name": "faceplate / nose (r 0..55)",
+   "k_tilt_nm_per_rad": 14373768.13787755
+  },
+  {
+   "name": "vise / faceplate (75 x 54, weak axis)",
+   "k_tilt_nm_per_rad": 1968300.0
+  },
+  {
+   "name": "plate / base (19 x 140 strip)",
+   "k_tilt_nm_per_rad": 161310.16125000003
+  }
+ ],
+ "tool_point": {
+  "chuck_Fz": {
+   "struct": 1.782608695652174e-07,
+   "bar": 2.1001904934687943e-10,
+   "bearing": 3.579652951174999e-08,
+   "joints": 7.607010762579767e-08,
+   "total": 2.9012750670276505e-07,
+   "total_less_bar": 2.899174876534182e-07,
+   "joint_list": [
+    [
+     "nose / gear output flange (r 10..30)",
+     6.0951513556111114e-09
+    ],
+    [
+     "faceplate / nose (r 0..55)",
+     3.0951452377169975e-10
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.4814814814814814e-09
+    ],
+    [
+     "plate / base (19 x 140 strip)",
+     6.818396026493337e-08
+    ]
+   ]
+  },
+  "chuck_Fy": {
+   "struct": 5.271099744245525e-08,
+   "bar": 2.1001904934687943e-10,
+   "bearing": 3.579652951174999e-08,
+   "joints": 8.327367718523666e-09,
+   "total": 9.68348946727289e-08,
+   "total_less_bar": 9.662487562338201e-08,
+   "joint_list": [
+    [
+     "nose / gear output flange (r 10..30)",
+     6.0951513556111114e-09
+    ],
+    [
+     "faceplate / nose (r 0..55)",
+     3.0951452377169975e-10
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.4814814814814814e-09
+    ],
+    [
+     "plate / base (19 x 140 strip)",
+     4.4122035765937407e-10
+    ]
+   ]
+  },
+  "overhang_Fz": {
+   "struct": 5.882352941176471e-07,
+   "bar": 3.1014853955007254e-08,
+   "bearing": 1.3427586835472517e-07,
+   "joints": 2.727784624317013e-07,
+   "total": 9.952896249040735e-07,
+   "total_less_bar": 9.642747709490663e-07,
+   "joint_list": [
+    [
+     "nose / gear output flange (r 10..30)",
+     2.5111280558115702e-08
+    ],
+    [
+     "faceplate / nose (r 0..55)",
+     1.7083126543062354e-09
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.0534979423868311e-08
+    ],
+    [
+     "plate / base (19 x 140 strip)",
+     2.3542388979541108e-07
+    ]
+   ]
+  },
+  "overhang_Fy": {
+   "struct": 1.9202046035805625e-07,
+   "bar": 3.1014853955007254e-08,
+   "bearing": 1.3427586835472517e-07,
+   "joints": 3.7795792993949624e-08,
+   "total": 3.6409212170673104e-07,
+   "total_less_bar": 3.330772677517238e-07,
+   "joint_list": [
+    [
+     "nose / gear output flange (r 10..30)",
+     2.5111280558115702e-08
+    ],
+    [
+     "faceplate / nose (r 0..55)",
+     1.7083126543062354e-09
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.0534979423868311e-08
+    ],
+    [
+     "plate / base (19 x 140 strip)",
+     4.4122035765937407e-10
+    ]
+   ]
+  }
+ },
+ "torsion": {
+  "table": [
+   {
+    "case": "roughing mean",
+    "r_mm": 46.199999999999996,
+    "torque": 18.075177523790153,
+    "windup_mrad": 0.5331164537016095,
+    "um": 24.62998016101436
+   },
+   {
+    "case": "roughing mean",
+    "r_mm": 25.0,
+    "torque": 9.780940218501165,
+    "windup_mrad": 0.31551420059681173,
+    "um": 7.8878550149202935
+   },
+   {
+    "case": "roughing peak",
+    "r_mm": 46.199999999999996,
+    "torque": 36.150355047580305,
+    "windup_mrad": 0.8946200041774126,
+    "um": 41.33144419299646
+   },
+   {
+    "case": "roughing peak",
+    "r_mm": 25.0,
+    "torque": 19.56188043700233,
+    "windup_mrad": 0.562850511965853,
+    "um": 14.071262799146325
+   },
+   {
+    "case": "finishing mean",
+    "r_mm": 46.199999999999996,
+    "torque": 3.588454361340692,
+    "windup_mrad": 0.11575659230131265,
+    "um": 5.347954564320644
+   },
+   {
+    "case": "finishing mean",
+    "r_mm": 25.0,
+    "torque": 1.9418043080847902,
+    "windup_mrad": 0.06263884864789646,
+    "um": 1.5659712161974115
+   }
+  ]
+ },
+ "lost_motion": {
+  "items": [
+   [
+    "Gear backlash (D: at most)",
+    20.0
+   ],
+   [
+    "Gear hysteresis loss on torque reversal (D)",
+    60.0
+   ],
+   [
+    "Wave generator on the motor shaft: key bonded with Loctite 638 (C: none)",
+    0.0
+   ],
+   [
+    "Friction joints rotor / bearing / nose / faceplate / vise (C: none below their slip torque)",
+    0.0
+   ],
+   [
+    "Closed-loop drive: +/- 1 encoder count (C)",
+    6.4799999999999995
+   ],
+   [
+    "Motor step accuracy 5 % of a step (D)",
+    6.48
+   ]
+  ],
+  "worst_arcsec": 92.96,
+  "rss_arcsec": 63.906031014294726,
+  "worst_um_rmax": 20.821545265725415,
+  "rss_um_rmax": 14.313923381206862,
+  "accuracy_arcsec": 60.0,
+  "accuracy_um_rmax": 13.439035240356336,
+  "repeat_uni_arcsec": 11.48,
+  "repeat_uni_um_rmax": 2.5713354093215126,
+  "enc_arcsec": 3.2399999999999998
+ },
+ "motor": {
+  "J_rotating_no_work": 0.0020518610753,
+  "mass_rotating": 1.7352089,
+  "cases": {
+   "typ": {
+    "J_out": 0.0021197194766175396,
+    "reflected": 2.1197194766175397e-07,
+    "ratio": 0.000957848837152074,
+    "t_acc": 0.2783056621536007,
+    "t_cut_fin": 0.05126363373343846,
+    "t_cut_rough": 0.25821682176843075,
+    "margin_600": 6.038889509933089
+   },
+   "max": {
+    "J_out": 0.004138825002070516,
+    "reflected": 4.138825002070516e-07,
+    "ratio": 0.0018702327167060622,
+    "t_acc": 0.2784818623504225,
+    "t_cut_fin": 0.05126363373343846,
+    "t_cut_rough": 0.25821682176843075,
+    "margin_600": 6.036906919791319
+   }
+  },
+  "steps_per_deg": 1111.111111111111,
+  "max_out_rpm_600": 6.0,
+  "max_deg_s": 36.0,
+  "accel_deg_s2": 500.0,
+  "step_hz_at_max": 40000.0
+ },
+ "natural": {
+  "torsion_gear_no part": 618.6243381227994,
+  "torsion_gear_\u00d840 x 100": 608.6418113818168,
+  "torsion_gear_\u00d890 x 120": 435.574499826014,
+  "tilt_lumped_no_part": 1009.658895890977,
+  "tilt_lumped_typ_part": 668.1733890256924
+ },
+ "bearing_life": {
+  "M_peak": 138.81110358096853,
+  "allow": 156.0,
+  "share": 0.8898147665446701
+ },
+ "bolts": [
+  {
+   "joint": "vise to faceplate",
+   "screws": "4 x M6 12.9",
+   "torque": 12.0,
+   "preload": 9999.999999999998,
+   "proof_share": 0.5128994204236548,
+   "slip_torque": 119.99999999999999,
+   "margin": 3.3194694724867464
+  },
+  {
+   "joint": "faceplate to nose",
+   "screws": "6 x M6 8.8",
+   "torque": 8.0,
+   "preload": 6666.666666666666,
+   "proof_share": 0.5718533767941899,
+   "slip_torque": 300.0,
+   "margin": 8.298673681216867
+  },
+  {
+   "joint": "nose to gear output flange",
+   "screws": "8 x M8 12.9",
+   "torque": 30.0,
+   "preload": 18750.0,
+   "proof_share": 0.5281392597600135,
+   "slip_torque": 472.5,
+   "margin": 13.070411047916565
+  }
+ ],
+ "vise_pry": {
+  "moment": 112.6764313171334,
+  "extra_tension": 1369.4267296686123,
+  "preload": 9999.999999999998,
+  "share": 0.13694267296686125
+ },
+ "thermal": {
+  "dT": 10.0,
+  "height_um": 17.6292,
+  "length_um": 28.320000000000004
+ }
+}

@@ -1,0 +1,5 @@
+Retrieved 2026-11-20
+STC_Air_Cylinder-SDA-spec.html <- https://stcvalve.com/Air_Cylinder-SDA-spec.htm  (STC = Airtac-pattern SDA clone; dimension table)
+STC_SDA20-100-dimension.png    <- https://stcvalve.com/Drawings/2D/SDA20-100-dimension.png (letter key for the table)
+Prices: https://stcvalve.com/Air_Cylinder-SDA.htm ; https://www.airtacs.com (search suggest API)
+No STEP downloaded.

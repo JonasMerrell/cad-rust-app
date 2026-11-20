@@ -1,0 +1,4 @@
+product page: https://www.omc-stepperonline.com/hht-series-harmonic-drive-gearbox-70mm-ratio-100-1-backlash-20arcsec-8mm-input-diameter-hht-14-100-i-d8
+datasheet: https://files.omc-stepperonline.com/HHT-14-100-I-D8_Full_Datasheet.pdf
+STEP: https://files.omc-stepperonline.com/HHT-14-100-I-D8.stp  (fetched with browser UA + Referer https://www.omc-stepperonline.com/ ; site download tab otherwise asks for login)
+retrieved 2026-11-20

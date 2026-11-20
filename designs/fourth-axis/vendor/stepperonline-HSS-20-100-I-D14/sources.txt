@@ -1,0 +1,3 @@
+product page: https://www.omc-stepperonline.com/hss-series-harmonic-drive-gearbox-93mm-ratio-100-1-backlash-20arcsec-14mm-input-diameter-hss-20-100-i-d14
+datasheet: https://files.omc-stepperonline.com/HSS-20-100-I-D14_Full_Datasheet.pdf
+retrieved 2026-11-20

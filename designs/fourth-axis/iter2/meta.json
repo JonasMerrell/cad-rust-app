@@ -1,0 +1,936 @@
+{
+ "params": {
+  "it": 2,
+  "vise_l": 75.0,
+  "vise_w": 54.0,
+  "vise_h": 44.0,
+  "vise_m6": 14.14,
+  "ru_id": 55.0,
+  "ru_od": 120.0,
+  "ru_w": 15.0,
+  "ru_in_pcd": 65.0,
+  "ru_out_pcd": 105.0,
+  "ru_cb": 5.4,
+  "hss_out_to_flange": 36.0,
+  "hss_flange_t": 10.0,
+  "hss_flange_r": 53.5,
+  "hss_body_r": 43.0,
+  "hss_pcd": 96.0,
+  "hss_m8_pcd": 42.0,
+  "hss_pilot_in_r": 33.5,
+  "hss_alpha": 22.5,
+  "motor_len": 117.8,
+  "motor_sq": 85.85,
+  "motor_holes": 69.58,
+  "motor_pilot_r": 36.5,
+  "motor_flange_t": 10.0,
+  "fp_t": 12.7,
+  "fp_r": 59.0,
+  "nose_t": 11.7,
+  "nose_boss": 2.0,
+  "nose_r": 55.0,
+  "base_t": 12.7,
+  "W2": 78.0,
+  "top": 64.5,
+  "bot": -64.5,
+  "chamfer": 18.0,
+  "p1_t": 31.75,
+  "c_t": 38.1,
+  "d_t": 31.75,
+  "d_gap": 0.1,
+  "brake": false,
+  "tail": true,
+  "rec_d": 4.45,
+  "lining": 0.25,
+  "fl_gap": 0.15,
+  "fl_t": 2.5,
+  "pis_gap": 0.2,
+  "pis_t": 6.35,
+  "pis_proud": 1.35,
+  "fl_r": 61.0,
+  "rec_r": 61.5,
+  "gr_ro": 61.2,
+  "gr_ri": 46.5,
+  "gr_d": 6.0,
+  "port_r": 57.9,
+  "port_deg": 20.0,
+  "H": 77.2,
+  "xt": 169.0,
+  "tail_tip": 144.0
+ },
+ "x": {
+  "fp_f": 0.0,
+  "fp_r": -12.7,
+  "nose_r": -24.4,
+  "ru_f": -26.4,
+  "ru_r": -41.4,
+  "p1_f": -26.4,
+  "p1_r": -58.15,
+  "rec_f": -53.699999999999996,
+  "fl_f": -54.099999999999994,
+  "fl_r": -56.599999999999994,
+  "pis_f": -56.8,
+  "pis_r": -63.15,
+  "c_f": -58.15,
+  "c_r": -96.25,
+  "hss_fl_f": -96.25,
+  "hss_out": -60.25,
+  "hss_fl_r": -106.25,
+  "d_f": -96.35,
+  "d_r": -128.1,
+  "motor_f": -128.1,
+  "motor_r": -245.89999999999998
+ },
+ "parts": [
+  {
+   "name": "Faceplate",
+   "stem": "faceplate",
+   "studio": 0,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1/2 in (12.7) 6061 plate, 125 x 125",
+   "inst": 1
+  },
+  {
+   "name": "Spindle nose",
+   "stem": "spindle-nose",
+   "studio": 1,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "5/8 in (15.9) 6061 plate, 115 x 115",
+   "inst": 2
+  },
+  {
+   "name": "Base plate",
+   "stem": "base-plate",
+   "studio": 2,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1/2 in (12.7) 6061 plate",
+   "inst": 3
+  },
+  {
+   "name": "P1 bearing plate",
+   "stem": "p1-bearing-plate",
+   "studio": 3,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1-1/4 in (31.75) 6061 plate, 160 x 135",
+   "inst": 4
+  },
+  {
+   "name": "C spacer plate",
+   "stem": "c-spacer-plate",
+   "studio": 4,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1-1/2 in (38.1) 6061 plate, 160 x 135",
+   "inst": 5
+  },
+  {
+   "name": "D motor plate",
+   "stem": "d-motor-plate",
+   "studio": 5,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1-1/4 in (31.75) 6061 plate, 160 x 135",
+   "inst": 6
+  },
+  {
+   "name": "Rotor",
+   "stem": "rotor",
+   "studio": 6,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1 in (25.4) 6061 plate, 130 x 130",
+   "inst": 7
+  },
+  {
+   "name": "Tailstock plate",
+   "stem": "tailstock-plate",
+   "studio": 7,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1 in (25.4) 6061 plate, 115 x 100",
+   "inst": 8
+  },
+  {
+   "name": "Tailstock base",
+   "stem": "tailstock-base",
+   "studio": 8,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "3/4 in (19.05) 6061 plate, 115 x 105",
+   "inst": 9
+  },
+  {
+   "name": "Tail centre (12 mm 90 deg spot drill)",
+   "stem": "tail-centre-12-mm-90-deg-spot-drill",
+   "studio": 9,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Steel",
+   "kind": "bought",
+   "stock": "",
+   "inst": 10
+  },
+  {
+   "name": "Vise XinDian H54-8-55",
+   "stem": "vise-xindian-h54-8-55",
+   "studio": 10,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Steel",
+   "kind": "bought",
+   "stock": "",
+   "inst": 11
+  }
+ ],
+ "instances": [
+  [
+   1,
+   "Faceplate",
+   null
+  ],
+  [
+   2,
+   "Spindle nose",
+   null
+  ],
+  [
+   3,
+   "Base plate",
+   null
+  ],
+  [
+   4,
+   "P1 bearing plate",
+   null
+  ],
+  [
+   5,
+   "C spacer plate",
+   null
+  ],
+  [
+   6,
+   "D motor plate",
+   null
+  ],
+  [
+   7,
+   "Rotor",
+   null
+  ],
+  [
+   8,
+   "Tailstock plate",
+   null
+  ],
+  [
+   9,
+   "Tailstock base",
+   null
+  ],
+  [
+   10,
+   "Tail centre (12 mm 90 deg spot drill)",
+   null
+  ],
+  [
+   11,
+   "Vise XinDian H54-8-55",
+   null
+  ],
+  [
+   12,
+   "HSS-25 0",
+   null
+  ],
+  [
+   13,
+   "HSS-25 1",
+   null
+  ],
+  [
+   14,
+   "HSS-25 2",
+   null
+  ],
+  [
+   15,
+   "HSS-25 3",
+   null
+  ],
+  [
+   16,
+   "HSS-25 4",
+   null
+  ],
+  [
+   17,
+   "HSS-25 5",
+   null
+  ],
+  [
+   18,
+   "HSS-25 8",
+   null
+  ],
+  [
+   19,
+   "HSS-25 61",
+   null
+  ],
+  [
+   20,
+   "Motor 34E1KIP65-45",
+   null
+  ],
+  [
+   21,
+   "RU85UUCC0",
+   null
+  ],
+  [
+   22,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   23,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   24,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   25,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   26,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   27,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   28,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   29,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   30,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   31,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   32,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   33,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   34,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   35,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   36,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   37,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   38,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   39,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   40,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   41,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   42,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   43,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   44,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   45,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   46,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   47,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   48,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   49,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   50,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   51,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   52,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   53,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   54,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   55,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   56,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   57,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   58,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   59,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   60,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   61,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   62,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   63,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   64,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   65,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   66,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   67,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   68,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   69,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   70,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   71,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   72,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   73,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   74,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   75,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   76,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   77,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   78,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   79,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   80,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   81,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   82,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   83,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   84,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   85,
+   "ISO 4762 M5x12",
+   null
+  ],
+  [
+   86,
+   "ISO 4762 M5x20",
+   null
+  ],
+  [
+   87,
+   "ISO 4762 M5x25",
+   null
+  ],
+  [
+   88,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   89,
+   "ISO 4762 M8x20",
+   null
+  ],
+  [
+   90,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   91,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   92,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   93,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   94,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   95,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   96,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   97,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   98,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   99,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   100,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   101,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   102,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   103,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   104,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   105,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   106,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   107,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   108,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   109,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   110,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   111,
+   "ISO 4762 M8x120",
+   null
+  ],
+  [
+   112,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   113,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   114,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   115,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   116,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   117,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   118,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   119,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   120,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   121,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   122,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   123,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   124,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   125,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   126,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   127,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   128,
+   "ISO 7089 M8",
+   null
+  ],
+  [
+   129,
+   "ISO 4762 M8x30",
+   null
+  ],
+  [
+   130,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   131,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   132,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   133,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   134,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   135,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   136,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   137,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   138,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   139,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   140,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   141,
+   "ISO 4032 M6",
+   null
+  ]
+ ]
+}

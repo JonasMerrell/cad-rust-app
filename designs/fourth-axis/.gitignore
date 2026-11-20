@@ -1,0 +1,17 @@
+# rCAD run transcripts and inputs that the scripts regenerate
+*.out
+*.err
+*.log
+*.stl
+__pycache__/
+iter*/build.json
+iter*/dfm-run.json
+iter*/section.json
+iter*/exploded.json
+iter*/fea/head-*.json
+iter*/fea/tail.json
+iter*/fea/brake.json
+iter*/machine/machine.json
+iter*/machine/list.json
+iter*/machine/results-old.json
+cutsim/c.json

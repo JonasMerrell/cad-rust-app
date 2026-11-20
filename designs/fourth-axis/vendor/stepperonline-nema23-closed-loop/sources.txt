@@ -1,0 +1,13 @@
+Retrieved 2026-11-20
+Product pages (specs, prices, embedded torque-curve JSON -> torque_curves.json):
+ https://www.omc-stepperonline.com/p-series-nema-23-closed-loop-stepper-motor-2nm-283-28oz-in-with-encoder-1000ppr-4000cpr-23e1k-20
+ https://www.omc-stepperonline.com/s-series-nema-23-closed-loop-stepper-motor-2-0-nm-283-28oz-in-encoder-1000ppr-4000cpr-23hs30-5004d-e1000
+ https://www.omc-stepperonline.com/nema-23-closed-loop-stepper-motor-3-0nm-424oz-in-encoder-1000ppr-4000cpr-23hs45-4204d-e1000
+ https://www.omc-stepperonline.com/p-series-ip65-waterproof-nema-23-closed-loop-stepper-motor-2nm-283-28oz-in-with-encoder-1000ppr-4000cpr-23e1kip65-20
+ https://www.omc-stepperonline.com/p-series-ip65-waterproof-nema-23-closed-loop-stepper-motor-1-2nm-169-97oz-in-with-encoder-1000ppr-4000cpr-23e1kip65-12
+ https://www.omc-stepperonline.com/closed-loop-stepper-driver-v4-1-0-8-0a-24-48vdc-for-nema-17-23-24-stepper-motor-cl57t-v41
+Datasheet PDFs: https://files.omc-stepperonline.com/<name>.pdf (needs Referer: https://www.omc-stepperonline.com/)
+ 23E1K-20_Full_Datasheet.pdf, 23E1KIP65-20_Full_Datasheet.pdf, 23E1KIP65-12_Full_Datasheet.pdf,
+ 23HS30-5004D-E1000_Full_Datasheet.pdf, 23HS45-4204D-E1000_Full_Datasheet.pdf, CL57T-V41_Manual.pdf
+STEP files NOT downloaded: the product pages list <MODEL>.STEP (e.g. 23E1K-20.STEP, 7.38 MB) as "Log in to download";
+ https://www.omc-stepperonline.com/download/<MODEL>.STEP returns 404. A StepperOnline account login is needed.

@@ -1,0 +1,551 @@
+{
+ "params": {
+  "it": 1,
+  "vise_l": 75.0,
+  "vise_w": 54.0,
+  "vise_h": 44.0,
+  "vise_m6": 14.14,
+  "ru_id": 55.0,
+  "ru_od": 120.0,
+  "ru_w": 15.0,
+  "ru_in_pcd": 65.0,
+  "ru_out_pcd": 105.0,
+  "ru_cb": 5.4,
+  "hss_out_to_flange": 36.0,
+  "hss_flange_t": 10.0,
+  "hss_flange_r": 53.5,
+  "hss_body_r": 43.0,
+  "hss_pcd": 96.0,
+  "hss_m8_pcd": 42.0,
+  "hss_pilot_in_r": 33.5,
+  "hss_alpha": 22.5,
+  "motor_len": 117.8,
+  "motor_sq": 85.85,
+  "motor_holes": 69.58,
+  "motor_pilot_r": 36.5,
+  "motor_flange_t": 10.0,
+  "fp_t": 12.7,
+  "fp_r": 59.0,
+  "nose_t": 11.7,
+  "nose_boss": 2.0,
+  "nose_r": 55.0,
+  "base_t": 12.7,
+  "W2": 70.0,
+  "top": 62.0,
+  "bot": -62.0,
+  "chamfer": 18.0,
+  "p1_t": 19.05,
+  "adapter_t": 22.0,
+  "H": 74.7
+ },
+ "x": {
+  "fp_f": 0.0,
+  "fp_r": -12.7,
+  "nose_r": -24.4,
+  "hss_out": -24.4,
+  "hss_fl_f": -60.4,
+  "p1_r": -60.4,
+  "p1_f": -41.349999999999994,
+  "hss_fl_r": -70.4,
+  "ad_r": -92.4,
+  "motor_f": -92.4,
+  "motor_r": -210.2
+ },
+ "parts": [
+  {
+   "name": "Faceplate",
+   "stem": "faceplate",
+   "studio": 0,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1/2 in (12.7) 6061 plate, 125 x 125",
+   "inst": 1
+  },
+  {
+   "name": "Spindle nose",
+   "stem": "spindle-nose",
+   "studio": 1,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1/2 in (12.7) 6061 plate",
+   "inst": 2
+  },
+  {
+   "name": "Base plate",
+   "stem": "base-plate",
+   "studio": 2,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1/2 in (12.7) 6061 plate",
+   "inst": 3
+  },
+  {
+   "name": "Headstock plate",
+   "stem": "headstock-plate",
+   "studio": 3,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "3/4 in (19.05) 6061 plate",
+   "inst": 4
+  },
+  {
+   "name": "Motor adapter",
+   "stem": "motor-adapter",
+   "studio": 4,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Aluminium 6061",
+   "kind": "machined",
+   "stock": "1 in (25.4) 6061 plate",
+   "inst": 5
+  },
+  {
+   "name": "Vise XinDian H54-8-55",
+   "stem": "vise-xindian-h54-8-55",
+   "studio": 5,
+   "body": [
+    3,
+    0
+   ],
+   "material": "Steel",
+   "kind": "bought",
+   "stock": "",
+   "inst": 6
+  }
+ ],
+ "instances": [
+  [
+   1,
+   "Faceplate",
+   null
+  ],
+  [
+   2,
+   "Spindle nose",
+   null
+  ],
+  [
+   3,
+   "Base plate",
+   null
+  ],
+  [
+   4,
+   "Headstock plate",
+   null
+  ],
+  [
+   5,
+   "Motor adapter",
+   null
+  ],
+  [
+   6,
+   "Vise XinDian H54-8-55",
+   null
+  ],
+  [
+   7,
+   "HSS-25 0",
+   null
+  ],
+  [
+   8,
+   "HSS-25 1",
+   null
+  ],
+  [
+   9,
+   "HSS-25 2",
+   null
+  ],
+  [
+   10,
+   "HSS-25 3",
+   null
+  ],
+  [
+   11,
+   "HSS-25 4",
+   null
+  ],
+  [
+   12,
+   "HSS-25 5",
+   null
+  ],
+  [
+   13,
+   "HSS-25 8",
+   null
+  ],
+  [
+   14,
+   "HSS-25 61",
+   null
+  ],
+  [
+   15,
+   "Motor 34E1KIP65-45",
+   null
+  ],
+  [
+   16,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   17,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   18,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   19,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   20,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   21,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   22,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   23,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   24,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   25,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   26,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   27,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   28,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   29,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   30,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   31,
+   "ISO 4762 M6x16",
+   null
+  ],
+  [
+   32,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   33,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   34,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   35,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   36,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   37,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   38,
+   "ISO 4762 M8x25",
+   null
+  ],
+  [
+   39,
+   "ISO 4032 M8",
+   null
+  ],
+  [
+   40,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   41,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   42,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   43,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   44,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   45,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   46,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   47,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   48,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   49,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   50,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   51,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   52,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   53,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   54,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   55,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   56,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   57,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   58,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   59,
+   "ISO 4032 M5",
+   null
+  ],
+  [
+   60,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   61,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   62,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   63,
+   "ISO 4762 M5x30",
+   null
+  ],
+  [
+   64,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   65,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   66,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   67,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   68,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   69,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   70,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   71,
+   "ISO 4762 M8x16",
+   null
+  ],
+  [
+   72,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   73,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   74,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   75,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   76,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   77,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   78,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   79,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   80,
+   "ISO 4032 M6",
+   null
+  ],
+  [
+   81,
+   "ISO 7089 M6",
+   null
+  ],
+  [
+   82,
+   "ISO 4762 M6x30",
+   null
+  ],
+  [
+   83,
+   "ISO 4032 M6",
+   null
+  ]
+ ]
+}
