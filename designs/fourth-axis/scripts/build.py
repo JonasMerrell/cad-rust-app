@@ -59,6 +59,9 @@ def ry(deg): c, s = math.cos(math.radians(deg)), math.sin(math.radians(deg)); re
 
 
 def params(it):
+    if it >= 6:
+        from build6 import params6
+        return params6(it)
     p = dict(it=it)
     # ---- bought parts (vendor drawings / STEP) ----
     p.update(vise_l=75.0, vise_w=54.0, vise_h=44.0, vise_m6=14.14,
@@ -84,6 +87,9 @@ def params(it):
 
 def stack(p):
     """x positions along the axis, front to back."""
+    if p["it"] >= 6:
+        from build6 import stack6
+        return stack6(p)
     x = {}
     x["fp_f"] = 0.0; x["fp_r"] = -p["fp_t"]
     x["nose_r"] = x["fp_r"] - p["nose_t"]                    # rear face of the nose flange (outside the boss)
@@ -470,7 +476,11 @@ def build(it, outdir):
 
 if __name__ == "__main__":
     it = int(sys.argv[1]); out = sys.argv[2] if len(sys.argv) > 2 else os.path.join(ROOT, f"iter{it}")
-    d, res, meta = build(it, out)
+    if it >= 6:
+        from build6 import build6
+        d, res, meta = build6(it, out)
+    else:
+        d, res, meta = build(it, out)
     bad = failures(res)
     print("steps", len(res), "failed", len(bad))
     for b in bad[:30]: print("  FAIL", b)

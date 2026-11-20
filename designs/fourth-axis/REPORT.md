@@ -6,7 +6,7 @@ Written 2026-11-20. Everything here is modelled and calculated; nothing has been
 
 - **What it is:** a rotary A axis along X that bolts to the M8 fixture grid in place of the two-station vise. A bought size-25 strain-wave reducer (100:1) drives a spindle that runs in a bought 120 mm crossed-roller bearing; a pneumatic disc brake clamps the spindle for indexed roughing; a closed-loop NEMA 34 stepper drives it. The XinDian H54-8-55 self-centring vise sits on a removable faceplate with its clamp centre on the axis. A plain tailstock with a dead centre supports long parts.
 - **Envelope:** centre height 77.2 mm above the table. The vise swings Ø92 mm. Parts up to about Ø90 mm can be machined on top; the tool reaches down to centre height on parts up to about Ø66 mm (the collet nut is the limit, section 8). Between the jaw face and the tail centre: up to about 120 mm. The vise grips 8 to 55 mm.
-- **Stiffness at the mean roughing force (391 N):** 13.6 µm at the jaws (target 20). Finishing force: 2.70 µm (target 5). At 100 mm overhang without the tailstock it is 54.0 µm, so long parts need the tailstock (13.2 µm mid-length on a Ø25 x 120 aluminium bar).
+- **Stiffness at the mean roughing force (391 N):** 9.5 µm at the jaws (target 20). Finishing force: 1.88 µm (target 5). At 100 mm overhang without the tailstock it is 39.0 µm, so long parts need the tailstock (11.2 µm mid-length on a Ø25 x 120 aluminium bar).
 - **Torsion:** with the brake on, 1.2 µm at the 46 mm radius while roughing. On the reducer alone, 24.6 µm roughing and 5.3 µm finishing at 46 mm (1.6 µm on a Ø50 part).
 - **Backlash:** the reducer's rating is 20 arc-sec at most (D), with 60 arc-sec of hysteresis on a torque reversal (D). Approaching from one side, repeatability is about 11 arc-sec (2.6 µm at 46 mm). No keys, splines or gears of our own are in the torque path: every joint we make is a clamped flat face.
 - **Makeable:** 10 of 10 machined parts pass an automatic check for one 1/4 in end mill from two sides (section 9). No tapped holes, no holes under 6.5 mm, no press fits. Two parts are printed without supports.
@@ -102,7 +102,7 @@ How the constraints shaped it:
 | 2 | Separate RU85 main bearing; three bolted plates (31.75 / 38.1 / 31.75) on a base with two rows of bolts; rotor; tailstock | iteration 1 bent 113 µm at the jaws and loaded the reducer's bearing to 89 % of its limit | 11.6 | 49.0 | 15.2 | 24.6 (no brake) | 791 / 581 |
 | 3 | Disc brake (piston in plate C, lining on P1), air port, home sensor | the reducer alone winds up 24.6 µm at 46 mm when roughing | 12.2 | 51.1 | 15.5 | 24.6 (0.50) | 740 / 552 |
 | 4 | Brake disc on a 1 mm web with a narrower friction ring; shims between C and D; air tube bonded into C; splash ring; home sensor on a printed bracket in front; shorter tail centre; lower tie bolts raised | iteration 3's 2.5 mm disc would yield (478 MPa); the reducer was pinched between two bearings; the sensor did not fit the base; coolant could reach the bearing | 12.1 | 50.9 | 12.4 | 24.6 (1.13) | 766 / 571 |
-| 5 | Table bolts moved; bearing lands under P1 and D, C lifted off the base; pocket corners R3.6; tailstock clamp pockets and slit a 6.35 cutter can make; reducer turned 4.5 degrees; friction ring moved out to Ø114-122, clear of the bearing's nut pockets; nose screws 1 mm deeper; home target moved off a faceplate screw | adversarial review: a hex key could not reach two table bolts past the tie bolts; plate edges cut from two sides would rock; three features could not be milled; the lining bridged the nut pockets; the nose screws had 4.5 mm of thread; the target pin's hole ran into a screw counterbore | 13.6 | 54.0 | 13.2 | 24.6 (1.24) | 660 / 500 |
+| 5 | Table bolts moved; bearing lands under P1 and D, C lifted off the base; pocket corners R3.6; tailstock clamp pockets and slit a 6.35 cutter can make; reducer turned 4.5 degrees; friction ring moved out to Ø114-122, clear of the bearing's nut pockets; nose screws 1 mm deeper; home target moved off a faceplate screw | adversarial review: a hex key could not reach two table bolts past the tie bolts; plate edges cut from two sides would rock; three features could not be milled; the lining bridged the nut pockets; the nose screws had 4.5 mm of thread; the target pin's hole ran into a screw counterbore | 9.5 | 39.0 | 11.2 | 24.6 (1.24) | 660 / 438 |
 
 Each iteration is a full rCAD model with every screw (`iter<N>/a-axis.json`), built by `scripts/build.py <N>`, and has its own `calc.md`, `fea/` and renders. Iteration 1 has no modal result: in the coarser modal mesh one of its thin parts came loose (0 Hz modes), and it was not worth chasing for a design already ruled out. The brake-on windup of iterations 4 and 5 is larger than 3's because the disc's web is thinner; it is the price of a disc that does not yield. Iteration 5 is a little softer than 4 (13.6 against 12.1 µm at the jaws, first mode 660 against 766 Hz) because only a 19 mm land of each end plate now stands on the base and plate C does not touch it: that is what makes the standing faces cuttable in one setup. Bedding the block on the base in metal-filled epoxy would win it back (not designed).
 
@@ -121,12 +121,12 @@ Load at the end of a 40 x 40 test bar gripped in the vise. 'Structure' is the bo
 
 | Load point | Dir | Structure F | of which the test bar C | Bearing C | Joints G | Total rough µm | Total less the bar, rough µm | Finishing µm (less the bar) |
 |---|---|---|---|---|---|---|---|---|
-| chuck, 10 mm past the jaws | Fz | 6.4 | 0.1 | 5.5 | 1.8 | 13.7 | 13.6 | 2.70 |
-| chuck, 10 mm past the jaws | Fy | 4.8 | 0.1 | 5.5 | 1.5 | 11.8 | 11.7 | 2.32 |
-| overhang, 100 mm past the jaws | Fz | 38.1 | 12.1 | 19.2 | 8.9 | 66.1 | 54.0 | 10.72 |
-| overhang, 100 mm past the jaws | Fy | 31.0 | 12.1 | 19.2 | 8.1 | 58.3 | 46.2 | 9.17 |
+| chuck, 10 mm past the jaws | Fz | 2.1 | 0.1 | 5.5 | 2.0 | 9.6 | 9.5 | 1.88 |
+| chuck, 10 mm past the jaws | Fy | 1.6 | 0.1 | 5.5 | 1.5 | 8.6 | 8.5 | 1.69 |
+| overhang, 100 mm past the jaws | Fz | 22.5 | 12.1 | 19.2 | 9.4 | 51.1 | 39.0 | 7.74 |
+| overhang, 100 mm past the jaws | Fy | 18.3 | 12.1 | 19.2 | 8.1 | 45.6 | 33.5 | 6.65 |
 
-Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.3 µm instead of 38.1 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about 15 µm at that point.
+Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.3 µm instead of 22.5 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about -1 µm at that point.
 
 ### With and without the tailstock (aluminium bar between the jaws and the centre)
 
@@ -134,9 +134,9 @@ Tailstock stiffness at the centre: 32 N/µm vertical, 42 N/µm sideways (F, bond
 
 | Part | No tailstock, at the free end, rough µm | No tailstock, mid-length µm | With tailstock, mid-length, rough µm | With tailstock, finishing µm |
 |---|---|---|---|---|
-| Ø25 x 120 mm | 208 | 41.0 | 13.2 | 2.61 |
-| Ø40 x 120 mm | 64 | 22.9 | 8.6 | 1.70 |
-| Ø16 x 100 mm | 619 | 91.4 | 24.6 | 4.88 |
+| Ø25 x 120 mm | 198 | 35.3 | 11.2 | 2.23 |
+| Ø40 x 120 mm | 53 | 17.2 | 7.1 | 1.40 |
+| Ø16 x 100 mm | 610 | 86.1 | 22.6 | 4.48 |
 
 ### Torsion: windup at the work surface
 
@@ -156,7 +156,7 @@ Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: dis
 - Piston ring Ø93 to Ø122.4: 4974 mm² (C). At 0.6 MPa (G: shop pressure not confirmed) less 120 N seal drag (G): clamp force 2864 N (C).
 - Holding torque at mean radius 59 mm: 43 N·m with µ 0.3, 85 N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).
 - Needed: 18.1 N·m mean, 36.2 N·m peak at the 46 mm radius (C).
-- The disc's 1.0 mm web, 19 mm wide, bends 0.15 mm to reach the lining: 86 MPa and 450 N of the clamp force (C); with the gap 0.1 mm larger, 143 MPa and 750 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
+- The disc's 1.0 mm web, 19.0 mm wide, bends 0.15 mm to reach the lining: 86 MPa and 450 N of the clamp force (C); with the gap 0.1 mm larger, 143 MPa and 750 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
 - Clamp force left on the lining: 2415 N.
 
 ### Lost motion, accuracy, repeatability
@@ -202,7 +202,7 @@ Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rot
 | Axis turning against the brake, Ø90 x 120 | 1889 | C |
 | Rotating group tilting on the bearing and joints, no part | 1518 | C |
 | Rotating group tilting on the bearing and joints, Ø40 x 100 part | 1017 | C |
-| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 500 | C from F |
+| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 438 | C from F |
 
 ### Bearing
 
@@ -228,11 +228,11 @@ A 10 K rise of the aluminium housing (G: motor at holding current) lifts the axi
 
 Reading the results against the targets:
 
-- **At the jaws:** 13.6 µm roughing, 2.70 µm finishing. Both targets are met.
-- **100 mm past the jaws with no tailstock:** 54.0 µm roughing. Not met, and it cannot be with a 120 mm bearing: the bearing's tilt alone is about 19 µm there. Use the tailstock, or rough at half the load.
+- **At the jaws:** 9.5 µm roughing, 1.88 µm finishing. Both targets are met.
+- **100 mm past the jaws with no tailstock:** 39.0 µm roughing. Not met, and it cannot be with a 120 mm bearing: the bearing's tilt alone is about 19 µm there. Use the tailstock, or rough at half the load.
 - **Brake stiffness source:** iteration 3's 2.5 mm disc was solved by FE (1.7 x10^6 N·m/rad). The 1 mm web of iterations 4 and 5 would not solve (the solver overflowed on a mesh fine enough for it), so its value is the ring formula with the hub's share taken from that FE result: 7.4 x10^5 N·m/rad (C).
 - **Windup:** met with the brake on. On the reducer alone, roughing at the full 46 mm radius is 24.6 µm (over) and finishing is 5.3 µm (at the limit); on a Ø50 part both are met.
-- **Resonance:** on the reducer alone the axis's torsional mode is 405 to 540 Hz, which brackets the 450 Hz tooth-passing frequency at 9000 rpm. Continuous 4-axis cutting at 9000 rpm with a heavy cut could excite it; at 24 000 rpm (1200 Hz) it is well clear. With the brake on the mode is above 1889 Hz. The first bending mode of the head carrying a 40 x 40 x 100 steel bar with no tailstock is 660 Hz in the bonded FE model and about 500 Hz once the bearing and joints are counted (C from F): close to 450 Hz, so a heavy bar that long should not be roughed at 9000 rpm without the tailstock.
+- **Resonance:** on the reducer alone the axis's torsional mode is 405 to 540 Hz, which brackets the 450 Hz tooth-passing frequency at 9000 rpm. Continuous 4-axis cutting at 9000 rpm with a heavy cut could excite it; at 24 000 rpm (1200 Hz) it is well clear. With the brake on the mode is above 1889 Hz. The first bending mode of the head carrying a 40 x 40 x 100 steel bar with no tailstock is 660 Hz in the bonded FE model and about 438 Hz once the bearing and joints are counted (C from F): close to 450 Hz, so a heavy bar that long should not be roughed at 9000 rpm without the tailstock.
 - **Motor:** six times the torque needed for 500 °/s² plus roughing. Top speed is set by the stepper: 600 rpm is 36 °/s.
 - **Thermal:** a 10 K rise lifts the axis 18 µm. Probe the centre height again once the motor is warm, and let the drive cut the current at standstill.
 
@@ -420,3 +420,27 @@ Cables and air: the motor's two 1 m leads leave toward the back; run them and th
 Vendor CAD used: reducer and motor from StepperOnline's file host, RU85 from THK's CAD (via a public repository, THK's terms attached). Drawn by hand from published dimensions because no CAD exists: the vise, the M8 sensor, the spot drill, O-rings and small hardware. Screws, nuts, washers and the dowel pin are rCAD's ISO parts.
 
 rCAD itself got one small change, on the same branch as its own commit: `solve_simulation` takes `probes`, points at which to report the displacement.
+
+## 14. Iteration 6: the low headstock that leaves the tool setter working (added 2026-11-20)
+
+Asked for after iteration 5: *the tool setter needs to still work; steel parts are allowed if that makes it smaller.* Files in `iter6/`, built by `scripts/build6.py`.
+
+- **Turned end for end**: headstock and motor at the right end of the table, work and tailstock toward the left, where the tool setter stands (its centre on the back-left table corner).
+- **RU66 main bearing** (35 x 95 x 15) instead of RU85, round-topped plates of R56: centre height 63.9 mm instead of 77.2, the whole unit 120 mm tall. A retracted 24 mm tool's tip is 126 mm above the table, so the head passes over everything.
+- **Steel (1018 cold-rolled flat)** for the faceplate (9.5 mm, Ø100), the spindle nose, two identical hub discs and the base plate (7.9 mm). The steel faceplate is also the home sensor's target: a flat on its rim.
+- Spindle stack clamped from the front by four M6 through the bearing's bore; brake piston in its own plate in front of the reducer.
+- **Machinability**: 13 of 13 machined parts pass the one-cutter check.
+- **Stiffness**: 14.4 µm at the jaws under the mean roughing force, 2.9 µm finishing (targets 20 and 5); 61 µm at 100 mm overhang without the tailstock. The smaller bearing costs stiffness against iteration 5 (3.69e+05 N·m/rad of tilt).
+- **Windup** as iteration 5: 24.6 µm at 46 mm on the gear alone at the mean roughing torque, 1.7 µm with the brake.
+- **On the machine** (`scripts/machine_check6.py`, 83 poses): 65 of 66 required poses clear, among them touching the tool setter with the 21 mm tool, the 24 mm tool and the 40 mm probe, and the route to it along the back edge with Z fully up. The one flagged required pose is the machine model's own base against its own table at the end of Y travel, which is there without the A axis. The front-left corner case (6 poses, outside the CAD's Y travel, geometry only): 6 clear. The 40 mm probe cannot pass over the headstock on the axis line (its tip is 110 mm above the table); it passes beside it or over the work.
+- The motor still hangs past the right end of the table (to X 285 in the model, tub wall at 294.8). The cycloidal design below removes that.
+- Not done for iteration 6: its own modal run and a new BOM (it differs from iteration 5's by the RU66, the steel stock and the O-ring sizes).
+
+### Two corrections to earlier numbers
+
+1. **Structure FE runs.** They named no material, and rCAD then left one part out of the mesh. With the material named, the structure's share of the deflection at the jaws is 2.1 µm, not 6.4 (iteration 5) or 4.4 (iteration 6). Sections 1 and 7 above are regenerated with the corrected runs: iteration 5 is 9.5 µm at the jaws (13.6 reported before), iteration 6 is 14.4 (16.7 reported before). The error was on the safe side. Iteration 5's modal run and the runs for iterations 1 to 4 were not repeated.
+2. **Machine check of the turned unit.** The first run of `machine_check6.py` applied the half turn again at every pose, so every second pose had the unit facing the wrong way. Fixed; the figures above are from the corrected run.
+
+## 15. The cycloidal design (now the main one)
+
+Jonas then asked for a self-made cycloidal reducer as the main design, held to tighter tolerances by careful work and in-situ probing. It keeps iteration 6's front end and replaces the bought reducer and the NEMA 34: see **`cycloidal/REPORT.md`** (result, tolerance study, four iterations c1 to c4, the comparison of the three drives, the upgrade path back to the strain-wave unit) and **`cycloidal/MAKING.md`** (making plan, probe-and-correct, calibration, rcnc requirements).

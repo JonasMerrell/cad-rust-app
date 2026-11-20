@@ -47,11 +47,11 @@ def head_model(it, bar_len, with_tail=False):
     parts = os.path.join(ROOT, f"iter{it}", "parts"); m = Model()
     struct = [q for q in meta["parts"] if q["kind"] == "machined" and not q["name"].startswith("Tailstock")
               and q["name"] not in ("Brake piston",)]
-    for q in struct: m.imp(q["name"], os.path.join(parts, q["stem"] + ".step"), "Aluminium 6061")
+    for q in struct: m.imp(q["name"], os.path.join(parts, q["stem"] + ".step"), "Steel" if q["material"] == "Steel" else "Aluminium 6061")
     vise = [q for q in meta["parts"] if q["name"].startswith("Vise")][0]
     m.imp("Vise", os.path.join(parts, vise["stem"] + ".step"), "Steel")
     if it > 1:
-        m.prism("Bearing ring", "x", x["ru_r"], x["ru_f"], [C(0, 0, 60), C(0, 0, 27.5)], "Steel")
+        m.prism("Bearing ring", "x", x["ru_r"], x["ru_f"], [C(0, 0, p["ru_od"]/2), C(0, 0, p["ru_id"]/2)], "Steel")
         # gear unit: flange in D's recess + body; steel ring of about 1.46 kg
         m.prism("Gear flange", "x", x["hss_fl_r"], x["hss_fl_f"], [C(0, 0, 53.5), C(0, 0, 34)], "Steel")
         m.prism("Gear body", "x", x["hss_fl_f"], x["hss_out"] - 1.0, [C(0, 0, 42.5), C(0, 0, 31)], "Steel")
@@ -79,7 +79,7 @@ def run_head(it, out):
             bcs = [{"type": "fixed", "faces": [{"point": fixpt, "normal": [0, 0, -1]}], "name": "table"},
                    {"type": "force", "faces": end, "f": f, "name": "cutting force"}]
             m.steps.append({"tool": "create_simulation", "args": {"name": f"{tag} {nm}", "analysis": "static", "mode": "advanced", "solver": "iterative",
-                                                                   "material": "", "mesh_size": MESH, "refine": False, "bcs": bcs}})
+                                                                   "material": "Aluminium 6061", "mesh_size": MESH, "refine": False, "bcs": bcs}})
             m.steps.append({"tool": "solve_simulation", "args": {"simulation": k, "probes": [[xe, 0, 0], [0, 0, 0], [x["p1_f"], 0, p["top"]]]}})
             sims.append(nm)
         m.steps.append({"tool": "render_simulation", "args": {"simulation": 0, "field": "displacement", "view": "front", "width": 1500, "height": 900,
@@ -141,7 +141,7 @@ def run_tail(it, out):
     for q in meta["parts"]:
         if q["name"].startswith("Tailstock"):
             m.imp(q["name"], os.path.join(parts, q["stem"] + ".step"), "Aluminium 6061")
-    xt = 169.0; H = p["H"]; zt = p["bot"] - 19.05; to = p["tail_out"] - 6.0
+    xt = (160.0 if it >= 6 else 169.0); H = p["H"]; zt = (-H if it >= 6 else p["bot"] - 19.05); to = p["tail_out"] - 6.0
     m.prism("Centre pin", "x", xt - to, xt + 25.4, [C(0, 0, 6.01)], "Steel")
     m.finish_parts()
     fixf = [{"point": [xt + 20, 0, zt], "normal": [0, 0, -1]}]
@@ -197,7 +197,7 @@ if __name__ == "__main__":
     res = json.load(open(rp)) if os.path.exists(rp) else {}
     if "head" in which: res["head"] = run_head(it, out)
     if "tail" in which and it >= 2: res["tail"] = run_tail(it, out)
-    if "brake" in which and it >= 3: res["brake"] = run_brake(it, out)
+    if "brake" in which and 3 <= it < 6: res["brake"] = run_brake(it, out)
     if "modal" in which: res["modal"] = run_modal(it, out)
     if "steel" in which: res["steel"] = run_steel(it, out)
     json.dump(res, open(rp, "w"), indent=1)

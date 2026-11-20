@@ -1,0 +1,20 @@
+{
+ "force_n": 100.0,
+ "tangential_mm": 0.07853205117054529,
+ "k_n_per_mm": 1273.3654413639792,
+ "max_vm_mpa": 228.6,
+ "vm_per_n": 2.286,
+ "mesh": {
+  "element": "10-node tetrahedron",
+  "element_size_mm": 1.2,
+  "elements": 128047,
+  "nodes": 202293,
+  "smallest_dihedral_deg": 10.0998,
+  "smallest_element_mm": 1.2
+ },
+ "vm_at": [
+  -104.4048,
+  8.422,
+  12.4993
+ ]
+}

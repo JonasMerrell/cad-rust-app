@@ -1,0 +1,87 @@
+item,description,kind,vendor,part number,qty,unit price USD,price source,link,material / stock / note
+1,Faceplate (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 3/8 x 4 in (9.53 x 101.6), 105 long"
+2,Spindle nose (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 1/2 x 4 in (12.7 x 101.6), 100 long"
+3,Hub disc A (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 1/2 x 2-1/2 in (12.7 x 63.5), 65 long"
+4,Brake disc,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1/8 in (3.18) 6061 sheet, 110 x 110"
+5,Hub spacer (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 3/4 x 2-1/2 in (19.05 x 63.5), 65 long; rim polished for the seal"
+6,Carrier 1 (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 1/2 x 3-1/2 in (12.7 x 88.9), 85 long"
+7,Carrier 2 spider (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 4140 pre-hardened or O1 ground flat stock 3/8 x 3-1/2 in (9.53 x 88.9), 85 long"
+8,Cycloid disc A,machined on the DMC2,made,,1,,,,"Steel; stock: O1 ground flat stock 1/4 x 4 in (6.35 x 101.6), both discs cut stacked from one 190 mm length"
+9,Cycloid disc B,machined on the DMC2,made,,1,,,,"Steel; stock: O1 ground flat stock 1/4 x 4 in (6.35 x 101.6), both discs cut stacked from one 190 mm length"
+10,Eccentric bush A,machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 3/8 in, faced to 9.00; bore and journal in one setup"
+11,Eccentric bush B,machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 3/8 in, faced to 9.00; bore and journal in one setup"
+12,P1 bearing plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1-1/4 in (31.75) 6061 plate, 155 x 115"
+13,C1 piston and seal plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 3/4 in (19.05) 6061 plate, 155 x 115"
+14,G1 pin plate,machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 1/2 x 6 in, 155 x 115; both pin plates bored stacked"
+15,M ring spacer,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 3/4 in (19.05) 6061 plate, 155 x 115, faced to 17.25"
+16,G2 pin plate,machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 1/2 x 6 in, 155 x 115; both pin plates bored stacked"
+17,D rear plate and motor ear,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 5/8 in (15.88) 6061 plate, 230 x 115"
+18,Base plate (steel),machined on the DMC2,made,,1,,,,"Steel; stock: 1018 cold-rolled flat 5/16 x 6 in (7.94 x 152.4), 210 long"
+19,Brake piston,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1/4 in (6.35) 6061 plate, 110 x 110"
+20,Tailstock plate,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 1 in (25.4) 6061 plate, 115 x 80"
+21,Tailstock base,machined on the DMC2,made,,1,,,,"Aluminium 6061; stock: 3/4 in (19.05) 6061 plate, 115 x 105"
+22,Splash ring,"3D printed, no supports",made,,1,,,,ASA
+23,Window cover,"3D printed, no supports",made,,1,,,,ASA
+24,Belt guard,"3D printed, no supports",made,,1,,,,ASA
+25,Sensor bracket,"3D printed, no supports",made,,1,,,,ASA
+26,Friction lining,cut by hand,made,,1,,,,"ABS; stock: P400 silicon carbide paper, bonded"
+27,"Closed-loop stepper NEMA 23, IP65, 2.0 N·m, 8 mm shaft, 1000-line encoder",bought,StepperOnline,23E1KIP65-20,1,75.00,est,https://www.omc-stepperonline.com/p-series-ip65-waterproof-nema-23-closed-loop-stepper-motor-2nm-283-28oz-in-with-encoder-1000ppr-4000cpr-23e1kip65-20,vendor STEP in the model
+28,"Closed-loop stepper drive 24-48 VDC, step/dir",bought,StepperOnline,CL57T-V41,1,35.00,est,https://www.omc-stepperonline.com/closed-loop-stepper-driver-v4-1-0-8-0a-24-48vdc-for-nema-17-23-24-stepper-motor-cl57t-v41,"in the control cabinet, not in the model"
+29,36 V 350 W power supply,bought,Mean Well,LRS-350-36,1,33.00,est,,not in the model
+30,"Crossed roller bearing 35 x 95 x 15, both rings with mounting holes, P5",bought,THK type (clone),RU66UUCC0 P5,1,120.00,est,,drawn from THK's dimension table; genuine THK costs several times this
+31,"Self-centring vise 75 x 54 x 44, 8-55 mm",bought,XinDian,H54-8-55,1,0.00,chosen by Jonas,https://www.amazon.com/dp/B0CKWBBHGS,drawn from the vendor's dimension drawings
+32,"Dowel pin 8 m6 x 40, hardened (ISO 8734)",bought,"any (buy 30; grade by micrometer, or pin gauges in 0.01 steps)",ISO 8734 8x40,24,0.60,est,,ring pins
+33,Needle bearing inner ring 7 x 10 x 10.5,bought,INA / any,IR 7x10x10.5,12,3.00,est,,"output sleeves, two per post"
+34,"Deep groove ball bearing 20 x 37 x 9, sealed",bought,"any (SKF, NSK, NTN)",6904-2RS (61904-2RS1),2,9.00,est,,one per disc; normal clearance
+35,"Deep groove ball bearing 12 x 28 x 8, sealed",bought,any,6001-2RS,2,4.00,est,,input shaft
+36,"Precision shaft 12 h6 x 80, hardened",bought,"any linear-shaft seller, cut to length",W12 h6 x 80,1,8.00,est,,input shaft; bushes bonded on with Loctite 638
+37,"Steel tube 16 x 2, 100 mm",bought,any,,1,4.00,est,,"spacer on the shaft, faced to length"
+38,"Shim rings 12 x 18, assorted 0.1 to 0.5",bought,generic (DIN 988),DIN 988 12x18,1,8.00,est,,axial play of the shaft stack
+39,"Timing pulley GT3 3 mm, 20 teeth, 8 mm bore, for 9 mm belt",bought,any (Gates PowerGrip GT3 profile),3MGT 20T,1,9.00,est,,on the motor
+40,"Timing pulley GT3 3 mm, 60 teeth, 12 mm bore, for 9 mm belt",bought,any,3MGT 60T,1,16.00,est,,on the input shaft
+41,"Timing belt GT3 3 mm pitch, 345 mm (115 teeth), 9 mm wide",bought,Gates or equivalent,345-3MGT-9,1,9.00,est,,"GT profile for its small tooth clearance, not HTD"
+42,"Shaft seal 60 x 75 x 8, NBR",bought,any,60x75x8 TC,1,5.00,est,,keeps grease out of the brake
+43,"O-ring NBR 70, 68 x 2.5",bought,The O-Ring Store,N2.50X068,1,0.45,est,,"brake piston, inner"
+44,"O-ring NBR 70, 100 x 2.5",bought,The O-Ring Store,N2.50X100,1,0.55,est,,"brake piston, outer"
+45,"3/2 solenoid valve, 1/8 in ports, 24 V DC, normally closed",bought,Airtac type (STC Valve),3V110-06-NC 24VDC,1,40.76,snippet,https://www.stcvalve.com/Solenoid_Valve.htm,brake; not in the model
+46,"Push-in union 6 mm, tube 6 x 4, brass tube 6 mm",bought,as the harmonic design's BOM,,1,58.33,snippet,,air to the brake
+47,"Inductive sensor M8, NPN NO, 2 mm",bought,generic,LJ8A3-2-Z/BX,1,9.96,snippet,,home sensor
+48,"Spotting drill 12 mm, 90 degrees, solid carbide",bought,Garr Tool (Zoro),91568,1,67.89,snippet,,tailstock centre
+49,Heat-set insert M5 x 7,bought,generic,,2,0.20,est,,sensor bracket
+50,"Loctite 638, RTV gasket maker, P400 paper, epoxy",bought,as the harmonic design's BOM,,1,45.48,snippet,,"bushes on the shaft, plate joints, brake lining"
+51,"Lithium EP2 grease, small tin",bought,any,,1,8.00,est,,reducer
+52,"Fine lapping compound (or metal polish), small tin",bought,any,,1,8.00,est,,"run-in, optional"
+53,"Countersunk socket screw, class 10.9 M5x12",bought,any metric fastener shop,ISO 10642 M5x12,2,0.15,est,,
+54,"Countersunk socket screw, class 10.9 M8x30",bought,any metric fastener shop,ISO 10642 M8x30,4,0.35,est,,
+55,"Hex nut, class 8 M4",bought,any metric fastener shop,ISO 4032 M4,8,0.10,est,,
+56,"Hex nut, class 8 M5",bought,any metric fastener shop,ISO 4032 M5,4,0.10,est,,
+57,"Hex nut, class 8 M6",bought,any metric fastener shop,ISO 4032 M6,25,0.10,est,,
+58,"Hex nut, class 8 M8",bought,any metric fastener shop,ISO 4032 M8,10,0.10,est,,
+59,Thin hex nut M8,bought,any metric fastener shop,ISO 4035 M8,2,0.10,est,,
+60,"Socket head cap screw, class 12.9 M4x20",bought,any metric fastener shop,ISO 4762 M4x20,8,0.10,est,,
+61,"Socket head cap screw, class 12.9 M5x20",bought,any metric fastener shop,ISO 4762 M5x20,4,0.15,est,,
+62,"Socket head cap screw, class 12.9 M6x12",bought,any metric fastener shop,ISO 4762 M6x12,4,0.20,est,,
+63,"Socket head cap screw, class 12.9 M6x14",bought,any metric fastener shop,ISO 4762 M6x14,6,0.20,est,,
+64,"Socket head cap screw, class 12.9 M6x30",bought,any metric fastener shop,ISO 4762 M6x30,1,0.20,est,,
+65,"Socket head cap screw, class 12.9 M6x35",bought,any metric fastener shop,ISO 4762 M6x35,7,0.20,est,,
+66,"Socket head cap screw, class 12.9 M6x40",bought,any metric fastener shop,ISO 4762 M6x40,9,0.20,est,,
+67,"Socket head cap screw, class 12.9 M6x45",bought,any metric fastener shop,ISO 4762 M6x45,2,0.20,est,,
+68,"Socket head cap screw, class 12.9 M8x120",bought,any metric fastener shop,ISO 4762 M8x120,4,1.20,est,,
+69,"Socket head cap screw, class 12.9 M8x20",bought,any metric fastener shop,ISO 4762 M8x20,4,0.35,est,,
+70,"Socket head cap screw, class 12.9 M8x30",bought,any metric fastener shop,ISO 4762 M8x30,6,0.35,est,,
+71,Flat washer M5,bought,any metric fastener shop,ISO 7089 M5,4,0.05,est,,
+72,Flat washer M6,bought,any metric fastener shop,ISO 7089 M6,2,0.05,est,,
+73,Flat washer M8,bought,any metric fastener shop,ISO 7089 M8,16,0.05,est,,
+74,O1 ground flat stock 1/4 x 4 x 18 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,45.00,est,,for: Cycloid discs A and B (cut stacked)
+75,4140 pre-hardened or O1 flat 3/8 x 3-1/2 x 12 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,40.00,est,,"for: Carrier 2 spider, eccentric bushes"
+76,1018 cold-rolled flat 1/2 x 6 x 12 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,30.00,est,,for: Pin plates G1 and G2 (bored stacked)
+77,1018 cold-rolled flat 1/2 x 4 x 12 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,18.00,est,,"for: Spindle nose, carrier 1, hub disc A"
+78,1018 cold-rolled flat 3/4 x 2-1/2 x 6 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,10.00,est,,for: Hub spacer
+79,1018 cold-rolled flat 3/8 x 4 x 6 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,9.00,est,,for: Faceplate
+80,1018 cold-rolled flat 5/16 x 6 x 12 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,22.00,est,,for: Base plate
+81,6061-T6 plate 1-1/4 in x 7 x 6 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,100.00,est,,for: P1 bearing plate
+82,6061-T6 plate 3/4 in x 7 x 12 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,120.00,est,,"for: C1, M ring spacer, tailstock base"
+83,6061-T6 plate 5/8 in x 5 x 9 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,60.00,est,,for: D rear plate with the motor ear
+84,6061-T6 plate 1 in x 5 x 4 in,stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,40.00,est,,for: Tailstock plate
+85,"6061-T6 sheet 1/4 in and 1/8 in, 5 x 5 in each",stock,any metal supplier (small cut pieces; offcuts are far cheaper),,1,35.00,est,,"for: Brake piston, brake disc"
+,TOTAL of the priced lines,,,,,1190.42,,,vise not counted; most prices are estimates

@@ -24,6 +24,7 @@ GEAR = dict(name="HSS-25-100-I-D14", ratio=100, k1=3.1e4, k2=5.0e4, k3=5.7e4, t1
 MOTOR = dict(name="34E1KIP65-45", hold=4.5, j_rotor=1.8e-4, counts=4000, step_deg=1.8, mass=2.1,               # D (datasheet: 1800 g.cm2; 2.1 kg reseller page)
              torque_at=dict([(100, 4.2), (300, 3.96), (600, 3.24), (900, 1.95), (1200, 0.61)]))                # D: vendor pull-out curve at 60 V, 6 A (read off the plot)
 RU85 = dict(dp=85.0, dw=6.0, lw=4.8, z=36, preload_um=2.0, c_dyn=20.3e3, c0=29.5e3, knock=0.5)                  # C, C0, dp: D (THK); rollers G (fit C0); knock G
+RU66 = dict(dp=66.0, dw=5.0, lw=4.0, z=38, preload_um=2.0, c_dyn=17.5e3, c0=22.3e3, knock=0.5)                   # as RU85: C, C0, dp D (THK table); rollers G
 KC = 2000.0               # N/mm^3: normal stiffness of a bolted, milled interface per unit area               (G: 500..5000 published)
 
 
@@ -60,26 +61,30 @@ def main(it):
         x_brg = x["hss_out"] - 9.0                        # centre of the unit's crossed-roller bearing
         brg = dict(kind="gear unit's own crossed-roller bearing", k_tilt=k_tilt, k_rad=k_rad, k_ax=k_ax, tag="tilt D, radial C (scaled model)")
     else:
-        cr = phys.CrossedRoller(RU85["dp"], RU85["dw"], RU85["lw"], RU85["z"], RU85["preload_um"]); s = cr.summary()
-        k_tilt = s["k_tilt_Nm_per_rad"]*RU85["knock"]; k_rad = s["k_radial_N_per_um"]*1e6*RU85["knock"]; k_ax = s["k_axial_N_per_um"]*1e6*RU85["knock"]
+        RU = RU66 if it >= 6 else RU85
+        cr = phys.CrossedRoller(RU["dp"], RU["dw"], RU["lw"], RU["z"], RU["preload_um"]); s = cr.summary()
+        k_tilt = s["k_tilt_Nm_per_rad"]*RU["knock"]; k_rad = s["k_radial_N_per_um"]*1e6*RU["knock"]; k_ax = s["k_axial_N_per_um"]*1e6*RU["knock"]
         x_brg = (x["ru_f"] + x["ru_r"])/2
-        brg = dict(kind="THK RU85 crossed roller", k_tilt=k_tilt, k_rad=k_rad, k_ax=k_ax, theory=s, knock=RU85["knock"],
-                   tag="C: Palmgren line contact, 36 rollers of 6 x 4.8 mm (G, fits C0), 2 um preload (G), x0.5 for ring and seat flexing (G)")
+        brg = dict(kind="THK RU66 crossed roller" if it >= 6 else "THK RU85 crossed roller", k_tilt=k_tilt, k_rad=k_rad, k_ax=k_ax, theory=s, knock=RU["knock"],
+                   tag="C: Palmgren line contact, rollers sized to fit the catalogue C0 (G), 2 um preload (G), x0.5 for ring and seat flexing (G)")
     R["bearing"] = brg
 
     # ---------------------------------------------------------------- bolted interfaces (tilt)
     joints = []
     if it == 1:
         joints.append(("nose / gear output flange (r 10..30)", tilt_k_annulus(30, 10.5)))
+    elif it >= 6:
+        joints.append(("nose / bearing inner ring (r 17.5..29.5)", tilt_k_annulus(29.5, 17.5)))
     else:
         joints.append(("nose / bearing inner ring (r 28..41.5)", tilt_k_annulus(41.5, 28)))
-    joints.append(("faceplate / nose (r 0..55)", tilt_k_annulus(55, 0)))
+    joints.append(("faceplate / nose (r 0..%d)" % (48 if it >= 6 else 55), tilt_k_annulus(48 if it >= 6 else 55, 0)))
     joints.append(("vise / faceplate (75 x 54, weak axis)", tilt_k_rect(75, 54)))
     if it == 1:
         joints.append(("plate / base (19 x 140 strip)", tilt_k_rect(140, 19.05)))
     else:
-        a = 156*31.75; dd = (x["p1_f"] + x["p1_r"])/2 - (x["d_f"] + x["d_r"])/2
-        joints.append(("plates / base (two 31.75 x 156 strips)", KC*(2*(a*(dd/2)**2 + 156*31.75**3/12))*1e-3))
+        wl = 19.0 if it >= 5 else 31.75                       # from iteration 5 only a 19 mm land of each end plate bears
+        a = 2*p["W2"]*wl; dd = (x["p1_f"] + x["p1_r"])/2 - (x["d_f"] + x["d_r"])/2
+        joints.append(("plates / base (two %.0f x %.0f strips)" % (wl, 2*p["W2"]), KC*(2*(a*(dd/2)**2 + 2*p["W2"]*wl**3/12))*1e-3))
     R["joints"] = [dict(name=n, k_tilt_nm_per_rad=k) for n, k in joints]
 
     # ---------------------------------------------------------------- tool-point deflection
@@ -177,14 +182,14 @@ def main(it):
         # Hand formula for a flat ring in shear, K = 4 pi G t / (1/ri^2 - 1/ro^2), with the hub's share taken from iteration 3's FE result.
         f3 = os.path.join(ROOT, "iter3", "fea", "results.json")
         ring = lambda t, ri, ro: 4*math.pi*G_AL*t/(1/ri**2 - 1/ro**2)
-        k_web = ring(p["web_t"]/1000, 0.038, p["fr_ri"]/1000)
+        k_web = ring(p["web_t"]/1000, p.get("web_ri", 38.0)/1000, (p["fr_ri"] - (1.0 if it >= 6 else 0.0))/1000)
         c_hub = 0.0
         if os.path.exists(f3):
             b3 = json.load(open(f3)).get("brake", {})
             if b3.get("rotation_rad"):
                 k3 = b3["torque_nmm"]/1000.0/b3["rotation_rad"]; c_hub = max(0.0, 1/k3 - 1/ring(0.0025, 0.038, 0.047))
         k_disc = 1/(c_hub + 1/k_web)
-        k_lin = 0.5e9*math.pi*(0.061**2 - (p["fr_ri"]/1000)**2)/0.00025*((0.061 + p["fr_ri"]/1000)/2)**2
+        k_lin = 0.5e9*math.pi*((p["fl_r"]/1000)**2 - (p["fr_ri"]/1000)**2)/0.00025*((p["fl_r"]/1000 + p["fr_ri"]/1000)/2)**2
         k_brake = 1/(1/k_disc + 1/k_lin)
         tors["k_disc_fea"] = k_disc; tors["k_lining"] = k_lin; tors["k_brake"] = k_brake; tors["k_disc_source"] = "C: ring formula, hub share from iteration 3's FE"
     cases = [("roughing mean", L["rough_side"]), ("roughing peak", L["rough_peak"]), ("finishing mean", L["fin_side"])]
@@ -209,17 +214,18 @@ def main(it):
         area = math.pi*((p["gr_ro"])**2 - (p["gr_ri"])**2)                                         # mm2
         press = 0.6                                                                               # MPa, shop air (G: not confirmed)
         f_seal = 2*60.0                                                                           # N lost to the two O-rings (G)
-        N = area*press - f_seal; rm = (61.0 + 47.0)/2/1000
+        N = area*press - f_seal; rm = (p["fl_r"] + p["fr_ri"])/2/1000
         br = dict(area_mm2=area, pressure_mpa=press, clamp_n=N, r_mean_m=rm, torque_mu03=0.3*N*rm, torque_mu06=0.6*N*rm,
                   need_peak=L["rough_peak"]*R_MAX, need_mean=L["rough_side"]*R_MAX,
                   disc_bend_stress_mpa=0.0)
         # the web between the hub (r 38) and the friction ring bends as a clamped-guided strip: force per width E t^3 d / L^3, stress 3 E t d / L^2
-        Lw = (p["fr_ri"] - 38.0)/1000; tw = p["web_t"]/1000; rmid = (p["fr_ri"] + 38.0)/2/1000
+        wri = p.get("web_ri", 38.0); wro = p["fr_ri"] - (1.0 if it >= 6 else 0.0)
+        Lw = (wro - wri)/1000; tw = p["web_t"]/1000; rmid = (wro + wri)/2/1000
         for nm_, gap in (("nominal", p["fl_gap"]/1000), ("worst", (p["fl_gap"] + 0.1)/1000)):
             br[f"web_force_{nm_}"] = E_AL*tw**3*gap/Lw**3*2*math.pi*rmid
             br[f"web_stress_{nm_}_mpa"] = 3*E_AL*tw*gap/Lw**2/1e6
         br["disc_bend_stress_mpa"] = br["web_stress_nominal_mpa"]
-        rm = (61.0 + p["fr_ri"])/2/1000; br["r_mean_m"] = rm
+        rm = (p["fl_r"] + p["fr_ri"])/2/1000; br["r_mean_m"] = rm
         Nn = N - br["web_force_nominal"]; br["clamp_net_n"] = Nn
         br["torque_mu03"] = 0.3*Nn*rm; br["torque_mu06"] = 0.6*Nn*rm
         R["brake"] = br
@@ -227,7 +233,7 @@ def main(it):
                f"- Piston ring Ø{2*p['gr_ri']:.0f} to Ø{2*p['gr_ro']:.1f}: {area:.0f} mm² (C). At {press} MPa (G: shop pressure not confirmed) less {f_seal:.0f} N seal drag (G): clamp force {N:.0f} N (C).",
                f"- Holding torque at mean radius {br['r_mean_m']*1000:.0f} mm: {br['torque_mu03']:.0f} N·m with µ 0.3, {br['torque_mu06']:.0f} N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).",
                f"- Needed: {br['need_mean']:.1f} N·m mean, {br['need_peak']:.1f} N·m peak at the 46 mm radius (C).",
-               f"- The disc's {p['web_t']} mm web, {p['fr_ri'] - 38:.0f} mm wide, bends {p['fl_gap']} mm to reach the lining: {br['web_stress_nominal_mpa']:.0f} MPa and {br['web_force_nominal']:.0f} N of the clamp force (C); with the gap 0.1 mm larger, {br['web_stress_worst_mpa']:.0f} MPa and {br['web_force_worst']:.0f} N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.",
+               f"- The disc's {p['web_t']} mm web, {Lw*1000:.1f} mm wide, bends {p['fl_gap']} mm to reach the lining: {br['web_stress_nominal_mpa']:.0f} MPa and {br['web_force_nominal']:.0f} N of the clamp force (C); with the gap 0.1 mm larger, {br['web_stress_worst_mpa']:.0f} MPa and {br['web_force_worst']:.0f} N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.",
                f"- Clamp force left on the lining: {br['clamp_net_n']:.0f} N.", ""]
 
     # ---------------------------------------------------------------- lost motion and accuracy
@@ -256,10 +262,10 @@ def main(it):
         except Exception: continue
         if j.get("tool") == "mass_properties" and "result" in j:
             for q in j["result"]["parts"]: mp[q["name"]] = q
-    rotating = [n for n in mp if any(k in n for k in ("Faceplate", "Spindle nose", "Rotor", "Vise"))]
+    rotating = [n for n in mp if any(k in n for k in ("Faceplate", "Spindle nose", "Rotor", "Vise", "Hub disc", "Brake disc"))]
     J = sum(mp[n]["inertia_g_mm2"][0][0] for n in rotating)*1e-9                                   # kg m2 about x
     m_rot = sum(mp[n]["mass_g"] for n in rotating)/1000
-    J += 0.5*0.45*(0.035**2 + 0.0275**2) if it > 1 else 0                                          # bearing inner ring (C, 0.45 kg)
+    J += (0.5*0.28*(0.0325**2 + 0.0175**2) if it >= 6 else 0.5*0.45*(0.035**2 + 0.0275**2)) if it > 1 else 0   # bearing inner ring (C)
     J += 0.5*0.35*0.03**2                                                                          # gear output flange + flexspline (G)
     J_work_typ = 0.5*(math.pi*0.02**2*0.1*2700)*0.02**2                                            # Ø40 x 100 aluminium
     J_work_max = 0.5*(math.pi*0.045**2*0.12*2700)*0.045**2                                         # Ø90 x 120 aluminium
@@ -316,12 +322,13 @@ def main(it):
     # ---------------------------------------------------------------- bearing life, static safety
     arm_o = (144.0 - x_brg)/1000
     if it > 1:
-        M = L["rough_side"]*arm_o; P = phys.crb_equivalent_load(L["rough_side"], L["rough_axial"], M, RU85["dp"])
-        life = phys.bearing_life_h(RU85["c_dyn"], P, 10.0)
-        P0 = L["rough_peak"] + 2*L["rough_peak"]*arm_o/(RU85["dp"]/1000) + 0.44*L["rough_axial"]*DYN
-        R["bearing_life"] = dict(P=P, M=M, L10_h_at_10rpm=life, static_safety=RU85["c0"]/P0, P0=P0)
-        md += ["## Bearing\n", f"- Roughing at 100 mm past the jaws: moment {M:.0f} N·m, equivalent load {P:.0f} N (C) against C = {RU85['c_dyn']/1000} kN (D): L10 = {life:.2e} h at 10 rpm (C).",
-               f"- Static: peak equivalent {P0:.0f} N against C0 = {RU85['c0']/1000} kN (D): safety {RU85['c0']/P0:.1f} (C).", ""]
+        RU = RU66 if it >= 6 else RU85
+        M = L["rough_side"]*arm_o; P = phys.crb_equivalent_load(L["rough_side"], L["rough_axial"], M, RU["dp"])
+        life = phys.bearing_life_h(RU["c_dyn"], P, 10.0)
+        P0 = L["rough_peak"] + 2*L["rough_peak"]*arm_o/(RU["dp"]/1000) + 0.44*L["rough_axial"]*DYN
+        R["bearing_life"] = dict(P=P, M=M, L10_h_at_10rpm=life, static_safety=RU["c0"]/P0, P0=P0)
+        md += ["## Bearing\n", f"- Roughing at 100 mm past the jaws: moment {M:.0f} N·m, equivalent load {P:.0f} N (C) against C = {RU['c_dyn']/1000} kN (D): L10 = {life:.2e} h at 10 rpm (C).",
+               f"- Static: peak equivalent {P0:.0f} N against C0 = {RU['c0']/1000} kN (D): safety {RU['c0']/P0:.1f} (C).", ""]
     else:
         M = L["rough_peak"]*arm_o
         R["bearing_life"] = dict(M_peak=M, allow=GEAR["bearing_moment_allow"], share=M/GEAR["bearing_moment_allow"])
@@ -334,8 +341,11 @@ def main(it):
         bl.append(dict(joint=name, screws=f"{n} x M{d} {grade}", torque=torque, preload=b["preload_n"], proof_share=b["share_of_proof"], slip_torque=cap,
                        margin=cap/(L["rough_peak"]*R_MAX)))
     joint("vise to faceplate", 6, 4, 20.0, "12.9", 12.0)
-    joint("faceplate to nose", 6, 6, 50.0, "8.8", 8.0)
-    if it > 1:
+    joint("faceplate to nose", 6, 6, 42.0 if it >= 6 else 50.0, "8.8", 8.0)
+    if it >= 6:
+        joint("nose and hub clamped on the bearing's inner ring (two faces, the weaker one counted)", 6, 4, 23.5, "12.9", 12.0)
+        joint("hubs and brake disc to the gear output flange", 8, 8, 21.0, "12.9", 30.0)
+    elif it > 1:
         joint("nose to bearing inner ring", 5, 8, 32.5, "12.9", 7.0)
         joint("rotor to bearing inner ring", 5, 8, 32.5, "12.9", 7.0)
         joint("rotor to gear output flange", 8, 8, 21.0, "12.9", 30.0)

@@ -24,7 +24,7 @@ from build import ROOT
 RCAD = os.path.expanduser("~/src/cad-rust-app-4axis/target/release/rcad")
 TOOL = 6.35; MARGIN = 0.1; FLUTE = 19.05; REACH = 24.0; EPS = 0.02
 TRAVEL = (343.0, 234.0, 150.0)
-AXIS = {"Base plate": "z", "Tailstock base": "z"}            # every other machined part is cut along the rotation axis, x
+AXIS = {"Base plate": "z", "Base plate (steel)": "z", "Tailstock base": "z"}            # every other machined part is cut along the rotation axis, x
 
 def stl(path):
     b = open(path, "rb").read(); n = struct.unpack("<I", b[80:84])[0]
@@ -102,7 +102,7 @@ def check(tri, tool_d, flute):
 
 
 def main(it):
-    out = os.path.join(ROOT, f"iter{it}"); meta = json.load(open(os.path.join(out, "meta.json")))
+    out = it if os.path.isdir(str(it)) else os.path.join(ROOT, f"iter{it}"); meta = json.load(open(os.path.join(out, "meta.json")))
     parts = [q for q in meta["parts"] if q["kind"] == "machined"]
     steps = []
     for k, q in enumerate(parts):
@@ -131,7 +131,7 @@ def main(it):
         r["fits_travel"] = (max(sx, sy) + TOOL + 4 <= TRAVEL[0]) and (min(sx, sy) + TOOL + 4 <= TRAVEL[1])
         res[q["name"]] = r
         if not (r["ok"] and r["fits_travel"]): bad.append(q["name"])
-        print(f"{q['name']:22s} {'OK  ' if r['ok'] else 'FAIL'} {sx:6.1f} x {sy:6.1f} x {r['thickness_mm']:5.2f}  setups {r['setups']}  deepest cut {r['deepest_cut_mm']:5.2f}"
+        print(f"{q['name']:28s} {'OK  ' if r['ok'] else 'FAIL'} {sx:6.1f} x {sy:6.1f} x {r['thickness_mm']:5.2f}  setups {r['setups']}  deepest cut {r['deepest_cut_mm']:5.2f}"
               f"{' (>flute)' if r['deeper_than_flute'] else ''}  largest tool that fits {r['largest_tool_mm']}  travel {'ok' if r['fits_travel'] else 'NO'}  "
               f"{r['cannot_cut'][:3] if not r['ok'] else ''}")
     json.dump(res, open(os.path.join(out, "dfm.json"), "w"), indent=1)
@@ -139,4 +139,4 @@ def main(it):
 
 
 if __name__ == "__main__":
-    main(int(sys.argv[1]))
+    main(os.path.abspath(sys.argv[1]) if os.path.isdir(sys.argv[1]) else int(sys.argv[1]))

@@ -1,0 +1,387 @@
+{
+ "iteration": 6,
+ "loads": {
+  "rough_side": 391.2376087400466,
+  "rough_peak": 782.4752174800932,
+  "never_side": 437.26556270946384,
+  "fin_side": 77.6721723233916,
+  "fin_peak": 155.3443446467832,
+  "rough_ft": 284.05606641073183,
+  "fin_ft": 56.393483772718824,
+  "rough_axial": 110.96446090437117,
+  "fin_axial": 22.029709150132515,
+  "tooth_hz_9k": 450.0,
+  "tooth_hz_24k": 1200.0,
+  "straight_tooth_peak_over_mean": 4.13285628931268
+ },
+ "bearing": {
+  "kind": "THK RU66 crossed roller",
+  "k_tilt": 368619.85162390996,
+  "k_rad": 338493848.42317134,
+  "k_ax": 676987662.0216926,
+  "theory": {
+   "k_radial_N_per_um": 676.9876968463427,
+   "k_axial_N_per_um": 1353.9753240433852,
+   "k_tilt_Nm_per_rad": 737239.7032478199,
+   "preload_per_roller_N": 128.27137288169646
+  },
+  "knock": 0.5,
+  "tag": "C: Palmgren line contact, rollers sized to fit the catalogue C0 (G), 2 um preload (G), x0.5 for ring and seat flexing (G)"
+ },
+ "joints": [
+  {
+   "name": "nose / bearing inner ring (r 17.5..29.5)",
+   "k_tilt_nm_per_rad": 1042295.6194594463
+  },
+  {
+   "name": "faceplate / nose (r 0..48)",
+   "k_tilt_nm_per_rad": 8338440.353899257
+  },
+  {
+   "name": "vise / faceplate (75 x 54, weak axis)",
+   "k_tilt_nm_per_rad": 1968300.0
+  },
+  {
+   "name": "plates / base (two 19 x 150 strips)",
+   "k_tilt_nm_per_rad": 17240600.0
+  }
+ ],
+ "tool_point": {
+  "chuck_Fz": {
+   "struct": 5.429667519181585e-09,
+   "bar": 2.1001904934687943e-10,
+   "bearing": 2.1973078807537058e-08,
+   "joints": 9.706727959489564e-09,
+   "total": 3.710947428620821e-08,
+   "total_less_bar": 3.689945523686133e-08,
+   "joint_list": [
+    [
+     "nose / bearing inner ring (r 17.5..29.5)",
+     6.726223126252687e-09
+    ],
+    [
+     "faceplate / nose (r 0..48)",
+     5.33539824137447e-10
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.4814814814814814e-09
+    ],
+    [
+     "plates / base (two 19 x 150 strips)",
+     9.65483527617948e-10
+    ]
+   ]
+  },
+  "chuck_Fy": {
+   "struct": 3.900255754475704e-09,
+   "bar": 2.1001904934687943e-10,
+   "bearing": 2.1973078807537058e-08,
+   "joints": 8.748779062048997e-09,
+   "total": 3.462211362406176e-08,
+   "total_less_bar": 3.441209457471488e-08,
+   "joint_list": [
+    [
+     "nose / bearing inner ring (r 17.5..29.5)",
+     6.726223126252687e-09
+    ],
+    [
+     "faceplate / nose (r 0..48)",
+     5.33539824137447e-10
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.4814814814814814e-09
+    ],
+    [
+     "plates / base (two 19 x 150 strips)",
+     7.534630177381322e-12
+    ]
+   ]
+  },
+  "overhang_Fz": {
+   "struct": 5.79539641943734e-08,
+   "bar": 3.1014853955007254e-08,
+   "bearing": 8.483295978768832e-08,
+   "joints": 4.5219413978089265e-08,
+   "total": 1.88006337960151e-07,
+   "total_less_bar": 1.5699148400514373e-07,
+   "joint_list": [
+    [
+     "nose / bearing inner ring (r 17.5..29.5)",
+     2.8957344093658378e-08
+    ],
+    [
+     "faceplate / nose (r 0..48)",
+     2.9447821124627375e-09
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.0534979423868311e-08
+    ],
+    [
+     "plates / base (two 19 x 150 strips)",
+     2.7823083480998338e-09
+    ]
+   ]
+  },
+  "overhang_Fy": {
+   "struct": 4.718670076726343e-08,
+   "bar": 3.1014853955007254e-08,
+   "bearing": 8.483295978768832e-08,
+   "joints": 4.244464026016681e-08,
+   "total": 1.7446430081511857e-07,
+   "total_less_bar": 1.4344944686011133e-07,
+   "joint_list": [
+    [
+     "nose / bearing inner ring (r 17.5..29.5)",
+     2.8957344093658378e-08
+    ],
+    [
+     "faceplate / nose (r 0..48)",
+     2.9447821124627375e-09
+    ],
+    [
+     "vise / faceplate (75 x 54, weak axis)",
+     1.0534979423868311e-08
+    ],
+    [
+     "plates / base (two 19 x 150 strips)",
+     7.534630177381322e-12
+    ]
+   ]
+  }
+ },
+ "tailstock": {
+  "k_tail_fz": 31836994.58771092,
+  "k_tail_fy": 42625745.95055413,
+  "k_centre_contact": 100000000.0,
+  "parts": {
+   "d25_L120": {
+    "with_tail_mid": 3.4844652179205126e-08,
+    "no_tail_mid": 1.100557744241755e-07,
+    "no_tail_end": 5.475181256800292e-07,
+    "k_tail": 24148756.33904854,
+    "k_rot_head": 192947.02768915013
+   },
+   "d40_L120": {
+    "with_tail_mid": 2.2746765415836826e-08,
+    "no_tail_mid": 6.387321402743546e-08,
+    "no_tail_end": 1.7805764250117088e-07,
+    "k_tail": 24148756.33904854,
+    "k_rot_head": 192947.02768915013
+   },
+   "d16_L100": {
+    "with_tail_mid": 6.412802511698159e-08,
+    "no_tail_mid": 2.3783986888347084e-07,
+    "no_tail_end": 1.5925950678180543e-06,
+    "k_tail": 24148756.33904854,
+    "k_rot_head": 192947.02768915013
+   }
+  }
+ },
+ "torsion": {
+  "k_disc_fea": 485353.3182987997,
+  "k_lining": 8870525.618452456,
+  "k_brake": 460174.72789845674,
+  "k_disc_source": "C: ring formula, hub share from iteration 3's FE",
+  "table": [
+   {
+    "case": "roughing mean",
+    "r_mm": 46.199999999999996,
+    "torque": 18.075177523790153,
+    "windup_mrad": 0.5331164537016095,
+    "um": 24.62998016101436,
+    "um_brake": 1.7001550653309354
+   },
+   {
+    "case": "roughing mean",
+    "r_mm": 25.0,
+    "torque": 9.780940218501165,
+    "windup_mrad": 0.31551420059681173,
+    "um": 7.8878550149202935,
+    "um_brake": 0.4978340528812403
+   },
+   {
+    "case": "roughing peak",
+    "r_mm": 46.199999999999996,
+    "torque": 36.150355047580305,
+    "windup_mrad": 0.8946200041774126,
+    "um": 41.33144419299646,
+    "um_brake": 3.400310130661871
+   },
+   {
+    "case": "roughing peak",
+    "r_mm": 25.0,
+    "torque": 19.56188043700233,
+    "windup_mrad": 0.562850511965853,
+    "um": 14.071262799146325,
+    "um_brake": 0.9956681057624805
+   },
+   {
+    "case": "finishing mean",
+    "r_mm": 46.199999999999996,
+    "torque": 3.588454361340692,
+    "windup_mrad": 0.11575659230131265,
+    "um": 5.347954564320644,
+    "um_brake": 0.33753078502893563
+   },
+   {
+    "case": "finishing mean",
+    "r_mm": 25.0,
+    "torque": 1.9418043080847902,
+    "windup_mrad": 0.06263884864789646,
+    "um": 1.5659712161974115,
+    "um_brake": 0.09883470167495213
+   }
+  ]
+ },
+ "brake": {
+  "area_mm2": 5060.351782696296,
+  "pressure_mpa": 0.6,
+  "clamp_n": 2916.2110696177774,
+  "r_mean_m": 0.049,
+  "torque_mu03": 31.048216806263664,
+  "torque_mu06": 62.09643361252733,
+  "need_peak": 36.150355047580305,
+  "need_mean": 18.075177523790153,
+  "disc_bend_stress_mpa": 147.4673008323424,
+  "web_force_nominal": 804.0874773549431,
+  "web_stress_nominal_mpa": 147.4673008323424,
+  "web_force_worst": 1340.1457955915716,
+  "web_stress_worst_mpa": 245.77883472057076,
+  "clamp_net_n": 2112.1235922628343
+ },
+ "lost_motion": {
+  "items": [
+   [
+    "Gear backlash (D: at most)",
+    20.0
+   ],
+   [
+    "Gear hysteresis loss on torque reversal (D)",
+    60.0
+   ],
+   [
+    "Wave generator on the motor shaft: key bonded with Loctite 638 (C: none)",
+    0.0
+   ],
+   [
+    "Friction joints rotor / bearing / nose / faceplate / vise (C: none below their slip torque)",
+    0.0
+   ],
+   [
+    "Closed-loop drive: +/- 1 encoder count (C)",
+    6.4799999999999995
+   ],
+   [
+    "Motor step accuracy 5 % of a step (D)",
+    6.48
+   ]
+  ],
+  "worst_arcsec": 92.96,
+  "rss_arcsec": 63.906031014294726,
+  "worst_um_rmax": 20.821545265725415,
+  "rss_um_rmax": 14.313923381206862,
+  "accuracy_arcsec": 60.0,
+  "accuracy_um_rmax": 13.439035240356336,
+  "repeat_uni_arcsec": 11.48,
+  "repeat_uni_um_rmax": 2.5713354093215126,
+  "enc_arcsec": 3.2399999999999998
+ },
+ "motor": {
+  "J_rotating_no_work": 0.002813311388,
+  "mass_rotating": 2.632484,
+  "cases": {
+   "typ": {
+    "J_out": 0.0028811697893175395,
+    "reflected": 2.8811697893175394e-07,
+    "ratio": 0.0013019294122537457,
+    "t_acc": 0.2783721112288355,
+    "t_cut_fin": 0.05126363373343846,
+    "t_cut_rough": 0.25821682176843075,
+    "margin_600": 6.038141677470093
+   },
+   "max": {
+    "J_out": 0.004900275314770516,
+    "reflected": 4.900275314770516e-07,
+    "ratio": 0.002214313291807734,
+    "t_acc": 0.2785483114256573,
+    "t_cut_fin": 0.05126363373343846,
+    "t_cut_rough": 0.25821682176843075,
+    "margin_600": 6.036159578249755
+   }
+  },
+  "steps_per_deg": 1111.111111111111,
+  "max_out_rpm_600": 6.0,
+  "max_deg_s": 36.0,
+  "accel_deg_s2": 500.0,
+  "step_hz_at_max": 40000.0
+ },
+ "natural": {
+  "torsion_gear_no part": 528.3139477940595,
+  "torsion_brake_no part": 2102.951400332525,
+  "torsion_gear_\u00d840 x 100": 522.0553519879122,
+  "torsion_brake_\u00d840 x 100": 2078.0390866039024,
+  "torsion_gear_\u00d890 x 120": 400.30474506576337,
+  "torsion_brake_\u00d890 x 120": 1593.4113186122988,
+  "tilt_lumped_no_part": 1123.391292439589,
+  "tilt_lumped_typ_part": 762.0064270712105
+ },
+ "bearing_life": {
+  "P": 2500.859790886659,
+  "M": 67.9697097664083,
+  "L10_h_at_10rpm": 1092306.283660503,
+  "static_safety": 4.46044578359301,
+  "P0": 4999.500292555231
+ },
+ "bolts": [
+  {
+   "joint": "vise to faceplate",
+   "screws": "4 x M6 12.9",
+   "torque": 12.0,
+   "preload": 9999.999999999998,
+   "proof_share": 0.5128994204236548,
+   "slip_torque": 119.99999999999999,
+   "margin": 3.3194694724867464
+  },
+  {
+   "joint": "faceplate to nose",
+   "screws": "6 x M6 8.8",
+   "torque": 8.0,
+   "preload": 6666.666666666666,
+   "proof_share": 0.5718533767941899,
+   "slip_torque": 252.0,
+   "margin": 6.970885892222168
+  },
+  {
+   "joint": "nose and hub clamped on the bearing's inner ring (two faces, the weaker one counted)",
+   "screws": "4 x M6 12.9",
+   "torque": 12.0,
+   "preload": 9999.999999999998,
+   "proof_share": 0.5128994204236548,
+   "slip_torque": 140.99999999999997,
+   "margin": 3.9003766301719267
+  },
+  {
+   "joint": "hubs and brake disc to the gear output flange",
+   "screws": "8 x M8 12.9",
+   "torque": 30.0,
+   "preload": 18750.0,
+   "proof_share": 0.5281392597600135,
+   "slip_torque": 472.5,
+   "margin": 13.070411047916565
+  }
+ ],
+ "vise_pry": {
+  "moment": 112.6764313171334,
+  "extra_tension": 1369.4267296686123,
+  "preload": 9999.999999999998,
+  "share": 0.13694267296686125
+ },
+ "thermal": {
+  "dT": 10.0,
+  "height_um": 15.08984,
+  "length_um": 28.320000000000004
+ }
+}

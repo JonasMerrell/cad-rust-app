@@ -1,0 +1,1346 @@
+{
+ "placement": {
+  "x_faceplate": 39.4,
+  "y_axis": -325.3,
+  "z_axis": 75.17999999999999,
+  "table_offset_tool_over_axis": 15.227599999999995,
+  "turned": true,
+  "jaw_tips_x": -4.600000000000001,
+  "tail_centre_x": -105.6,
+  "motor_rear_x": 203.4,
+  "setter_back": [
+   -127.2,
+   -225.3
+  ],
+  "setter_front": [
+   -127.2,
+   -475.3
+  ]
+ },
+ "poses": [
+  {
+   "name": "Y sweep, head parked left, dy -150.7",
+   "dx": -123.7,
+   "dy": -150.7,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": [
+    {
+     "a": "base 4",
+     "b": "table 16",
+     "volume_mm3": 1410.4127
+    },
+    {
+     "a": "base 4",
+     "b": "table 17",
+     "volume_mm3": 1410.4127
+    },
+    {
+     "a": "base 4",
+     "b": "table 20",
+     "volume_mm3": 9711.2013
+    }
+   ]
+  },
+  {
+   "name": "Y sweep, head parked left, dy -75.0",
+   "dx": -123.7,
+   "dy": -75.0,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head parked left, dy +0.0",
+   "dx": -123.7,
+   "dy": 0.0,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Y sweep, head parked left, dy +83.1",
+   "dx": -123.7,
+   "dy": 83.1,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (back-left corner), 21 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": -50.49980000000002,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (back-left corner), 24 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": -47.49980000000002,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (back-left corner), probe40 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": -31.499800000000022,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +219.3, 21 mm tool",
+   "dx": 219.3,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +99.4, 21 mm tool",
+   "dx": 99.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +17.4, 21 mm tool",
+   "dx": 17.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +47.8, 21 mm tool",
+   "dx": 47.8,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -54.6, 21 mm tool",
+   "dx": -54.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -105.6, 21 mm tool",
+   "dx": -105.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -120.7, 21 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +219.3, 24 mm tool",
+   "dx": 219.3,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +99.4, 24 mm tool",
+   "dx": 99.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +17.4, 24 mm tool",
+   "dx": 17.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +47.8, 24 mm tool",
+   "dx": 47.8,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -54.6, 24 mm tool",
+   "dx": -54.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -105.6, 24 mm tool",
+   "dx": -105.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -120.7, 24 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +219.3, probe40 mm tool",
+   "dx": 219.3,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +99.4, probe40 mm tool",
+   "dx": 99.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +17.4, probe40 mm tool",
+   "dx": 17.4,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X +47.8, probe40 mm tool",
+   "dx": 47.8,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -54.6, probe40 mm tool",
+   "dx": -54.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -105.6, probe40 mm tool",
+   "dx": -105.6,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "route along the back edge at Z top, X -120.7, probe40 mm tool",
+   "dx": -120.7,
+   "dy": -84.7724,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, on the axis, 21 mm tool",
+   "dx": -8.600000000000001,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, leaving toward the back, 21 mm tool",
+   "dx": -8.600000000000001,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, on the axis, 21 mm tool",
+   "dx": -54.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, leaving toward the back, 21 mm tool",
+   "dx": -54.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, on the axis, 21 mm tool",
+   "dx": -97.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, leaving toward the back, 21 mm tool",
+   "dx": -97.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, on the axis, 24 mm tool",
+   "dx": -8.600000000000001,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, leaving toward the back, 24 mm tool",
+   "dx": -8.600000000000001,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, on the axis, 24 mm tool",
+   "dx": -54.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, leaving toward the back, 24 mm tool",
+   "dx": -54.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, on the axis, 24 mm tool",
+   "dx": -97.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, leaving toward the back, 24 mm tool",
+   "dx": -97.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, on the axis, probe40 mm tool",
+   "dx": -8.600000000000001,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over a 90 mm part",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -8.6, leaving toward the back, probe40 mm tool",
+   "dx": -8.600000000000001,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, on the axis, probe40 mm tool",
+   "dx": -54.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over a 90 mm part",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -54.6, leaving toward the back, probe40 mm tool",
+   "dx": -54.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, on the axis, probe40 mm tool",
+   "dx": -97.6,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over a 90 mm part",
+   "hits": []
+  },
+  {
+   "name": "over the work at Z top, X -97.6, leaving toward the back, probe40 mm tool",
+   "dx": -97.6,
+   "dy": -44.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the vise, 0 mm off the axis, 21 mm tool",
+   "dx": 17.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the vise, 40 mm off the axis, 21 mm tool",
+   "dx": 17.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the faceplate and nose, 0 mm off the axis, 21 mm tool",
+   "dx": 51.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the faceplate and nose, 40 mm off the axis, 21 mm tool",
+   "dx": 51.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the plates, 0 mm off the axis, 21 mm tool",
+   "dx": 99.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the plates, 40 mm off the axis, 21 mm tool",
+   "dx": 99.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 0 mm off the axis, 21 mm tool",
+   "dx": 219.3,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 40 mm off the axis, 21 mm tool",
+   "dx": 219.3,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the vise, 0 mm off the axis, 24 mm tool",
+   "dx": 17.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the vise, 40 mm off the axis, 24 mm tool",
+   "dx": 17.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the faceplate and nose, 0 mm off the axis, 24 mm tool",
+   "dx": 51.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the faceplate and nose, 40 mm off the axis, 24 mm tool",
+   "dx": 51.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the plates, 0 mm off the axis, 24 mm tool",
+   "dx": 99.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the plates, 40 mm off the axis, 24 mm tool",
+   "dx": 99.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 0 mm off the axis, 24 mm tool",
+   "dx": 219.3,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 40 mm off the axis, 24 mm tool",
+   "dx": 219.3,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "Z top over the vise, 0 mm off the axis, probe40 mm tool",
+   "dx": 17.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": [
+    {
+     "a": "tool probe40",
+     "b": "swing envelope: vise",
+     "volume_mm3": 13.0821
+    }
+   ]
+  },
+  {
+   "name": "Z top over the vise, 40 mm off the axis, probe40 mm tool",
+   "dx": 17.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": []
+  },
+  {
+   "name": "Z top over the faceplate and nose, 0 mm off the axis, probe40 mm tool",
+   "dx": 51.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": [
+    {
+     "a": "A: Faceplate (steel)",
+     "b": "tool probe40",
+     "volume_mm3": 7.5544
+    },
+    {
+     "a": "A: Spindle nose (steel)",
+     "b": "tool probe40",
+     "volume_mm3": 56.9015
+    },
+    {
+     "a": "A: Splash ring",
+     "b": "tool probe40",
+     "volume_mm3": 79.1007
+    }
+   ]
+  },
+  {
+   "name": "Z top over the faceplate and nose, 40 mm off the axis, probe40 mm tool",
+   "dx": 51.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": []
+  },
+  {
+   "name": "Z top over the plates, 0 mm off the axis, probe40 mm tool",
+   "dx": 99.4,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": [
+    {
+     "a": "A: C1 piston and seal plate",
+     "b": "tool probe40",
+     "volume_mm3": 184.0182
+    },
+    {
+     "a": "A: Brake piston",
+     "b": "tool probe40",
+     "volume_mm3": 58.9124
+    }
+   ]
+  },
+  {
+   "name": "Z top over the plates, 40 mm off the axis, probe40 mm tool",
+   "dx": 99.4,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 0 mm off the axis, probe40 mm tool",
+   "dx": 219.3,
+   "dy": 15.227599999999995,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": []
+  },
+  {
+   "name": "Z top over the motor, 40 mm off the axis, probe40 mm tool",
+   "dx": 219.3,
+   "dy": -24.772400000000005,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "probe over the headstock (not needed)",
+   "hits": []
+  },
+  {
+   "name": "top of a 90 mm part, 4 mm past the jaws",
+   "dx": -8.600000000000001,
+   "dy": 15.227599999999995,
+   "dz": -2.059800000000024,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "top of a 90 mm part, 50 mm past the jaws",
+   "dx": -54.6,
+   "dy": 15.227599999999995,
+   "dz": -2.059800000000024,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "top of a 90 mm part, 8 mm before the centre",
+   "dx": -97.6,
+   "dy": 15.227599999999995,
+   "dz": -2.059800000000024,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "top of a 20 mm part 14 mm past the jaws, A 0",
+   "dx": -18.6,
+   "dy": 15.227599999999995,
+   "dz": -37.059800000000024,
+   "tool": "24",
+   "env": false,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "beside a 20 mm part at centre height, 50 mm past the jaws, A 0",
+   "dx": -54.6,
+   "dy": 28.702599999999997,
+   "dz": -50.35980000000002,
+   "tool": "24",
+   "env": false,
+   "a": 0.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "top of a 20 mm part 14 mm past the jaws, A 90",
+   "dx": -18.6,
+   "dy": 15.227599999999995,
+   "dz": -37.059800000000024,
+   "tool": "24",
+   "env": false,
+   "a": 90.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "beside a 20 mm part at centre height, 50 mm past the jaws, A 90",
+   "dx": -54.6,
+   "dy": 28.702599999999997,
+   "dz": -50.35980000000002,
+   "tool": "24",
+   "env": false,
+   "a": 90.0,
+   "kind": "must be clear",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (front-left corner), 21 mm tool: beyond the CAD's Y travel",
+   "dx": -120.7,
+   "dy": 165.2276,
+   "dz": -50.49980000000002,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  },
+  {
+   "name": "route along the front edge at Z top, X -105.6, 21 mm tool: beyond the CAD's Y travel",
+   "dx": -105.6,
+   "dy": 165.2276,
+   "dz": 14.7,
+   "tool": "21",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (front-left corner), 24 mm tool: beyond the CAD's Y travel",
+   "dx": -120.7,
+   "dy": 165.2276,
+   "dz": -47.49980000000002,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  },
+  {
+   "name": "route along the front edge at Z top, X -105.6, 24 mm tool: beyond the CAD's Y travel",
+   "dx": -105.6,
+   "dy": 165.2276,
+   "dz": 14.7,
+   "tool": "24",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  },
+  {
+   "name": "touching the setter (front-left corner), probe40 mm tool: beyond the CAD's Y travel",
+   "dx": -120.7,
+   "dy": 165.2276,
+   "dz": -31.499800000000022,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  },
+  {
+   "name": "route along the front edge at Z top, X -105.6, probe40 mm tool: beyond the CAD's Y travel",
+   "dx": -105.6,
+   "dy": 165.2276,
+   "dz": 14.7,
+   "tool": "probe40",
+   "env": true,
+   "a": 0.0,
+   "kind": "front-left case",
+   "hits": []
+  }
+ ],
+ "instances": [
+  {
+   "id": 1,
+   "name": "base 0",
+   "grp": "base"
+  },
+  {
+   "id": 2,
+   "name": "base 1",
+   "grp": "base"
+  },
+  {
+   "id": 3,
+   "name": "base 2",
+   "grp": "base"
+  },
+  {
+   "id": 4,
+   "name": "base 3",
+   "grp": "base"
+  },
+  {
+   "id": 5,
+   "name": "base 4",
+   "grp": "base"
+  },
+  {
+   "id": 6,
+   "name": "X 5",
+   "grp": "x"
+  },
+  {
+   "id": 7,
+   "name": "X 6",
+   "grp": "x"
+  },
+  {
+   "id": 8,
+   "name": "X 7",
+   "grp": "x"
+  },
+  {
+   "id": 9,
+   "name": "X 8",
+   "grp": "x"
+  },
+  {
+   "id": 10,
+   "name": "X 9",
+   "grp": "x"
+  },
+  {
+   "id": 11,
+   "name": "X 10",
+   "grp": "x"
+  },
+  {
+   "id": 12,
+   "name": "X 11",
+   "grp": "x"
+  },
+  {
+   "id": 13,
+   "name": "X 12",
+   "grp": "x"
+  },
+  {
+   "id": 14,
+   "name": "X 13",
+   "grp": "x"
+  },
+  {
+   "id": 15,
+   "name": "X 14",
+   "grp": "x"
+  },
+  {
+   "id": 16,
+   "name": "X 15",
+   "grp": "x"
+  },
+  {
+   "id": 17,
+   "name": "table 16",
+   "grp": "y"
+  },
+  {
+   "id": 18,
+   "name": "table 17",
+   "grp": "y"
+  },
+  {
+   "id": 19,
+   "name": "table 18",
+   "grp": "y"
+  },
+  {
+   "id": 20,
+   "name": "table 19",
+   "grp": "y"
+  },
+  {
+   "id": 21,
+   "name": "table 20",
+   "grp": "y"
+  },
+  {
+   "id": 22,
+   "name": "Z 21",
+   "grp": "z"
+  },
+  {
+   "id": 23,
+   "name": "Z 22",
+   "grp": "z"
+  },
+  {
+   "id": 24,
+   "name": "Z 23",
+   "grp": "z"
+  },
+  {
+   "id": 25,
+   "name": "A: Faceplate (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 26,
+   "name": "A: Spindle nose (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 27,
+   "name": "A: Hub disc A (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 28,
+   "name": "A: Brake disc",
+   "grp": "rot"
+  },
+  {
+   "id": 29,
+   "name": "A: Hub spacer (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 30,
+   "name": "A: Carrier 1 (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 31,
+   "name": "A: Carrier 2 spider (steel)",
+   "grp": "rot"
+  },
+  {
+   "id": 32,
+   "name": "A: Cycloid disc A",
+   "grp": "axis"
+  },
+  {
+   "id": 33,
+   "name": "A: Cycloid disc B",
+   "grp": "axis"
+  },
+  {
+   "id": 34,
+   "name": "A: P1 bearing plate",
+   "grp": "axis"
+  },
+  {
+   "id": 35,
+   "name": "A: C1 piston and seal plate",
+   "grp": "axis"
+  },
+  {
+   "id": 36,
+   "name": "A: G1 pin plate",
+   "grp": "axis"
+  },
+  {
+   "id": 37,
+   "name": "A: M ring spacer",
+   "grp": "axis"
+  },
+  {
+   "id": 38,
+   "name": "A: G2 pin plate",
+   "grp": "axis"
+  },
+  {
+   "id": 39,
+   "name": "A: D rear plate and motor ear",
+   "grp": "axis"
+  },
+  {
+   "id": 40,
+   "name": "A: Base plate (steel)",
+   "grp": "axis"
+  },
+  {
+   "id": 41,
+   "name": "A: Brake piston",
+   "grp": "axis"
+  },
+  {
+   "id": 42,
+   "name": "A: Shaft seal 60 x 75 x 8",
+   "grp": "axis"
+  },
+  {
+   "id": 43,
+   "name": "A: Splash ring",
+   "grp": "axis"
+  },
+  {
+   "id": 44,
+   "name": "A: RU66 crossed roller bearing",
+   "grp": "axis"
+  },
+  {
+   "id": 45,
+   "name": "A: Bearing 6904-2RS (disc A)",
+   "grp": "axis"
+  },
+  {
+   "id": 46,
+   "name": "A: Bearing 6904-2RS (disc B)",
+   "grp": "axis"
+  },
+  {
+   "id": 47,
+   "name": "A: Bearing 6001-2RS (front)",
+   "grp": "axis"
+  },
+  {
+   "id": 48,
+   "name": "A: Bearing 6001-2RS (rear)",
+   "grp": "axis"
+  },
+  {
+   "id": 49,
+   "name": "A: Input shaft 12 h6 x 80",
+   "grp": "axis"
+  },
+  {
+   "id": 50,
+   "name": "A: Pulley GT3 3 mm 60 teeth, 12 bore",
+   "grp": "axis"
+  },
+  {
+   "id": 51,
+   "name": "A: Pulley GT3 3 mm 20 teeth, 8 bore",
+   "grp": "axis"
+  },
+  {
+   "id": 52,
+   "name": "A: Belt GT3 345-3MGT-9 (115 teeth)",
+   "grp": "axis"
+  },
+  {
+   "id": 53,
+   "name": "A: Motor rear cover and gland (part of 23E1",
+   "grp": "axis"
+  },
+  {
+   "id": 54,
+   "name": "A: Window cover",
+   "grp": "axis"
+  },
+  {
+   "id": 55,
+   "name": "A: Belt guard",
+   "grp": "axis"
+  },
+  {
+   "id": 56,
+   "name": "A: Sensor bracket",
+   "grp": "axis"
+  },
+  {
+   "id": 57,
+   "name": "A: Tailstock plate",
+   "grp": "axis"
+  },
+  {
+   "id": 58,
+   "name": "A: Tailstock base",
+   "grp": "axis"
+  },
+  {
+   "id": 59,
+   "name": "A: Tail centre (12 mm 90 deg spot drill)",
+   "grp": "axis"
+  },
+  {
+   "id": 60,
+   "name": "A: Vise XinDian H54-8-55",
+   "grp": "rot"
+  },
+  {
+   "id": 61,
+   "name": "A: Motor 23E1KIP65-20",
+   "grp": "axis"
+  },
+  {
+   "id": 62,
+   "name": "A: ISO 4762 M8x120 <1>",
+   "grp": "axis"
+  },
+  {
+   "id": 63,
+   "name": "A: ISO 4762 M8x120 <2>",
+   "grp": "axis"
+  },
+  {
+   "id": 64,
+   "name": "A: ISO 4762 M8x120 <3>",
+   "grp": "axis"
+  },
+  {
+   "id": 65,
+   "name": "A: ISO 4762 M8x120 <4>",
+   "grp": "axis"
+  },
+  {
+   "id": 66,
+   "name": "tool 21",
+   "grp": "tool:21"
+  },
+  {
+   "id": 67,
+   "name": "tool 24",
+   "grp": "tool:24"
+  },
+  {
+   "id": 68,
+   "name": "tool probe40",
+   "grp": "tool:probe40"
+  },
+  {
+   "id": 69,
+   "name": "tool setter, back-left corner",
+   "grp": "setter:back"
+  },
+  {
+   "id": 70,
+   "name": "tool setter, front-left corner",
+   "grp": "setter:front"
+  },
+  {
+   "id": 71,
+   "name": "swing envelope: vise",
+   "grp": "env"
+  },
+  {
+   "id": 72,
+   "name": "swing envelope: largest part",
+   "grp": "env"
+  }
+ ]
+}

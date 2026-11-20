@@ -1,0 +1,405 @@
+{
+ "Faceplate (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 6.5,
+  "thickness_mm": 9.53,
+  "stock_xy_mm": [
+   98.6,
+   100.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 3/8 x 4 in (9.53 x 101.6), 105 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Spindle nose (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 6.6,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   96.0,
+   96.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 4 in (12.7 x 101.6), 100 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Hub disc A (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 7.0,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   60.0,
+   60.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 2-1/2 in (12.7 x 63.5), 65 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Brake disc": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 2.17,
+  "thickness_mm": 3.17,
+  "stock_xy_mm": [
+   104.0,
+   104.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1/8 in (3.18) 6061 sheet, 110 x 110",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Hub spacer (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 19.05,
+  "thickness_mm": 19.05,
+  "stock_xy_mm": [
+   60.0,
+   60.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 3/4 x 2-1/2 in (19.05 x 63.5), 65 long; rim polished for the seal",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Carrier 1 (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 8.0,
+  "thickness_mm": 12.71,
+  "stock_xy_mm": [
+   76.0,
+   76.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 3-1/2 in (12.7 x 88.9), 85 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Carrier 2 spider (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 9.53,
+  "thickness_mm": 9.53,
+  "stock_xy_mm": [
+   73.5,
+   66.2
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "4140 pre-hardened or O1 ground flat stock 3/8 x 3-1/2 in (9.53 x 88.9), 85 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Cycloid disc A": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 6.35,
+  "thickness_mm": 6.35,
+  "stock_xy_mm": [
+   82.1,
+   82.3
+  ],
+  "largest_tool_mm": 9.16,
+  "cut_along": "x",
+  "stock": "O1 ground flat stock 1/4 x 4 in (6.35 x 101.6), both discs cut stacked from one 190 mm length",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Cycloid disc B": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 6.35,
+  "thickness_mm": 6.35,
+  "stock_xy_mm": [
+   82.1,
+   82.3
+  ],
+  "largest_tool_mm": 9.16,
+  "cut_along": "x",
+  "stock": "O1 ground flat stock 1/4 x 4 in (6.35 x 101.6), both discs cut stacked from one 190 mm length",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Eccentric bush A": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 9.0,
+  "thickness_mm": 9.0,
+  "stock_xy_mm": [
+   20.0,
+   20.0
+  ],
+  "largest_tool_mm": 11.97,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 3/8 in, faced to 9.00; bore and journal in one setup",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Eccentric bush B": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 9.0,
+  "thickness_mm": 9.0,
+  "stock_xy_mm": [
+   20.0,
+   20.0
+  ],
+  "largest_tool_mm": 11.97,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 3/8 in, faced to 9.00; bore and journal in one setup",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "P1 bearing plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 16.0,
+  "thickness_mm": 31.75,
+  "stock_xy_mm": [
+   150.0,
+   112.0
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1-1/4 in (31.75) 6061 plate, 155 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "C1 piston and seal plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 12.38,
+  "thickness_mm": 19.05,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "3/4 in (19.05) 6061 plate, 155 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "G1 pin plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 12.7,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 6 in, 155 x 115; both pin plates bored stacked",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "M ring spacer": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 17.25,
+  "thickness_mm": 17.25,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "3/4 in (19.05) 6061 plate, 155 x 115, faced to 17.25",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "G2 pin plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 1,
+  "deepest_cut_mm": 12.7,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 6 in, 155 x 115; both pin plates bored stacked",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "D rear plate and motor ear": {
+  "ok": false,
+  "cannot_cut": [
+   {
+    "z": [
+     -125.0,
+     -123.56
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   },
+   {
+    "z": [
+     -123.56,
+     -122.28
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   },
+   {
+    "z": [
+     -122.28,
+     -120.93
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   },
+   {
+    "z": [
+     -120.93,
+     -119.58
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   },
+   {
+    "z": [
+     -119.58,
+     -117.63
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   },
+   {
+    "z": [
+     -117.63,
+     -115.68
+    ],
+    "area_mm2": 1.55,
+    "at": [
+     76.1,
+     3.8
+    ]
+   }
+  ],
+  "setups": 2,
+  "deepest_cut_mm": 6.56,
+  "thickness_mm": 15.88,
+  "stock_xy_mm": [
+   217.0,
+   112.0
+  ],
+  "largest_tool_mm": null,
+  "cut_along": "x",
+  "stock": "5/8 in (15.88) 6061 plate, 225 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Base plate (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 4.6,
+  "thickness_mm": 7.94,
+  "stock_xy_mm": [
+   208.0,
+   150.0
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "z",
+  "stock": "1018 cold-rolled flat 5/16 x 6 in (7.94 x 152.4), 210 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Brake piston": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 3.39,
+  "thickness_mm": 6.34,
+  "stock_xy_mm": [
+   105.0,
+   105.0
+  ],
+  "largest_tool_mm": 13.94,
+  "cut_along": "x",
+  "stock": "1/4 in (6.35) 6061 plate, 110 x 110",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Tailstock plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 18.6,
+  "thickness_mm": 25.4,
+  "stock_xy_mm": [
+   110.0,
+   72.9
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1 in (25.4) 6061 plate, 115 x 80",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Tailstock base": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 10.55,
+  "thickness_mm": 19.05,
+  "stock_xy_mm": [
+   102.0,
+   110.0
+  ],
+  "largest_tool_mm": 8.98,
+  "cut_along": "z",
+  "stock": "3/4 in (19.05) 6061 plate, 115 x 105",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ }
+}

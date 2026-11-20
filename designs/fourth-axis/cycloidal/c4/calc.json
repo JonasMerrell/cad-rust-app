@@ -1,0 +1,320 @@
+{
+ "iteration": "c4",
+ "ratio": {
+  "cycloid": 23,
+  "belt": 3.0,
+  "total": 69.0
+ },
+ "torque": {
+  "rough_mean": 18.075177523790153,
+  "rough_peak": 36.150355047580305,
+  "fin_mean": 3.588454361340692,
+  "fin_peak": 7.176908722681384
+ },
+ "stiffness": {
+  "K_ring": 268353.057663974,
+  "K_out": 314279.5100710075,
+  "K_ecc": 35536.567992233446,
+  "k_ecc_n_per_m": 39485075.54692605,
+  "k_shaft": 260085355.719984,
+  "K_one_disc": 28532.019628389582,
+  "K_belt_at_output": 286273.590371401,
+  "K_drive": 25946.05508958943,
+  "K_brake": 460174.72789845674,
+  "pin_load_n": 524.3437443451252,
+  "mesh_force_n": 1205.0118349193435,
+  "hertz_ring_mpa": 526.0202250496385,
+  "hertz_sleeve_mpa": 401.11367436914054,
+  "sleeve_force_n": 623.2819835789708
+ },
+ "windup": [
+  {
+   "case": "roughing mean",
+   "r_mm": 46.199999999999996,
+   "torque": 18.075177523790153,
+   "arcmin": 2.394887505989543,
+   "um": 32.18497758968257,
+   "um_brake": 1.7178306931584937
+  },
+  {
+   "case": "roughing peak",
+   "r_mm": 46.199999999999996,
+   "torque": 36.150355047580305,
+   "arcmin": 4.789775011979086,
+   "um": 64.36995517936514,
+   "um_brake": 3.4356613863169874
+  },
+  {
+   "case": "roughing mean",
+   "r_mm": 25.0,
+   "torque": 9.780940218501165,
+   "arcmin": 1.295934797613389,
+   "um": 9.42430379563333,
+   "um_brake": 0.5030097745657215
+  },
+  {
+   "case": "finishing mean",
+   "r_mm": 46.199999999999996,
+   "torque": 3.588454361340692,
+   "arcmin": 0.4754556078067475,
+   "um": 6.38966466853992,
+   "um_brake": 0.3410399170241127
+  },
+  {
+   "case": "finishing mean",
+   "r_mm": 25.0,
+   "torque": 1.9418043080847902,
+   "arcmin": 0.2572811730555993,
+   "um": 1.8710014888389699,
+   "um_brake": 0.09986223465643002
+  }
+ ],
+ "bearings": {
+  "ecc_mean_n": 783.2576926975734,
+  "ecc_peak_n": 1566.5153853951467,
+  "static_safety": 2.361930201577108,
+  "L10_h_at_10rpm_roughing": 39531.821769766866,
+  "front_6001_n": 632.3248325267531
+ },
+ "motor": {
+  "cases": [
+   {
+    "case": "roughing mean",
+    "out": 18.075177523790153,
+    "motor": 0.4460973634911225,
+    "m300": 2.7124123544031646,
+    "m600": 2.443412782065661,
+    "m900": 1.7484972201937756
+   },
+   {
+    "case": "roughing peak",
+    "out": 36.150355047580305,
+    "motor": 0.8400208139387667,
+    "m300": 1.4404404985234127,
+    "m600": 1.2975868953640661,
+    "m900": 0.9285484205357537
+   },
+   {
+    "case": "finishing mean",
+    "out": 3.588454361340692,
+    "motor": 0.13037930394117234,
+    "m300": 9.280614050109953,
+    "m600": 8.360222574065991,
+    "m900": 5.982544594285756
+   }
+  ],
+  "eta_cycloid": 0.7,
+  "eta_belt": 0.95,
+  "preload_nm": 6.0,
+  "preload_friction_at_motor": 0.05217391304347827,
+  "t_acc": 0.033023060034425254,
+  "J_out": 0.004013311388,
+  "J_in": 5.4e-05,
+  "deg_s_at": {
+   "300": 26.08695652173913,
+   "600": 52.17391304347826,
+   "900": 78.26086956521739
+  },
+  "back_efficiency": 0.5714285714285714,
+  "hold_needed_peak": 0.29938182234020955
+ },
+ "natural": {
+  "no part": {
+   "drive": 404.67313218657637,
+   "preloaded": 404.67313218657637,
+   "brake": 1751.623637905079
+  },
+  "\u00d840 x 100 aluminium": {
+   "drive": 401.2947407164152,
+   "preloaded": 401.2947407164152,
+   "brake": 1737.0003039435278
+  },
+  "\u00d890 x 120 aluminium": {
+   "drive": 328.2321229146406,
+   "preloaded": 328.2321229146406,
+   "brake": 1420.7494876432063
+  }
+ },
+ "lost_motion": {
+  "monte_carlo": {
+   "as milled, +/- 0.03 mm": {
+    "tol": 0.03,
+    "clearance": 0.075,
+    "trials": 60,
+    "bind_share": 0.016666666666666666,
+    "lost_single_mean": 35.60624713827342,
+    "lost_single_p95": 55.32610964099052,
+    "te_pp_mean": 13.924798322043848,
+    "te_pp_p95": 17.851877876667018,
+    "te_in_pp_mean": 7.894890111806542,
+    "te_out_pp_mean": 0.7267087531993047,
+    "te_rest_pp_mean": 9.89043084983709,
+    "te_rest_pp_p95": 13.000354679402813,
+    "split_residual_mean": 17.76816817103046,
+    "split_residual_p95": 22.92550139895803
+   },
+   "careful, +/- 0.015 mm": {
+    "tol": 0.015,
+    "clearance": 0.045,
+    "trials": 60,
+    "bind_share": 0.0,
+    "lost_single_mean": 20.501894867997358,
+    "lost_single_p95": 30.594493396787065,
+    "te_pp_mean": 7.90595926391368,
+    "te_pp_p95": 10.430202520759861,
+    "te_in_pp_mean": 4.0098398175330505,
+    "te_out_pp_mean": 0.38361632632335524,
+    "te_rest_pp_mean": 6.118260580437972,
+    "te_rest_pp_p95": 7.735812785446369,
+    "split_residual_mean": 10.61377874451522,
+    "split_residual_p95": 13.371997234774756
+   },
+   "probed and corrected, +/- 0.008 mm": {
+    "tol": 0.008,
+    "clearance": 0.02,
+    "trials": 60,
+    "bind_share": 0.016666666666666666,
+    "lost_single_mean": 8.517773417242337,
+    "lost_single_p95": 13.385768125576941,
+    "te_pp_mean": 3.767589173353178,
+    "te_pp_p95": 5.227599072221705,
+    "te_in_pp_mean": 1.8612587931206004,
+    "te_out_pp_mean": 0.20910595882067168,
+    "te_rest_pp_mean": 2.8925588278705505,
+    "te_rest_pp_p95": 4.090981888042768,
+    "split_residual_mean": 5.116639370663288,
+    "split_residual_p95": 6.465897342326143
+   },
+   "best case, +/- 0.004 mm": {
+    "tol": 0.004,
+    "clearance": 0.012,
+    "trials": 60,
+    "bind_share": 0.0,
+    "lost_single_mean": 4.625767721446878,
+    "lost_single_p95": 7.142565549437491,
+    "te_pp_mean": 2.065943437500203,
+    "te_pp_p95": 2.6921962424984254,
+    "te_in_pp_mean": 0.9965680408799302,
+    "te_out_pp_mean": 0.09450744921455613,
+    "te_rest_pp_mean": 1.5972957971164412,
+    "te_rest_pp_p95": 2.127760804856651,
+    "split_residual_mean": 2.858649728420519,
+    "split_residual_p95": 3.6990621586198484
+   }
+  },
+  "belt_arcmin": 0.10434782608695654,
+  "encoder_count_arcmin": 0.0782608695652174
+ },
+ "sprung": {
+  "k_blade_fe": 1270.880321659194,
+  "k_blade_hand": [
+   1017.1972461613793,
+   1499.2723271094715,
+   3163.5231578085427
+  ],
+  "k_eff": 906.6516718624367,
+  "K_between_carriers": 2287.482168108928,
+  "preload_nm": 6.0,
+  "preload_swing_nm": 2.151209186943229,
+  "deflection_arcmin": 9.017111001901993,
+  "max_force_n": 93.6920596200371,
+  "max_stress_mpa": 214.46112447026493
+ },
+ "thermal": {
+  "dT": 10.0,
+  "clearance_change_um": 0.0,
+  "arcmin": 0.0
+ },
+ "tool_point": {
+  "chuck_Fz": {
+   "struct_um": 2.128,
+   "iter6_struct_um": 2.1229999999999998,
+   "total_um": 14.43268699761278,
+   "finishing_um": 2.8791549509304266
+  },
+  "chuck_Fy": {
+   "struct_um": 1.485,
+   "iter6_struct_um": 1.5250000000000001,
+   "total_um": 13.415128978713517,
+   "finishing_um": 2.676163837185817
+  },
+  "overhang_Fz": {
+   "struct_um": 22.64,
+   "iter6_struct_um": 22.66,
+   "total_um": 61.363670246011196,
+   "finishing_um": 12.24134598258024
+  },
+  "overhang_Fy": {
+   "struct_um": 18.3,
+   "iter6_struct_um": 18.45,
+   "total_um": 55.938733722303525,
+   "finishing_um": 11.159133581431393
+  }
+ },
+ "modes": [
+  {
+   "frequency_hz": 0.003683,
+   "mass_participation_xyz": [
+    0.0,
+    0.0002,
+    0.0
+   ],
+   "mode": 1
+  },
+  {
+   "decay_60db_s": 28.31,
+   "frequency_hz": 255.3,
+   "loss_factor": 0.0003042,
+   "mass_participation_xyz": [
+    0.0183,
+    0.0342,
+    0.0005
+   ],
+   "mode": 2
+  },
+  {
+   "decay_60db_s": 12.7,
+   "frequency_hz": 557.7,
+   "loss_factor": 0.0003105,
+   "mass_participation_xyz": [
+    0.0,
+    0.0006,
+    0.0549
+   ],
+   "mode": 3
+  },
+  {
+   "decay_60db_s": 8.25,
+   "frequency_hz": 671.3,
+   "loss_factor": 0.000397,
+   "mass_participation_xyz": [
+    0.0537,
+    0.0,
+    0.1556
+   ],
+   "mode": 4
+  },
+  {
+   "decay_60db_s": 6.689,
+   "frequency_hz": 789.0,
+   "loss_factor": 0.0004166,
+   "mass_participation_xyz": [
+    0.0001,
+    0.1849,
+    0.0
+   ],
+   "mode": 5
+  },
+  {
+   "decay_60db_s": 3.497,
+   "frequency_hz": 1749.0,
+   "loss_factor": 0.0003594,
+   "mass_participation_xyz": [
+    0.3337,
+    0.0012,
+    0.0022
+   ],
+   "mode": 6
+  }
+ ]
+}

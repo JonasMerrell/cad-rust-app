@@ -16,12 +16,12 @@ Load at the end of a 40 x 40 test bar gripped in the vise. 'Structure' is the bo
 
 | Load point | Dir | Structure F | of which the test bar C | Bearing C | Joints G | Total rough µm | Total less the bar, rough µm | Finishing µm (less the bar) |
 |---|---|---|---|---|---|---|---|---|
-| chuck, 10 mm past the jaws | Fz | 6.4 | 0.1 | 5.5 | 1.8 | 13.7 | 13.6 | 2.70 |
-| chuck, 10 mm past the jaws | Fy | 4.8 | 0.1 | 5.5 | 1.5 | 11.8 | 11.7 | 2.32 |
-| overhang, 100 mm past the jaws | Fz | 38.1 | 12.1 | 19.2 | 8.9 | 66.1 | 54.0 | 10.72 |
-| overhang, 100 mm past the jaws | Fy | 31.0 | 12.1 | 19.2 | 8.1 | 58.3 | 46.2 | 9.17 |
+| chuck, 10 mm past the jaws | Fz | 2.1 | 0.1 | 5.5 | 2.0 | 9.6 | 9.5 | 1.88 |
+| chuck, 10 mm past the jaws | Fy | 1.6 | 0.1 | 5.5 | 1.5 | 8.6 | 8.5 | 1.69 |
+| overhang, 100 mm past the jaws | Fz | 22.5 | 12.1 | 19.2 | 9.4 | 51.1 | 39.0 | 7.74 |
+| overhang, 100 mm past the jaws | Fy | 18.3 | 12.1 | 19.2 | 8.1 | 45.6 | 33.5 | 6.65 |
 
-Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.3 µm instead of 38.1 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about 15 µm at that point.
+Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.3 µm instead of 22.5 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about -1 µm at that point.
 
 ## With and without the tailstock (aluminium bar between the jaws and the centre)
 
@@ -29,9 +29,9 @@ Tailstock stiffness at the centre: 32 N/µm vertical, 42 N/µm sideways (F, bond
 
 | Part | No tailstock, at the free end, rough µm | No tailstock, mid-length µm | With tailstock, mid-length, rough µm | With tailstock, finishing µm |
 |---|---|---|---|---|
-| Ø25 x 120 mm | 208 | 41.0 | 13.2 | 2.61 |
-| Ø40 x 120 mm | 64 | 22.9 | 8.6 | 1.70 |
-| Ø16 x 100 mm | 619 | 91.4 | 24.6 | 4.88 |
+| Ø25 x 120 mm | 198 | 35.3 | 11.2 | 2.23 |
+| Ø40 x 120 mm | 53 | 17.2 | 7.1 | 1.40 |
+| Ø16 x 100 mm | 610 | 86.1 | 22.6 | 4.48 |
 
 ## Torsion: windup at the work surface
 
@@ -51,7 +51,7 @@ Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: dis
 - Piston ring Ø93 to Ø122.4: 4974 mm² (C). At 0.6 MPa (G: shop pressure not confirmed) less 120 N seal drag (G): clamp force 2864 N (C).
 - Holding torque at mean radius 59 mm: 43 N·m with µ 0.3, 85 N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).
 - Needed: 18.1 N·m mean, 36.2 N·m peak at the 46 mm radius (C).
-- The disc's 1.0 mm web, 19 mm wide, bends 0.15 mm to reach the lining: 86 MPa and 450 N of the clamp force (C); with the gap 0.1 mm larger, 143 MPa and 750 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
+- The disc's 1.0 mm web, 19.0 mm wide, bends 0.15 mm to reach the lining: 86 MPa and 450 N of the clamp force (C); with the gap 0.1 mm larger, 143 MPa and 750 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
 - Clamp force left on the lining: 2415 N.
 
 ## Lost motion, accuracy, repeatability
@@ -97,7 +97,7 @@ Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rot
 | Axis turning against the brake, Ø90 x 120 | 1889 | C |
 | Rotating group tilting on the bearing and joints, no part | 1518 | C |
 | Rotating group tilting on the bearing and joints, Ø40 x 100 part | 1017 | C |
-| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 500 | C from F |
+| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 438 | C from F |
 
 ## Bearing
 

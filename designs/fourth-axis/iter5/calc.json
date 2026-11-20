@@ -26,7 +26,7 @@
    "preload_per_roller_N": 150.8388014248244
   },
   "knock": 0.5,
-  "tag": "C: Palmgren line contact, 36 rollers of 6 x 4.8 mm (G, fits C0), 2 um preload (G), x0.5 for ring and seat flexing (G)"
+  "tag": "C: Palmgren line contact, rollers sized to fit the catalogue C0 (G), 2 um preload (G), x0.5 for ring and seat flexing (G)"
  },
  "joints": [
   {
@@ -42,18 +42,18 @@
    "k_tilt_nm_per_rad": 1968300.0
   },
   {
-   "name": "plates / base (two 31.75 x 156 strips)",
-   "k_tilt_nm_per_rad": 26177314.929999996
+   "name": "plates / base (two 19 x 156 strips)",
+   "k_tilt_nm_per_rad": 15025867.089999998
   }
  ],
  "tool_point": {
   "chuck_Fz": {
-   "struct": 1.637851662404092e-08,
+   "struct": 5.450127877237852e-09,
    "bar": 2.1001904934687943e-10,
    "bearing": 1.3995331322015399e-08,
-   "joints": 4.542849978896753e-09,
-   "total": 3.491669792495307e-08,
-   "total_less_bar": 3.470667887560619e-08,
+   "joints": 5.032727822391076e-09,
+   "total": 2.4478187021644328e-08,
+   "total_less_bar": 2.426816797229745e-08,
    "joint_list": [
     [
      "nose / bearing inner ring (r 28..41.5)",
@@ -68,18 +68,18 @@
      1.4814814814814814e-09
     ],
     [
-     "plates / base (two 31.75 x 156 strips)",
-     6.600792535905821e-10
+     "plates / base (two 19 x 156 strips)",
+     1.1499570970849044e-09
     ]
    ]
   },
   "chuck_Fy": {
-   "struct": 1.2242966751918158e-08,
+   "struct": 4.10997442455243e-09,
    "bar": 2.1001904934687943e-10,
    "bearing": 1.3995331322015399e-08,
-   "joints": 3.889353857770323e-09,
-   "total": 3.012765193170388e-08,
-   "total_less_bar": 2.9917632882357e-08,
+   "joints": 3.894239529782334e-09,
+   "total": 2.1999545276350163e-08,
+   "total_less_bar": 2.1789526227003284e-08,
    "joint_list": [
     [
      "nose / bearing inner ring (r 28..41.5)",
@@ -94,18 +94,18 @@
      1.4814814814814814e-09
     ],
     [
-     "plates / base (two 31.75 x 156 strips)",
-     6.583132464152037e-12
+     "plates / base (two 19 x 156 strips)",
+     1.14688044761625e-11
     ]
    ]
   },
   "overhang_Fz": {
-   "struct": 9.726342710997442e-08,
+   "struct": 5.7493606138107424e-08,
    "bar": 3.1014853955007254e-08,
    "bearing": 4.911630572619948e-08,
-   "joints": 2.2684863130740515e-08,
-   "total": 1.6906459596691442e-07,
-   "total_less_bar": 1.3804974201190718e-07,
+   "joints": 2.407519342465714e-08,
+   "total": 1.3068510528896404e-07,
+   "total_less_bar": 9.967025133395678e-08,
    "joint_list": [
     [
      "nose / bearing inner ring (r 28..41.5)",
@@ -120,18 +120,18 @@
      1.0534979423868311e-08
     ],
     [
-     "plates / base (two 31.75 x 156 strips)",
-     1.8733816906407977e-09
+     "plates / base (two 19 x 156 strips)",
+     3.2637119845574246e-09
     ]
    ]
   },
   "overhang_Fy": {
-   "struct": 7.913043478260869e-08,
+   "struct": 4.672634271099745e-08,
    "bar": 3.1014853955007254e-08,
    "bearing": 4.911630572619948e-08,
-   "joints": 2.0818064572563867e-08,
-   "total": 1.4906480508137205e-07,
-   "total_less_bar": 1.1804995112636479e-07,
+   "joints": 2.0822950244575878e-08,
+   "total": 1.1666559868177281e-07,
+   "total_less_bar": 8.565074472676556e-08,
    "joint_list": [
     [
      "nose / bearing inner ring (r 28..41.5)",
@@ -146,15 +146,15 @@
      1.0534979423868311e-08
     ],
     [
-     "plates / base (two 31.75 x 156 strips)",
-     6.583132464152037e-12
+     "plates / base (two 19 x 156 strips)",
+     1.14688044761625e-11
     ]
    ]
   }
  },
  "steel_check": {
   "struct_real_materials": 5.943734015345269e-08,
-  "struct_all_aluminium": 9.726342710997442e-08,
+  "struct_all_aluminium": 5.7493606138107424e-08,
   "bar_steel": 1.0684617187499999e-08
  },
  "tailstock": {
@@ -163,25 +163,25 @@
   "k_centre_contact": 100000000.0,
   "parts": {
    "d25_L120": {
-    "with_tail_mid": 3.364763772503628e-08,
-    "no_tail_mid": 1.047570308220451e-07,
-    "no_tail_end": 5.329014803862947e-07,
+    "with_tail_mid": 2.8738090685553522e-08,
+    "no_tail_mid": 9.011370726579427e-08,
+    "no_tail_end": 5.056437188288808e-07,
     "k_tail": 24248302.61881668,
-    "k_rot_head": 231481.42965772995
+    "k_rot_head": 317259.1383882627
    },
    "d40_L120": {
-    "with_tail_mid": 2.1934102629549756e-08,
-    "no_tail_mid": 5.857447037644913e-08,
-    "no_tail_end": 1.6344099700465453e-07,
+    "with_tail_mid": 1.8058908844801307e-08,
+    "no_tail_mid": 4.393114686616032e-08,
+    "no_tail_end": 1.3618323566489328e-07,
     "k_tail": 24248302.61881668,
-    "k_rot_head": 231481.42965772995
+    "k_rot_head": 317259.1383882627
    },
    "d16_L100": {
-    "with_tail_mid": 6.284766498036982e-08,
-    "no_tail_mid": 2.334901707866823e-07,
-    "no_tail_end": 1.5817746044727844e-06,
+    "with_tail_mid": 5.76685009505955e-08,
+    "no_tail_mid": 2.2013165114483843e-07,
+    "no_tail_end": 1.559656058670122e-06,
     "k_tail": 24248302.61881668,
-    "k_rot_head": 231481.42965772995
+    "k_rot_head": 317259.1383882627
    }
   }
  },
@@ -340,7 +340,7 @@
   "torsion_brake_\u00d890 x 120": 1888.6347056970928,
   "tilt_lumped_no_part": 1517.8460235966945,
   "tilt_lumped_typ_part": 1016.6598958542188,
-  "mode1_with_bearing_and_joints": 500.3742274763819
+  "mode1_with_bearing_and_joints": 437.56564125774736
  },
  "bearing_life": {
   "P": 2078.8462183788793,

@@ -1,0 +1,210 @@
+{
+ "Faceplate (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 6.5,
+  "thickness_mm": 9.53,
+  "stock_xy_mm": [
+   98.6,
+   100.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 3/8 x 4 in (9.53 x 101.6), 105 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Spindle nose (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 6.6,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   96.0,
+   96.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 4 in (12.7 x 101.6), 100 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Hub disc (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 7.0,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   60.0,
+   60.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "1018 cold-rolled flat 1/2 x 2-1/2 in (12.7 x 63.5), 65 long each",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Hub disc (steel) B": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 7.0,
+  "thickness_mm": 12.71,
+  "stock_xy_mm": [
+   60.0,
+   60.0
+  ],
+  "largest_tool_mm": 6.59,
+  "cut_along": "x",
+  "stock": "same part as the other hub disc",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Brake disc": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 2.17,
+  "thickness_mm": 3.17,
+  "stock_xy_mm": [
+   104.0,
+   104.0
+  ],
+  "largest_tool_mm": 6.95,
+  "cut_along": "x",
+  "stock": "1/8 in (3.18) 6061 sheet, 110 x 110",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "P1 bearing plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 16.0,
+  "thickness_mm": 31.75,
+  "stock_xy_mm": [
+   150.0,
+   112.0
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1-1/4 in (31.75) 6061 plate, 155 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "C1 piston plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 11.7,
+  "thickness_mm": 12.7,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1/2 in (12.7) 6061 plate, 155 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "C2 spacer plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 18.12,
+  "thickness_mm": 35.13,
+  "stock_xy_mm": [
+   150.0,
+   111.7
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1-1/2 in (38.1) 6061 plate, 155 x 115, faced to 35.12",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "D motor plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 16.0,
+  "thickness_mm": 25.41,
+  "stock_xy_mm": [
+   150.0,
+   112.0
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1 in (25.4) 6061 plate, 155 x 115",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Base plate (steel)": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 4.6,
+  "thickness_mm": 7.94,
+  "stock_xy_mm": [
+   212.0,
+   150.0
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "z",
+  "stock": "1018 cold-rolled flat 5/16 x 6 in (7.94 x 152.4), 215 long",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Brake piston": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 3.39,
+  "thickness_mm": 6.34,
+  "stock_xy_mm": [
+   105.0,
+   105.0
+  ],
+  "largest_tool_mm": 13.94,
+  "cut_along": "x",
+  "stock": "1/4 in (6.35) 6061 plate, 110 x 110",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Tailstock plate": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 18.6,
+  "thickness_mm": 25.4,
+  "stock_xy_mm": [
+   110.0,
+   72.9
+  ],
+  "largest_tool_mm": 6.47,
+  "cut_along": "x",
+  "stock": "1 in (25.4) 6061 plate, 115 x 80",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ },
+ "Tailstock base": {
+  "ok": true,
+  "cannot_cut": [],
+  "setups": 2,
+  "deepest_cut_mm": 10.55,
+  "thickness_mm": 19.05,
+  "stock_xy_mm": [
+   102.0,
+   110.0
+  ],
+  "largest_tool_mm": 8.98,
+  "cut_along": "z",
+  "stock": "3/4 in (19.05) 6061 plate, 115 x 105",
+  "deeper_than_flute": false,
+  "fits_travel": true
+ }
+}

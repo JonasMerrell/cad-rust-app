@@ -1,0 +1,11034 @@
+{
+ "bom": [
+  {
+   "item": 1,
+   "mass_g": 522.1773,
+   "material": "Steel",
+   "part": "Faceplate (steel)",
+   "qty": 1,
+   "stock": "Round bar \u00d8110 \u00d7 15 mm"
+  },
+  {
+   "item": 2,
+   "mass_g": 621.0055,
+   "material": "Steel",
+   "part": "Spindle nose (steel)",
+   "qty": 1,
+   "stock": "Round bar \u00d8100 \u00d7 15 mm"
+  },
+  {
+   "item": 3,
+   "mass_g": 214.4941,
+   "material": "Steel",
+   "part": "Hub disc A (steel)",
+   "qty": 1,
+   "stock": "Round bar \u00d865 \u00d7 15 mm"
+  },
+  {
+   "item": 4,
+   "mass_g": 49.5459,
+   "material": "Aluminium 6061",
+   "part": "Brake disc",
+   "qty": 1,
+   "stock": "Round bar \u00d8110 \u00d7 5 mm"
+  },
+  {
+   "item": 5,
+   "mass_g": 392.1246,
+   "material": "Steel",
+   "part": "Hub spacer (steel)",
+   "qty": 1,
+   "stock": "Round bar \u00d865 \u00d7 25 mm"
+  },
+  {
+   "item": 6,
+   "mass_g": 305.5819,
+   "material": "Steel",
+   "part": "Carrier 1 (steel)",
+   "qty": 1,
+   "stock": "Round bar \u00d880 \u00d7 15 mm"
+  },
+  {
+   "item": 7,
+   "mass_g": 123.8883,
+   "material": "Steel",
+   "part": "Carrier 2 spider (steel)",
+   "qty": 1,
+   "stock": "Flat bar 12 \u00d7 70 \u00d7 80 mm"
+  },
+  {
+   "item": 8,
+   "mass_g": 152.8959,
+   "material": "Steel",
+   "part": "Cycloid disc A",
+   "qty": 1,
+   "stock": "Round bar \u00d890 \u00d7 10 mm"
+  },
+  {
+   "item": 9,
+   "mass_g": 152.8959,
+   "material": "Steel",
+   "part": "Cycloid disc B",
+   "qty": 1,
+   "stock": "Round bar \u00d890 \u00d7 10 mm"
+  },
+  {
+   "item": 10,
+   "mass_g": 14.205,
+   "material": "Steel",
+   "part": "Eccentric bush A",
+   "qty": 1,
+   "stock": "Round bar \u00d825 \u00d7 10 mm"
+  },
+  {
+   "item": 11,
+   "mass_g": 14.205,
+   "material": "Steel",
+   "part": "Eccentric bush B",
+   "qty": 1,
+   "stock": "Round bar \u00d825 \u00d7 10 mm"
+  },
+  {
+   "item": 12,
+   "mass_g": 623.3709,
+   "material": "Aluminium 6061",
+   "part": "P1 bearing plate",
+   "qty": 1,
+   "stock": "Flat bar 35 \u00d7 120 \u00d7 155 mm"
+  },
+  {
+   "item": 13,
+   "mass_g": 434.5268,
+   "material": "Aluminium 6061",
+   "part": "C1 piston and seal plate",
+   "qty": 1,
+   "stock": "Flat bar 25 \u00d7 120 \u00d7 155 mm"
+  },
+  {
+   "item": 14,
+   "mass_g": 793.1697,
+   "material": "Steel",
+   "part": "G1 pin plate",
+   "qty": 1,
+   "stock": "Flat bar 15 \u00d7 120 \u00d7 155 mm"
+  },
+  {
+   "item": 15,
+   "mass_g": 287.2018,
+   "material": "Aluminium 6061",
+   "part": "M ring spacer",
+   "qty": 1,
+   "stock": "Flat bar 20 \u00d7 120 \u00d7 155 mm"
+  },
+  {
+   "item": 16,
+   "mass_g": 795.2575,
+   "material": "Steel",
+   "part": "G2 pin plate",
+   "qty": 1,
+   "stock": "Flat bar 15 \u00d7 120 \u00d7 155 mm"
+  },
+  {
+   "item": 17,
+   "mass_g": 561.4642,
+   "material": "Aluminium 6061",
+   "part": "D rear plate and motor ear",
+   "qty": 1,
+   "stock": "Flat bar 20 \u00d7 120 \u00d7 225 mm"
+  },
+  {
+   "item": 18,
+   "mass_g": 1885.5578,
+   "material": "Steel",
+   "part": "Base plate (steel)",
+   "qty": 1,
+   "stock": "Flat bar 10 \u00d7 160 \u00d7 210 mm"
+  },
+  {
+   "item": 19,
+   "mass_g": 70.5828,
+   "material": "Aluminium 6061",
+   "part": "Brake piston",
+   "qty": 1,
+   "stock": "Round bar \u00d8110 \u00d7 10 mm"
+  },
+  {
+   "item": 20,
+   "mass_g": 0.4803,
+   "material": "ABS",
+   "part": "Friction lining",
+   "qty": 1
+  },
+  {
+   "item": 21,
+   "mass_g": 1.0596,
+   "material": "ABS",
+   "part": "O-ring 68 x 2.5",
+   "qty": 1
+  },
+  {
+   "item": 22,
+   "mass_g": 1.5548,
+   "material": "ABS",
+   "part": "O-ring 100 x 2.5",
+   "qty": 1
+  },
+  {
+   "item": 23,
+   "mass_g": 13.2324,
+   "material": "ABS",
+   "part": "Shaft seal 60 x 75 x 8",
+   "qty": 1
+  },
+  {
+   "item": 24,
+   "mass_g": 9.7508,
+   "material": "Brass",
+   "part": "Air tube stub 6 x 80",
+   "qty": 1,
+   "stock": "Round bar \u00d810 \u00d7 75 mm"
+  },
+  {
+   "item": 25,
+   "mass_g": 18.7821,
+   "material": "ASA",
+   "part": "Splash ring",
+   "qty": 1
+  },
+  {
+   "item": 26,
+   "mass_g": 688.8155,
+   "material": "Steel",
+   "part": "RU66 crossed roller bearing",
+   "qty": 1,
+   "stock": "Round bar \u00d8100 \u00d7 20 mm"
+  },
+  {
+   "item": 27,
+   "mass_g": 15.7834,
+   "material": "Steel",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "qty": 1,
+   "stock": "Square bar 10 \u00d7 10 \u00d7 45 mm"
+  },
+  {
+   "item": 28,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 2",
+   "qty": 1
+  },
+  {
+   "item": 29,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 3",
+   "qty": 1
+  },
+  {
+   "item": 30,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 4",
+   "qty": 1
+  },
+  {
+   "item": 31,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 5",
+   "qty": 1
+  },
+  {
+   "item": 32,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 6",
+   "qty": 1
+  },
+  {
+   "item": 33,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 7",
+   "qty": 1
+  },
+  {
+   "item": 34,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 8",
+   "qty": 1
+  },
+  {
+   "item": 35,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 9",
+   "qty": 1
+  },
+  {
+   "item": 36,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 10",
+   "qty": 1
+  },
+  {
+   "item": 37,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 11",
+   "qty": 1
+  },
+  {
+   "item": 38,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 12",
+   "qty": 1
+  },
+  {
+   "item": 39,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 13",
+   "qty": 1
+  },
+  {
+   "item": 40,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 14",
+   "qty": 1
+  },
+  {
+   "item": 41,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 15",
+   "qty": 1
+  },
+  {
+   "item": 42,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 16",
+   "qty": 1
+  },
+  {
+   "item": 43,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 17",
+   "qty": 1
+  },
+  {
+   "item": 44,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 18",
+   "qty": 1
+  },
+  {
+   "item": 45,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 19",
+   "qty": 1
+  },
+  {
+   "item": 46,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 20",
+   "qty": 1
+  },
+  {
+   "item": 47,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 21",
+   "qty": 1
+  },
+  {
+   "item": 48,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 22",
+   "qty": 1
+  },
+  {
+   "item": 49,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 23",
+   "qty": 1
+  },
+  {
+   "item": 50,
+   "mass_g": null,
+   "material": "",
+   "part": "Ring pin 8 m6 x 40 (ISO 8734) / Part 24",
+   "qty": 1
+  },
+  {
+   "item": 51,
+   "mass_g": 6.6031,
+   "material": "Steel",
+   "part": "Output sleeves A (2 x IR 7x10x10.5 each)",
+   "qty": 1,
+   "stock": "Square bar 12 \u00d7 12 \u00d7 25 mm"
+  },
+  {
+   "item": 52,
+   "mass_g": null,
+   "material": "",
+   "part": "Output sleeves A (2 x IR 7x10x10.5 each) / Part 2",
+   "qty": 1
+  },
+  {
+   "item": 53,
+   "mass_g": null,
+   "material": "",
+   "part": "Output sleeves A (2 x IR 7x10x10.5 each) / Part 3",
+   "qty": 1
+  },
+  {
+   "item": 54,
+   "mass_g": 6.6031,
+   "material": "Steel",
+   "part": "Output sleeves B (2 x IR 7x10x10.5 each)",
+   "qty": 1,
+   "stock": "Square bar 12 \u00d7 12 \u00d7 25 mm"
+  },
+  {
+   "item": 55,
+   "mass_g": null,
+   "material": "",
+   "part": "Output sleeves B (2 x IR 7x10x10.5 each) / Part 2",
+   "qty": 1
+  },
+  {
+   "item": 56,
+   "mass_g": null,
+   "material": "",
+   "part": "Output sleeves B (2 x IR 7x10x10.5 each) / Part 3",
+   "qty": 1
+  },
+  {
+   "item": 57,
+   "mass_g": 53.7682,
+   "material": "Steel",
+   "part": "Bearing 6904-2RS (disc A)",
+   "qty": 1,
+   "stock": "Round bar \u00d840 \u00d7 10 mm"
+  },
+  {
+   "item": 58,
+   "mass_g": 53.7682,
+   "material": "Steel",
+   "part": "Bearing 6904-2RS (disc B)",
+   "qty": 1,
+   "stock": "Round bar \u00d840 \u00d7 10 mm"
+  },
+  {
+   "item": 59,
+   "mass_g": 31.5667,
+   "material": "Steel",
+   "part": "Bearing 6001-2RS (front)",
+   "qty": 1,
+   "stock": "Round bar \u00d832 \u00d7 10 mm"
+  },
+  {
+   "item": 60,
+   "mass_g": 31.5667,
+   "material": "Steel",
+   "part": "Bearing 6001-2RS (rear)",
+   "qty": 1,
+   "stock": "Round bar \u00d832 \u00d7 10 mm"
+  },
+  {
+   "item": 61,
+   "mass_g": 0.5549,
+   "material": "Steel",
+   "part": "Shim ring 12 x 18 x 0.5",
+   "qty": 1,
+   "stock": "Flat bar 1.5 \u00d7 20 \u00d7 20 mm"
+  },
+  {
+   "item": 62,
+   "mass_g": 13.952,
+   "material": "Steel",
+   "part": "Spacer tube 12 x 16 x 20.2",
+   "qty": 1,
+   "stock": "Round bar \u00d820 \u00d7 25 mm"
+  },
+  {
+   "item": 63,
+   "mass_g": 71.0251,
+   "material": "Steel",
+   "part": "Input shaft 12 h6 x 80",
+   "qty": 1,
+   "stock": "Round bar \u00d814 \u00d7 85 mm"
+  },
+  {
+   "item": 64,
+   "mass_g": 84.7202,
+   "material": "Aluminium 6061",
+   "part": "Pulley GT3 3 mm 60 teeth, 12 bore",
+   "qty": 1,
+   "stock": "Round bar \u00d860 \u00d7 25 mm"
+  },
+  {
+   "item": 65,
+   "mass_g": 9.5749,
+   "material": "Aluminium 6061",
+   "part": "Pulley GT3 3 mm 20 teeth, 8 bore",
+   "qty": 1,
+   "stock": "Round bar \u00d822 \u00d7 20 mm"
+  },
+  {
+   "item": 66,
+   "mass_g": 3.0734,
+   "material": "ABS",
+   "part": "Belt GT3 345-3MGT-9 (115 teeth)",
+   "qty": 1
+  },
+  {
+   "item": 67,
+   "mass_g": 210.7529,
+   "material": "Aluminium 6061",
+   "part": "Motor rear cover and gland (part of 23E1KIP65-20)",
+   "qty": 1,
+   "stock": "Flat bar 30 \u00d7 60 \u00d7 60 mm"
+  },
+  {
+   "item": 68,
+   "mass_g": 4.2574,
+   "material": "ASA",
+   "part": "Window cover",
+   "qty": 1
+  },
+  {
+   "item": 69,
+   "mass_g": 54.6794,
+   "material": "ASA",
+   "part": "Belt guard",
+   "qty": 1
+  },
+  {
+   "item": 70,
+   "mass_g": 16.0125,
+   "material": "ASA",
+   "part": "Sensor bracket",
+   "qty": 1
+  },
+  {
+   "item": 71,
+   "mass_g": 17.7563,
+   "material": "Steel",
+   "part": "Inductive sensor LJ8A3-2-Z/BX",
+   "qty": 1,
+   "stock": "Square bar 10 \u00d7 10 \u00d7 50 mm"
+  },
+  {
+   "item": 72,
+   "mass_g": 1.0898,
+   "material": "Brass",
+   "part": "Heat-set insert M5",
+   "qty": 1,
+   "stock": "Round bar \u00d810 \u00d7 10 mm"
+  },
+  {
+   "item": 73,
+   "mass_g": null,
+   "material": "",
+   "part": "Heat-set insert M5 / Part 2",
+   "qty": 1
+  },
+  {
+   "item": 74,
+   "mass_g": 451.0449,
+   "material": "Aluminium 6061",
+   "part": "Tailstock plate",
+   "qty": 1,
+   "stock": "Flat bar 30 \u00d7 80 \u00d7 115 mm"
+  },
+  {
+   "item": 75,
+   "mass_g": 525.2956,
+   "material": "Aluminium 6061",
+   "part": "Tailstock base",
+   "qty": 1,
+   "stock": "Flat bar 25 \u00d7 120 \u00d7 120 mm"
+  },
+  {
+   "item": 76,
+   "mass_g": 63.0225,
+   "material": "Steel",
+   "part": "Tail centre (12 mm 90 deg spot drill)",
+   "qty": 1,
+   "stock": "Round bar \u00d814 \u00d7 80 mm"
+  },
+  {
+   "item": 77,
+   "mass_g": 1134.2385,
+   "material": "Steel",
+   "part": "Vise XinDian H54-8-55",
+   "qty": 1,
+   "stock": "Flat bar 45 \u00d7 60 \u00d7 80 mm"
+  },
+  {
+   "item": 78,
+   "mass_g": null,
+   "material": "",
+   "part": "23E1KIP65-20 3",
+   "qty": 1
+  },
+  {
+   "item": 79,
+   "mass_g": 6.238,
+   "material": "Steel",
+   "part": "ISO 4762 M6x14",
+   "qty": 6
+  },
+  {
+   "item": 80,
+   "mass_g": 2.3369,
+   "material": "Steel",
+   "part": "ISO 4032 M6",
+   "qty": 25
+  },
+  {
+   "item": 81,
+   "mass_g": 5.794,
+   "material": "Steel",
+   "part": "ISO 4762 M6x12",
+   "qty": 4
+  },
+  {
+   "item": 82,
+   "mass_g": 10.899,
+   "material": "Steel",
+   "part": "ISO 4762 M6x35",
+   "qty": 7
+  },
+  {
+   "item": 83,
+   "mass_g": 12.0087,
+   "material": "Steel",
+   "part": "ISO 4762 M6x40",
+   "qty": 9
+  },
+  {
+   "item": 84,
+   "mass_g": 3.0396,
+   "material": "Steel",
+   "part": "ISO 4762 M4x20",
+   "qty": 8
+  },
+  {
+   "item": 85,
+   "mass_g": 0.7352,
+   "material": "Steel",
+   "part": "ISO 4032 M4",
+   "qty": 8
+  },
+  {
+   "item": 86,
+   "mass_g": 1.8293,
+   "material": "Steel",
+   "part": "ISO 7089 M8",
+   "qty": 16
+  },
+  {
+   "item": 87,
+   "mass_g": 54.5748,
+   "material": "Steel",
+   "part": "ISO 4762 M8x120",
+   "qty": 4
+  },
+  {
+   "item": 88,
+   "mass_g": 5.0326,
+   "material": "Steel",
+   "part": "ISO 4032 M8",
+   "qty": 10
+  },
+  {
+   "item": 89,
+   "mass_g": 5.0025,
+   "material": "Steel",
+   "part": "ISO 4762 M5x20",
+   "qty": 4
+  },
+  {
+   "item": 90,
+   "mass_g": 0.4434,
+   "material": "Steel",
+   "part": "ISO 7089 M5",
+   "qty": 4
+  },
+  {
+   "item": 91,
+   "mass_g": 1.2979,
+   "material": "Steel",
+   "part": "ISO 4032 M5",
+   "qty": 4
+  },
+  {
+   "item": 92,
+   "mass_g": 1.0164,
+   "material": "Steel",
+   "part": "ISO 7089 M6",
+   "qty": 2
+  },
+  {
+   "item": 93,
+   "mass_g": 13.1185,
+   "material": "Steel",
+   "part": "ISO 4762 M6x45",
+   "qty": 2
+  },
+  {
+   "item": 94,
+   "mass_g": 15.1164,
+   "material": "Steel",
+   "part": "ISO 4762 M8x20",
+   "qty": 4
+  },
+  {
+   "item": 95,
+   "mass_g": 14.7193,
+   "material": "Steel",
+   "part": "ISO 10642 M8x30",
+   "qty": 4
+  },
+  {
+   "item": 96,
+   "mass_g": 2.5614,
+   "material": "Steel",
+   "part": "ISO 10642 M5x12",
+   "qty": 2
+  },
+  {
+   "item": 97,
+   "mass_g": 2.9205,
+   "material": "Steel",
+   "part": "ISO 4035 M8",
+   "qty": 2
+  },
+  {
+   "item": 98,
+   "mass_g": 9.7892,
+   "material": "Steel",
+   "part": "ISO 4762 M6x30",
+   "qty": 1
+  },
+  {
+   "item": 99,
+   "mass_g": 19.0623,
+   "material": "Steel",
+   "part": "ISO 4762 M8x30",
+   "qty": 6
+  }
+ ],
+ "explode_steps": [],
+ "failed_mates": [],
+ "instances": [
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 1,
+   "name": "Faceplate (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Faceplate (steel)",
+    "studio": 0
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -9.53,
+     -50.0,
+     -49.9988
+    ],
+    [
+     0.0,
+     48.6,
+     49.9988
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 2,
+   "name": "Spindle nose (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Spindle nose (steel)",
+    "studio": 1
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     -48.0,
+     -48.0
+    ],
+    [
+     -9.53,
+     48.0,
+     48.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 3,
+   "name": "Hub disc A (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Hub disc A (steel)",
+    "studio": 2
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -49.93,
+     -30.0,
+     -30.0
+    ],
+    [
+     -37.23,
+     30.0,
+     30.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 4,
+   "name": "Brake disc",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Brake disc",
+    "studio": 3
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -53.105,
+     -52.0,
+     -52.0
+    ],
+    [
+     -49.93,
+     52.0,
+     52.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 5,
+   "name": "Hub spacer (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Hub spacer (steel)",
+    "studio": 4
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -72.155,
+     -30.0,
+     -30.0
+    ],
+    [
+     -53.105,
+     30.0,
+     30.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 6,
+   "name": "Carrier 1 (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Carrier 1 (steel)",
+    "studio": 5
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.855,
+     -38.0,
+     -38.0
+    ],
+    [
+     -72.155,
+     38.0,
+     38.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 7,
+   "name": "Carrier 2 spider (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Carrier 2 spider (steel)",
+    "studio": 6
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -112.885,
+     -36.4996,
+     -33.1108
+    ],
+    [
+     -103.355,
+     36.9914,
+     33.1108
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 8,
+   "name": "Cycloid disc A",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Cycloid disc A",
+    "studio": 7
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -93.03,
+     -39.97,
+     -41.131
+    ],
+    [
+     -86.68,
+     42.1152,
+     41.131
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 9,
+   "name": "Cycloid disc B",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Cycloid disc B",
+    "studio": 8
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -102.03,
+     -42.1152,
+     -41.131
+    ],
+    [
+     -95.68,
+     39.97,
+     41.131
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 10,
+   "name": "Eccentric bush A",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Eccentric bush A",
+    "studio": 9
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -94.355,
+     -8.75,
+     -10.0
+    ],
+    [
+     -85.355,
+     11.25,
+     10.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 11,
+   "name": "Eccentric bush B",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Eccentric bush B",
+    "studio": 10
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -103.355,
+     -11.25,
+     -10.0
+    ],
+    [
+     -94.355,
+     8.75,
+     10.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 12,
+   "name": "P1 bearing plate",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "P1 bearing plate",
+    "studio": 11
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -53.98,
+     -75.0,
+     -56.0
+    ],
+    [
+     -22.23,
+     75.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 13,
+   "name": "C1 piston and seal plate",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "C1 piston and seal plate",
+    "studio": 12
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -73.03,
+     -75.0,
+     -55.7
+    ],
+    [
+     -53.98,
+     75.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 14,
+   "name": "G1 pin plate",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "G1 pin plate",
+    "studio": 13
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -85.73,
+     -75.0,
+     -55.7
+    ],
+    [
+     -73.03,
+     75.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 15,
+   "name": "M ring spacer",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "M ring spacer",
+    "studio": 14
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -102.98,
+     -75.0,
+     -55.7
+    ],
+    [
+     -85.73,
+     75.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 16,
+   "name": "G2 pin plate",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "G2 pin plate",
+    "studio": 15
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -115.68,
+     -75.0,
+     -55.7
+    ],
+    [
+     -102.98,
+     75.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 17,
+   "name": "D rear plate and motor ear",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "D rear plate and motor ear",
+    "studio": 16
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -131.56,
+     -75.0,
+     -56.0
+    ],
+    [
+     -115.68,
+     148.0,
+     55.9619
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 18,
+   "name": "Base plate (steel)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Base plate (steel)",
+    "studio": 17
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -164.0,
+     -75.0,
+     -63.94
+    ],
+    [
+     44.0,
+     75.0,
+     -56.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 19,
+   "name": "Brake piston",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Brake piston",
+    "studio": 18
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -59.655,
+     -52.5,
+     -52.5
+    ],
+    [
+     -53.305,
+     52.5,
+     52.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 20,
+   "name": "Friction lining",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Friction lining",
+    "studio": 19
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -49.78,
+     -52.0,
+     -52.0
+    ],
+    [
+     -49.53,
+     52.0,
+     52.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 21,
+   "name": "O-ring 68 x 2.5",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "O-ring 68 x 2.5",
+    "studio": 20
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -59.055,
+     -36.15,
+     -36.15
+    ],
+    [
+     -56.855,
+     36.15,
+     36.15
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 22,
+   "name": "O-ring 100 x 2.5",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "O-ring 100 x 2.5",
+    "studio": 21
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -59.055,
+     -52.55,
+     -52.55
+    ],
+    [
+     -56.855,
+     52.55,
+     52.55
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 23,
+   "name": "Shaft seal 60 x 75 x 8",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Shaft seal 60 x 75 x 8",
+    "studio": 22
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -72.53,
+     -37.5,
+     -37.5
+    ],
+    [
+     -64.53,
+     37.5,
+     37.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 24,
+   "name": "Air tube stub 6 x 80",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Air tube stub 6 x 80",
+    "studio": 23
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -149.56,
+     -67.0,
+     -12.0
+    ],
+    [
+     -76.53,
+     -61.0,
+     -6.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 25,
+   "name": "Splash ring",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Splash ring",
+    "studio": 24
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     -54.4793,
+     -54.4174
+    ],
+    [
+     -12.23,
+     54.4793,
+     54.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 26,
+   "name": "RU66 crossed roller bearing",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "RU66 crossed roller bearing",
+    "studio": 25
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -37.23,
+     -47.5,
+     -47.5
+    ],
+    [
+     -22.23,
+     47.5,
+     47.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 27,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     40.0,
+     -4.0
+    ],
+    [
+     -74.355,
+     48.0,
+     4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 28,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     1
+    ],
+    "name": "Part 2",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     38.5007,
+     7.388
+    ],
+    [
+     -74.355,
+     46.5007,
+     15.388
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 29,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     2
+    ],
+    "name": "Part 3",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     34.1051,
+     18.0
+    ],
+    [
+     -74.355,
+     42.1051,
+     26.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 30,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     3
+    ],
+    "name": "Part 4",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     27.1127,
+     27.1127
+    ],
+    [
+     -74.355,
+     35.1127,
+     35.1127
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 31,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     4
+    ],
+    "name": "Part 5",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     18.0,
+     34.1051
+    ],
+    [
+     -74.355,
+     26.0,
+     42.1051
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 32,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     5
+    ],
+    "name": "Part 6",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     7.388,
+     38.5007
+    ],
+    [
+     -74.355,
+     15.388,
+     46.5007
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 33,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     6
+    ],
+    "name": "Part 7",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -4.0,
+     40.0
+    ],
+    [
+     -74.355,
+     4.0,
+     48.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 34,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     7
+    ],
+    "name": "Part 8",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -15.388,
+     38.5007
+    ],
+    [
+     -74.355,
+     -7.388,
+     46.5007
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 35,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     8
+    ],
+    "name": "Part 9",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -26.0,
+     34.1051
+    ],
+    [
+     -74.355,
+     -18.0,
+     42.1051
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 36,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     9
+    ],
+    "name": "Part 10",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -35.1127,
+     27.1127
+    ],
+    [
+     -74.355,
+     -27.1127,
+     35.1127
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 37,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     10
+    ],
+    "name": "Part 11",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -42.1051,
+     18.0
+    ],
+    [
+     -74.355,
+     -34.1051,
+     26.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 38,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     11
+    ],
+    "name": "Part 12",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -46.5007,
+     7.388
+    ],
+    [
+     -74.355,
+     -38.5007,
+     15.388
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 39,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     12
+    ],
+    "name": "Part 13",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -48.0,
+     -4.0
+    ],
+    [
+     -74.355,
+     -40.0,
+     4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 40,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     13
+    ],
+    "name": "Part 14",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -46.5007,
+     -15.388
+    ],
+    [
+     -74.355,
+     -38.5007,
+     -7.388
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 41,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     14
+    ],
+    "name": "Part 15",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -42.1051,
+     -26.0
+    ],
+    [
+     -74.355,
+     -34.1051,
+     -18.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 42,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     15
+    ],
+    "name": "Part 16",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -35.1127,
+     -35.1127
+    ],
+    [
+     -74.355,
+     -27.1127,
+     -27.1127
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 43,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     16
+    ],
+    "name": "Part 17",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -26.0,
+     -42.1051
+    ],
+    [
+     -74.355,
+     -18.0,
+     -34.1051
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 44,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     17
+    ],
+    "name": "Part 18",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -15.388,
+     -46.5007
+    ],
+    [
+     -74.355,
+     -7.388,
+     -38.5007
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 45,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     18
+    ],
+    "name": "Part 19",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     -4.0,
+     -48.0
+    ],
+    [
+     -74.355,
+     4.0,
+     -40.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 46,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     19
+    ],
+    "name": "Part 20",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     7.388,
+     -46.5007
+    ],
+    [
+     -74.355,
+     15.388,
+     -38.5007
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 47,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     20
+    ],
+    "name": "Part 21",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     18.0,
+     -42.1051
+    ],
+    [
+     -74.355,
+     26.0,
+     -34.1051
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 48,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     21
+    ],
+    "name": "Part 22",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     27.1127,
+     -35.1127
+    ],
+    [
+     -74.355,
+     35.1127,
+     -27.1127
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 49,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     22
+    ],
+    "name": "Part 23",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     34.1051,
+     -26.0
+    ],
+    [
+     -74.355,
+     42.1051,
+     -18.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 50,
+   "name": "Ring pin 8 m6 x 40 (ISO 8734)",
+   "part": {
+    "body": [
+     3,
+     23
+    ],
+    "name": "Part 24",
+    "studio": 26
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -114.355,
+     38.5007,
+     -15.388
+    ],
+    [
+     -74.355,
+     46.5007,
+     -7.388
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 51,
+   "name": "Output sleeves A (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Output sleeves A (2 x IR 7x10x10.5 each)",
+    "studio": 27
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -103.355,
+     24.0,
+     -5.0
+    ],
+    [
+     -82.355,
+     34.0,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 52,
+   "name": "Output sleeves A (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     1
+    ],
+    "name": "Part 2",
+    "studio": 27
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -103.355,
+     -19.5,
+     20.1147
+    ],
+    [
+     -82.355,
+     -9.5,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 53,
+   "name": "Output sleeves A (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     2
+    ],
+    "name": "Part 3",
+    "studio": 27
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -103.355,
+     -19.5,
+     -30.1147
+    ],
+    [
+     -82.355,
+     -9.5,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 54,
+   "name": "Output sleeves B (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Output sleeves B (2 x IR 7x10x10.5 each)",
+    "studio": 28
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -106.355,
+     9.5,
+     20.1147
+    ],
+    [
+     -85.355,
+     19.5,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 55,
+   "name": "Output sleeves B (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     1
+    ],
+    "name": "Part 2",
+    "studio": 28
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -106.355,
+     -34.0,
+     -5.0
+    ],
+    [
+     -85.355,
+     -24.0,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 56,
+   "name": "Output sleeves B (2 x IR 7x10x10.5 each)",
+   "part": {
+    "body": [
+     3,
+     2
+    ],
+    "name": "Part 3",
+    "studio": 28
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -106.355,
+     9.5,
+     -30.1147
+    ],
+    [
+     -85.355,
+     19.5,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 57,
+   "name": "Bearing 6904-2RS (disc A)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Bearing 6904-2RS (disc A)",
+    "studio": 29
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -94.355,
+     -17.25,
+     -18.5
+    ],
+    [
+     -85.355,
+     19.75,
+     18.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 58,
+   "name": "Bearing 6904-2RS (disc B)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Bearing 6904-2RS (disc B)",
+    "studio": 30
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -103.355,
+     -19.75,
+     -18.5
+    ],
+    [
+     -94.355,
+     17.25,
+     18.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 59,
+   "name": "Bearing 6001-2RS (front)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Bearing 6001-2RS (front)",
+    "studio": 31
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.855,
+     -14.0,
+     -14.0
+    ],
+    [
+     -76.855,
+     14.0,
+     14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 60,
+   "name": "Bearing 6001-2RS (rear)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Bearing 6001-2RS (rear)",
+    "studio": 32
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -131.56,
+     -14.0,
+     -14.0
+    ],
+    [
+     -123.56,
+     14.0,
+     14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 61,
+   "name": "Shim ring 12 x 18 x 0.5",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Shim ring 12 x 18 x 0.5",
+    "studio": 33
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -85.355,
+     -9.0,
+     -9.0
+    ],
+    [
+     -84.855,
+     9.0,
+     9.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 62,
+   "name": "Spacer tube 12 x 16 x 20.2",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Spacer tube 12 x 16 x 20.2",
+    "studio": 34
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -123.56,
+     -8.0,
+     -8.0
+    ],
+    [
+     -103.355,
+     8.0,
+     8.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 63,
+   "name": "Input shaft 12 h6 x 80",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Input shaft 12 h6 x 80",
+    "studio": 35
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -157.005,
+     -6.0,
+     -6.0
+    ],
+    [
+     -77.005,
+     6.0,
+     6.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 64,
+   "name": "Pulley GT3 3 mm 60 teeth, 12 bore",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Pulley GT3 3 mm 60 teeth, 12 bore",
+    "studio": 36
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -152.06,
+     -28.2479,
+     -28.2479
+    ],
+    [
+     -132.56,
+     28.2479,
+     28.2479
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 65,
+   "name": "Pulley GT3 3 mm 20 teeth, 8 bore",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Pulley GT3 3 mm 20 teeth, 8 bore",
+    "studio": 37
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -152.06,
+     98.6107,
+     -35.1493
+    ],
+    [
+     -133.06,
+     116.9093,
+     -16.8507
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 66,
+   "name": "Belt GT3 345-3MGT-9 (115 teeth)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Belt GT3 345-3MGT-9 (115 teeth)",
+    "studio": 38
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -151.06,
+     -29.2389,
+     -36.1491
+    ],
+    [
+     -142.06,
+     117.9056,
+     29.2379
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 67,
+   "name": "Motor rear cover and gland (part of 23E1KIP65-20)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Motor rear cover and gland (part of 23E1KIP65-20)",
+    "studio": 39
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -39.2,
+     79.76,
+     -54.0
+    ],
+    [
+     -14.2,
+     135.76,
+     2.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 68,
+   "name": "Window cover",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Window cover",
+    "studio": 40
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.36,
+     -33.5,
+     -33.5
+    ],
+    [
+     -126.56,
+     33.5,
+     33.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 69,
+   "name": "Belt guard",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Belt guard",
+    "studio": 41
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -161.4,
+     -36.6366,
+     -43.549
+    ],
+    [
+     -131.56,
+     125.3029,
+     36.6354
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 70,
+   "name": "Sensor bracket",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Sensor bracket",
+    "studio": 42
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     58.0,
+     -56.0
+    ],
+    [
+     12.0,
+     75.0,
+     12.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 71,
+   "name": "Inductive sensor LJ8A3-2-Z/BX",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Inductive sensor LJ8A3-2-Z/BX",
+    "studio": 43
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -8.765,
+     51.2,
+     -4.0
+    ],
+    [
+     -0.765,
+     96.2,
+     4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 72,
+   "name": "Heat-set insert M5",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Heat-set insert M5",
+    "studio": 44
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     2.8,
+     64.8,
+     -55.8
+    ],
+    [
+     9.2,
+     71.2,
+     -48.8
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 73,
+   "name": "Heat-set insert M5",
+   "part": {
+    "body": [
+     3,
+     1
+    ],
+    "name": "Part 2",
+    "studio": 44
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -15.2,
+     64.8,
+     -55.8
+    ],
+    [
+     -8.8,
+     71.2,
+     -48.8
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 74,
+   "name": "Tailstock plate",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Tailstock plate",
+    "studio": 45
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     160.0,
+     -55.0,
+     -44.89
+    ],
+    [
+     185.4,
+     55.0,
+     28.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 75,
+   "name": "Tailstock base",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Tailstock base",
+    "studio": 46
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     88.0,
+     -55.0,
+     -63.94
+    ],
+    [
+     190.0,
+     55.0,
+     -44.89
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 76,
+   "name": "Tail centre (12 mm 90 deg spot drill)",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Tail centre (12 mm 90 deg spot drill)",
+    "studio": 47
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     145.0,
+     -6.0,
+     -6.0
+    ],
+    [
+     220.0,
+     6.0,
+     6.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 77,
+   "name": "Vise XinDian H54-8-55",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "Vise XinDian H54-8-55",
+    "studio": 48
+   },
+   "position": [
+    0.0,
+    0.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     0.0,
+     -39.0,
+     -27.0
+    ],
+    [
+     44.0,
+     39.0,
+     27.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 78,
+   "name": "Motor 23E1KIP65-20",
+   "part": {
+    "body": [
+     1,
+     2
+    ],
+    "name": "23E1KIP65-20 3",
+    "studio": 49
+   },
+   "position": [
+    -125.0,
+    107.76,
+    -26.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -146.0,
+     77.6361,
+     -56.1239
+    ],
+    [
+     -39.2,
+     137.8839,
+     4.125
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 79,
+   "name": "ISO 4762 M6x14 <1>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    21.0,
+    36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     16.0,
+     31.3731
+    ],
+    [
+     -0.5,
+     26.0,
+     41.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 80,
+   "name": "ISO 4032 M6 <1>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    21.0,
+    36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     15.2265,
+     31.3731
+    ],
+    [
+     -15.63,
+     26.7735,
+     41.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 81,
+   "name": "ISO 4762 M6x14 <2>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    0.0,
+    42.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     -5.0,
+     37.0
+    ],
+    [
+     -0.5,
+     5.0,
+     47.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 82,
+   "name": "ISO 4032 M6 <2>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    0.0,
+    42.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     -5.7735,
+     37.0
+    ],
+    [
+     -15.63,
+     5.7735,
+     47.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 83,
+   "name": "ISO 4762 M6x14 <3>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    -21.0,
+    36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     -26.0,
+     31.3731
+    ],
+    [
+     -0.5,
+     -16.0,
+     41.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 84,
+   "name": "ISO 4032 M6 <3>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    -21.0,
+    36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     -26.7735,
+     31.3731
+    ],
+    [
+     -15.63,
+     -15.2265,
+     41.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 85,
+   "name": "ISO 4762 M6x14 <4>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    -21.0,
+    -36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     -26.0,
+     -41.3731
+    ],
+    [
+     -0.5,
+     -16.0,
+     -31.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 86,
+   "name": "ISO 4032 M6 <4>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    -21.0,
+    -36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     -26.7735,
+     -41.3731
+    ],
+    [
+     -15.63,
+     -15.2265,
+     -31.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 87,
+   "name": "ISO 4762 M6x14 <5>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    0.0,
+    -42.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     -5.0,
+     -47.0
+    ],
+    [
+     -0.5,
+     5.0,
+     -37.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 88,
+   "name": "ISO 4032 M6 <5>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    0.0,
+    -42.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     -5.7735,
+     -47.0
+    ],
+    [
+     -15.63,
+     5.7735,
+     -37.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 89,
+   "name": "ISO 4762 M6x14 <6>",
+   "part": {
+    "body": [
+     1,
+     0
+    ],
+    "name": "ISO 4762 M6x14",
+    "studio": 50
+   },
+   "position": [
+    -6.5,
+    21.0,
+    -36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.5,
+     16.0,
+     -41.3731
+    ],
+    [
+     -0.5,
+     26.0,
+     -31.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 90,
+   "name": "ISO 4032 M6 <6>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -15.63,
+    21.0,
+    -36.3731
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -20.83,
+     15.2265,
+     -41.3731
+    ],
+    [
+     -15.63,
+     26.7735,
+     -31.3731
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 91,
+   "name": "ISO 4762 M6x12 <1>",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "ISO 4762 M6x12",
+    "studio": 50
+   },
+   "position": [
+    -3.03,
+    14.14,
+    14.14
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -9.03,
+     9.14,
+     9.14
+    ],
+    [
+     8.97,
+     19.14,
+     19.14
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 92,
+   "name": "ISO 4762 M6x12 <2>",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "ISO 4762 M6x12",
+    "studio": 50
+   },
+   "position": [
+    -3.03,
+    14.14,
+    -14.14
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -9.03,
+     9.14,
+     -19.14
+    ],
+    [
+     8.97,
+     19.14,
+     -9.14
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 93,
+   "name": "ISO 4762 M6x12 <3>",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "ISO 4762 M6x12",
+    "studio": 50
+   },
+   "position": [
+    -3.03,
+    -14.14,
+    14.14
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -9.03,
+     -19.14,
+     9.14
+    ],
+    [
+     8.97,
+     -9.14,
+     19.14
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 94,
+   "name": "ISO 4762 M6x12 <4>",
+   "part": {
+    "body": [
+     3,
+     0
+    ],
+    "name": "ISO 4762 M6x12",
+    "studio": 50
+   },
+   "position": [
+    -3.03,
+    -14.14,
+    -14.14
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -9.03,
+     -19.14,
+     -19.14
+    ],
+    [
+     8.97,
+     -9.14,
+     -9.14
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 95,
+   "name": "ISO 4762 M6x35 <1>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -16.03,
+    8.3149,
+    3.4442
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -51.03,
+     3.3149,
+     -1.5558
+    ],
+    [
+     -10.03,
+     13.3149,
+     8.4442
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 96,
+   "name": "ISO 4032 M6 <7>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -42.93,
+    8.3149,
+    3.4442
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -48.13,
+     2.5414,
+     -1.5558
+    ],
+    [
+     -42.93,
+     14.0884,
+     8.4442
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 97,
+   "name": "ISO 4762 M6x35 <2>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -16.03,
+    -3.4442,
+    8.3149
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -51.03,
+     -8.4442,
+     3.3149
+    ],
+    [
+     -10.03,
+     1.5558,
+     13.3149
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 98,
+   "name": "ISO 4032 M6 <8>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -42.93,
+    -3.4442,
+    8.3149
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -48.13,
+     -9.2177,
+     3.3149
+    ],
+    [
+     -42.93,
+     2.3293,
+     13.3149
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 99,
+   "name": "ISO 4762 M6x35 <3>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -16.03,
+    -8.3149,
+    -3.4442
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -51.03,
+     -13.3149,
+     -8.4442
+    ],
+    [
+     -10.03,
+     -3.3149,
+     1.5558
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 100,
+   "name": "ISO 4032 M6 <9>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -42.93,
+    -8.3149,
+    -3.4442
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -48.13,
+     -14.0884,
+     -8.4442
+    ],
+    [
+     -42.93,
+     -2.5414,
+     1.5558
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 101,
+   "name": "ISO 4762 M6x35 <4>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -16.03,
+    3.4442,
+    -8.3149
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -51.03,
+     -1.5558,
+     -13.3149
+    ],
+    [
+     -10.03,
+     8.4442,
+     -3.3149
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 102,
+   "name": "ISO 4032 M6 <10>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -42.93,
+    3.4442,
+    -8.3149
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -48.13,
+     -2.3293,
+     -13.3149
+    ],
+    [
+     -42.93,
+     9.2177,
+     -3.3149
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 103,
+   "name": "ISO 4762 M6x40 <1>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    18.1865,
+    10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     13.1865,
+     5.5
+    ],
+    [
+     -37.73,
+     23.1865,
+     15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 104,
+   "name": "ISO 4032 M6 <11>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    18.1865,
+    10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     12.413,
+     5.5
+    ],
+    [
+     -79.255,
+     23.96,
+     15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 105,
+   "name": "ISO 4762 M6x40 <2>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    0.0,
+    21.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     -5.0,
+     16.0
+    ],
+    [
+     -37.73,
+     5.0,
+     26.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 106,
+   "name": "ISO 4032 M6 <12>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    0.0,
+    21.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     -5.7735,
+     16.0
+    ],
+    [
+     -79.255,
+     5.7735,
+     26.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 107,
+   "name": "ISO 4762 M6x40 <3>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    -18.1865,
+    10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     -23.1865,
+     5.5
+    ],
+    [
+     -37.73,
+     -13.1865,
+     15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 108,
+   "name": "ISO 4032 M6 <13>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    -18.1865,
+    10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     -23.96,
+     5.5
+    ],
+    [
+     -79.255,
+     -12.413,
+     15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 109,
+   "name": "ISO 4762 M6x40 <4>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    -18.1865,
+    -10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     -23.1865,
+     -15.5
+    ],
+    [
+     -37.73,
+     -13.1865,
+     -5.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 110,
+   "name": "ISO 4032 M6 <14>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    -18.1865,
+    -10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     -23.96,
+     -15.5
+    ],
+    [
+     -79.255,
+     -12.413,
+     -5.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 111,
+   "name": "ISO 4762 M6x40 <5>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    0.0,
+    -21.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     -5.0,
+     -26.0
+    ],
+    [
+     -37.73,
+     5.0,
+     -16.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 112,
+   "name": "ISO 4032 M6 <15>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    0.0,
+    -21.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     -5.7735,
+     -26.0
+    ],
+    [
+     -79.255,
+     5.7735,
+     -16.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 113,
+   "name": "ISO 4762 M6x40 <6>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -43.73,
+    18.1865,
+    -10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -83.73,
+     13.1865,
+     -15.5
+    ],
+    [
+     -37.73,
+     23.1865,
+     -5.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 114,
+   "name": "ISO 4032 M6 <16>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -79.255,
+    18.1865,
+    -10.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -84.455,
+     12.413,
+     -15.5
+    ],
+    [
+     -79.255,
+     23.96,
+     -5.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 115,
+   "name": "ISO 4762 M4x20 <1>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    41.5,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     38.0,
+     -3.5
+    ],
+    [
+     -22.63,
+     45.0,
+     3.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 116,
+   "name": "ISO 4032 M4 <1>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    41.5,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     37.4585,
+     -3.5
+    ],
+    [
+     -43.53,
+     45.5415,
+     3.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 117,
+   "name": "ISO 4762 M4x20 <2>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    29.3449,
+    29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     25.8449,
+     25.8449
+    ],
+    [
+     -22.63,
+     32.8449,
+     32.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 118,
+   "name": "ISO 4032 M4 <2>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    29.3449,
+    29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     25.3034,
+     25.8449
+    ],
+    [
+     -43.53,
+     33.3864,
+     32.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 119,
+   "name": "ISO 4762 M4x20 <3>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    0.0,
+    41.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     -3.5,
+     38.0
+    ],
+    [
+     -22.63,
+     3.5,
+     45.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 120,
+   "name": "ISO 4032 M4 <3>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    0.0,
+    41.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     -4.0415,
+     38.0
+    ],
+    [
+     -43.53,
+     4.0415,
+     45.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 121,
+   "name": "ISO 4762 M4x20 <4>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    -29.3449,
+    29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     -32.8449,
+     25.8449
+    ],
+    [
+     -22.63,
+     -25.8449,
+     32.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 122,
+   "name": "ISO 4032 M4 <4>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    -29.3449,
+    29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     -33.3864,
+     25.8449
+    ],
+    [
+     -43.53,
+     -25.3034,
+     32.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 123,
+   "name": "ISO 4762 M4x20 <5>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    -41.5,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     -45.0,
+     -3.5
+    ],
+    [
+     -22.63,
+     -38.0,
+     3.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 124,
+   "name": "ISO 4032 M4 <5>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    -41.5,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     -45.5415,
+     -3.5
+    ],
+    [
+     -43.53,
+     -37.4585,
+     3.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 125,
+   "name": "ISO 4762 M4x20 <6>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    -29.3449,
+    -29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     -32.8449,
+     -32.8449
+    ],
+    [
+     -22.63,
+     -25.8449,
+     -25.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 126,
+   "name": "ISO 4032 M4 <6>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    -29.3449,
+    -29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     -33.3864,
+     -32.8449
+    ],
+    [
+     -43.53,
+     -25.3034,
+     -25.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 127,
+   "name": "ISO 4762 M4x20 <7>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    0.0,
+    -41.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     -3.5,
+     -45.0
+    ],
+    [
+     -22.63,
+     3.5,
+     -38.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 128,
+   "name": "ISO 4032 M4 <7>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    0.0,
+    -41.5
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     -4.0415,
+     -45.0
+    ],
+    [
+     -43.53,
+     4.0415,
+     -38.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 129,
+   "name": "ISO 4762 M4x20 <8>",
+   "part": {
+    "body": [
+     6,
+     0
+    ],
+    "name": "ISO 4762 M4x20",
+    "studio": 50
+   },
+   "position": [
+    -26.63,
+    29.3449,
+    -29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.63,
+     25.8449,
+     -32.8449
+    ],
+    [
+     -22.63,
+     32.8449,
+     -25.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 130,
+   "name": "ISO 4032 M4 <8>",
+   "part": {
+    "body": [
+     7,
+     0
+    ],
+    "name": "ISO 4032 M4",
+    "studio": 50
+   },
+   "position": [
+    -43.53,
+    29.3449,
+    -29.3449
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -46.73,
+     25.3034,
+     -32.8449
+    ],
+    [
+     -43.53,
+     33.3864,
+     -25.8449
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 131,
+   "name": "ISO 4762 M6x40 <7>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    29.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     24.0,
+     -5.0
+    ],
+    [
+     -72.885,
+     34.0,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 132,
+   "name": "ISO 4032 M6 <17>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -77.755,
+    29.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -77.755,
+     23.2265,
+     -5.0
+    ],
+    [
+     -72.555,
+     34.7735,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 133,
+   "name": "ISO 4762 M6x40 <8>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    -14.5,
+    25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     -19.5,
+     20.1147
+    ],
+    [
+     -72.885,
+     -9.5,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 134,
+   "name": "ISO 4032 M6 <18>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -77.755,
+    -14.5,
+    25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -77.755,
+     -20.2735,
+     20.1147
+    ],
+    [
+     -72.555,
+     -8.7265,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 135,
+   "name": "ISO 4762 M6x40 <9>",
+   "part": {
+    "body": [
+     5,
+     0
+    ],
+    "name": "ISO 4762 M6x40",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    -14.5,
+    -25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     -19.5,
+     -30.1147
+    ],
+    [
+     -72.885,
+     -9.5,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 136,
+   "name": "ISO 4032 M6 <19>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -77.755,
+    -14.5,
+    -25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -77.755,
+     -20.2735,
+     -30.1147
+    ],
+    [
+     -72.555,
+     -8.7265,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 137,
+   "name": "ISO 4762 M6x35 <5>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    14.5,
+    25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     9.5,
+     20.1147
+    ],
+    [
+     -77.885,
+     19.5,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 138,
+   "name": "ISO 4032 M6 <20>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -85.355,
+    14.5,
+    25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -85.355,
+     8.7265,
+     20.1147
+    ],
+    [
+     -80.155,
+     20.2735,
+     30.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 139,
+   "name": "ISO 4762 M6x35 <6>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    -29.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     -34.0,
+     -5.0
+    ],
+    [
+     -77.885,
+     -24.0,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 140,
+   "name": "ISO 4032 M6 <21>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -85.355,
+    -29.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -85.355,
+     -34.7735,
+     -5.0
+    ],
+    [
+     -80.155,
+     -23.2265,
+     5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 141,
+   "name": "ISO 4762 M6x35 <7>",
+   "part": {
+    "body": [
+     4,
+     0
+    ],
+    "name": "ISO 4762 M6x35",
+    "studio": 50
+   },
+   "position": [
+    -112.885,
+    14.5,
+    -25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -118.885,
+     9.5,
+     -30.1147
+    ],
+    [
+     -77.885,
+     19.5,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 142,
+   "name": "ISO 4032 M6 <22>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -85.355,
+    14.5,
+    -25.1147
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -85.355,
+     8.7265,
+     -30.1147
+    ],
+    [
+     -80.155,
+     20.2735,
+     -20.1147
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 143,
+   "name": "ISO 7089 M8 <1>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -22.23,
+    65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     57.0,
+     -4.0
+    ],
+    [
+     -20.63,
+     73.0,
+     12.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 144,
+   "name": "ISO 4762 M8x120 <1>",
+   "part": {
+    "body": [
+     9,
+     0
+    ],
+    "name": "ISO 4762 M8x120",
+    "studio": 50
+   },
+   "position": [
+    -20.63,
+    65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.63,
+     58.5,
+     -2.5
+    ],
+    [
+     -12.63,
+     71.5,
+     10.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 145,
+   "name": "ISO 7089 M8 <2>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -133.16,
+     57.0,
+     -4.0
+    ],
+    [
+     -131.56,
+     73.0,
+     12.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 146,
+   "name": "ISO 4032 M8 <1>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -133.16,
+    65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -139.96,
+     57.4944,
+     -2.5
+    ],
+    [
+     -133.16,
+     72.5056,
+     10.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 147,
+   "name": "ISO 7089 M8 <3>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -22.23,
+    -65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     -73.0,
+     -4.0
+    ],
+    [
+     -20.63,
+     -57.0,
+     12.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 148,
+   "name": "ISO 4762 M8x120 <2>",
+   "part": {
+    "body": [
+     9,
+     0
+    ],
+    "name": "ISO 4762 M8x120",
+    "studio": 50
+   },
+   "position": [
+    -20.63,
+    -65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.63,
+     -71.5,
+     -2.5
+    ],
+    [
+     -12.63,
+     -58.5,
+     10.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 149,
+   "name": "ISO 7089 M8 <4>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    -65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -133.16,
+     -73.0,
+     -4.0
+    ],
+    [
+     -131.56,
+     -57.0,
+     12.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 150,
+   "name": "ISO 4032 M8 <2>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -133.16,
+    -65.0,
+    4.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -139.96,
+     -72.5056,
+     -2.5
+    ],
+    [
+     -133.16,
+     -57.4944,
+     10.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 151,
+   "name": "ISO 7089 M8 <5>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -22.23,
+    65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     57.0,
+     -30.0
+    ],
+    [
+     -20.63,
+     73.0,
+     -14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 152,
+   "name": "ISO 4762 M8x120 <3>",
+   "part": {
+    "body": [
+     9,
+     0
+    ],
+    "name": "ISO 4762 M8x120",
+    "studio": 50
+   },
+   "position": [
+    -20.63,
+    65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.63,
+     58.5,
+     -28.5
+    ],
+    [
+     -12.63,
+     71.5,
+     -15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 153,
+   "name": "ISO 7089 M8 <6>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -133.16,
+     57.0,
+     -30.0
+    ],
+    [
+     -131.56,
+     73.0,
+     -14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 154,
+   "name": "ISO 4032 M8 <3>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -133.16,
+    65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -139.96,
+     57.4944,
+     -28.5
+    ],
+    [
+     -133.16,
+     72.5056,
+     -15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 155,
+   "name": "ISO 7089 M8 <7>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -22.23,
+    -65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -22.23,
+     -73.0,
+     -30.0
+    ],
+    [
+     -20.63,
+     -57.0,
+     -14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 156,
+   "name": "ISO 4762 M8x120 <4>",
+   "part": {
+    "body": [
+     9,
+     0
+    ],
+    "name": "ISO 4762 M8x120",
+    "studio": 50
+   },
+   "position": [
+    -20.63,
+    -65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.63,
+     -71.5,
+     -28.5
+    ],
+    [
+     -12.63,
+     -58.5,
+     -15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 157,
+   "name": "ISO 7089 M8 <8>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    -65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -133.16,
+     -73.0,
+     -30.0
+    ],
+    [
+     -131.56,
+     -57.0,
+     -14.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 158,
+   "name": "ISO 4032 M8 <4>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -133.16,
+    -65.0,
+    -22.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -139.96,
+     -72.5056,
+     -28.5
+    ],
+    [
+     -133.16,
+     -57.4944,
+     -15.5
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 159,
+   "name": "ISO 4762 M5x20 <1>",
+   "part": {
+    "body": [
+     11,
+     0
+    ],
+    "name": "ISO 4762 M5x20",
+    "studio": 50
+   },
+   "position": [
+    -120.0,
+    131.33,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.0,
+     127.08,
+     -6.68
+    ],
+    [
+     -115.0,
+     135.58,
+     1.82
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 160,
+   "name": "ISO 7089 M5 <1>",
+   "part": {
+    "body": [
+     12,
+     0
+    ],
+    "name": "ISO 7089 M5",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    131.33,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.56,
+     126.33,
+     -7.43
+    ],
+    [
+     -131.56,
+     136.33,
+     2.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 161,
+   "name": "ISO 4032 M5 <1>",
+   "part": {
+    "body": [
+     13,
+     0
+    ],
+    "name": "ISO 4032 M5",
+    "studio": 50
+   },
+   "position": [
+    -132.56,
+    131.33,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -137.26,
+     126.7112,
+     -6.43
+    ],
+    [
+     -132.56,
+     135.9488,
+     1.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 162,
+   "name": "ISO 4762 M5x20 <2>",
+   "part": {
+    "body": [
+     11,
+     0
+    ],
+    "name": "ISO 4762 M5x20",
+    "studio": 50
+   },
+   "position": [
+    -120.0,
+    131.33,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.0,
+     127.08,
+     -53.82
+    ],
+    [
+     -115.0,
+     135.58,
+     -45.32
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 163,
+   "name": "ISO 7089 M5 <2>",
+   "part": {
+    "body": [
+     12,
+     0
+    ],
+    "name": "ISO 7089 M5",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    131.33,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.56,
+     126.33,
+     -54.57
+    ],
+    [
+     -131.56,
+     136.33,
+     -44.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 164,
+   "name": "ISO 4032 M5 <2>",
+   "part": {
+    "body": [
+     13,
+     0
+    ],
+    "name": "ISO 4032 M5",
+    "studio": 50
+   },
+   "position": [
+    -132.56,
+    131.33,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -137.26,
+     126.7112,
+     -53.57
+    ],
+    [
+     -132.56,
+     135.9488,
+     -45.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 165,
+   "name": "ISO 4762 M5x20 <3>",
+   "part": {
+    "body": [
+     11,
+     0
+    ],
+    "name": "ISO 4762 M5x20",
+    "studio": 50
+   },
+   "position": [
+    -120.0,
+    84.19,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.0,
+     79.94,
+     -6.68
+    ],
+    [
+     -115.0,
+     88.44,
+     1.82
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 166,
+   "name": "ISO 7089 M5 <3>",
+   "part": {
+    "body": [
+     12,
+     0
+    ],
+    "name": "ISO 7089 M5",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    84.19,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.56,
+     79.19,
+     -7.43
+    ],
+    [
+     -131.56,
+     89.19,
+     2.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 167,
+   "name": "ISO 4032 M5 <3>",
+   "part": {
+    "body": [
+     13,
+     0
+    ],
+    "name": "ISO 4032 M5",
+    "studio": 50
+   },
+   "position": [
+    -132.56,
+    84.19,
+    -2.43
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -137.26,
+     79.5712,
+     -6.43
+    ],
+    [
+     -132.56,
+     88.8088,
+     1.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 168,
+   "name": "ISO 4762 M5x20 <4>",
+   "part": {
+    "body": [
+     11,
+     0
+    ],
+    "name": "ISO 4762 M5x20",
+    "studio": 50
+   },
+   "position": [
+    -120.0,
+    84.19,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -140.0,
+     79.94,
+     -53.82
+    ],
+    [
+     -115.0,
+     88.44,
+     -45.32
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 169,
+   "name": "ISO 7089 M5 <4>",
+   "part": {
+    "body": [
+     12,
+     0
+    ],
+    "name": "ISO 7089 M5",
+    "studio": 50
+   },
+   "position": [
+    -131.56,
+    84.19,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.56,
+     79.19,
+     -54.57
+    ],
+    [
+     -131.56,
+     89.19,
+     -44.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 170,
+   "name": "ISO 4032 M5 <4>",
+   "part": {
+    "body": [
+     13,
+     0
+    ],
+    "name": "ISO 4032 M5",
+    "studio": 50
+   },
+   "position": [
+    -132.56,
+    84.19,
+    -49.57
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -137.26,
+     79.5712,
+     -53.57
+    ],
+    [
+     -132.56,
+     88.8088,
+     -45.57
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 171,
+   "name": "ISO 7089 M6 <1>",
+   "part": {
+    "body": [
+     14,
+     0
+    ],
+    "name": "ISO 7089 M6",
+    "studio": 50
+   },
+   "position": [
+    -161.4,
+    47.0,
+    -10.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -163.0,
+     41.0,
+     -16.0
+    ],
+    [
+     -161.4,
+     53.0,
+     -4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 172,
+   "name": "ISO 4762 M6x45 <1>",
+   "part": {
+    "body": [
+     15,
+     0
+    ],
+    "name": "ISO 4762 M6x45",
+    "studio": 50
+   },
+   "position": [
+    -163.0,
+    47.0,
+    -10.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -169.0,
+     42.0,
+     -15.0
+    ],
+    [
+     -118.0,
+     52.0,
+     -5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 173,
+   "name": "ISO 4032 M6 <23>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -122.28,
+    47.0,
+    -10.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -122.28,
+     41.2265,
+     -15.0
+    ],
+    [
+     -117.08,
+     52.7735,
+     -5.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 174,
+   "name": "ISO 7089 M6 <2>",
+   "part": {
+    "body": [
+     14,
+     0
+    ],
+    "name": "ISO 7089 M6",
+    "studio": 50
+   },
+   "position": [
+    -161.4,
+    62.0,
+    -9.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -163.0,
+     56.0,
+     -15.0
+    ],
+    [
+     -161.4,
+     68.0,
+     -3.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 175,
+   "name": "ISO 4762 M6x45 <2>",
+   "part": {
+    "body": [
+     15,
+     0
+    ],
+    "name": "ISO 4762 M6x45",
+    "studio": 50
+   },
+   "position": [
+    -163.0,
+    62.0,
+    -9.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -169.0,
+     57.0,
+     -14.0
+    ],
+    [
+     -118.0,
+     67.0,
+     -4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 176,
+   "name": "ISO 4032 M6 <24>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    -122.28,
+    62.0,
+    -9.0
+   ],
+   "rotation_rows": [
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     -1.0,
+     0.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -122.28,
+     56.2265,
+     -14.0
+    ],
+    [
+     -117.08,
+     67.7735,
+     -4.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 177,
+   "name": "ISO 7089 M8 <9>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    21.0,
+    62.5,
+    -56.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     13.0,
+     54.5,
+     -56.0
+    ],
+    [
+     29.0,
+     70.5,
+     -54.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 178,
+   "name": "ISO 4762 M8x20 <1>",
+   "part": {
+    "body": [
+     16,
+     0
+    ],
+    "name": "ISO 4762 M8x20",
+    "studio": 50
+   },
+   "position": [
+    21.0,
+    62.5,
+    -54.4
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     14.5,
+     56.0,
+     -74.4
+    ],
+    [
+     27.5,
+     69.0,
+     -46.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 179,
+   "name": "ISO 7089 M8 <10>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    21.0,
+    -62.5,
+    -56.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     13.0,
+     -70.5,
+     -56.0
+    ],
+    [
+     29.0,
+     -54.5,
+     -54.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 180,
+   "name": "ISO 4762 M8x20 <2>",
+   "part": {
+    "body": [
+     16,
+     0
+    ],
+    "name": "ISO 4762 M8x20",
+    "studio": 50
+   },
+   "position": [
+    21.0,
+    -62.5,
+    -54.4
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     14.5,
+     -69.0,
+     -74.4
+    ],
+    [
+     27.5,
+     -56.0,
+     -46.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 181,
+   "name": "ISO 7089 M8 <11>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -154.0,
+    62.5,
+    -56.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -162.0,
+     54.5,
+     -56.0
+    ],
+    [
+     -146.0,
+     70.5,
+     -54.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 182,
+   "name": "ISO 4762 M8x20 <3>",
+   "part": {
+    "body": [
+     16,
+     0
+    ],
+    "name": "ISO 4762 M8x20",
+    "studio": 50
+   },
+   "position": [
+    -154.0,
+    62.5,
+    -54.4
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -160.5,
+     56.0,
+     -74.4
+    ],
+    [
+     -147.5,
+     69.0,
+     -46.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 183,
+   "name": "ISO 7089 M8 <12>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    -154.0,
+    -62.5,
+    -56.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -162.0,
+     -70.5,
+     -56.0
+    ],
+    [
+     -146.0,
+     -54.5,
+     -54.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 184,
+   "name": "ISO 4762 M8x20 <4>",
+   "part": {
+    "body": [
+     16,
+     0
+    ],
+    "name": "ISO 4762 M8x20",
+    "studio": 50
+   },
+   "position": [
+    -154.0,
+    -62.5,
+    -54.4
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -160.5,
+     -69.0,
+     -74.4
+    ],
+    [
+     -147.5,
+     -56.0,
+     -46.4
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 185,
+   "name": "ISO 10642 M8x30 <1>",
+   "part": {
+    "body": [
+     17,
+     0
+    ],
+    "name": "ISO 10642 M8x30",
+    "studio": 50
+   },
+   "position": [
+    -43.98,
+    64.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -52.94,
+     55.04,
+     -63.94
+    ],
+    [
+     -35.02,
+     72.96,
+     -33.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 186,
+   "name": "ISO 4032 M8 <5>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -43.98,
+    64.0,
+    -42.5
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -50.48,
+     56.4944,
+     -42.5
+    ],
+    [
+     -37.48,
+     71.5056,
+     -35.7
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 187,
+   "name": "ISO 10642 M8x30 <2>",
+   "part": {
+    "body": [
+     17,
+     0
+    ],
+    "name": "ISO 10642 M8x30",
+    "studio": 50
+   },
+   "position": [
+    -43.98,
+    -64.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -52.94,
+     -72.96,
+     -63.94
+    ],
+    [
+     -35.02,
+     -55.04,
+     -33.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 188,
+   "name": "ISO 4032 M8 <6>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -43.98,
+    -64.0,
+    -42.5
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -50.48,
+     -71.5056,
+     -42.5
+    ],
+    [
+     -37.48,
+     -56.4944,
+     -35.7
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 189,
+   "name": "ISO 10642 M8x30 <3>",
+   "part": {
+    "body": [
+     17,
+     0
+    ],
+    "name": "ISO 10642 M8x30",
+    "studio": 50
+   },
+   "position": [
+    -123.56,
+    64.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.52,
+     55.04,
+     -63.94
+    ],
+    [
+     -114.6,
+     72.96,
+     -33.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 190,
+   "name": "ISO 4032 M8 <7>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -123.56,
+    64.0,
+    -42.5
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -130.06,
+     56.4944,
+     -42.5
+    ],
+    [
+     -117.06,
+     71.5056,
+     -35.7
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 191,
+   "name": "ISO 10642 M8x30 <4>",
+   "part": {
+    "body": [
+     17,
+     0
+    ],
+    "name": "ISO 10642 M8x30",
+    "studio": 50
+   },
+   "position": [
+    -123.56,
+    -64.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -132.52,
+     -72.96,
+     -63.94
+    ],
+    [
+     -114.6,
+     -55.04,
+     -33.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 192,
+   "name": "ISO 4032 M8 <8>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    -123.56,
+    -64.0,
+    -42.5
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -130.06,
+     -71.5056,
+     -42.5
+    ],
+    [
+     -117.06,
+     -56.4944,
+     -35.7
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 193,
+   "name": "ISO 10642 M5x12 <1>",
+   "part": {
+    "body": [
+     18,
+     0
+    ],
+    "name": "ISO 10642 M5x12",
+    "studio": 50
+   },
+   "position": [
+    6.0,
+    68.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     0.4,
+     62.4,
+     -63.94
+    ],
+    [
+     11.6,
+     73.6,
+     -51.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 194,
+   "name": "ISO 10642 M5x12 <2>",
+   "part": {
+    "body": [
+     18,
+     0
+    ],
+    "name": "ISO 10642 M5x12",
+    "studio": 50
+   },
+   "position": [
+    -12.0,
+    68.0,
+    -63.94
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -17.6,
+     62.4,
+     -63.94
+    ],
+    [
+     -6.4,
+     73.6,
+     -51.94
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 195,
+   "name": "ISO 4035 M8 <1>",
+   "part": {
+    "body": [
+     19,
+     0
+    ],
+    "name": "ISO 4035 M8",
+    "studio": 50
+   },
+   "position": [
+    -4.765,
+    66.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -11.265,
+     66.0,
+     -7.5056
+    ],
+    [
+     1.735,
+     70.0,
+     7.5056
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 196,
+   "name": "ISO 4035 M8 <2>",
+   "part": {
+    "body": [
+     19,
+     0
+    ],
+    "name": "ISO 4035 M8",
+    "studio": 50
+   },
+   "position": [
+    -4.765,
+    58.0,
+    0.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     -11.265,
+     54.0,
+     -7.5056
+    ],
+    [
+     1.735,
+     58.0,
+     7.5056
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 197,
+   "name": "ISO 4762 M6x30 <1>",
+   "part": {
+    "body": [
+     20,
+     0
+    ],
+    "name": "ISO 4762 M6x30",
+    "studio": 50
+   },
+   "position": [
+    172.7,
+    12.0,
+    16.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     167.7,
+     -18.0,
+     11.0
+    ],
+    [
+     177.7,
+     18.0,
+     21.0
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 198,
+   "name": "ISO 4032 M6 <25>",
+   "part": {
+    "body": [
+     2,
+     0
+    ],
+    "name": "ISO 4032 M6",
+    "studio": 50
+   },
+   "position": [
+    172.7,
+    -12.5,
+    16.0
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     167.7,
+     -17.7,
+     10.2265
+    ],
+    [
+     177.7,
+     -12.5,
+     21.7735
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 199,
+   "name": "ISO 4762 M8x30 <1>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    175.4,
+    40.0,
+    -55.44
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     168.9,
+     33.5,
+     -63.44
+    ],
+    [
+     181.9,
+     46.5,
+     -25.44
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 200,
+   "name": "ISO 4032 M8 <9>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    175.4,
+    40.0,
+    -31.39
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     168.9,
+     32.4944,
+     -31.39
+    ],
+    [
+     181.9,
+     47.5056,
+     -24.59
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 201,
+   "name": "ISO 4762 M8x30 <2>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    175.4,
+    -40.0,
+    -55.44
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     -1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     -1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     168.9,
+     -46.5,
+     -63.44
+    ],
+    [
+     181.9,
+     -33.5,
+     -25.44
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 202,
+   "name": "ISO 4032 M8 <10>",
+   "part": {
+    "body": [
+     10,
+     0
+    ],
+    "name": "ISO 4032 M8",
+    "studio": 50
+   },
+   "position": [
+    175.4,
+    -40.0,
+    -31.39
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     168.9,
+     -47.5056,
+     -31.39
+    ],
+    [
+     181.9,
+     -32.4944,
+     -24.59
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 203,
+   "name": "ISO 7089 M8 <13>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    102.0,
+    37.5,
+    -44.89
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     94.0,
+     29.5,
+     -44.89
+    ],
+    [
+     110.0,
+     45.5,
+     -43.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 204,
+   "name": "ISO 4762 M8x30 <3>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    102.0,
+    37.5,
+    -43.29
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     95.5,
+     31.0,
+     -73.29
+    ],
+    [
+     108.5,
+     44.0,
+     -35.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 205,
+   "name": "ISO 7089 M8 <14>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    102.0,
+    -37.5,
+    -44.89
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     94.0,
+     -45.5,
+     -44.89
+    ],
+    [
+     110.0,
+     -29.5,
+     -43.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 206,
+   "name": "ISO 4762 M8x30 <4>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    102.0,
+    -37.5,
+    -43.29
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     95.5,
+     -44.0,
+     -73.29
+    ],
+    [
+     108.5,
+     -31.0,
+     -35.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 207,
+   "name": "ISO 7089 M8 <15>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    127.0,
+    37.5,
+    -44.89
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     119.0,
+     29.5,
+     -44.89
+    ],
+    [
+     135.0,
+     45.5,
+     -43.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 208,
+   "name": "ISO 4762 M8x30 <5>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    127.0,
+    37.5,
+    -43.29
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     120.5,
+     31.0,
+     -73.29
+    ],
+    [
+     133.5,
+     44.0,
+     -35.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 209,
+   "name": "ISO 7089 M8 <16>",
+   "part": {
+    "body": [
+     8,
+     0
+    ],
+    "name": "ISO 7089 M8",
+    "studio": 50
+   },
+   "position": [
+    127.0,
+    -37.5,
+    -44.89
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     119.0,
+     -45.5,
+     -44.89
+    ],
+    [
+     135.0,
+     -29.5,
+     -43.29
+    ]
+   ]
+  },
+  {
+   "fixed": true,
+   "hidden": false,
+   "id": 210,
+   "name": "ISO 4762 M8x30 <6>",
+   "part": {
+    "body": [
+     21,
+     0
+    ],
+    "name": "ISO 4762 M8x30",
+    "studio": 50
+   },
+   "position": [
+    127.0,
+    -37.5,
+    -43.29
+   ],
+   "rotation_rows": [
+    [
+     1.0,
+     0.0,
+     0.0
+    ],
+    [
+     0.0,
+     1.0,
+     0.0
+    ],
+    [
+     0.0,
+     0.0,
+     1.0
+    ]
+   ],
+   "sub_assembly": null,
+   "world_bbox": [
+    [
+     120.5,
+     -44.0,
+     -73.29
+    ],
+    [
+     133.5,
+     -31.0,
+     -35.29
+    ]
+   ]
+  }
+ ],
+ "interference": [],
+ "mates": [],
+ "name": "A axis"
+}
