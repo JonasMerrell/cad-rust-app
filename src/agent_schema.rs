@@ -226,6 +226,7 @@ fn common(prop: &str) -> Option<Value> {
         "mode" => json!({"type": "integer", "minimum": 1, "description": "modal: which mode, 1-based"}),
         "time" => t("number", "transient: time, s (default the moment of largest displacement)"),
         "deform" => t("number", "deformation scale × the automatic exaggeration (0 = undeformed)"),
+        "probes" => json!({"type": "array", "description": "points [x, y, z] (mm) to report the result at: the nearest mesh node and its displacement", "items": xyz("a point [x, y, z], mm")}),
         "analysis" => en(&["static", "modal", "transient"], "static: deflection and stress; modal: natural frequencies; transient: response over time"),
         "material" => t("string", "material name"),
         "kind" => t("string", "kind"),

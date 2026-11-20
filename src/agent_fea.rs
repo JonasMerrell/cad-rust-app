@@ -273,6 +273,45 @@ fn printed_solids(material: &str) -> Vec<&'static crate::fea_print::Printed> {
     out
 }
 
+/// The result at chosen points: for each probe [x, y, z], the nearest mesh node, how far it is from the probe, and
+/// its displacement (static) or its share of each mode shape (modal, each mode scaled to a largest movement of 1).
+fn probes(o: &Outcome, list: &[Value]) -> R<Value> {
+    let m = &o.mesh;
+    let mut out = vec![];
+    for p in list {
+        let c: Vec<f64> = p.as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
+        if c.len() != 3 {
+            return Err("probes: each probe is a point [x, y, z] in mm".into());
+        }
+        let at = DVec3::new(c[0], c[1], c[2]);
+        let (k, d2) = m.nodes.iter().enumerate().map(|(i, n)| (i, n.distance_squared(at))).fold((0, f64::INFINITY), |a, b| if b.1 < a.1 { b } else { a });
+        let mut j = json!({"probe": v3(at), "node": v3(m.nodes[k]), "distance_mm": sig(d2.sqrt())});
+        match &o.solution {
+            Solution::Static { u, .. } => {
+                let d = DVec3::new(u[3 * k], u[3 * k + 1], u[3 * k + 2]);
+                j["displacement_mm"] = json!([sig(d.x), sig(d.y), sig(d.z)]);
+                j["magnitude_mm"] = json!(sig(d.length()));
+            }
+            Solution::Modal { modes } => {
+                j["mode_shapes"] = json!(
+                    modes
+                        .iter()
+                        .map(|md| {
+                            let top = fea::max_mag(&md.shape).max(1e-300);
+                            json!([sig(md.shape[3 * k] / top), sig(md.shape[3 * k + 1] / top), sig(md.shape[3 * k + 2] / top)])
+                        })
+                        .collect::<Vec<_>>()
+                );
+                // mass-normalised (units mm, N, tonne): the mode's static compliance at the node is shape² / (2π f)²
+                j["mode_shapes_mass_normalised"] = json!(modes.iter().map(|md| json!([md.shape[3 * k], md.shape[3 * k + 1], md.shape[3 * k + 2]])).collect::<Vec<_>>());
+            }
+            Solution::Transient(_) => {}
+        }
+        out.push(j);
+    }
+    Ok(json!(out))
+}
+
 fn summary(s: &Study, o: &Outcome) -> Value {
     let m = &o.mesh;
     let mut v = json!({
@@ -491,6 +530,9 @@ impl Session {
                 let (s, o) = self.sim_solve(si)?;
                 let mut v = summary(&s, &o);
                 v["simulation"] = json!(si);
+                if let Some(list) = a.get("probes").and_then(|p| p.as_array()) {
+                    v["probes"] = probes(&o, list)?;
+                }
                 if a.get("render").and_then(|v| v.as_bool()).unwrap_or(false) {
                     let png = self.render_outcome(&o, a)?;
                     return Ok((v, Some(png)));
@@ -739,7 +781,7 @@ pub fn tools() -> Vec<Value> {
     vec![
         json!({"name": "create_simulation", "description": "Add a Simulation tab: linear elastic finite element analysis of a Part Studio's parts (auto-meshed with 10-node tetrahedra; parts that touch are bonded). Units mm, N, MPa, s. Fields: name, studio (default the active one), bodies [[f,i],…] (default every visible part), analysis (static: deflection and stress; modal: natural frequencies and mode shapes; transient: response over time), material (applies to every part; \"\" = each part's own material from set_part, and parts of different materials are meshed separately and bonded where they touch: Steel, Stainless steel, Stainless steel 303, Aluminium 6061, Aluminium 7075, Brass, Copper, Titanium, Tungsten alloy, Urethane foam, PLA, ABS, PETG, Nylon, Nylon (humid), ASA, PC, PLA-CF, PETG-CF, ASA-CF, PET-CF, PPS-CF, PA6-CF, PA6-CF (humid), PA12-CF, PA12-CF (humid), Oak, Pine; \"\" = the part's material, steel when unset), print (3D-printed plastic parts, FDM: null = solid isotropic; true = defaults; or {model: layered (default: transversely isotropic about build_dir, maker X-Y/Z data, failure by pressure-modified von Mises (1.3x stronger in compression) plus interlayer tension/shear) | isotropic (average modulus, weakest Z strength), infill (% sparse density, default 20), pattern: grid | triangles | honeycomb | gyroid (Gibson-Ashby scaling), walls (default 2), line_width (mm, 0.45), top_bottom (solid layers, 4), layer_height (mm, 0.2), build_dir ([x,y,z], default [0,0,1]), layer_bond (layer bond over the data sheet's Z strength, default 1; 0.5-0.8 for cool, fast or tall prints)}; applies to parts of PLA, PETG, ABS, ASA, PC, Nylon, Nylon (humid), PLA-CF, PETG-CF, ASA-CF, PET-CF, PPS-CF, PA6-CF, PA6-CF (humid), PA12-CF, PA12-CF (humid): walls and top/bottom skin are solid, the inside is infill, so mesh at or below the wall thickness on faces that matter), mesh_size (element size mm, null = auto), refine (default true: smaller elements at small holes and fillets, about a third of their radius, grading back to mesh_size), mesh_controls [{faces, size (element size mm on those faces), name}] (finer mesh where you expect the peak stress), mode (simple (default): supports and loads below; advanced: a static study with crackh3d's boundary conditions and solver, set with bcs, periodic, gravity and solver, and supports/loads ignored), bcs (advanced) [{type: fixed | displacement {u: [x|null, y|null, z|null] mm} | symmetry | pressure {p MPa} | traction {t: [x,y,z] MPa} | force {f: [x,y,z] N total} | spring {k: [x,y,z] N/mm³ per area} | remote_rigid {point, force, moment N·mm, u: [..|null], rot: [..|null] rad (null = free)} | remote_distributing {point, force, moment} | point_force {at: [x,y,z], f}, faces, name}], periodic (advanced) [{a: [face refs] (leads), b: [face refs] (follows), offset ([x,y,z] from A to B, default from face centres), jump ([x,y,z] mm: u_B - u_A, e.g. mean strain × offset), name}], gravity (advanced: [x,y,z] in g or null), solver (advanced: iterative (CG+AMG, default) | direct), modes (modal: how many, default 6), transient {profile: step | ramp | pulse (half-sine impact) | sine (shaking), time (ramp/pulse length s), frequency (sine Hz), duration (s, null = five periods of the lowest natural frequency), steps (default 400), damping (fraction of critical, default 0.02)}, loss_factors {material: η} (replace the library's structural loss factors; each material's η damps transient runs and modal results report each mode's loss factor and −60 dB decay time), supports [{kind: fixed | roller (slides on its faces, also symmetry planes), faces: [face refs {point, normal} from list_geometry], name}], loads [{kind: force (total N spread over the faces) | pressure (MPa into the faces) | gravity (value in g on the whole part), value, direction ([x,y,z] or \"-z\" etc., default -z), normal (force pushes into the faces instead), faces, at [x,y,z] + radius (only the part of the faces within radius of that point, e.g. an impact at the face centre), name}]. Static needs at least one support and one load; modal and transient work with or without supports (a free transient reports the vibration with the rigid motion taken out). Returns the simulation index.", "inputSchema": obj(fields.clone(), &[])}),
         json!({"name": "edit_simulation", "description": "Change a Simulation tab (same fields as create_simulation; supports and loads replace the whole lists).", "inputSchema": obj(fields, &["simulation"])}),
-        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress; 3D-printed parts: the walls' margin by the layered criterion (the infill's when nothing is wall), plus infill_factor_of_safety), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
+        json!({"name": "solve_simulation", "description": "Mesh and solve a Simulation tab. Static: largest von Mises stress and where, largest displacement, factor of safety (yield / max stress; 3D-printed parts: the walls' margin by the layered criterion (the infill's when nothing is wall), plus infill_factor_of_safety), reaction force of each support. Modal: natural frequencies with effective mass shares along x, y, z. Transient: lowest natural frequency, time step, peak displacement and when, peak stress, and a displacement history. probes [[x,y,z],…]: for each point the nearest mesh node and its displacement (static) or its movement in each mode shape (modal, each mode scaled to a largest movement of 1). render:true also returns a PNG (as render_simulation).", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "probes": {"type": "array"}, "render": {"type": "boolean"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}}), &["simulation"])}),
         json!({"name": "render_simulation", "description": "PNG of a Simulation tab's result as a colour map (blue low → red high) on the exaggerated deformed shape: field stress (von Mises, default), max_principal, min_principal, displacement, or safety (red where the factor of safety is low); the picture carries a title, a colour scale and the deformation scale; mode (modal, 1-based), time (transient s; default the moment of largest displacement), deform (× the automatic exaggeration, 0 = undeformed), view/direction/width/height/path as in render.", "inputSchema": obj(json!({"simulation": {"type": "integer"}, "field": {"type": "string"}, "mode": {"type": "integer"}, "time": {"type": "number"}, "deform": {"type": "number"}, "view": {"type": "string"}, "direction": {"type": "array"}, "width": {"type": "integer"}, "height": {"type": "integer"}, "path": {"type": "string"}}), &["simulation"])}),
     ]
 }
