@@ -15,7 +15,8 @@ Iterations
      bracket, shorter tail centre
   5  after the adversarial review of 4 (assembly, tool access, how each part is cut): table bolts moved clear of the
      tie bolts, bearing lands under the plates, pocket corners R3.6, tailstock clamp pockets a 1/4 in cutter can make,
-     gear turned so its two stop screws clear the motor flange (see REPORT.md)
+     gear turned so its two stop screws clear the motor flange, friction ring moved outside the bearing's nut
+     pockets, longer thread engagement for the nose screws, home target moved off a faceplate screw (see REPORT.md)
 """
 import sys, os, json, math
 import numpy as np
@@ -74,7 +75,7 @@ def params(it):
         return p
     p.update(p1_t=31.75, c_t=38.1, d_t=31.75, d_gap=(0.5 if it >= 4 else 0.1), brake=(it >= 3), tail=True)
     # brake disc: friction ring from fr_ri to fl_r; inside it the disc is a thin web (iteration 4) that bends to close the gap
-    p.update(fr_ri=(54.0 if it >= 4 else 47.0), web_t=(1.0 if it >= 4 else 2.5), tail_out=(15.0 if it >= 4 else 25.0))
+    p.update(fr_ri=(57.0 if it >= 5 else 54.0 if it >= 4 else 47.0), web_t=(1.0 if it >= 4 else 2.5), tail_out=(15.0 if it >= 4 else 25.0))
     p.update(rec_d=4.45, lining=0.25, fl_gap=0.15, fl_t=2.5, pis_gap=0.2, pis_t=6.35, pis_proud=1.35,
              fl_r=61.0, rec_r=61.5, gr_ro=61.2, gr_ri=46.5, gr_d=6.0, port_r=57.9, port_deg=20.0)
     p["H"] = -p["bot"] + p["base_t"]
@@ -141,7 +142,7 @@ def build(it, outdir):
     fp.cut("x", -8.7, 0, circs(50, [30 + 60*i for i in range(6)], 5.5))                  # M6 heads, from the front
     fp.cut("x", x["fp_r"], x["fp_r"] + 6.5, [C(sy*p["vise_m6"], sz*p["vise_m6"], 5.5) for sy in (1, -1) for sz in (1, -1)])
     if it == 3: fp.cut("x", x["fp_r"], x["fp_r"] + 3.3, circ(54.5, -90, 3.25))            # home magnet pocket (rear face)
-    if it >= 4: fp.cut("x", -10.0, 0, circ(55.0, -90, 3.25))                              # home target: a steel dowel pin bonded in, flush with the front face
+    if it >= 4: fp.cut("x", -10.0, 0, circ(55.0, -60 if it >= 5 else -90, 3.25))          # home target: a steel dowel pin bonded in, flush with the front face
     fp.done()
 
     # ---- nose flange
@@ -150,7 +151,7 @@ def build(it, outdir):
     if it > 1:
         nose.add("x", x["ru_f"], x["nose_r"], C(0, 0, 41.5))                              # boss onto the bearing's inner ring
         nose.cut("x", x["ru_f"], x["fp_r"], circs(p["ru_in_pcd"]/2, [45*i for i in range(8)], 3.25))
-        nose.cut("x", x["fp_r"] - 6.2, x["fp_r"], circs(p["ru_in_pcd"]/2, [45*i for i in range(8)], 5.0))
+        nose.cut("x", x["fp_r"] - (7.2 if it >= 5 else 6.2), x["fp_r"], circs(p["ru_in_pcd"]/2, [45*i for i in range(8)], 5.0))
     else:
         nose.cut("x", x["nose_r"], x["fp_r"], circs(21, [22.5 + 45*i for i in range(8)], 4.5))
         nose.cut("x", x["fp_r"] - 8.6, x["fp_r"], circs(21, [22.5 + 45*i for i in range(8)], 7.0))
@@ -215,7 +216,8 @@ def build(it, outdir):
         if p["brake"]: p1.cut("x", x["p1_r"], x["rec_f"], C(0, 0, p["rec_r"]))             # brake recess, from the rear
         p1.cut("x", floor, x["ru_r"], circs(p["ru_out_pcd"]/2, [45*i for i in range(8)], 3.25))
         for i in range(8):
-            y0, z0 = pt(51.3, 45*i); y1, z1 = pt(53.7, 45*i)
+            if it >= 5: y0, z0 = pt(52.5, 45*i - 1.31); y1, z1 = pt(52.5, 45*i + 1.31)      # pockets lie along the circle, inside the friction ring
+            else: y0, z0 = pt(51.3, 45*i); y1, z1 = pt(53.7, 45*i)
             p1.cut("x", floor, floor + 7.0, slot(y0, z0, y1, z1, 4.15))
         for sy in (1, -1): upbolt_pockets(p1, p, x["p1_r"], +1, sy*UPY)
         if it >= 5: p1.cut("z", zb - 0.01, zb + 0.2, R(x["p1_r"] + 19.0, -p["W2"] - 1, x["p1_f"] + 1, p["W2"] + 1))   # only the 19 mm cut in one setup bears on the base
@@ -408,7 +410,7 @@ def build(it, outdir):
         for i in range(8):
             a = 45*i
             y, z = pt(32.5, a)
-            g["v"] = "nose"; scr("M5", 12, (x["fp_r"] - 6.2, y, z), (-1, 0, 0))          # nose -> inner ring, from the front
+            g["v"] = "nose"; scr("M5", 12, (x["fp_r"] - (7.2 if it >= 5 else 6.2), y, z), (-1, 0, 0))   # nose -> inner ring, from the front
             g["v"] = "rotor"; scr("M5", 20, (x["fl_r"] + 2.5, y, z), (1, 0, 0))          # rotor -> inner ring, from the rear
             y, z = pt(52.5, a)
             floor = x["rec_f"] if p["brake"] else x["p1_r"]
@@ -433,7 +435,8 @@ def build(it, outdir):
         g["v"] = "base"
         for sy in (1, -1): scr("M5", 12, (30.0, sy*13.0, zt + 6.0), (0, 0, 1))             # sensor bracket, from below into the inserts
         d.std("ISO 4035", "M8", (20.0, 0, -55.0), (1, 0, 0), group="base"); d.std("ISO 4035", "M8", (12.0, 0, -55.0), (-1, 0, 0), group="base")
-        d.std("ISO 8734", "Ø6", (-10.0, 0, -55.0), (1, 0, 0), length=10, name="Home target pin 6 x 10", group="face")
+        hy, hz = pt(55.0, -60 if it >= 5 else -90)
+        d.std("ISO 8734", "Ø6", (-10.0, hy, hz), (1, 0, 0), length=10, name="Home target pin 6 x 10", group="face")
     # motor -> its plate: 4 x M6 x 30 from the motor side, nuts under the gear's flange
     for sy in (1, -1):
         for sz in (1, -1):

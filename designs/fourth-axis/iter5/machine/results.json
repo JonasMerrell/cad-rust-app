@@ -192,7 +192,7 @@
     {
      "a": "A: P1 bearing plate",
      "b": "tool 6.35 x 24",
-     "volume_mm3": 217.1039
+     "volume_mm3": 245.7674
     }
    ]
   },
@@ -546,12 +546,12 @@
     {
      "a": "Z 22",
      "b": "A: Faceplate",
-     "volume_mm3": 28283.3513
+     "volume_mm3": 28434.4728
     },
     {
      "a": "Z 22",
      "b": "A: Spindle nose",
-     "volume_mm3": 26429.3157
+     "volume_mm3": 26337.3334
     },
     {
      "a": "Z 22",
@@ -561,7 +561,7 @@
     {
      "a": "Z 22",
      "b": "A: P1 bearing plate",
-     "volume_mm3": 113667.2091
+     "volume_mm3": 113697.2629
     },
     {
      "a": "Z 22",
@@ -576,12 +576,12 @@
     {
      "a": "Z 22",
      "b": "A: Rotor with brake disc",
-     "volume_mm3": 55639.7641
+     "volume_mm3": 54776.3905
     },
     {
      "a": "Z 22",
      "b": "A: Brake piston",
-     "volume_mm3": 13966.0586
+     "volume_mm3": 13628.7706
     },
     {
      "a": "Z 22",

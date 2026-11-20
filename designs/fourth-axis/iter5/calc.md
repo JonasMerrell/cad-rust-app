@@ -16,43 +16,43 @@ Load at the end of a 40 x 40 test bar gripped in the vise. 'Structure' is the bo
 
 | Load point | Dir | Structure F | of which the test bar C | Bearing C | Joints G | Total rough µm | Total less the bar, rough µm | Finishing µm (less the bar) |
 |---|---|---|---|---|---|---|---|---|
-| chuck, 10 mm past the jaws | Fz | 6.6 | 0.1 | 5.5 | 1.8 | 13.8 | 13.7 | 2.73 |
-| chuck, 10 mm past the jaws | Fy | 4.7 | 0.1 | 5.5 | 1.5 | 11.7 | 11.7 | 2.31 |
-| overhang, 100 mm past the jaws | Fz | 38.5 | 12.1 | 19.2 | 8.9 | 66.6 | 54.4 | 10.81 |
-| overhang, 100 mm past the jaws | Fy | 30.8 | 12.1 | 19.2 | 8.1 | 58.1 | 46.0 | 9.13 |
+| chuck, 10 mm past the jaws | Fz | 6.4 | 0.1 | 5.5 | 1.8 | 13.7 | 13.6 | 2.70 |
+| chuck, 10 mm past the jaws | Fy | 4.8 | 0.1 | 5.5 | 1.5 | 11.8 | 11.7 | 2.32 |
+| overhang, 100 mm past the jaws | Fz | 38.1 | 12.1 | 19.2 | 8.9 | 66.1 | 54.0 | 10.72 |
+| overhang, 100 mm past the jaws | Fy | 31.0 | 12.1 | 19.2 | 8.1 | 58.3 | 46.2 | 9.17 |
 
-Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.2 µm instead of 38.5 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about 15 µm at that point.
+Check with real materials (steel vise, bearing ring and test bar; direct solver, 6 mm mesh): the structure column at 100 mm, vertical, is 23.3 µm instead of 38.1 µm, of which the steel bar itself is 4.2 µm (F). So the all-aluminium numbers above overstate the structure by about 15 µm at that point.
 
 ## With and without the tailstock (aluminium bar between the jaws and the centre)
 
-Tailstock stiffness at the centre: 34 N/µm vertical, 42 N/µm sideways (F, bonded); centre-in-hole contact 100 N/µm (G).
+Tailstock stiffness at the centre: 32 N/µm vertical, 42 N/µm sideways (F, bonded); centre-in-hole contact 100 N/µm (G).
 
 | Part | No tailstock, at the free end, rough µm | No tailstock, mid-length µm | With tailstock, mid-length, rough µm | With tailstock, finishing µm |
 |---|---|---|---|---|
-| Ø25 x 120 mm | 209 | 41.2 | 13.2 | 2.61 |
-| Ø40 x 120 mm | 64 | 23.1 | 8.5 | 1.69 |
-| Ø16 x 100 mm | 619 | 91.5 | 24.6 | 4.88 |
+| Ø25 x 120 mm | 208 | 41.0 | 13.2 | 2.61 |
+| Ø40 x 120 mm | 64 | 22.9 | 8.6 | 1.70 |
+| Ø16 x 100 mm | 619 | 91.4 | 24.6 | 4.88 |
 
 ## Torsion: windup at the work surface
 
-Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: disc 7.4e+05 N·m/rad (C: ring formula, hub share from iteration 3's FE) in series with the lining 1.67e+07 (G) = 7.09e+05 N·m/rad.
+Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: disc 6.85e+05 N·m/rad (C: ring formula, hub share from iteration 3's FE) in series with the lining 1.03e+07 (G) = 6.43e+05 N·m/rad.
 
 | Case | Radius mm | Torque N·m | Gear only: windup mrad | Gear only: µm at the surface | With brake: µm |
 |---|---|---|---|---|---|
-| roughing mean | 46 | 18.1 | 0.533 | 24.6 | 1.13 |
-| roughing mean | 25 | 9.8 | 0.316 | 7.9 | 0.33 |
-| roughing peak | 46 | 36.2 | 0.895 | 41.3 | 2.26 |
-| roughing peak | 25 | 19.6 | 0.563 | 14.1 | 0.66 |
-| finishing mean | 46 | 3.6 | 0.116 | 5.3 | 0.22 |
+| roughing mean | 46 | 18.1 | 0.533 | 24.6 | 1.24 |
+| roughing mean | 25 | 9.8 | 0.316 | 7.9 | 0.36 |
+| roughing peak | 46 | 36.2 | 0.895 | 41.3 | 2.48 |
+| roughing peak | 25 | 19.6 | 0.563 | 14.1 | 0.73 |
+| finishing mean | 46 | 3.6 | 0.116 | 5.3 | 0.25 |
 | finishing mean | 25 | 1.9 | 0.063 | 1.6 | 0.07 |
 
 ## Brake
 
 - Piston ring Ø93 to Ø122.4: 4974 mm² (C). At 0.6 MPa (G: shop pressure not confirmed) less 120 N seal drag (G): clamp force 2864 N (C).
-- Holding torque at mean radius 58 mm: 37 N·m with µ 0.3, 74 N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).
+- Holding torque at mean radius 59 mm: 43 N·m with µ 0.3, 85 N·m with µ 0.6 (C; µ of the bonded abrasive lining on aluminium is G, 0.6 to 0.8 expected).
 - Needed: 18.1 N·m mean, 36.2 N·m peak at the 46 mm radius (C).
-- The disc's 1.0 mm web, 16 mm wide, bends 0.15 mm to reach the lining: 121 MPa and 729 N of the clamp force (C); with the gap 0.1 mm larger, 202 MPa and 1215 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
-- Clamp force left on the lining: 2135 N.
+- The disc's 1.0 mm web, 19 mm wide, bends 0.15 mm to reach the lining: 86 MPa and 450 N of the clamp force (C); with the gap 0.1 mm larger, 143 MPa and 750 N. 6061-T6 yields at 276 MPa and takes about 100 MPa for 10^8 cycles.
+- Clamp force left on the lining: 2415 N.
 
 ## Lost motion, accuracy, repeatability
 
@@ -71,8 +71,8 @@ Gear: K1/K2/K3 = 31000/50000/57000 N·m/rad up to 14.0/48.0 N·m (D). Brake: dis
 
 ## Motor, speed, inertia
 
-- Rotating group without a workpiece: 1.96 kg, 2712 kg·mm² about the axis (C, from the CAD). A Ø40 x 100 aluminium part adds 68, a Ø90 x 120 part 2087 kg·mm².
-- Reflected to the motor through 100:1: 2.78 g·cm² (typical part), 4.80 g·cm² (largest part), against 2213 g·cm² of rotor plus wave generator (D). Inertia ratio 0.0013 to 0.0022.
+- Rotating group without a workpiece: 1.95 kg, 2697 kg·mm² about the axis (C, from the CAD). A Ø40 x 100 aluminium part adds 68, a Ø90 x 120 part 2087 kg·mm².
+- Reflected to the motor through 100:1: 2.76 g·cm² (typical part), 4.78 g·cm² (largest part), against 2213 g·cm² of rotor plus wave generator (D). Inertia ratio 0.0012 to 0.0022.
 - Motor torque for 500 °/s² with the largest part: 0.28 N·m (C); for cutting through the gear at 70 % efficiency (G): 51 mN·m finishing, 258 mN·m roughing at 46 mm.
 - Motor has 4.5 N·m holding (D) and 3.24 N·m at 600 rpm (D: vendor curve at 60 V; a 48 V supply gives a little less at speed): margin 6.0x over acceleration plus roughing.
 - 600 motor rpm = 6 rpm = 36 °/s at the axis. 1111.111 steps per degree with the drive set to 4000 pulses per rev; 40 kHz step rate at top speed.
@@ -83,21 +83,21 @@ Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rot
 
 | Mode | Hz | Source |
 |---|---|---|
-| Structure mode 1 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 650 | F |
-| Structure mode 2 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 816 | F |
-| Structure mode 3 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1234 | F |
-| Structure mode 4 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1482 | F |
-| Structure mode 5 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1889 | F |
-| Structure mode 6 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 2019 | F |
-| torsion gear no part | 538 | C |
-| torsion brake no part | 2628 | C |
-| torsion gear Ø40 x 100 | 531 | C |
-| torsion brake Ø40 x 100 | 2596 | C |
-| torsion gear Ø90 x 120 | 404 | C |
-| torsion brake Ø90 x 120 | 1976 | C |
-| tilt lumped no part | 1516 | C |
-| tilt lumped typ part | 1016 | C |
-| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 495 | C from F |
+| Structure mode 1 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 660 | F |
+| Structure mode 2 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 814 | F |
+| Structure mode 3 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1238 | F |
+| Structure mode 4 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1488 | F |
+| Structure mode 5 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1897 | F |
+| Structure mode 6 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 2023 | F |
+| Axis turning on the reducer's spring, no part | 540 | C |
+| Axis turning against the brake, no part | 2515 | C |
+| Axis turning on the reducer's spring, Ø40 x 100 | 533 | C |
+| Axis turning against the brake, Ø40 x 100 | 2484 | C |
+| Axis turning on the reducer's spring, Ø90 x 120 | 405 | C |
+| Axis turning against the brake, Ø90 x 120 | 1889 | C |
+| Rotating group tilting on the bearing and joints, no part | 1518 | C |
+| Rotating group tilting on the bearing and joints, Ø40 x 100 part | 1017 | C |
+| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 500 | C from F |
 
 ## Bearing
 

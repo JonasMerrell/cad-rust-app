@@ -141,15 +141,19 @@ def main():
            3: ("Disc brake (piston in plate C, lining on P1), air port, home sensor", "the reducer alone winds up 24.6 µm at 46 mm when roughing"),
            4: ("Brake disc on a 1 mm web with a narrower friction ring; shims between C and D; air tube bonded into C; splash ring; home sensor on a printed bracket in front; shorter tail centre; lower tie bolts raised",
                "iteration 3's 2.5 mm disc would yield (478 MPa); the reducer was pinched between two bearings; the sensor did not fit the base; coolant could reach the bearing"),
-           5: ("Table bolts moved; bearing lands under P1 and D, C lifted off the base; pocket corners R3.6; tailstock clamp pockets and slit a 6.35 cutter can make; reducer turned 4.5 degrees",
-               "adversarial review: a hex key could not reach two table bolts past the tie bolts; plate edges cut from two sides would rock; three features could not be milled")}
+           5: ("Table bolts moved; bearing lands under P1 and D, C lifted off the base; pocket corners R3.6; tailstock clamp pockets and slit a 6.35 cutter can make; reducer turned 4.5 degrees; "
+               "friction ring moved out to Ø114-122, clear of the bearing's nut pockets; nose screws 1 mm deeper; home target moved off a faceplate screw",
+               "adversarial review: a hex key could not reach two table bolts past the tie bolts; plate edges cut from two sides would rock; three features could not be milled; "
+               "the lining bridged the nut pockets; the nose screws had 4.5 mm of thread; the target pin's hole ran into a screw counterbore")}
     for i in range(1, it + 1):
         k = kn[i] or {}
         wb = f"{fmt(k.get('wind'))} ({fmt(k.get('wind_brake'), 2)})" if k.get("wind_brake") is not None else f"{fmt(k.get('wind'))} (no brake)"
         A(f"| {i} | {why[i][0]} | {why[i][1]} | {fmt(k.get('chuck'))} | {fmt(k.get('over'))} | {fmt(k.get('tail'))} | {wb} | {fmt(k.get('mode1'), 0)} / {fmt(k.get('mode1c'), 0)} |")
     A("\nEach iteration is a full rCAD model with every screw (`iter<N>/a-axis.json`), built by `scripts/build.py <N>`, and has its own `calc.md`, `fea/` and renders. "
       "Iteration 1 has no modal result: in the coarser modal mesh one of its thin parts came loose (0 Hz modes), and it was not worth chasing for a design already ruled out. "
-      "The brake-on windup of iterations 4 and 5 is larger than 3's because the disc's web is thinner; it is the price of a disc that does not yield.\n")
+      "The brake-on windup of iterations 4 and 5 is larger than 3's because the disc's web is thinner; it is the price of a disc that does not yield. "
+      "Iteration 5 is a little softer than 4 (13.6 against 12.1 µm at the jaws, first mode 660 against 766 Hz) because only a 19 mm land of each end plate now stands on the base "
+      "and plate C does not touch it: that is what makes the standing faces cuttable in one setup. Bedding the block on the base in metal-filled epoxy would win it back (not designed).\n")
 
     A("## 7. Simulation results, iteration %d\n" % it)
     A("How the numbers are made:\n")
@@ -210,13 +214,13 @@ def main():
     A("| Faceplate | 1/2 in plate | Rear: face, vise counterbores, holes. Flip: face, M6 counterbores, target pin hole, outline | Both faces milled, parallel within 0.02: it sets how true the vise runs |")
     A("| Tailstock plate | 1 in plate | Rear: face, pinch channel and pockets, nut pockets, bore Ø12.02, slit, outline land. Flip: face, rest of outline | Bore: the spot drill slides in and the pinch bolt locks it |")
     A("| Tailstock base | 3/4 in plate | Top: slots, holes, outline. Flip: counterbores | none |")
-    A("| Friction lining | P400 silicon carbide paper | Cut a ring Ø108 to Ø122 with a knife; bond to the P1 recess floor with slow epoxy under a flat weight, after the bearing screws are in | Even, thin glue line; no glue on the grit |")
+    A("| Friction lining | P400 silicon carbide paper | Cut a ring Ø114 to Ø122 with a knife; bond to the P1 recess floor with slow epoxy under a flat weight, after the bearing screws are in | Even, thin glue line; no glue on the grit |")
     A("| Splash ring, sensor bracket | ASA | Printed flat, no supports | none |\n")
     A("Fixturing that has to be made first: a spoil plate with an M8 pattern for the rotor and the discs. The big plates are bolted through their own tie holes after a first clamped operation; none is taller than 38 mm on the table.\n")
 
     A("## 10. Assembly and alignment\n")
     A("Order (every screw can be reached at its step; checked against the model):\n")
-    A("1. **P1:** drop the eight M5 nuts into their slots in the brake recess and tape them. Set the RU85 in its recess, eight M5 x 20 from the front, 7 N·m. Then bond the lining over the nuts.")
+    A("1. **P1:** drop the eight M5 nuts into their slots in the brake recess and tape them. Set the RU85 in its recess, eight M5 x 20 from the front, 7 N·m. Bond the lining ring to the recess floor outside the nut pockets; the nuts stay in their pockets behind the rotor.")
     A("2. **Rotor:** eight M5 x 20 from the rear into the inner ring, 7 N·m, with medium threadlocker. Measure from P1's rear face to the disc rim and to the lining with a depth micrometer: the gap must be 0.10 to 0.25 mm. Correct it with a shim ring between rotor and inner ring.")
     A("3. **C:** oil the two O-rings, fit them and the piston in the groove. Put the two M8 nuts in P1's pockets. RTV on the joint, C onto P1, tie bolts in loosely.")
     A("4. **D unit:** nuts for the motor in D's slots. Reducer into D's recess, two M5 x 30 from behind. Wave generator onto the motor shaft with its key and Loctite 638 as the vendor's manual says; grease; motor onto D with four M6 x 30.")
@@ -253,9 +257,9 @@ def main():
     A("| 2 | Bolted joints at 2000 N/mm³ | G | the joints column, 2 to 9 µm | same test |")
     A("| 3 | A clone RU85 at 180 USD has the stated P5 runout and preload | G | runout of the vise; stiffness if it has clearance | buy from a seller who states C0 clearance; measure on arrival |")
     A("| 4 | Reducer stiffness is Harmonic Drive's table for the same size, not the maker's own | D (proxy) | windup on the reducer alone | measure windup with a lever and indicator |")
-    A("| 5 | Brake friction 0.3 to 0.6 on bonded abrasive paper, 6 bar available | G | holding torque 37 to 74 N·m against 36 needed at the peak | the 45 N·m torque-wrench test at assembly |")
-    A("| 6 | Brake gap 0.10 to 0.25 mm after stacking six tolerances | C | web stress 80 to 200 MPa, clamp force | measured and shimmed at step 2 |")
-    A("| 7 | The 1 mm web survives the cut and the duty | C | brake | 6061 at 120 MPa nominal; cut it last, supported; inspect after the first 1000 cycles |")
+    A("| 5 | Brake friction 0.3 to 0.6 on bonded abrasive paper, 6 bar available | G | holding torque 43 to 85 N·m against 36 needed at the peak | the 45 N·m torque-wrench test at assembly |")
+    A("| 6 | Brake gap 0.10 to 0.25 mm after stacking six tolerances | C | web stress 60 to 145 MPa, 300 to 750 N of the clamp force | measured and shimmed at step 2 |")
+    A("| 7 | The 1 mm web survives the cut and the duty | C | brake | 6061 at 86 MPa nominal; cut it last, supported; inspect after the first 1000 cycles |")
     A("| 8 | Brake piston returns by O-ring roll-back and the disc's spring | G | drag when released | check free rotation; add three light springs under the piston if it drags |")
     A("| 9 | The vise is drawn from two vendor drawings; thread depths, mass (1.09 kg listed) and the Ø9 bores are not confirmed | D / G | screw lengths, inertia | measure the vise in hand before cutting the faceplate |")
     A("| 10 | Left tub wall 72 mm from the table as in the CAD; motor rear ends 4 mm short of it | D (CAD) | whether it fits at all | measure the machine |")
@@ -267,7 +271,9 @@ def main():
     A("| 16 | Home sensor sees a steel pin flush in an aluminium face at 1 mm | G | false triggers from chips | home with the coolant off; rcnc checks the pulse width |")
     A("| 17 | Splash ring and bearing seals are enough against low-pressure flood | G | bearing life | drain at the bottom; grease the bearing through its ports yearly |")
     A("| 18 | Motor price is a reseller's; StepperOnline's own page would not load. Plate prices are a shop's formula for small cut pieces | D / est | BOM total | check at order time |")
-    A("| 19 | Prices and lead time: the reducer is listed as pre-order | D | schedule | ask the vendor |\n")
+    A("| 19 | Prices and lead time: the reducer is listed as pre-order | D | schedule | ask the vendor |")
+    A("| 20 | Only a 19 mm land of each end plate bears on the base (so it can be cut in one setup) | F | 1.5 µm at the jaws, first mode 660 instead of 766 Hz | accept, or bed the block in metal-filled epoxy |")
+    A("| 21 | The thin-web brake disc's stiffness is a formula, not FE (the solver overflowed) | C | brake-on windup 1.2 µm could be 2 | measure with the brake on and a lever |\n")
 
     A("## 13. Files\n")
     A("| Path | What |\n|---|---|")

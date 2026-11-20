@@ -79,11 +79,11 @@ Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rot
 | Structure mode 4 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 1768 | F |
 | Structure mode 5 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 2318 | F |
 | Structure mode 6 (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | 2428 | F |
-| torsion gear no part | 546 | C |
-| torsion gear Ø40 x 100 | 540 | C |
-| torsion gear Ø90 x 120 | 408 | C |
-| tilt lumped no part | 1525 | C |
-| tilt lumped typ part | 1019 | C |
+| Axis turning on the reducer's spring, no part | 546 | C |
+| Axis turning on the reducer's spring, Ø40 x 100 | 540 | C |
+| Axis turning on the reducer's spring, Ø90 x 120 | 408 | C |
+| Rotating group tilting on the bearing and joints, no part | 1525 | C |
+| Rotating group tilting on the bearing and joints, Ø40 x 100 part | 1019 | C |
 | Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | 581 | C from F |
 
 ## Bearing

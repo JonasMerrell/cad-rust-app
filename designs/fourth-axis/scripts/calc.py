@@ -306,7 +306,11 @@ def main(it):
     for i, f in enumerate(nf.get("fea_modes_hz", [])): md.append(f"| Structure mode {i + 1} (bonded FE model with a 40 x 40 x 100 steel bar in the vise) | {f:.0f} | F |")
     for k, v in nf.items():
         if k == "mode1_with_bearing_and_joints": md.append(f"| Structure mode 1 scaled for the bearing and joint compliance the FE model leaves out | {v:.0f} | C from F |")
-        elif k != "fea_modes_hz": md.append(f"| {k.replace('_', ' ')} | {v:.0f} | C |")
+        elif k != "fea_modes_hz":
+            lab = (k.replace("torsion_gear_", "Axis turning on the reducer's spring, ").replace("torsion_brake_", "Axis turning against the brake, ")
+                    .replace("tilt_lumped_no_part", "Rotating group tilting on the bearing and joints, no part")
+                    .replace("tilt_lumped_typ_part", "Rotating group tilting on the bearing and joints, Ø40 x 100 part"))
+            md.append(f"| {lab} | {v:.0f} | C |")
     md.append("")
 
     # ---------------------------------------------------------------- bearing life, static safety

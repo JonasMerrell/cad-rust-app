@@ -63,11 +63,11 @@ Tooth passing: 450 Hz at 9000 rpm, 1200 Hz at 24 000 rpm (3 flutes); spindle rot
 
 | Mode | Hz | Source |
 |---|---|---|
-| torsion gear no part | 619 | C |
-| torsion gear Ø40 x 100 | 609 | C |
-| torsion gear Ø90 x 120 | 436 | C |
-| tilt lumped no part | 1010 | C |
-| tilt lumped typ part | 668 | C |
+| Axis turning on the reducer's spring, no part | 619 | C |
+| Axis turning on the reducer's spring, Ø40 x 100 | 609 | C |
+| Axis turning on the reducer's spring, Ø90 x 120 | 436 | C |
+| Rotating group tilting on the bearing and joints, no part | 1010 | C |
+| Rotating group tilting on the bearing and joints, Ø40 x 100 part | 668 | C |
 
 ## Bearing
 
