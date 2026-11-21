@@ -36,6 +36,16 @@ fn apply_axis(c: &mut Cam, a: &Value) -> R<()> {
 
 fn tool_json(t: &Tool) -> Value {
     let mut v = json!({"id": t.id, "number": t.number, "name": t.name, "kind": t.kind.key(), "diameter": t.diameter, "description": t.describe(), "rpm": t.rpm, "feed": t.feed, "plunge_feed": t.plunge_feed, "stepdown": t.stepdown, "stepover": t.stepover, "flute_length": t.flute_length, "stickout": t.stickout, "coolant": t.coolant, "holder": if t.holder.len() >= 2 { json!(if t.holder_name.is_empty() { "custom" } else { t.holder_name.as_str() }) } else { json!(format!("Ø{} cylinder", crate::cam::fmt_mm(t.holder_diameter))) }});
+    if t.kind.is_undercut() {
+        v["neck_diameter"] = json!(2.0 * t.neck_radius());
+        v["head_height"] = json!(t.head_height());
+        if t.neck_length > 0.0 {
+            v["neck_length"] = json!(t.neck_length);
+        }
+        if t.kind == ToolKind::Dovetail {
+            v["angle"] = json!(t.dovetail_angle());
+        }
+    }
     if t.kind == ToolKind::Tap {
         v["tapping_head"] = json!(t.tapping_head);
         if t.tapping_head {

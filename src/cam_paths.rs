@@ -2930,8 +2930,12 @@ mod tests {
         c.stock = crate::cam::Stock { side: 0.0, top: 0.0, bottom: 0.0, ..Default::default() };
         let flat = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap());
         let dove = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Dovetail && t.diameter == 4.0).unwrap());
-        let a = c.add_op(OpKind::Contour, flat);
-        c.op_mut(a).unwrap().side = Side::Inside;
+        // and its corners by a Ø2 one, so only the part is left round the hole
+        let small = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 2.0).unwrap());
+        for t in [flat, small] {
+            let a = c.add_op(OpKind::Contour, t);
+            c.op_mut(a).unwrap().side = Side::Inside;
+        }
         let b = c.add_op(OpKind::Contour, dove);
         let o = c.op_mut(b).unwrap();
         o.side = Side::Inside;
@@ -2951,8 +2955,8 @@ mod tests {
     #[test]
     fn dovetail_back_chamfers_the_underside_of_a_hole() {
         let (c, part, paths) = dovetail_in_hole(4.0, |o| o.chamfer = 0.5);
-        assert!(paths[1].warnings.is_empty(), "{:?}", paths[1].warnings);
-        let feeds: Vec<[f64; 3]> = paths[1].moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(*p) } else { None }).collect();
+        assert!(paths[2].warnings.is_empty(), "{:?}", paths[2].warnings);
+        let feeds: Vec<[f64; 3]> = paths[2].moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(*p) } else { None }).collect();
         // the tip 0.25 mm under the edge (the 0.5 mm chamfer across the middle of the 1 mm flank)
         let low = feeds.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
         assert!((low + 0.25).abs() < 1e-6, "{low}");
