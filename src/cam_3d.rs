@@ -970,6 +970,9 @@ pub(crate) fn waterline(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpat
             }
             l.iter()
                 .map(|p| {
+                    if p.is_nan() {
+                        return (DVec3::new(p.x, p.y, z), f64::NAN);   // a break: never kept, the runs split there
+                    }
                     let (_, a) = fin.d.drop(*p, s);
                     (DVec3::new(p.x, p.y, z), a)
                 })
@@ -1002,14 +1005,15 @@ pub(crate) fn waterline(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpat
 /// (the region above `z` is on the loop's left).
 fn tighten(d: &Dropper, l: &[DVec2], z: f64, below: f64, cell: f64, s: &mut Scratch) -> Vec<DVec2> {
     // A chord between two loop points can pass over a proud feature narrower than the grid (a pillar between
-    // recessed glass): look along the whole segment (not only its middle) for the point that dips most into the
-    // part, push it out past the surface (the bracket grows until it is clear) and split there.
+    // recessed glass on the Eclipse car mesh: 0.05-0.76 mm gouges). Look along the whole chord for its deepest
+    // dip, move that point to the nearest clear spot (either side, within two cells) and split there; where no
+    // clear spot is near, break the loop (a NaN point: the caller lifts over the gap, following the surface).
+    fn inside(d: &Dropper, q: DVec2, z: f64, below: f64, s: &mut Scratch) -> bool {
+        d.drop(q, s).0.max(below) > z + 1e-4
+    }
     fn split(d: &Dropper, a: DVec2, b: DVec2, z: f64, below: f64, cell: f64, depth: u32, s: &mut Scratch, out: &mut Vec<DVec2>) {
         let len = a.distance(b);
-        if depth >= 12 || len < 0.005 {
-            return;
-        }
-        let n = ((len / (cell * 0.25)).ceil() as usize).clamp(2, 64);
+        let n = ((len / (cell * 0.2)).ceil() as usize).clamp(2, 200);
         let mut worst: Option<(f64, DVec2)> = None;
         for i in 1..n {
             let q = a.lerp(b, i as f64 / n as f64);
@@ -1019,30 +1023,34 @@ fn tighten(d: &Dropper, l: &[DVec2], z: f64, below: f64, cell: f64, s: &mut Scra
             }
         }
         let Some((_, m)) = worst else { return };
-        let t = b - a;
-        let out_dir = DVec2::new(t.y, -t.x).normalize_or_zero();
-        let mut reach = cell;
-        let mut hi = m + out_dir * reach;
-        let mut k = 0;
-        while d.drop(hi, s).0.max(below) > z && k < 8 {
-            reach *= 2.0;
-            hi = m + out_dir * reach;
-            k += 1;
-        }
-        if d.drop(hi, s).0.max(below) > z {
+        if depth >= 12 || len < 0.005 {
+            out.push(DVec2::NAN);
             return;
         }
+        let t = b - a;
+        let nrm = DVec2::new(t.y, -t.x).normalize_or_zero();
+        let mut clear = None;
+        'search: for k in 1..=16 {
+            let r = cell * 2.0 * k as f64 / 16.0;
+            for dir in [nrm, -nrm] {
+                if !inside(d, m + dir * r, z, below, s) {
+                    clear = Some(m + dir * r);
+                    break 'search;
+                }
+            }
+        }
+        let Some(mut hi) = clear else {
+            out.push(DVec2::NAN);
+            return;
+        };
         let mut lo = m;
         for _ in 0..20 {
             let q = (lo + hi) / 2.0;
-            if d.drop(q, s).0.max(below) > z {
+            if inside(d, q, z, below, s) {
                 lo = q;
             } else {
                 hi = q;
             }
-        }
-        if hi.distance(m) < 0.0005 {
-            return;
         }
         split(d, a, hi, z, below, cell, depth + 1, s, out);
         out.push(hi);
