@@ -66,6 +66,48 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 - Results are compact JSON; `describe` shows an imported file's size and hash
   instead of its contents.
 
+## Showing a design to the user
+
+When you design a model, part or assembly for someone, show it to them with
+rCAD's own interactive web viewer (`export_web`), not a viewer page you write
+yourself (three.js, model-viewer, a VTK or matplotlib render passed off as the
+3D view, …). The page is the same viewer the editor's *File → Export web
+viewer (HTML)* writes: orbit, zoom, section planes, part list and details,
+ghosting by material, and for an assembly its mates moving within their
+limits, explode steps and `assembly_animation` motions. PNGs from `render`
+or `render_assembly` are fine next to it as quick pictures, but the
+interactive page is what you hand over.
+
+Headless, it is one tool call at the end of the script (or MCP session):
+
+```json
+{"tool": "export_web", "args": {"path": "out/bracket.html"}}
+```
+
+- No `assembly`: the parts of a Part Studio (`studio`, default the active one).
+- `"assembly": 0` (an index): that assembly, with its mates and animations.
+- `inline` (default `true`) gives one self-contained `.html`; `false` writes a
+  `.json` and `.bin` beside it, which must then be served over http.
+
+The page loads three.js from cdn.jsdelivr.net, so it needs a network
+connection to open; the model itself is inside the file.
+
+A model made outside rCAD (CadQuery, OpenSCAD, a STEP from elsewhere) is
+shown the same way: import it, then export the page.
+
+```json
+[
+  {"tool": "new_document", "args": {}},
+  {"tool": "import_file", "args": {"path": "tray.step"}},
+  {"tool": "export_web", "args": {"path": "tray.html"}}
+]
+```
+
+    rcad run show.json
+
+For machining work the matching pages are `export_cam_simulation` (toolpath
+playback) and `export_setup_sheet`.
+
 ## Tools
 
 | tool | what it does |
