@@ -1011,6 +1011,8 @@ fn tighten(d: &Dropper, l: &[DVec2], z: f64, below: f64, cell: f64, s: &mut Scra
     fn inside(d: &Dropper, q: DVec2, z: f64, below: f64, s: &mut Scratch) -> bool {
         d.drop(q, s).0.max(below) > z + 1e-4
     }
+    // dips shallower than this are left (the parallel finish's own tolerance); deeper ones are fixed or broken
+    const DIP: f64 = 0.003;
     fn split(d: &Dropper, a: DVec2, b: DVec2, z: f64, below: f64, cell: f64, depth: u32, s: &mut Scratch, out: &mut Vec<DVec2>) {
         let len = a.distance(b);
         let n = ((len / (cell * 0.2)).ceil() as usize).clamp(2, 200);
@@ -1018,7 +1020,7 @@ fn tighten(d: &Dropper, l: &[DVec2], z: f64, below: f64, cell: f64, s: &mut Scra
         for i in 1..n {
             let q = a.lerp(b, i as f64 / n as f64);
             let h = d.drop(q, s).0.max(below);
-            if h > z + 1e-4 && worst.is_none_or(|(w, _)| h > w) {
+            if h > z + DIP && worst.is_none_or(|(w, _)| h > w) {
                 worst = Some((h, q));
             }
         }
