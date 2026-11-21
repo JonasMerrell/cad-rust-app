@@ -43,6 +43,8 @@ writes its own files into `rcad-scan/` inside the folder.
 
 ## Using the app
 
+- **Install**: open `http://<netdash>:8765/` on the phone and tap *Download
+  the app* (the receiver serves `~/.local/share/rcad-capture/rcad-capture.apk`).
 - **Pair**: open `http://<netdash>:8765/pair?t=<token>` on the phone (scan a
   QR code of it), then tap *Open in rCAD Capture*. `rcad_capture_receiver.py
   pair-url` prints the link. Or type the address and token in Settings.

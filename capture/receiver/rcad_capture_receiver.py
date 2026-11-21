@@ -35,6 +35,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 VERSION = "1.0"
 CONFIG_DIR = os.path.expanduser("~/.config/rcad-capture")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
+# Served at /rcad-capture.apk so the phone can install the app from netdash.
+APK_FILE = os.path.expanduser("~/.local/share/rcad-capture/rcad-capture.apk")
 MAX_PHOTO_BYTES = 200 * 1024 * 1024
 PHOTO_EXT = (".jpg", ".jpeg", ".png", ".dng")
 RESERVED = {"rcad-scan", "session.json"}
@@ -292,6 +294,29 @@ class Handler(BaseHTTPRequestHandler):
         p = self.parts()
         if p == ["pair"]:
             return self.pair_page()
+        if p == []:
+            have = os.path.isfile(APK_FILE)
+            dl = ('<p><a href="/rcad-capture.apk" style="display:inline-block;padding:18px 28px;background:#1f6feb;'
+                  'color:#fff;border-radius:12px;text-decoration:none;font-size:20px">Download the app</a></p>'
+                  if have else "<p>No APK installed on this server yet.</p>")
+            return self.send_html(200, f"""<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
+<title>rCAD Capture</title>
+<body style="font-family:sans-serif;text-align:center;padding:40px 16px;background:#111;color:#eee">
+<h2>rCAD Capture on {html.escape(socket.gethostname())}</h2>{dl}
+<p style="color:#999">Then open the pairing link (or scan its QR code) to connect the app.</p>""")
+        if p == ["rcad-capture.apk"]:
+            try:
+                with open(APK_FILE, "rb") as f:
+                    data = f.read()
+            except OSError:
+                return self.send_json(404, {"error": "no APK on this server"})
+            self.send_response(200)
+            self.send_header("Content-Type", "application/vnd.android.package-archive")
+            self.send_header("Content-Disposition", 'attachment; filename="rcad-capture.apk"')
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+            return
         if p == ["api", "ping"]:
             if not self.authed():
                 return
