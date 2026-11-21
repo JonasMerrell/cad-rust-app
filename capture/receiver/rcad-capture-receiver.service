@@ -1,0 +1,13 @@
+# systemd user unit: cp to ~/.config/systemd/user/ then
+#   systemctl --user daemon-reload && systemctl --user enable --now rcad-capture-receiver
+[Unit]
+Description=rCAD Capture photo receiver (photogrammetry uploads to ~/scans)
+After=network-online.target
+
+[Service]
+ExecStart=/usr/bin/python3 %h/src/cad-rust-app/capture/receiver/rcad_capture_receiver.py serve --root %h/scans --port 8765
+Restart=on-failure
+RestartSec=3
+
+[Install]
+WantedBy=default.target
