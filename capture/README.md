@@ -65,10 +65,13 @@ writes its own files into `rcad-scan/` inside the folder.
 ## Receiver on netdash
 
 ```sh
+mkdir -p ~/.local/share/rcad-capture ~/.config/systemd/user
+cp capture/receiver/rcad_capture_receiver.py ~/.local/share/rcad-capture/
+cp capture/android/app/build/outputs/apk/release/app-release.apk ~/.local/share/rcad-capture/rcad-capture.apk
 cp capture/receiver/rcad-capture-receiver.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now rcad-capture-receiver
-python3 capture/receiver/rcad_capture_receiver.py pair-url
+python3 ~/.local/share/rcad-capture/rcad_capture_receiver.py pair-url
 ```
 
 Port 8765, saves to `~/scans`, token in `~/.config/rcad-capture/token`
