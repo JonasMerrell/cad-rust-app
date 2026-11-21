@@ -64,7 +64,9 @@ pub fn import_csv(text: &str) -> Result<Imported, String> {
             ("tool_taperAngle", "TA"),
             ("tool_threadPitch", "TP"),
             ("tool_shoulderDiameter", "shoulder-diameter"),
+            ("tool_shoulderDiameter", "shoulder-diameter"),
             ("tool_shoulderLength", "shoulder-length"),
+            ("tool_numberOfTeeth", "NT"),
         ] {
             if let Some(v) = n(field) {
                 geometry.insert(g.into(), v.into());
@@ -245,7 +247,13 @@ fn fusion_tool(e: &Value) -> Result<Option<Tool>, String> {
             t.neck_length = len(&["shoulder-length"]).filter(|v| *v > t.flute_length).unwrap_or(0.0);
         }
         ToolKind::ThreadMill => {
-            t.cutting_width = t.flute_length;
+            // the toothed length: a single-profile mill (one tooth) cuts one pitch per lap, so it must
+            // go round the whole thread depth; without a tooth count take the flutes as all teeth
+            let pitch = len(&["TP", "thread-pitch"]).filter(|p| *p > 0.0).unwrap_or_else(|| coarse_pitch(d));
+            t.cutting_width = match num(&["NT"]).filter(|n| *n >= 1.0) {
+                Some(n) => (n.round() * pitch).min(t.flute_length),
+                None => t.flute_length,
+            };
             t.neck_diameter = len(&["shoulder-diameter", "DN"]).unwrap_or(d * 0.7);
         }
         _ => {}
@@ -435,6 +443,23 @@ mod tests {
         let tsv = "Number (tool_number)\tType (tool_type)\tDiameter (tool_diameter)\n7\tflat end mill\t2\n";
         assert_eq!(import_csv(tsv).unwrap().tools[0].number, 7);
         assert!(import_csv("a,b\n1,2").is_err());
+    }
+
+    #[test]
+    fn reads_neck_and_teeth_from_fusion_csv() {
+        let csv = "tool_type,tool_description,tool_number,tool_diameter,tool_numberOfFlutes,tool_numberOfTeeth,tool_fluteLength,tool_overallLength,tool_shaftDiameter,tool_shoulderDiameter,tool_cornerRadius,tool_taperAngle,tool_threadPitch\n\
+            slot mill,,17,16,6,,3,62,6,6,0,,\n\
+            thread mill,,19,6,4,1,20,50,6,3.40192,,,1.5\n\
+            tapered mill,SpeTool W01004,50,1.9233,2,,15,38.1,3.175,3.17346,1,2.24,\n";
+        let r = import_csv(csv).unwrap();
+        assert_eq!(r.tools.len(), 3, "{:?}", r.skipped);
+        let s = &r.tools[0];
+        assert_eq!((s.kind, s.cutting_width, s.neck_diameter, s.shank_diameter), (ToolKind::Slot, 3.0, 6.0, 6.0));
+        let t = &r.tools[1];
+        // one tooth: cuts one pitch per lap, so it isn't taken as 20 mm of teeth
+        assert_eq!((t.kind, t.pitch, t.cutting_width, t.neck_diameter), (ToolKind::ThreadMill, 1.5, 1.5, 3.40192));
+        let b = &r.tools[2];
+        assert_eq!((b.kind, b.corner_radius, b.angle, b.shank_diameter), (ToolKind::TaperedBall, 1.0, 2.24, 3.175));
     }
 
     #[test]
