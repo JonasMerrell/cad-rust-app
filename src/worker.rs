@@ -46,6 +46,10 @@ pub enum Reply {
 
 /// Entry point of the worker process.
 pub fn worker_main() {
+    // a crash inside OCCT (e.g. ShapeUpgrade_UnifySameDomain on an invalid boolean result)
+    // comes back as a feature error instead of killing the worker, which would otherwise be
+    // respawned only to crash again on the same rebuild
+    opencascade_sys::extra::ex_catch_signals();
     let stdin = std::io::stdin();
     let send = |r: &Reply| {
         let mut out = std::io::stdout().lock();
