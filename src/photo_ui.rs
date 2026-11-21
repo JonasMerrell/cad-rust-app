@@ -133,8 +133,8 @@ pub fn frame(app: &mut App, ctx: &egui::Context) {
     let mut add = false;
     egui::Window::new("Scan from photos")
         .open(&mut open)
-        .default_size([560.0, 620.0])
-        .default_pos(ctx.content_rect().center() - egui::vec2(280.0, 300.0))
+        .default_size([560.0, 700.0])
+        .default_pos(ctx.content_rect().center() - egui::vec2(280.0, 360.0))
         .constrain(true)
         .collapsible(false)
         .resizable(true)
@@ -228,7 +228,10 @@ fn setup_ui(p: &mut PhotoUi, ui: &mut Ui) {
             ui.label("");
             ui.horizontal(|ui| {
                 let cuda = p.tools.as_ref().is_some_and(|t| t.cuda);
-                ui.add_enabled(cuda, egui::Checkbox::new(&mut p.gpu, "Use the GPU")).on_disabled_hover_text("This COLMAP was built without CUDA");
+                let mut gpu = p.gpu && cuda;
+                if ui.add_enabled(cuda, egui::Checkbox::new(&mut gpu, "Use the GPU")).on_disabled_hover_text("This COLMAP was built without CUDA").changed() {
+                    p.gpu = gpu;
+                }
                 let glomap = p.tools.as_ref().is_some_and(|t| t.glomap.is_some());
                 ui.add_enabled(glomap, egui::Checkbox::new(&mut p.glomap, "Solve cameras with GLOMAP")).on_disabled_hover_text("GLOMAP isn't installed");
             });
@@ -515,7 +518,7 @@ fn ruler_ui(p: &mut PhotoUi, rec: &Reconstruction, ui: &mut Ui) {
     let fit = ui.available_width().max(200.0) / shown.size[0] as f32;
     let scale = fit * p.zoom;
     let disp = egui::vec2(shown.size[0] as f32 * scale, shown.size[1] as f32 * scale);
-    let view_h = (ui.available_width() * shown.size[1] as f32 / shown.size[0] as f32).min(420.0);
+    let view_h = (ui.available_width() * shown.size[1] as f32 / shown.size[0] as f32).min(320.0);
     egui::ScrollArea::both().id_salt("scan-photo").max_height(view_h).auto_shrink([false, true]).show(ui, |ui| {
         let (rect, resp) = ui.allocate_exact_size(disp, egui::Sense::click());
         let painter = ui.painter_at(rect);

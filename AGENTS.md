@@ -121,6 +121,7 @@ playback) and `export_setup_sheet`.
 | `sketch_info` | points, curves, degrees of freedom, regions |
 | `add_feature` / `edit_feature` / `delete_feature` | extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linear/circular/curve/sketch-point patterns, mirror, boolean, split, transform, deleteBody, sheetMetal, heal |
 | `import_file` | bring in STEP, Parasolid .x_t, IGES (exact solids), STL or OBJ (meshes become solids with merged flat faces); stored in the document. DXF and SVG drawings go into a sketch (new, or `sketch_id`) |
+| `scan_photos` | photogrammetry: a folder of photos (or a capture-app session) becomes a mesh reference body, via COLMAP and OpenMVS (installed separately); table cut away, stood on XY, scaled from a reference block, two ruler clicks or a number; takes minutes |
 | `printability` / `send_to_slicer` | overhang and thin-wall check; stage the parts as STL in the orcaweb slicer |
 | `set_part` / `set_parts` / `add_decal` | part name, colour, material, finish, hidden (one part, or a list with one rebuild); the names show in `describe` and every result; images on faces |
 | `feature_defaults` | a feature kind's params with their defaults (no kind: the list of kinds) |

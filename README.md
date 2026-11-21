@@ -61,6 +61,12 @@ build the part from features with a rollback bar, configurations, materials and 
   angle), section view, X-ray, and isolate (I: show only the selected parts or instances).
 - **Command search** like Fusion 360: press S (or / or Ctrl+K while sketching) to find and run any
   command by name.
+- **Scan from photos** (File menu): photogrammetry turns 20-100 photos of a part into a mesh
+  reference body to measure and model against. rCAD runs [COLMAP](https://colmap.github.io) for
+  the cameras (and the dense surface on an NVIDIA GPU) and [OpenMVS](https://github.com/cdcseacave/openMVS)
+  for the dense surface on the CPU, as separate programs you install. It cuts away the table,
+  stands the part on XY and sets the scale from a 1-2-3 block (or any block or ball) beside the
+  part, from two ruler marks clicked on a photo, or from a number. See [docs/photogrammetry.md](docs/photogrammetry.md).
 
 </details>
 
@@ -328,6 +334,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/doc.rs` | document model (features, references, variables), JSON format |
 | `src/kernel.rs` | feature evaluation on OpenCascade, meshing |
 | `src/import.rs` | STEP and IGES import |
+| `src/photogrammetry.rs`, `src/photo_mesh.rs`, `src/photo_ui.rs` | Scan from photos: runs COLMAP/OpenMVS, cleans, levels, scales and thins the mesh, and its window |
 | `src/parasolid.rs` | Parasolid text (.x_t) reader, turned into STEP on import |
 | `src/worker.rs` | kernel worker process protocol |
 | `src/expr.rs` | expressions and units |

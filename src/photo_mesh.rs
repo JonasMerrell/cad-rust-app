@@ -624,8 +624,14 @@ pub fn clean(m: &Mesh, c: &Cleanup, up_hint: Option<DVec3>) -> Cleaned {
             let best = (0..n)
                 .filter(|&k| verts[k].len() > 30)
                 .map(|k| {
-                    let fp = footprint(&verts[k].iter().map(|p| (p.x, p.y)).collect::<Vec<_>>());
-                    let h = verts[k].iter().map(|p| p.z).fold(f64::NEG_INFINITY, f64::max) - pl.d;
+                    // the height from the top face (a high percentile, past stray points) and the
+                    // footprint from the middle of the sides: a reconstructed block flares out
+                    // where it meets the table and rounds over at the top
+                    let mut zs: Vec<f64> = verts[k].iter().map(|p| p.z - pl.d).collect();
+                    zs.sort_by(f64::total_cmp);
+                    let h = zs[(zs.len() as f64 * 0.995) as usize];
+                    let mid: Vec<(f64, f64)> = verts[k].iter().filter(|p| (p.z - pl.d) > 0.3 * h && (p.z - pl.d) < 0.8 * h).map(|p| (p.x, p.y)).collect();
+                    let fp = footprint(&if mid.len() > 10 { mid } else { verts[k].iter().map(|p| (p.x, p.y)).collect() });
                     let (s, spread) = reference_fit([fp[0], fp[1], h], reference);
                     (k, s, spread)
                 })
