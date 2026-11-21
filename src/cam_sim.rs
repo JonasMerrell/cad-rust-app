@@ -73,8 +73,18 @@ struct Cutter {
     shank_z: f32,
     /// Cells under the holder (every other cell) and how far above the tip its underside is there.
     holder: Vec<(i32, i32, f32)>,
-    /// Cuts under an overhang (slot mills, thread mills): not modelled in the height map.
+    /// Cuts under an overhang (slot mills, dovetails, thread mills): the head takes material out of the
+    /// middle of a column (see `Sim::voids`), and is checked against the part's solid, not its top.
     undercut: bool,
+    /// An undercut cutter's head: its top above the tip by distance from the axis, every LUT_STEP mm
+    /// (the head's full height on the neck: what is above that is for the shank check).
+    head: Vec<f32>,
+    /// Where an undercut tool's neck ends and the wider shank starts: (radius, height above the tip).
+    upper: Option<(f64, f32)>,
+    /// A dovetail's flank angle from its bottom face (radians), for the depth of a cut into the part.
+    flank: f64,
+    /// For a back chamfer: the heights above the tip where the flank may cut into the part's edge, and how far.
+    chamfer_band: Option<(f32, f32, f32)>,
     /// How deep it may cut into the part without it counting (chamfers, taps, threads).
     allowance: f32,
     /// For chamfers and edge breaks: the cells where `allowance` holds (next to an edge whose face drops away
@@ -112,7 +122,7 @@ pub const LUT_STEP: f64 = 0.002;
 /// Height of a tool's cutting surface above its tip, every LUT_STEP mm out from the axis
 /// (empty for tools that cut under an overhang).
 pub fn tool_lut(t: &Tool) -> Vec<f32> {
-    if matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill) {
+    if t.kind.is_undercut() {
         return vec![];
     }
     let prof = t.profile();
@@ -138,19 +148,14 @@ pub fn tool_lut(t: &Tool) -> Vec<f32> {
 /// each reaching up to the next one's bottom (the last one has no top).
 pub fn tool_body(t: &Tool) -> Vec<(f64, f64)> {
     let r = t.radius();
-    let undercut = matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill);
-    let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
-    let neck = if undercut {
-        if t.neck_diameter > 0.0 {
-            t.neck_diameter / 2.0
-        } else {
-            r * 0.6
-        }
-    } else {
-        (t.shank_diameter / 2.0).max(0.1)
-    };
+    let undercut = t.kind.is_undercut();
+    let flutes = if undercut { t.head_height() } else { t.flute_length.max(r) };
+    let neck = if undercut { t.neck_radius() } else { (t.shank_diameter / 2.0).max(0.1) };
     let stick = t.stickout.max(flutes + 1.0);
     let mut body = vec![(r, 0.0), (neck, flutes)];
+    if let Some((sr, z)) = t.shank_step().filter(|s| s.1 < stick) {
+        body.push((sr, z));
+    }
     body.extend(t.holder_outline().iter().map(|(hr, h)| (*hr, stick + h)));
     body
 }
@@ -158,19 +163,19 @@ pub fn tool_body(t: &Tool) -> Vec<(f64, f64)> {
 impl Cutter {
     fn new(t: &Tool, cell: f64, allowance: f32) -> Cutter {
         let r = t.radius();
-        let undercut = matches!(t.kind, ToolKind::Slot | ToolKind::ThreadMill);
+        let undercut = t.kind.is_undercut();
         let lut = tool_lut(t);
-        let flutes = if undercut { t.cutting_width.max(0.5) } else { t.flute_length.max(r) };
-        let neck = if undercut {
-            if t.neck_diameter > 0.0 {
-                t.neck_diameter / 2.0
-            } else {
-                r * 0.6
-            }
-        } else {
-            (t.shank_diameter / 2.0).max(0.1)
-        };
+        let flutes = if undercut { t.head_height() } else { t.flute_length.max(r) };
+        let neck = if undercut { t.neck_radius() } else { (t.shank_diameter / 2.0).max(0.1) };
         let stick = t.stickout.max(flutes + 1.0);
+        let head: Vec<f32> = if undercut {
+            // up to the head's top on the neck too: material above it there is the neck running into it
+            (0..=((r / LUT_STEP).ceil() as usize)).map(|i| t.head_top((i as f64 * LUT_STEP).min(r)).unwrap_or(0.0).min(flutes) as f32).collect()
+        } else {
+            vec![]
+        };
+        let upper = t.shank_step().filter(|s| s.1 < stick).map(|(sr, z)| (sr, z as f32));
+        let flank = if t.kind == ToolKind::Dovetail { t.dovetail_angle().to_radians() } else { std::f64::consts::FRAC_PI_2 };
         let outline = t.holder_outline();
         let reach = outline.iter().map(|p| p.0).fold(neck, f64::max);
         let n = (reach / (cell * 2.0)).ceil() as i32;
@@ -184,19 +189,7 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall).then(|| (2.0 * r, area_limit(2.0 * r, &t.material))), nominal: 1.0, geom: {
-            let (modulus, stress_limit) = crate::cam_cutting::tool_steel(&t.material);
-            crate::cam_cutting::ToolGeom {
-                diameter: 2.0 * r,
-                ball: matches!(t.kind, ToolKind::Ball | ToolKind::TaperedBall),
-                flutes: t.flutes,
-                stickout: stick,
-                flute_length: flutes,
-                shank: if t.shank_diameter > 0.0 { t.shank_diameter } else { 2.0 * r },
-                modulus,
-                stress_limit,
-            }
-        }, rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
+        Cutter { radius: r, lut, head, upper, flank, chamfer_band: None, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail).then(|| (2.0 * r, area_limit(if undercut { 2.0 * neck } else { 2.0 * r }, &t.material))), nominal: 1.0, geom: crate::cam_cutting::tool_geom(t), rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
     }
 }
 
@@ -229,6 +222,8 @@ pub struct Blocks {
     pub l: Vec<f64>,
     pub cls: Vec<u8>,
     pub cuts: Vec<[(u8, f32); 3]>,
+    /// Gaps an undercut cutter left inside a block's column (see `Sim::voids`), by block.
+    pub gaps: std::collections::HashMap<usize, Vec<(f64, f64)>>,
 }
 
 pub struct Sim {
@@ -296,6 +291,29 @@ pub struct Sim {
     pub chatter: Vec<OpChatter>,
     /// When set (`record_loads`), every load sample of every sideways cut, in order (the feed schedule).
     pub profile: Option<Vec<LoadSample>>,
+    /// Gaps an undercut cutter left inside columns of stock, by cell: (bottom, top) going up, between the
+    /// column's `lo` and its top.
+    pub voids: std::collections::HashMap<u32, Vec<(f32, f32)>>,
+    /// The part's solid by cell, for undercut cutters (worked out only when a toolpath uses one): its lowest
+    /// surface (NEG_INFINITY: none) and the gaps between there and `part` (under overhangs).
+    part_lo: Vec<f32>,
+    part_gaps: std::collections::HashMap<u32, Vec<(f32, f32)>>,
+}
+
+/// How much of [a, b] lies inside the column [lo, hi] once the gaps (sorted, disjoint) are taken out.
+fn overlap(a: f32, b: f32, lo: f32, hi: f32, gaps: &[(f32, f32)]) -> f32 {
+    let (a, b) = (a.max(lo), b.min(hi));
+    if b <= a {
+        return 0.0;
+    }
+    let mut v = b - a;
+    for &(g0, g1) in gaps {
+        let (x, y) = (g0.max(a), g1.min(b));
+        if y > x {
+            v -= y - x;
+        }
+    }
+    v.max(0.0)
 }
 
 /// One tool position of a sideways cut as the load check sees it: the cut over about the last millimetre
@@ -606,6 +624,9 @@ impl Sim {
             chip_ops: vec![],
             chatter: vec![],
             profile: None,
+            voids: Default::default(),
+            part_lo: vec![],
+            part_gaps: Default::default(),
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -641,10 +662,72 @@ impl Sim {
             }
         }
         s.fixture_top = s.fixtures.iter().map(|f| f.1.z).fold(f64::NEG_INFINITY, f64::max);
+        if paths.iter().any(|tp| cam.path_tool(tp.op, tp.tool).is_some_and(|t| t.kind.is_undercut())) {
+            s.part_solid(part);
+        }
         for tp in paths {
             s.push(cam, tp);
         }
         s
+    }
+
+    /// The part's solid along each cell's vertical line (for undercut cutters): every crossing of its
+    /// surface, paired off going up into stretches of material.
+    fn part_solid(&mut self, part: &Part) {
+        let (x0, y0, cell, nx, ny) = (self.x0, self.y0, self.cell, self.nx, self.ny);
+        let mut hits: Vec<(u32, f32)> = vec![];
+        for t in &part.tris {
+            let n = (t[1] - t[0]).cross(t[2] - t[0]);
+            if n.z.abs() <= 1e-12 {
+                continue;
+            }
+            let (mnx, mxx) = (t[0].x.min(t[1].x).min(t[2].x), t[0].x.max(t[1].x).max(t[2].x));
+            let (mny, mxy) = (t[0].y.min(t[1].y).min(t[2].y), t[0].y.max(t[1].y).max(t[2].y));
+            let i0 = (((mnx - x0) / cell).floor().max(0.0)) as usize;
+            let i1 = (((mxx - x0) / cell).ceil().max(0.0) as usize).min(nx - 1);
+            let j0 = (((mny - y0) / cell).floor().max(0.0)) as usize;
+            let j1 = (((mxy - y0) / cell).ceil().max(0.0) as usize).min(ny - 1);
+            let d = (t[1].x - t[0].x) * (t[2].y - t[0].y) - (t[2].x - t[0].x) * (t[1].y - t[0].y);
+            if d.abs() < 1e-14 || i0 > i1 || j0 > j1 {
+                continue;
+            }
+            for j in j0..=j1 {
+                for i in i0..=i1 {
+                    let (px, py) = (x0 + i as f64 * cell, y0 + j as f64 * cell);
+                    let a = ((t[1].x - px) * (t[2].y - py) - (t[2].x - px) * (t[1].y - py)) / d;
+                    let b = ((t[2].x - px) * (t[0].y - py) - (t[0].x - px) * (t[2].y - py)) / d;
+                    let c = 1.0 - a - b;
+                    // half-open edges, so a line through an edge shared by two triangles counts once
+                    if a > -1e-12 && b > -1e-12 && c >= -1e-12 {
+                        hits.push(((j * nx + i) as u32, (a * t[0].z + b * t[1].z + c * t[2].z) as f32));
+                    }
+                }
+            }
+        }
+        hits.sort_by(|p, q| p.0.cmp(&q.0).then(p.1.total_cmp(&q.1)));
+        self.part_lo = vec![f32::NEG_INFINITY; nx * ny];
+        self.part_gaps.clear();
+        let mut k = 0;
+        while k < hits.len() {
+            let cell = hits[k].0;
+            let mut zs: Vec<f32> = vec![];
+            while k < hits.len() && hits[k].0 == cell {
+                // the same height twice (a vertex or edge hit from both sides) is one crossing
+                if zs.last().is_none_or(|z| hits[k].1 - z > 1e-4) {
+                    zs.push(hits[k].1);
+                }
+                k += 1;
+            }
+            if zs.len() < 2 {
+                continue;
+            }
+            self.part_lo[cell as usize] = zs[0];
+            // in, out, in, out …: the gaps are each out to the next in
+            let gaps: Vec<(f32, f32)> = zs.chunks(2).collect::<Vec<_>>().windows(2).filter_map(|w| (w[0].len() == 2).then(|| (w[0][1], w[1][0]))).filter(|g| g.1 > g.0).collect();
+            if !gaps.is_empty() {
+                self.part_gaps.insert(cell, gaps);
+            }
+        }
     }
 
     /// Queue another toolpath to run after the ones already given.
@@ -665,6 +748,13 @@ impl Sim {
             _ => 0.02,
         };
         let mut cutter = Cutter::new(tool, self.cell, allowance);
+        // a dovetail's back chamfer: the flank cuts the edge on purpose, across the middle of its height
+        if let Some(b) = op.filter(|o| o.kind == OpKind::Contour).and_then(|o| crate::cam_paths::back_chamfer(o, tool, 0.0)) {
+            // the edge is `-b.tip` above the tip; the chamfer runs up the wall from there
+            let (g, width) = (-b.tip, tool.radius() - (-b.tip) / tool.dovetail_angle().to_radians().tan() - b.offset);
+            let rise = width * tool.dovetail_angle().to_radians().tan();
+            cutter.chamfer_band = Some(((g - 0.05) as f32, (g + rise + 0.05) as f32, (width + 0.05) as f32));
+        }
         if let Some(o) = op.filter(|o| matches!(o.kind, OpKind::Chamfer | OpKind::Deburr)) {
             cutter.near_edge = Some(std::sync::Arc::new(self.near_edges(o.chamfer.max(0.05))));
         }
@@ -1213,13 +1303,29 @@ impl Sim {
                     let s = self.stock[k];
                     if s > z {
                         let floor = self.lo[k];
-                        let cut = s - z.max(floor);
+                        let mut cut = s - z.max(floor);
+                        // gaps an undercut cutter left in the column: no material there to take, and one the
+                        // tip ends in opens the column down to its bottom
+                        let mut top_z = z;
+                        if !self.voids.is_empty() {
+                            if let Some(v) = self.voids.get_mut(&(k as u32)) {
+                                let zf = z.max(floor);
+                                cut = (cut - v.iter().map(|g| (g.1.min(s) - g.0.max(zf)).max(0.0)).sum::<f32>()).max(0.0);
+                                if let Some(g) = v.iter().find(|g| g.0 < z && g.1 >= z - 1e-4) {
+                                    top_z = g.0;
+                                }
+                                v.retain(|g| g.1 < top_z);
+                                if v.is_empty() {
+                                    self.voids.remove(&(k as u32));
+                                }
+                            }
+                        }
                         removed += cut * area;
                         if !c.probe || rho <= probe_inner {
                             deepest = deepest.max(cut);
                         }
                         // cut right through the column: nothing left over this cell
-                        self.stock[k] = if z <= floor { EMPTY } else { z };
+                        self.stock[k] = if top_z <= floor { EMPTY } else { top_z };
                         let tag = (ci + 1).min(250) as u8;
                         let h = &mut self.cuts[k];
                         if h[0].0 != tag {
@@ -1235,6 +1341,102 @@ impl Sim {
                             // breadth sideways reads as a deep cut from above
                             let d = (self.part[k] - z) / self.slope_factor(i, j);
                             if d > allowance {
+                                gouge = gouge.max(d);
+                                self.gouged[k] = true;
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        if c.undercut && !c.head.is_empty() {
+            let n = (c.radius / self.cell).ceil() as i32 + 1;
+            let r2 = c.radius * c.radius;
+            let inner = (c.radius - 0.04).max(0.0);
+            let tag = (ci + 1).min(250) as u8;
+            let (cos_f, solid) = (c.flank.cos() as f32, !self.part_lo.is_empty());
+            for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
+                let dy = self.y0 + j as f64 * self.cell - p.y;
+                for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
+                    let dx = self.x0 + i as f64 * self.cell - p.x;
+                    let d2 = dx * dx + dy * dy;
+                    if d2 > r2 {
+                        continue;
+                    }
+                    let rho = d2.sqrt();
+                    let rise = c.head[((rho / LUT_STEP) as usize).min(c.head.len() - 1)];
+                    // the head takes [a, b] out of the column
+                    let (a, b) = (tip, tip + rise);
+                    let k = (j * nx + i) as usize;
+                    let (s, floor) = (self.stock[k], self.lo[k]);
+                    if s != EMPTY && b > floor && a < s {
+                        let gaps = self.voids.get(&(k as u32)).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let cut = overlap(a, b, floor, s, gaps);
+                        if cut > 0.0 {
+                            removed += cut * area;
+                            deepest = deepest.max(cut);
+                            let h = &mut self.cuts[k];
+                            if h[0].0 != tag {
+                                h.rotate_right(1);
+                                h[0] = (tag, s);
+                            }
+                        }
+                        let (mut hi, mut lo) = (s, floor);
+                        let mut v: Vec<(f32, f32)> = gaps.to_vec();
+                        if b >= hi {
+                            hi = a;
+                        } else if a <= lo {
+                            lo = b;
+                        } else {
+                            v.push((a, b));
+                        }
+                        // merge the gaps and fold the ones that reach the top or bottom into the column's ends
+                        v.sort_by(|x, y| x.0.total_cmp(&y.0));
+                        let mut m: Vec<(f32, f32)> = vec![];
+                        for g in v {
+                            match m.last_mut() {
+                                Some(l) if g.0 <= l.1 => l.1 = l.1.max(g.1),
+                                _ => m.push(g),
+                            }
+                        }
+                        while m.last().is_some_and(|g| g.1 >= hi - 1e-4) {
+                            hi = hi.min(m.pop().unwrap().0);
+                        }
+                        while m.first().is_some_and(|g| g.0 <= lo + 1e-4) {
+                            lo = lo.max(m.remove(0).1);
+                        }
+                        m.retain(|g| g.0 > lo && g.1 < hi);
+                        if hi <= lo + 1e-4 {
+                            self.stock[k] = EMPTY;
+                            self.voids.remove(&(k as u32));
+                        } else {
+                            self.stock[k] = hi;
+                            self.lo[k] = lo;
+                            if m.is_empty() {
+                                self.voids.remove(&(k as u32));
+                            } else {
+                                self.voids.insert(k as u32, m);
+                            }
+                        }
+                    }
+                    // into the part: the head against the part's solid along this line
+                    if solid && rho <= inner && self.part_lo[k] > f32::NEG_INFINITY {
+                        let pg = self.part_gaps.get(&(k as u32)).map(|v| v.as_slice()).unwrap_or(&[]);
+                        let (pa, pb) = (a + 0.02, b - 0.02);
+                        let into = overlap(pa, pb, self.part_lo[k], self.part[k], pg);
+                        if into > 0.0 {
+                            // through the bottom face it is as deep as it overlaps; through the flank, across it
+                            let bottom = overlap(pa, pa + 1e-3, self.part_lo[k], self.part[k], pg) > 0.0;
+                            let d = if bottom { into } else { into * cos_f };
+                            // a back chamfer: the flank may cut the part where it is meant to take the edge off
+                            let allowed = match c.chamfer_band {
+                                Some((z0, z1, depth)) if !bottom => {
+                                    let inside = overlap((tip + z0).max(pa), (tip + z1).min(pb), self.part_lo[k], self.part[k], pg).min(into);
+                                    if (into - inside) * cos_f <= c.allowance { depth.max(c.allowance) } else { c.allowance }
+                                }
+                                _ => c.allowance,
+                            };
+                            if d > allowed {
                                 gouge = gouge.max(d);
                                 self.gouged[k] = true;
                             }
@@ -1260,6 +1462,24 @@ impl Sim {
                     let s = self.stock[(j * nx + i) as usize];
                     if s > sz + 0.01 {
                         shank_hit = shank_hit.max(s - sz);
+                    }
+                }
+            }
+            // an undercut tool's full shank above its neck
+            if let Some((ur, uz)) = c.upper {
+                let (uz, rs) = (tip + uz, ur - 0.02);
+                let n = (rs / self.cell).ceil() as i32;
+                for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
+                    let dy = self.y0 + j as f64 * self.cell - p.y;
+                    for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
+                        let dx = self.x0 + i as f64 * self.cell - p.x;
+                        if dx * dx + dy * dy > rs * rs {
+                            continue;
+                        }
+                        let s = self.stock[(j * nx + i) as usize];
+                        if s != EMPTY && s > uz + 0.01 {
+                            shank_hit = shank_hit.max(s - uz);
+                        }
                     }
                 }
             }
@@ -1310,12 +1530,14 @@ impl Sim {
         let mut l = vec![0.0f64; mx * my];
         let mut cls = vec![0u8; mx * my];
         let mut cuts = vec![[(0u8, 0.0f32); 3]; mx * my];
+        let mut gaps = std::collections::HashMap::new();
         for bj in 0..my {
             for bi in 0..mx {
                 let mut top = f32::INFINITY;
                 let mut low = self.bottom;
                 let mut g = false;
                 let mut by = [(0u8, 0.0f32); 3];
+                let mut from: Option<usize> = None;
                 for j in bj * k..((bj + 1) * k).min(self.ny) {
                     for i in bi * k..((bi + 1) * k).min(self.nx) {
                         let q = j * self.nx + i;
@@ -1323,11 +1545,15 @@ impl Sim {
                             top = self.stock[q];
                             by = self.cuts[q];
                             low = self.lo[q];
+                            from = Some(q);
                         }
                         g |= self.gouged[q];
                     }
                 }
                 let b = bj * mx + bi;
+                if let Some(v) = from.and_then(|q| self.voids.get(&(q as u32))) {
+                    gaps.insert(b, v.iter().map(|g| (g.0 as f64, g.1 as f64)).collect());
+                }
                 l[b] = (low as f64).max(bz);
                 h[b] = if top == EMPTY { l[b] } else { (top as f64).max(l[b]) };
                 cuts[b] = by;
@@ -1342,7 +1568,7 @@ impl Sim {
                 };
             }
         }
-        Blocks { k, mx, my, h, l, cls, cuts }
+        Blocks { k, mx, my, h, l, cls, cuts, gaps }
     }
 
     /// The tool and holder bands of the cutter of toolpath `ci` (see `tool_body`) and how far it sticks out of
@@ -1370,7 +1596,11 @@ impl Sim {
     /// positions and per-triangle colour class: CLASS_STOCK (untouched), CLASS_GOUGE, CLASS_EARLIER
     /// (machined in an earlier setup) or CLASS_PATH + the index of the toolpath that cut it last.
     pub fn mesh(&self, max_cells: usize) -> (Vec<[DVec3; 3]>, Vec<u8>) {
-        let Blocks { k, mx, my, h, l, cls, cuts } = self.blocks(max_cells);
+        let Blocks { k, mx, my, h, l, cls, cuts, gaps } = self.blocks(max_cells);
+        let no_gaps: Vec<(f64, f64)> = vec![];
+        let gaps_of = |b: usize| gaps.get(&b).unwrap_or(&no_gaps);
+        // the class of what cut a block's gaps: the newest toolpath that cut it
+        let gap_class = |b: usize| if cuts[b][0].0 > 0 { CLASS_PATH.saturating_add(cuts[b][0].0 - 1) } else { CLASS_EARLIER };
         let bz = self.bottom as f64;
         let c = self.cell * k as f64;
         let mut tris = vec![];
@@ -1398,6 +1628,14 @@ impl Sim {
                 // underneath: the stock's bottom, or a surface an earlier setup machined
                 let under = if zl > bz + 1e-3 { CLASS_EARLIER } else { CLASS_STOCK };
                 quad(DVec3::new(xa, ya, zl), DVec3::new(xa, yb, zl), DVec3::new(xb, yb, zl), DVec3::new(xb, ya, zl), under);
+                // gaps an undercut cutter left inside the column: their ceiling and floor
+                let b = j * mx + i;
+                let own = gaps_of(b);
+                for &(g0, g1) in own {
+                    let gc = gap_class(b);
+                    quad(DVec3::new(xa, ya, g1), DVec3::new(xa, yb, g1), DVec3::new(xb, yb, g1), DVec3::new(xb, ya, g1), gc);
+                    quad(DVec3::new(xa, ya, g0), DVec3::new(xb, ya, g0), DVec3::new(xb, yb, g0), DVec3::new(xa, yb, g0), gc);
+                }
                 // sides: the parts of [zl, z] the neighbour doesn't cover. Above it they were exposed by the cuts
                 // that took the neighbour down (newest lowest), below it by an earlier setup; the stock's outer
                 // faces keep the stock's colour.
@@ -1432,6 +1670,35 @@ impl Sim {
                         if below > zl {
                             segs.push((zl, below.min(z), CLASS_EARLIER));
                         }
+                        // the neighbour's own gaps open this side too
+                        if solid {
+                            for &(g0, g1) in gaps_of(nb) {
+                                let (a, b) = (g0.max(zl).max(nl), g1.min(z).min(nh));
+                                if b > a {
+                                    segs.push((a, b, gap_class(nb)));
+                                }
+                            }
+                        }
+                    }
+                    // nothing to draw across this column's own gaps
+                    if !own.is_empty() {
+                        let mut cut = vec![];
+                        for (a, b, c) in segs {
+                            let mut at = a;
+                            for &(g0, g1) in own {
+                                if g1 <= at || g0 >= b {
+                                    continue;
+                                }
+                                if g0 > at {
+                                    cut.push((at, g0, c));
+                                }
+                                at = at.max(g1);
+                            }
+                            if at < b {
+                                cut.push((at, b, c));
+                            }
+                        }
+                        segs = cut;
                     }
                     for (a, b, c) in segs {
                         if b <= a + 1e-6 {

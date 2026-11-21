@@ -1624,7 +1624,7 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                 _ => part_bottom,
             };
             opt(ui, "Bottom", &mut o.bottom, auto_bottom, " mm", "found from the part");
-            if tool.as_ref().map(|t| t.kind != ToolKind::Slot).unwrap_or(true) {
+            if tool.as_ref().map(|t| !matches!(t.kind, ToolKind::Slot | ToolKind::Dovetail)).unwrap_or(true) {
                 opt(ui, "Stepdown", &mut o.stepdown, sd, " mm", "the tool's stepdown");
             }
             if o.kind != OpKind::Contour {
@@ -1642,6 +1642,12 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
                 });
                 if tool.as_ref().map(|t| t.kind == ToolKind::Slot).unwrap_or(false) {
                     num(ui, "Slot depth", &mut o.slot_depth, " mm", 0.0..=100.0, 0.1);
+                } else if tool.as_ref().map(|t| t.kind == ToolKind::Dovetail).unwrap_or(false) {
+                    // chamfer the underside of the edge at Bottom; 0 = cut a dovetail Slot depth into the wall
+                    num(ui, "Back chamfer", &mut o.chamfer, " mm", 0.0..=20.0, 0.05);
+                    if o.chamfer <= 0.0 {
+                        num(ui, "Slot depth", &mut o.slot_depth, " mm", 0.0..=100.0, 0.1);
+                    }
                 } else {
                     row(ui, "Tabs", |ui| {
                         let mut n = o.tabs as i32;
@@ -2111,6 +2117,12 @@ fn tool_params(app: &mut App, ui: &mut Ui, id: u64) {
         ToolKind::Slot => {
             num(ui, "Thickness", &mut t.cutting_width, " mm", 0.1..=50.0, 0.05);
             num(ui, "Neck Ø", &mut t.neck_diameter, " mm", 0.1..=100.0, 0.05);
+        }
+        ToolKind::Dovetail => {
+            num(ui, "Angle", &mut t.angle, "°", 5.0..=85.0, 1.0);
+            num(ui, "Neck Ø", &mut t.neck_diameter, " mm", 0.1..=100.0, 0.05);
+            num(ui, "Neck length", &mut t.neck_length, " mm", 0.0..=200.0, 0.1);
+            ui.label(RichText::new(format!("flank {} mm tall, from the bottom face", cam::fmt_mm(t.head_height()))).color(theme::muted()).size(11.0));
         }
         ToolKind::ThreadMill => {
             num(ui, "Pitch", &mut t.pitch, " mm", 0.1..=10.0, 0.05);

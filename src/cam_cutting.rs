@@ -60,14 +60,66 @@ pub struct ToolGeom {
     pub shank: f64,
     pub modulus: f64,
     pub stress_limit: f64,
+    /// A neck thinner than the shank above the flutes (slot mills, dovetails): its diameter and how far it
+    /// reaches up from the tip, mm (0 = none).
+    pub neck: f64,
+    pub neck_length: f64,
+}
+
+impl ToolGeom {
+    /// The tool as a stepped cantilever loaded `l` mm out from the holder: each section's top (distance
+    /// from the load point) and its diameter in bending, from the load point up to the holder.
+    fn sections(&self, l: f64) -> Vec<(f64, f64)> {
+        let lf = self.flute_length.min(l).max(0.0);
+        let mut v = vec![(lf, 0.8 * self.diameter)];
+        if self.neck > 0.0 && self.neck_length > lf {
+            v.push((self.neck_length.min(l), self.neck));
+        }
+        v.push((l, self.shank.max(0.1)));
+        v
+    }
+
+    /// Tip deflection per newton times the modulus·3 (Σ Δ(b³)/I), and the worst bending stress per newton.
+    fn beam(&self, l: f64) -> (f64, f64) {
+        let i = |dia: f64| PI * dia.powi(4) / 64.0;
+        let (mut c, mut stress, mut b0) = (0.0, 0.0f64, 0.0);
+        for (b1, dia) in self.sections(l) {
+            if b1 > b0 {
+                c += (b1.powi(3) - b0.powi(3)) / i(dia);
+            }
+            // the moment at the section's top end, where it is biggest
+            let half = if b0 == 0.0 && b1 <= self.flute_length + 1e-9 { 0.4 * self.diameter } else { dia / 2.0 };
+            stress = stress.max(b1.max(b0) * half / i(dia));
+            b0 = b1.max(b0);
+        }
+        (c, stress)
+    }
+
+    /// Mass of the part that sticks out, tonnes (N·s²/mm).
+    fn mass(&self, l: f64) -> f64 {
+        // density, tonnes/mm³: carbide 14.5 g/cm³, steel 8.0
+        let rho = if self.modulus > 400_000.0 { 1.45e-8 } else { 8.0e-9 };
+        let area = |dia: f64| PI * dia * dia / 4.0;
+        let (mut m, mut b0) = (0.0, 0.0);
+        for (k, (b1, dia)) in self.sections(l).into_iter().enumerate() {
+            let a = if k == 0 { area(0.85 * self.diameter) } else { area(dia) };
+            m += a * (b1 - b0).max(0.0);
+            b0 = b1.max(b0);
+        }
+        rho * m
+    }
 }
 
 /// An end mill's side of a cut, as the simulation models it.
 pub fn tool_geom(t: &crate::cam::Tool) -> ToolGeom {
     let r = t.radius();
-    let flutes = t.flute_length.max(r);
+    let undercut = t.kind.is_undercut();
+    let flutes = if undercut { t.head_height() } else { t.flute_length.max(r) };
     let (modulus, stress_limit) = tool_steel(&t.material);
+    let neck_length = if !undercut { 0.0 } else if t.neck_length > 0.0 { t.neck_length } else { t.stickout };
     ToolGeom {
+        neck: if undercut { 2.0 * t.neck_radius() } else { 0.0 },
+        neck_length,
         diameter: 2.0 * r,
         ball: matches!(t.kind, crate::cam::ToolKind::Ball | crate::cam::ToolKind::TaperedBall),
         flutes: t.flutes,
@@ -134,13 +186,12 @@ pub fn cut(t: &ToolGeom, m: &Material, width: f64, depth: f64, feed: f64, rpm: f
     let torque = ft_mean * d / 2000.0;
     // a cantilever from the holder: the shank, then the thinner fluted part (about 80% of the diameter
     // in bending), loaded at the middle of the cut
+    // (and a neck between them when it has one)
     let l = (t.stickout - depth / 2.0).max(1.0);
-    let lf = t.flute_length.min(l).max(0.0);
-    let i = |dia: f64| PI * dia.powi(4) / 64.0;
-    let (i_f, i_s) = (i(0.8 * t.diameter), i(t.shank.max(0.1)));
-    let deflection = force / (3.0 * t.modulus) * ((l.powi(3) - lf.powi(3)) / i_s + lf.powi(3) / i_f);
-    // bending at the holder, or where the flutes start if they are the weaker section
-    let stress = (force * l * (t.shank / 2.0) / i_s).max(force * lf * (0.4 * t.diameter) / i_f);
+    let (c, s) = t.beam(l);
+    let deflection = force / (3.0 * t.modulus) * c;
+    // bending at the holder, or where the flutes (or the neck) start if they are the weaker section
+    let stress = force * s;
     let mrr = area * feed / 1000.0;
     Cut { d_eff: d, vc, fz, angle: phi.to_degrees(), h_max, h_mean, mrr, ft_peak, ft_mean, force, power, torque, deflection, stress }
 }
@@ -318,15 +369,9 @@ pub struct Mode {
 /// the tip), on a holder/spindle of stiffness `holder_k` N/mm (in series).
 pub fn tool_mode(t: &ToolGeom, holder_k: f64, zeta: f64) -> Mode {
     let l = t.stickout.max(1.0);
-    let lf = t.flute_length.min(l).max(0.0);
-    let i = |dia: f64| PI * dia.powi(4) / 64.0;
-    let (i_f, i_s) = (i(0.8 * t.diameter), i(t.shank.max(0.1)));
-    let compliance = 1.0 / (3.0 * t.modulus) * ((l.powi(3) - lf.powi(3)) / i_s + lf.powi(3) / i_f);
+    let compliance = t.beam(l).0 / (3.0 * t.modulus);
     let k_tool = 1.0 / compliance.max(1e-12);
-    // density, tonnes/mm³ (N·s²/mm per mm³): carbide 14.5 g/cm³, steel 8.0
-    let rho = if t.modulus > 400_000.0 { 1.45e-8 } else { 8.0e-9 };
-    let area = |dia: f64| PI * dia * dia / 4.0;
-    let mass = rho * (area(t.shank) * (l - lf) + area(0.85 * t.diameter) * lf);
+    let mass = t.mass(l);
     let hz_tool = (k_tool / (0.243 * mass)).sqrt() / (2.0 * PI);
     // the holder in series lowers the stiffness; its mass hardly moves at the tool's mode
     let k = 1.0 / (1.0 / k_tool + 1.0 / holder_k.max(1.0));
@@ -414,7 +459,7 @@ mod tests {
 
     /// The DMC2's 1/4" 3-flute carbide end mill, 24 out of the holder, at 24000 rpm and 2400 mm/min.
     fn t24() -> ToolGeom {
-        ToolGeom { diameter: 6.35, ball: false, flutes: 3, stickout: 24.0, flute_length: 19.05, shank: 6.35, modulus: 600_000.0, stress_limit: 800.0 }
+        ToolGeom { diameter: 6.35, ball: false, flutes: 3, stickout: 24.0, flute_length: 19.05, shank: 6.35, modulus: 600_000.0, stress_limit: 800.0, neck: 0.0, neck_length: 0.0 }
     }
 
     fn dmc2() -> Limits {
@@ -534,7 +579,7 @@ mod tests {
 
     #[test]
     fn a_ball_cuts_with_a_smaller_diameter_near_its_tip() {
-        let ball = ToolGeom { ball: true, diameter: 6.0, flutes: 2, modulus: 210_000.0, stress_limit: 900.0, stickout: 21.0, flute_length: 18.0, shank: 6.0 };
+        let ball = ToolGeom { ball: true, diameter: 6.0, flutes: 2, modulus: 210_000.0, stress_limit: 900.0, stickout: 21.0, flute_length: 18.0, shank: 6.0, neck: 0.0, neck_length: 0.0 };
         let c = cut(&ball, &material("6061"), 0.5, 0.3, 800.0, 10000.0, 0.15);
         assert!(c.d_eff < 3.0 && c.vc < 0.5 * PI * 6.0 * 10.0, "{c:?}");
     }

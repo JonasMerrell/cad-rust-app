@@ -1448,7 +1448,7 @@ pub fn op_path(ctx: &Ctx, op: &Operation) -> Toolpath {
     }
     pb.up();
     // deepest cut below the stock top against the flute length
-    if !tool.kind.is_hole_tool() && !matches!(tool.kind, ToolKind::Slot | ToolKind::ThreadMill | ToolKind::Probe) {
+    if !tool.kind.is_hole_tool() && !tool.kind.is_undercut() && tool.kind != ToolKind::Probe {
         let top = ctx.stock.1.z;
         let low = pb.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
         if low.is_finite() && top - low > tool.flute_length + 1e-6 {
@@ -1649,6 +1649,33 @@ fn pocket(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     }
 }
 
+/// A dovetail's back chamfer: the edge's height (setup Z), where the tip goes, and how far the axis
+/// stays from the wall so the flank takes `chamfer` off the underside of the edge, with the chamfer across
+/// the middle of the flank.
+pub(crate) struct BackChamfer {
+    pub edge: f64,
+    pub tip: f64,
+    pub offset: f64,
+    pub warning: Option<String>,
+}
+
+pub(crate) fn back_chamfer(op: &Operation, t: &Tool, edge: f64) -> Option<BackChamfer> {
+    if t.kind != ToolKind::Dovetail || op.chamfer <= 0.0 {
+        return None;
+    }
+    let tan = t.dovetail_angle().to_radians().tan();
+    let h = t.head_height();
+    // the chamfer's height up the wall; it has to fit on the flank with a little to spare
+    let most = (h * 0.9 / tan).max(0.01);
+    let (c, warning) = if op.chamfer > most {
+        (most, Some(format!("a {} mm back chamfer doesn't fit on the {} mm flank: cutting {} mm", crate::cam::fmt_mm(op.chamfer), crate::cam::fmt_mm(h), crate::cam::fmt_mm(most))))
+    } else {
+        (op.chamfer, None)
+    };
+    let g = (h - c * tan) / 2.0;
+    Some(BackChamfer { edge, tip: edge - g, offset: t.radius() - g / tan - c, warning })
+}
+
 fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let part_bottom = ctx.part().lo.z;
@@ -1656,9 +1683,24 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let top = ctx.wz(op.top).unwrap_or(ctx.stock.1.z);
     let bottom = ctx.wz(op.bottom).unwrap_or(if cut_out { part_bottom - op.breakthrough } else { part_bottom });
     let r = t.radius();
-    let slot = t.kind == ToolKind::Slot;
-    let lv = if slot { vec![bottom] } else { levels(top, bottom, stepdown(op, t), &ctx.geo.floors()) };
-    let off = if slot { r - if op.slot_depth > 0.0 { op.slot_depth } else { r * 0.3 } } else { r + op.leave };
+    // a slot mill or dovetail cuts sideways at one depth, coming in from the side
+    let slot = matches!(t.kind, ToolKind::Slot | ToolKind::Dovetail);
+    // the edge a back chamfer breaks: the part's bottom, not below it as a cut-out goes
+    let back = back_chamfer(op, t, ctx.wz(op.bottom).unwrap_or(part_bottom));
+    if let Some(b) = &back {
+        tp.warnings.extend(b.warning.clone());
+    }
+    // a back chamfer follows the wall at the edge, with the tip below it
+    let lv = match &back {
+        Some(b) => vec![b.tip],
+        None if slot => vec![bottom],
+        None => levels(top, bottom, stepdown(op, t), &ctx.geo.floors()),
+    };
+    let off = match &back {
+        Some(b) => b.offset,
+        None if slot => r - if op.slot_depth > 0.0 { op.slot_depth } else { r * 0.3 },
+        None => r + op.leave,
+    };
     let tab_top = bottom + op.tab_height;
     // the most a pass may take radially; extra passes outside the wall keep to it where the stock reaches further out
     let limit = crate::cam_contour::max_engagement(op, t);
@@ -1671,7 +1713,7 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let mut worst: Option<(crate::cam_contour::Engagement, f64)> = None;
     let mut too_far: Option<f64> = None;
     for z in lv {
-        let sh = ctx.geo.shadow(z);
+        let sh = ctx.geo.shadow(back.as_ref().map(|b| b.edge).unwrap_or(z));
         let path = offset(&sh, off);
         let first_move = pb.moves.len();
         let from = pb.pos;
@@ -1736,11 +1778,16 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                 .unwrap();
             let l = loops.remove(j);
             if slot {
-                // enter from the side: plunge clear of the part, feed in, cut, feed out
-                let clear_path = offset(&sh, r + 1.0);
+                // enter from the side: plunge clear of the part, feed in, cut, feed out (in a small hole as
+                // close to the wall as the head goes by)
                 let s = DVec2::from(l[0]);
-                let lead =
-                    flat(&clear_path).iter().flat_map(|c| c.iter()).map(|q| DVec2::from(*q)).min_by(|a, b| a.distance_squared(s).partial_cmp(&b.distance_squared(s)).unwrap());
+                let lead = [r + 1.0, r + 0.3, r + 0.05].into_iter().find_map(|gap| {
+                    let clear_path = offset(&sh, gap);
+                    flat(&clear_path).iter().flat_map(|c| c.iter()).map(|q| DVec2::from(*q)).min_by(|a, b| a.distance_squared(s).partial_cmp(&b.distance_squared(s)).unwrap())
+                });
+                if lead.is_none() {
+                    tp.warnings.push(format!("the Ø{} head can't get down beside a wall here (a hole too small for it): skipped", crate::cam::fmt_mm(t.diameter)));
+                }
                 if let Some(lead) = lead {
                     pb.approach(lead.x, lead.y, top);
                     pb.cut(DVec3::new(lead.x, lead.y, z), pb.plunge);
@@ -2846,6 +2893,101 @@ mod tests {
         }
         tris.push([DVec3::ZERO, DVec3::new(0.0, 40.0, 0.0), DVec3::new(60.0, 0.0, 0.0)]);
         Part::new(&tris, &[], "top")
+    }
+
+    /// A square plate (40 × 40, `thick` mm) with a 10 × 10 through hole in the middle, as a closed mesh.
+    fn holed_plate(thick: f64) -> Part {
+        let mut tris = vec![];
+        let mut quad = |a: DVec3, b: DVec3, c: DVec3, d: DVec3| {
+            tris.push([a, b, c]);
+            tris.push([a, c, d]);
+        };
+        let v = DVec3::new;
+        for (z, up) in [(thick, true), (0.0, false)] {
+            for (x0, y0, x1, y1) in [(0.0, 0.0, 40.0, 15.0), (0.0, 25.0, 40.0, 40.0), (0.0, 15.0, 15.0, 25.0), (25.0, 15.0, 40.0, 25.0)] {
+                let (a, b, c, d) = (v(x0, y0, z), v(x1, y0, z), v(x1, y1, z), v(x0, y1, z));
+                if up {
+                    quad(a, b, c, d);
+                } else {
+                    quad(a, d, c, b);
+                }
+            }
+        }
+        for (lo, hi) in [(0.0, 40.0), (15.0, 25.0)] {
+            let c = [v(lo, lo, 0.0), v(hi, lo, 0.0), v(hi, hi, 0.0), v(lo, hi, 0.0)];
+            for k in 0..4 {
+                let (p, q) = (c[k], c[(k + 1) % 4]);
+                quad(p, q, q + DVec3::Z * thick, p + DVec3::Z * thick);
+            }
+        }
+        Part::new(&tris, &[], "top")
+    }
+
+    /// The holed plate with its hole opened by a Ø6 end mill, then a dovetail op in the hole.
+    fn dovetail_in_hole(thick: f64, edit: impl Fn(&mut Operation)) -> (Cam, Part, Vec<Toolpath>) {
+        let part = holed_plate(thick);
+        let mut c = Cam::default();
+        c.stock = crate::cam::Stock { side: 0.0, top: 0.0, bottom: 0.0, ..Default::default() };
+        let flat = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && t.diameter == 6.0).unwrap());
+        let dove = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Dovetail && t.diameter == 4.0).unwrap());
+        let a = c.add_op(OpKind::Contour, flat);
+        c.op_mut(a).unwrap().side = Side::Inside;
+        let b = c.add_op(OpKind::Contour, dove);
+        let o = c.op_mut(b).unwrap();
+        o.side = Side::Inside;
+        edit(o);
+        let paths = generate(&c, &part);
+        (c, part, paths)
+    }
+
+    fn sim_of(c: &Cam, part: &Part, paths: &[Toolpath]) -> crate::cam_sim::Sim {
+        let mut sim = crate::cam_sim::Sim::new(c, part, stock_box(c, part), paths, 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        sim
+    }
+
+    /// A 0.5 mm back chamfer under the bottom edge of a through hole: cut from inside the hole, the flank
+    /// takes the edge off from below without the sim calling it a gouge, and the stock shows the chamfer.
+    #[test]
+    fn dovetail_back_chamfers_the_underside_of_a_hole() {
+        let (c, part, paths) = dovetail_in_hole(4.0, |o| o.chamfer = 0.5);
+        assert!(paths[1].warnings.is_empty(), "{:?}", paths[1].warnings);
+        let feeds: Vec<[f64; 3]> = paths[1].moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(*p) } else { None }).collect();
+        // the tip 0.25 mm under the edge (the 0.5 mm chamfer across the middle of the 1 mm flank)
+        let low = feeds.iter().map(|p| p[2]).fold(f64::INFINITY, f64::min);
+        assert!((low + 0.25).abs() < 1e-6, "{low}");
+        let sim = sim_of(&c, &part, &paths);
+        let bad: Vec<_> = sim.events.iter().filter(|e| e.kind != crate::cam_sim::EventKind::Overload).collect();
+        assert!(bad.is_empty(), "{bad:?}");
+        // 0.2 mm into the wall at the middle of a side the chamfer is 0.3 mm up: the column starts there now
+        let (i, j) = (((15.0 - 0.2 - sim.x0) / sim.cell).round() as usize, ((20.0 - sim.y0) / sim.cell).round() as usize);
+        let k = j * sim.nx + i;
+        let x = sim.x0 + i as f64 * sim.cell;
+        let want = 0.5 - (15.0 - x);
+        assert!((sim.lo[k] as f64 - want).abs() < 0.06, "{} vs {want}", sim.lo[k]);
+        // and further in, untouched
+        assert!(sim.lo[k - 5] == 0.0);
+    }
+
+    /// The same head 0.5 mm into the hole's wall halfway up cuts the part: a gouge. In a 10 mm plate the
+    /// shank above the 6 mm neck runs into the wall getting down to the bottom edge.
+    #[test]
+    fn dovetail_gouges_and_shank_hits_are_found() {
+        let origin = work_origin(&Cam { stock: crate::cam::Stock { side: 0.0, top: 0.0, bottom: 0.0, ..Default::default() }, ..Default::default() }, &holed_plate(4.0)).z;
+        let (c, part, paths) = dovetail_in_hole(4.0, |o| {
+            o.chamfer = 0.0;
+            o.slot_depth = 0.5;
+            o.bottom = Some(2.0 - origin);
+        });
+        let sim = sim_of(&c, &part, &paths);
+        let gouge = sim.events.iter().filter(|e| e.kind == crate::cam_sim::EventKind::Gouge).map(|e| e.depth).fold(0.0, f64::max);
+        assert!(gouge > 0.3 && gouge < 0.6, "{gouge}: {:?}", sim.events);
+        // the cut stays inside the column: a gap in the stock under the overhang
+        assert!(!sim.voids.is_empty());
+        let (c, part, paths) = dovetail_in_hole(10.0, |o| o.chamfer = 0.5);
+        let sim = sim_of(&c, &part, &paths);
+        assert!(sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Shank), "{:?}", sim.events);
+        assert!(!sim.events.iter().any(|e| e.kind == crate::cam_sim::EventKind::Gouge), "{:?}", sim.events);
     }
 
     fn setup() -> (Cam, u64) {
