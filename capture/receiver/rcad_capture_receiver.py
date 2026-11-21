@@ -280,14 +280,16 @@ class Handler(BaseHTTPRequestHandler):
             return self.send_html(401, "<h1>Wrong pairing link</h1>")
         host = self.headers.get("Host") or f"{primary_ip()}:{self.server.server_address[1]}"
         urls = [f"http://{host}"] + [u for u in self.app.extra_urls if u != f"http://{host}"]
-        link = html.escape(pair_url_from(urls, tok), quote=True)
+        raw = pair_url_from(urls, tok)
+        link = html.escape(raw, quote=True)
+        js_link = json.dumps(raw).replace("<", "\\u003c")
         self.send_html(200, f"""<!doctype html><meta name=viewport content="width=device-width,initial-scale=1">
 <title>Pair rCAD Capture</title>
 <body style="font-family:sans-serif;text-align:center;padding:40px 16px;background:#111;color:#eee">
 <h2>Pair rCAD Capture with {html.escape(socket.gethostname())}</h2>
 <p><a href="{link}" style="display:inline-block;padding:18px 28px;background:#1f6feb;color:#fff;border-radius:12px;text-decoration:none;font-size:20px">Open in rCAD Capture</a></p>
 <p style="color:#999">Install the app first. Photos will upload to {html.escape(self.app.root)}.</p>
-<script>setTimeout(function(){{location.href="{link}"}},300)</script>""")
+<script>setTimeout(function(){{location.href={js_link}}},300)</script>""")
 
     # -- routes
     def do_GET(self):

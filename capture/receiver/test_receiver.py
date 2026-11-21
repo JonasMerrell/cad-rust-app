@@ -44,6 +44,9 @@ class ReceiverTest(unittest.TestCase):
         body = r1.read().decode()
         self.assertEqual(r1.status, 200)
         self.assertIn("rcadcapture://pair?url=http%3A%2F%2F127.0.0.1", body)
+        script = body[body.index("<script>"):]
+        self.assertIn("&token=tok", script)
+        self.assertNotIn("&amp;", script)
         c.request("GET", "/pair?t=nope")
         r2 = c.getresponse()
         r2.read()
