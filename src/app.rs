@@ -175,6 +175,8 @@ pub struct App {
     /// The Claude chat panel.
     pub claude: crate::claude_ui::ClaudeUi,
     pub vcs: crate::vcs_ui::VcsUi,
+    /// The Scan from photos window.
+    pub photo: crate::photo_ui::PhotoUi,
     pub github: crate::github_ui::GithubUi,
     /// The start screen with recent documents.
     pub home: crate::home::HomeUi,
@@ -280,6 +282,7 @@ impl App {
             script_editor: None,
             claude: Default::default(),
             vcs: Default::default(),
+            photo: Default::default(),
             github: Default::default(),
             home: Default::default(),
             awaiting_sketch_plane: false,
@@ -1618,7 +1621,7 @@ impl App {
                 }
             });
         });
-        for (a, icon, l, keys) in [("json", "save", "Save", "Ctrl+S"), ("saveas", "save", "Save as…", "Ctrl+Shift+S"), ("git", "branch", "Version control (git)…", ""), ("export-project", "export", "Export project (ZIP)…", ""), ("import-project", "download", "Import project (ZIP)…", ""), ("import", "importFile", "Import STEP, IGES, STL, OBJ…", "")] {
+        for (a, icon, l, keys) in [("json", "save", "Save", "Ctrl+S"), ("saveas", "save", "Save as…", "Ctrl+Shift+S"), ("git", "branch", "Version control (git)…", ""), ("export-project", "export", "Export project (ZIP)…", ""), ("import-project", "download", "Import project (ZIP)…", ""), ("import", "importFile", "Import STEP, IGES, STL, OBJ…", ""), ("scan", "photo", "Scan from photos…", "")] {
             if item(ui, icon, l, keys) {
                 action = Some(a);
                 ui.close();
@@ -1708,6 +1711,7 @@ impl App {
             Some("import-project") => crate::vcs_ui::import_project(self),
             Some("quit") => self.guard(crate::session::Pending::Close),
             Some("import") => self.import_step(),
+            Some("scan") => crate::photo_ui::open(self),
             Some(f @ ("step" | "stl" | "iges")) => self.export(f),
             Some("step-one") => {
                 if let crate::workspace::Tab::Assembly(ai) = self.tab {
@@ -3870,6 +3874,7 @@ impl eframe::App for App {
         }
         crate::palette::window(self, &ctx);
         crate::vcs_ui::frame(self, &ctx);
+        crate::photo_ui::frame(self, &ctx);
         if self.phone && self.sidebar_open {
             self.drawer(&ctx, central.response.rect);
         }

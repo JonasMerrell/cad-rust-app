@@ -617,6 +617,78 @@ impl Session {
                 }
                 v
             }
+            "scan_photos" => {
+                use crate::photogrammetry as pg;
+                let photos = std::path::PathBuf::from(self.input_path(&str_arg(a, "photos")?));
+                let method = match a.get("method").and_then(|v| v.as_str()).unwrap_or("auto") {
+                    "colmap" => pg::Method::Colmap,
+                    "openmvs" => pg::Method::Openmvs,
+                    "sparse" => pg::Method::Sparse,
+                    _ => pg::Method::Auto,
+                };
+                let quality = match a.get("quality").and_then(|v| v.as_str()).unwrap_or("normal") {
+                    "fast" => pg::Quality::Fast,
+                    "high" => pg::Quality::High,
+                    _ => pg::Quality::Normal,
+                };
+                let job = pg::Job { photos: photos.clone(), method, quality, gpu: a.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true), glomap: a.get("glomap").and_then(|v| v.as_bool()).unwrap_or(false) };
+                let tools = pg::find_tools(&pg::Settings::load());
+                let (tx, rx) = std::sync::mpsc::channel();
+                let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
+                // steps to stderr as they start (the run takes minutes)
+                let printer = std::thread::spawn(move || {
+                    for p in rx {
+                        if let pg::Progress::Step(i, n, name) = p {
+                            eprintln!("scan_photos: step {}/{n}: {name}", i + 1);
+                        }
+                    }
+                });
+                let r = pg::run(&job, &tools, &tx, &cancel);
+                drop(tx);
+                let _ = printer.join();
+                let r = r?;
+                let cleanup = crate::photo_mesh::Cleanup {
+                    level: a.get("level").and_then(|v| v.as_bool()).unwrap_or(true),
+                    remove_table: a.get("remove_table").and_then(|v| v.as_bool()).unwrap_or(true),
+                    triangles: a.get("triangles").and_then(|v| v.as_u64()).unwrap_or(40000) as usize,
+                    reference: None,
+                };
+                let sc = match a.get("scale") {
+                    None => {
+                        // a capture session with a reference block: find it
+                        if pg::read_session(&photos).and_then(|s| s.reference).and_then(|r| r.block()).is_some() { pg::Scale::Reference(None) } else { pg::Scale::None }
+                    }
+                    Some(Value::Number(n)) => pg::Scale::Factor(n.as_f64().unwrap_or(1.0)),
+                    Some(v) if v.get("reference").is_some() => {
+                        let d: Vec<f64> = v["reference"].as_array().map(|a| a.iter().filter_map(|x| x.as_f64()).collect()).unwrap_or_default();
+                        pg::Scale::Reference(match d.as_slice() {
+                            [x, y, z] => Some([*x, *y, *z]),
+                            [d] => Some([*d; 3]),
+                            _ => None,
+                        })
+                    }
+                    Some(v) => {
+                        let pt = |k: &str| -> Result<[f64; 2], String> {
+                            let q = v.get(k).and_then(|x| x.as_array()).ok_or(format!("scale.{k} must be [x, y] pixels"))?;
+                            Ok([q.first().and_then(|x| x.as_f64()).unwrap_or(0.0), q.get(1).and_then(|x| x.as_f64()).unwrap_or(0.0)])
+                        };
+                        pg::Scale::Clicks { photo: v.get("photo").and_then(|x| x.as_str()).ok_or("scale.photo names the photo the marks are on")?.to_string(), a: pt("a")?, b: pt("b")?, mm: v.get("mm").and_then(|x| x.as_f64()).ok_or("scale.mm is the distance between the marks")? }
+                    }
+                };
+                let scan = pg::finish(&r, &photos, &cleanup, &sc)?;
+                let name = a.get("name").and_then(|n| n.as_str()).map(String::from).unwrap_or_else(|| self.doc.unique_name(&format!("Scan {}", photos.file_name().map(|s| s.to_string_lossy().to_string()).unwrap_or_default())));
+                let id = self.doc.insert(name.clone(), Op::Import { name, step: String::new(), format: "stl".into(), data: crate::import::pack(&scan.mesh.to_stl()), scale: format!("{}", scan.scale), merge: false });
+                self.rebuild()?;
+                let mut v = self.status();
+                v["feature_id"] = json!(id);
+                v["method"] = json!(format!("{:?}", r.method).to_lowercase());
+                v["scale_mm_per_unit"] = json!(scan.scale);
+                v["scaled"] = json!(scan.scaled);
+                v["triangles"] = json!(scan.mesh.t.len());
+                v["notes"] = json!(scan.notes);
+                v["work_folder"] = json!(r.work.display().to_string());
+                v
+            }
             "export" => {
                 let format = str_arg(a, "format")?;
                 let path = str_arg(a, "path")?;
@@ -1782,6 +1854,7 @@ pub(crate) fn tools() -> Value {
         {"name": "feature_defaults", "description": "A feature kind's params with their default values, the shape add_feature params and edit_feature take; without kind, the list of kinds.", "inputSchema": obj(json!({"kind": {"type": "string"}}), &[])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
+        {"name": "scan_photos", "description": "Photogrammetry: turn a folder of photos of a part (20+ overlapping shots all round it, on a textured table) into a mesh reference body in the active Part Studio, to measure and model against. Runs COLMAP (camera solve; dense surface with CUDA) and OpenMVS (dense surface on the CPU) as separate programs; work files go in <photos>/rcad-scan and a re-run with the same photos and settings carries on. method auto|colmap|openmvs|sparse, quality fast|normal|high. The mesh is cleaned: the table cut away (remove_table), stood on XY (level), thinned to about `triangles` (default 40000). scale: a number (mm per unit), {reference: [a, b, c]} sizes of a block beside the part (a 1-2-3 block is [25.4, 50.8, 76.2]; a ball [d]) found automatically, or {photo, a: [x, y], b: [x, y], mm} two marks clicked on an undistorted photo (rcad-scan/dense/images). Capture-app folders with a session.json reference block are scaled from it by default. Takes minutes to hours.", "inputSchema": obj(json!({"photos": {"type": "string"}, "method": {"type": "string"}, "quality": {"type": "string"}, "gpu": {"type": "boolean"}, "glomap": {"type": "boolean"}, "level": {"type": "boolean"}, "remove_table": {"type": "boolean"}, "triangles": {"type": "integer"}, "scale": {}, "name": {"type": "string"}}), &["photos"])},
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
         {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
