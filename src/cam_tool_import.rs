@@ -64,7 +64,6 @@ pub fn import_csv(text: &str) -> Result<Imported, String> {
             ("tool_taperAngle", "TA"),
             ("tool_threadPitch", "TP"),
             ("tool_shoulderDiameter", "shoulder-diameter"),
-            ("tool_shoulderDiameter", "shoulder-diameter"),
             ("tool_shoulderLength", "shoulder-length"),
             ("tool_numberOfTeeth", "NT"),
         ] {
