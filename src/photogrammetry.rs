@@ -684,7 +684,20 @@ pub struct Scan {
 
 /// Clean the reconstructed mesh and work out its scale.
 pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scale) -> Result<Scan, String> {
-    let raw = photo_mesh::read_ply(&std::fs::read(&r.mesh).map_err(|e| format!("can't read {}: {e}", r.mesh.display()))?)?;
+    let mut raw = photo_mesh::read_ply(&std::fs::read(&r.mesh).map_err(|e| format!("can't read {}: {e}", r.mesh.display()))?)?;
+    let mut trim_note = None;
+    let fused = r.work.join("dense").join("fused.ply");
+    if r.method == Method::Colmap && cleanup.remove_table {
+        // Poisson closes the surface over what the photos never saw: trim it back to the points
+        if let Ok(pts) = std::fs::read(&fused).map_err(|e| e.to_string()).and_then(|b| photo_mesh::read_points(&b)) {
+            let before = raw.t.len();
+            let trimmed = photo_mesh::trim_to_points(&raw, &pts, 2.0 * raw.median_edge());
+            if trimmed.t.len() > 100 {
+                trim_note = Some(format!("trimmed the surface to the {:.0}% that has photo points under it", 100.0 * trimmed.t.len() as f64 / before.max(1) as f64));
+                raw = trimmed;
+            }
+        }
+    }
     let cams = photo_mesh::read_cameras(&r.model).unwrap_or_default();
     // where the photos were taken from and which way they look (towards the part)
     let rig: Vec<(glam::DVec3, glam::DVec3)> = cams.iter().map(|c| (c.centre(), c.r.transpose() * glam::DVec3::Z)).collect();
@@ -695,8 +708,17 @@ pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scal
             return Err("no reference block to look for: give its sizes, or click two ruler marks".into());
         }
     }
-    let cleaned = photo_mesh::clean(&raw, &c, &rig);
-    let mut notes = cleaned.notes.clone();
+    let mut cleaned = photo_mesh::clean(&raw, &c, &rig);
+    // a block "found" that makes the part bigger than a room is a false match
+    if let Some(s) = cleaned.scale {
+        let (lo, hi) = cleaned.mesh.bbox();
+        let size = (hi - lo).max_element() * s;
+        if size > 3000.0 {
+            cleaned.notes.push(format!("ignored the reference match: it would make the part {:.1} m across. Set the scale another way", size / 1000.0));
+            cleaned.scale = None;
+        }
+    }
+    let mut notes: Vec<String> = trim_note.into_iter().chain(cleaned.notes.clone()).collect();
     let factor = match scale {
         Scale::None => None,
         Scale::Factor(f) => Some(*f),

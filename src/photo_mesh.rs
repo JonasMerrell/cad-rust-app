@@ -126,6 +126,19 @@ impl Mesh {
 /// Read a PLY mesh (ASCII or binary): its vertex positions and faces (polygons are fanned
 /// into triangles). A file with no faces is an error, since a point cloud isn't a mesh.
 pub fn read_ply(b: &[u8]) -> Result<Mesh, String> {
+    let m = parse_ply(b)?;
+    if m.t.is_empty() {
+        return Err("the PLY file has no faces (a point cloud, not a mesh)".into());
+    }
+    Ok(m)
+}
+
+/// Read the points of a PLY file (a point cloud such as COLMAP's `fused.ply`).
+pub fn read_points(b: &[u8]) -> Result<Vec<DVec3>, String> {
+    Ok(parse_ply(b)?.v)
+}
+
+fn parse_ply(b: &[u8]) -> Result<Mesh, String> {
     let end = find(b, b"end_header").ok_or("not a PLY file (no end_header)")?;
     let mut body = end + b"end_header".len();
     while body < b.len() && b[body] != b'\n' {
@@ -227,10 +240,24 @@ pub fn read_ply(b: &[u8]) -> Result<Mesh, String> {
     }
     let nv = m.v.len() as u32;
     m.t.retain(|t| t.iter().all(|&i| i < nv) && t[0] != t[1] && t[1] != t[2] && t[0] != t[2]);
-    if m.t.is_empty() {
-        return Err("the PLY file has no faces (a point cloud, not a mesh)".into());
-    }
     Ok(m)
+}
+
+/// Keep the triangles that lie near the points the surface was made from. Poisson meshing
+/// closes the surface, so where the photos saw nothing (over the top of the part, under the
+/// table, round the edges of the scan) it bulges out into smooth skins with no points under
+/// them. `size` is how near counts.
+pub fn trim_to_points(m: &Mesh, pts: &[DVec3], size: f64) -> Mesh {
+    if pts.is_empty() || !(size > 0.0) {
+        return m.clone();
+    }
+    let cell = |p: DVec3| ((p.x / size).floor() as i64, (p.y / size).floor() as i64, (p.z / size).floor() as i64);
+    let occupied: std::collections::HashSet<(i64, i64, i64)> = pts.iter().map(|p| cell(*p)).collect();
+    let near = |p: DVec3| {
+        let (x, y, z) = cell(p);
+        (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| occupied.contains(&(x + i, y + j, z + k)))))
+    };
+    m.filter(|i| near(m.tri(i).iter().sum::<DVec3>() / 3.0))
 }
 
 fn find(h: &[u8], n: &[u8]) -> Option<usize> {
@@ -695,7 +722,15 @@ pub fn clean(m: &Mesh, c: &Cleanup, cams: &[(DVec3, DVec3)]) -> Cleaned {
                     let h = zs[(zs.len() as f64 * 0.995) as usize];
                     let mid: Vec<(f64, f64)> = verts[k].iter().filter(|p| (p.z - pl.d) > 0.3 * h && (p.z - pl.d) < 0.8 * h).map(|p| (p.x, p.y)).collect();
                     let fp = footprint(&if mid.len() > 10 { mid } else { verts[k].iter().map(|p| (p.x, p.y)).collect() });
-                    let (s, spread, flat) = reference_fit(fp, h, reference);
+                    let (s, mut spread, flat) = reference_fit(fp, h, reference);
+                    // and it must look like a box: its surface about that of the block's top
+                    // and four sides (a lump of carpet or a bit of the part can have the right
+                    // bounding box but far more or less surface)
+                    let [a, b, c] = reference.map(|x| x / s);
+                    let full = 2.0 * (a * b + b * c + a * c);
+                    if !(area[k] > 0.45 * full && area[k] < 1.6 * full) {
+                        spread = spread.max(1.0);
+                    }
                     (k, s, spread, flat, [fp[0], fp[1], h])
                 })
                 .min_by(|a, b| a.2.total_cmp(&b.2));
@@ -983,6 +1018,24 @@ pub fn decimate(m: &Mesh, target: usize) -> Mesh {
 mod tests {
     use super::*;
 
+    /// Weld the faces' shared edges, as a reconstructed mesh is.
+    fn weld(m: &Mesh) -> Mesh {
+        let mut ids = std::collections::HashMap::new();
+        let mut v = vec![];
+        let map: Vec<u32> =
+            m.v.iter()
+                .map(|p| {
+                    let k = (p * 1e6).round().as_i64vec3().to_array();
+                    *ids.entry(k).or_insert_with(|| {
+                        v.push(*p);
+                        v.len() as u32 - 1
+                    })
+                })
+                .collect();
+        let t: Vec<[u32; 3]> = m.t.iter().map(|t| t.map(|i| map[i as usize])).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
+        Mesh { v, t }
+    }
+
     /// A box standing on a big flat table, finely triangulated, with a tilt and offset.
     fn quad(m: &mut Mesh, o: DVec3, u: DVec3, v: DVec3, n: usize) {
         let base = m.v.len() as u32;
@@ -1022,21 +1075,7 @@ mod tests {
         if block {
             add_box(&mut m, -95.0, -90.0, -95.0 + 76.2, -90.0 + 50.8, 25.4, 20);
         }
-        // weld the faces' shared edges, as a reconstructed mesh is
-        let mut ids = std::collections::HashMap::new();
-        let mut v = vec![];
-        let map: Vec<u32> =
-            m.v.iter()
-                .map(|p| {
-                    let k = (p * 1e6).round().as_i64vec3().to_array();
-                    *ids.entry(k).or_insert_with(|| {
-                        v.push(*p);
-                        v.len() as u32 - 1
-                    })
-                })
-                .collect();
-        let t: Vec<[u32; 3]> = m.t.iter().map(|t| t.map(|i| map[i as usize])).filter(|t| t[0] != t[1] && t[1] != t[2] && t[0] != t[2]).collect();
-        let m = Mesh { v, t };
+        let m = weld(&m);
         let r = DMat3::from_rotation_x(0.4) * DMat3::from_rotation_y(-0.3);
         let o = DVec3::new(3.0, -2.0, 7.0);
         let s = 1.0 / 50.0;
@@ -1062,6 +1101,35 @@ mod tests {
         assert!(c.scale.is_none());
     }
 
+    #[test]
+    fn a_lump_with_the_blocks_bounding_box_isnt_the_block() {
+        // where the block would be, a thin cross of two walls: the right footprint and height,
+        // but far less surface than a box
+        let mut m = Mesh::default();
+        quad(&mut m, DVec3::new(-100.0, -100.0, 0.0), DVec3::X * 200.0, DVec3::Y * 200.0, 60);
+        add_box(&mut m, -10.0, -5.0, 30.0, 15.0, 10.0, 20);
+        quad(&mut m, DVec3::new(-95.0, -90.0, 0.0), DVec3::new(76.2, 50.8, 0.0), DVec3::Z * 25.4, 20);
+        quad(&mut m, DVec3::new(-95.0, -90.0 + 50.8, 0.0), DVec3::new(76.2, -50.8, 0.0), DVec3::Z * 25.4, 20);
+        let c = clean(&weld(&m), &Cleanup { reference: Some([25.4, 50.8, 76.2]), triangles: 0, ..Default::default() }, &[]);
+        assert!(c.scale.is_none(), "{:?}", c.notes);
+    }
+
+    #[test]
+    fn trims_the_surface_to_the_points() {
+        // a closed box surface, but the points only cover its sides (the top was never seen)
+        let mut m = Mesh::default();
+        add_box(&mut m, 0.0, 0.0, 10.0, 10.0, 10.0, 10);
+        let pts: Vec<DVec3> = m.v.iter().cloned().filter(|p| p.z < 9.0).collect();
+        let t = trim_to_points(&m, &pts, 0.5);
+        let (_, hi) = t.bbox();
+        assert!(hi.z < 10.0 && t.t.len() > m.t.len() / 2, "{} of {}", t.t.len(), m.t.len());
+        // a point cloud reads as points
+        let mut b = b"ply\nformat ascii 1.0\nelement vertex 2\nproperty float x\nproperty float y\nproperty float z\nproperty uchar red\nend_header\n".to_vec();
+        b.extend(b"1 2 3 9\n4 5 6 9\n");
+        assert_eq!(read_points(&b).unwrap(), vec![DVec3::new(1.0, 2.0, 3.0), DVec3::new(4.0, 5.0, 6.0)]);
+        assert!(read_ply(&b).is_err());
+    }
+
     /// A room-sized scan: a small part and a reference block on a floor, with a wall, a big
     /// piece of furniture and floor clutter around; cameras circle the part.
     #[test]
@@ -1084,6 +1152,7 @@ mod tests {
                 (c, (target - c).normalize())
             })
             .collect();
+        let m = weld(&m);
         let c = clean(&m, &Cleanup { reference: Some([25.0, 50.0, 75.0]), triangles: 0, ..Default::default() }, &cams);
         let s = c.scale.expect("found the box");
         assert!((s - 1.0).abs() < 0.02, "{s} {:?}", c.notes);
