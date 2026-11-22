@@ -1449,6 +1449,29 @@ pub fn sharp_edges(part: &Part, min_angle: f64) -> Vec<(Vec<DVec3>, Vec<DVec2>, 
     chains
 }
 
+/// A chain of edges (`dirs`: each edge's outward direction) cut at its corners into pieces. A closed loop starts
+/// wherever its first vertex happened to be: it is started at a corner instead, so the stretch round the loop's
+/// start isn't cut in two (and its far half dropped as not picked).
+fn corner_pieces(mut pts: Vec<DVec3>, mut dirs: Vec<DVec2>, closed: bool) -> Vec<(Vec<DVec3>, Vec<DVec2>)> {
+    let n = dirs.len();
+    let corner = |dirs: &[DVec2], i: usize| dirs[(i + n - 1) % n].angle_to(dirs[i % n]).abs() > 0.5;
+    if closed && n > 1 && !corner(&dirs, 0) {
+        if let Some(k) = (1..n).find(|&i| corner(&dirs, i)) {
+            pts = pts[k..n].iter().chain(pts[..=k].iter()).copied().collect();
+            dirs = dirs[k..].iter().chain(dirs[..k].iter()).copied().collect();
+        }
+    }
+    let mut pieces = vec![];
+    let mut start = 0;
+    for i in 1..=n {
+        if i == n || dirs[i - 1].angle_to(dirs[i]).abs() > 0.5 {
+            pieces.push((pts[start..=i].to_vec(), dirs[start..i].to_vec()));
+            start = i;
+        }
+    }
+    pieces
+}
+
 pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let t = pb.tool;
     let c = Cutter3::new(t);
@@ -1460,8 +1483,10 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
     let w = op.chamfer.max(0.0);
     let dz = w / tanb.max(1e-6);
     let e = if op.tip_offset > 0.0 { op.tip_offset } else { 0.2 };
-    let rho = tip + (dz + e) * tanb;
-    if rho > c.r + 1e-6 {
+    // the tip `e` below the chamfer's lower edge: the cone meets the face under the edge `rho` from the centre
+    // and must still be that wide `dz` higher, at the edge itself (as the chamfer operation)
+    let rho = tip + e * tanb;
+    if rho + dz * tanb > c.r + 1e-6 {
         tp.warnings.push(format!("a {} mm chamfer is too wide for this tool", crate::cam::fmt_mm(w)));
         return;
     }
@@ -1472,14 +1497,8 @@ pub(crate) fn deburr(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) 
     if !picks.is_empty() {
         // picked edges: break the chains at corners and keep the pieces picked
         let mut pieces = vec![];
-        for (pts, dirs, _) in chains {
-            let mut start = 0;
-            for i in 1..=dirs.len() {
-                if i == dirs.len() || dirs[i - 1].angle_to(dirs[i]).abs() > 0.5 {
-                    pieces.push((pts[start..=i].to_vec(), dirs[start..i].to_vec(), false));
-                    start = i;
-                }
-            }
+        for (pts, dirs, closed) in chains {
+            pieces.extend(corner_pieces(pts, dirs, closed).into_iter().map(|(p, d)| (p, d, false)));
         }
         pieces.retain(|(pts, _, _)| pts.windows(2).any(|w| picks.iter().any(|p| seg_dist(*p, w[0], w[1]) < 1.0)));
         chains = pieces;
@@ -3241,10 +3260,24 @@ mod tests {
             .moves
             .iter()
             .filter_map(|m| if let Move::Feed(p, _) = m { Some(*p) } else { None })
-            .find(|p| p[0] > -0.01 && p[0] < 40.01 && p[1] < -0.5 && p[1] > -5.0)
+            .find(|p| p[0] > -0.01 && p[0] < 40.01 && p[1] < -0.1 && p[1] > -5.0)
             .unwrap();
         let reach = tip + (10.0 - 0.3 - on_front[2]) * half.tan();
         assert!((reach - (-on_front[1])).abs() < 0.05, "{on_front:?}");
+        // the tip the tip offset (0.2 by default) under the chamfer's lower edge, not the chamfer deeper still
+        assert!((on_front[2] - (10.0 - 0.3 - 0.2)).abs() < 0.05, "{on_front:?}");
+        // a chamfer whose top the cone can't reach with that tip offset is refused, not cut as a step
+        let (w0, e0) = (c.op(id).unwrap().chamfer, c.op(id).unwrap().tip_offset);
+        c.op_mut(id).unwrap().chamfer = 1.7;
+        c.op_mut(id).unwrap().tip_offset = 1.2;
+        assert!(generate(&c, &part)[0].warnings.iter().any(|w| w.contains("too wide")));
+        c.op_mut(id).unwrap().tip_offset = 0.9;
+        let wide = &generate(&c, &part)[0];
+        assert!(wide.warnings.is_empty(), "{:?}", wide.warnings);
+        let low = wide.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).fold(f64::INFINITY, f64::min);
+        assert!((low - (10.0 - 1.7 - 0.9)).abs() < 0.05, "{low}");
+        c.op_mut(id).unwrap().chamfer = w0;
+        c.op_mut(id).unwrap().tip_offset = e0;
         // only the picked edge
         let o = crate::cam_paths::work_origin(&c, &part);
         c.op_mut(id).unwrap().edges = vec![[20.0 - o.x, -o.y, 10.0 - o.z]];
@@ -3278,6 +3311,29 @@ mod tests {
             t.extend(q(at(15.0, k, 0.0), at(15.0, k + 1, 0.0), at(15.0, k + 1, 10.0), at(15.0, k, 10.0)));
         }
         Part::new(&t, &[], "top")
+    }
+
+    #[test]
+    fn a_picked_loop_keeps_its_rounded_corner_where_it_starts() {
+        // outward directions round a closed loop (degrees): a side, a round into a sharp corner, a short edge,
+        // another sharp corner, a round back to the side. The loop's first vertex is in the middle of the side.
+        let deg = [180.0, 180.0, 165.0, 150.0, 135.0, 120.0, 105.0, 90.0, 0.0, 270.0, 255.0, 240.0, 225.0, 210.0, 195.0, 180.0];
+        let dirs: Vec<DVec2> = deg.iter().map(|d: &f64| DVec2::new(d.to_radians().cos(), d.to_radians().sin())).collect();
+        let mut pts: Vec<DVec3> = (0..dirs.len()).map(|i| DVec3::new(i as f64, 0.0, 0.0)).collect();
+        pts.push(pts[0]);
+        let pieces = corner_pieces(pts, dirs, true);
+        // the short edge alone, and the rest (round, side, round) in one piece: before, the side was cut in two
+        // at the loop's start
+        let mut sizes: Vec<usize> = pieces.iter().map(|p| p.1.len()).collect();
+        sizes.sort();
+        assert_eq!(sizes, vec![1, 15], "{pieces:?}");
+        let long = pieces.iter().find(|p| p.1.len() == 15).unwrap();
+        assert_eq!(long.0.len(), 16);
+        assert_eq!(long.0[0].x, 9.0);
+        assert_eq!(long.0[15].x, 8.0);
+        // an open chain is only cut at its corners
+        let open = corner_pieces(vec![DVec3::ZERO, DVec3::X, DVec3::Y], vec![DVec2::X, DVec2::Y], false);
+        assert_eq!(open.len(), 2);
     }
 
     #[test]

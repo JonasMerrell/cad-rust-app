@@ -64,6 +64,7 @@ pub struct SimEvent {
     pub what: String,
 }
 
+#[derive(Clone)]
 struct Cutter {
     radius: f64,
     /// Height of the cutting surface above the tip by distance from the axis, every LUT_STEP mm.
@@ -231,6 +232,7 @@ pub struct Blocks {
     pub cuts: Vec<[(u8, f32); 3]>,
 }
 
+#[derive(Clone)]
 pub struct Sim {
     pub x0: f64,
     pub y0: f64,
@@ -437,6 +439,7 @@ pub fn allowed_depth(d: f64, width: f64) -> f64 {
 }
 
 /// The machine model placed for the simulation, and each toolpath's tool as points for checking it.
+#[derive(Clone)]
 pub struct SimMachine {
     pub placed: std::sync::Arc<crate::cam_machine::Placed>,
     fixtures: Vec<(String, DVec3, DVec3)>,

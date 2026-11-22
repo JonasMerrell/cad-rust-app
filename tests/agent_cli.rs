@@ -173,6 +173,118 @@ fn failed_cam_op_adds_nothing() {
     assert_eq!(lines[5]["result"]["operations"], json!([]), "{}", lines[5]);
 }
 
+/// CAM builds are cached between calls, and the cache follows every change: an operation edited, the part
+/// changed, or the setup a following setup starts from changed.
+#[test]
+fn cam_builds_follow_every_change() {
+    let dir = scratch("camcache");
+    let script = dir.join("cam.json");
+    let steps = json!([
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [40, 30]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 10}}},
+        {"tool": "create_cam", "args": {"stock": {"side": 3, "top": 2}}},
+        {"tool": "cam_tool", "args": {"cam": 0, "kind": "flat", "diameter": 6, "number": 1}},
+        {"tool": "cam_op", "args": {"cam": 0, "kind": "contour", "tool": 1}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "cam_op", "args": {"cam": 0, "id": 2, "stepdown": 1.0}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 3, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [60, 30]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 3}], "depth": 10}}},
+        {"tool": "cam_info", "args": {"cam": 0}},
+        {"tool": "create_cam", "args": {"name": "Op 2", "follows": "Manufacture 1", "orient": "bottom"}},
+        {"tool": "cam_op", "args": {"cam": 1, "kind": "adaptive", "tool": 1}},
+        {"tool": "cam_info", "args": {"cam": 1}},
+        {"tool": "cam_op", "args": {"cam": 0, "id": 2, "delete": true}},
+        {"tool": "cam_info", "args": {"cam": 1}}
+    ]);
+    std::fs::write(&script, steps.to_string()).unwrap();
+    let o = Command::new(exe()).arg("run").arg(&script).current_dir(&dir).output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 19, "{}", String::from_utf8_lossy(&o.stderr));
+    for l in &lines {
+        assert!(l.get("error").is_none(), "{l}");
+    }
+    let info = |i: usize| &lines[i]["result"];
+    let op = |i: usize| info(i)["operations"][0].clone();
+    // the same build twice
+    assert_eq!(op(6), op(7));
+    // an edited operation: more passes, so more moves
+    assert!(op(9)["moves"].as_u64().unwrap() > op(7)["moves"].as_u64().unwrap(), "{} {}", op(7), op(9));
+    // a longer part: a longer contour
+    assert!(op(13)["cut_length"].as_f64().unwrap() > op(9)["cut_length"].as_f64().unwrap() + 30.0, "{} {}", op(9), op(13));
+    // the setup that follows starts from what op 1 leaves: with op 1's contour gone there is more to clear
+    let rough = |i: usize| info(i)["operations"][0]["cut_length"].as_f64().unwrap();
+    assert!(rough(18) > rough(16) + 1.0, "{} {}", rough(16), rough(18));
+}
+
+/// The simulation is shared between simulate_cam and the export gate, and verify_gcode still reads the posted file:
+/// a program edited after it was exported is caught, the untouched one passes.
+#[test]
+fn shared_simulation_still_catches_an_edited_program() {
+    let dir = scratch("simcache");
+    let steps = |extra: Value| {
+        let mut v = json!([
+            {"tool": "create_sketch", "args": {"plane": "top"}},
+            {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [40, 30]}]}},
+            {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 10}}},
+            {"tool": "create_cam", "args": {"stock": {"side": 3, "top": 2}}},
+            {"tool": "cam_tool", "args": {"cam": 0, "kind": "flat", "diameter": 6, "number": 1}},
+            {"tool": "cam_op", "args": {"cam": 0, "kind": "contour", "tool": 1}}
+        ]);
+        v.as_array_mut().unwrap().extend(extra.as_array().unwrap().iter().cloned());
+        v
+    };
+    let run = |name: &str, v: Value| -> Vec<Value> {
+        let script = dir.join(name);
+        std::fs::write(&script, v.to_string()).unwrap();
+        let o = Command::new(exe()).arg("run").arg(&script).current_dir(&dir).output().unwrap();
+        String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect()
+    };
+    let a = run("a.json", steps(json!([
+        {"tool": "simulate_cam", "args": {"cam": 0}},
+        {"tool": "export_gcode", "args": {"cam": 0, "path": "p.nc"}},
+        {"tool": "simulate_cam", "args": {"cam": 0}},
+        {"tool": "verify_gcode", "args": {"cam": 0, "path": "p.nc"}},
+        {"tool": "cam_info", "args": {"cam": 0}}
+    ])));
+    assert_eq!(a.len(), 11, "{a:?}");
+    // the same run both times, and the export gate passed on it
+    assert_eq!(a[6]["result"]["problems"], a[8]["result"]["problems"]);
+    assert_eq!(a[6]["result"]["removed_mm3"], a[8]["result"]["removed_mm3"]);
+    assert_eq!(a[7]["result"]["sim"]["ok"], json!(true), "{}", a[7]);
+    assert_eq!(a[9]["result"]["ok"], json!(true), "{}", a[9]);
+    // edit the posted program: after the first cutting move, a move through the middle of the part at that depth
+    let info = &a[10]["result"];
+    let (lo, hi) = (&info["part"]["min"], &info["part"]["max"]);
+    let mid = |k: usize| (lo[k].as_f64().unwrap() + hi[k].as_f64().unwrap()) / 2.0;
+    let text = std::fs::read_to_string(dir.join("p.nc")).unwrap();
+    let top = hi[2].as_f64().unwrap();
+    let mut done = false;
+    let mut z = f64::INFINITY;
+    let mut edited = vec![];
+    for l in text.lines() {
+        edited.push(l.to_string());
+        if let Some(v) = l.split_whitespace().find_map(|w| w.strip_prefix('Z')).and_then(|v| v.parse::<f64>().ok()) {
+            z = v;
+        }
+        if !done && z < top - 1.0 && l.starts_with("G1 ") && (l.contains('X') || l.contains('Y')) {
+            edited.push(format!("G1 X{:.3} Y{:.3}", mid(0), mid(1)));
+            done = true;
+        }
+    }
+    assert!(done);
+    std::fs::write(dir.join("p.nc"), edited.join("\n")).unwrap();
+    let b = run("b.json", steps(json!([
+        {"tool": "simulate_cam", "args": {"cam": 0}},
+        {"tool": "verify_gcode", "args": {"cam": 0, "path": "p.nc"}}
+    ])));
+    assert_eq!(b[7]["result"]["ok"], json!(false), "{}", b[7]);
+    assert!(!b[7]["result"]["problems"].as_array().unwrap().is_empty(), "{}", b[7]);
+}
+
 /// A Rhai script builds a feature tree, not baked solids: the saved document has the variables,
 /// dimensioned sketches and features, and changing a variable resizes the part when it reopens.
 #[test]
