@@ -68,7 +68,7 @@ pub(super) const FEATURE_KINDS: [&str; 37] = [
 
 /// Tools that change the active Part Studio: a call that leaves a feature failing reports
 /// `ok: false` with `new_errors`, and `rollback: true` undoes it.
-pub(crate) const MODELLING_TOOLS: [&str; 11] = [
+pub(crate) const MODELLING_TOOLS: [&str; 12] = [
     "set_variable",
     "create_sketch",
     "sketch_add",
@@ -77,6 +77,7 @@ pub(crate) const MODELLING_TOOLS: [&str; 11] = [
     "edit_feature",
     "delete_feature",
     "import_file",
+    "scan_photos",
     "define_custom_feature",
     "set_part",
     "set_parts",
@@ -295,6 +296,20 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("edit_feature", "suppressed") => t("boolean", "suppress or unsuppress the feature"),
         ("delete_feature", "id") => json!({"type": "integer", "minimum": 1, "description": "feature id"}),
         ("feature_defaults", "kind") => en(&FEATURE_KINDS, "a feature kind; leave out to list the kinds"),
+        ("scan_photos", "photos") => t("string", "folder of photos (JPEG, PNG, TIFF), e.g. a capture-app session ~/scans/<date>-<name>"),
+        ("scan_photos", "method") => en(&["auto", "colmap", "openmvs", "sparse"], "dense surface: COLMAP on an NVIDIA GPU, OpenMVS on the CPU, or the rough sparse points (default auto: the best installed)"),
+        ("scan_photos", "quality") => en(&["fast", "normal", "high"], "detail and time (default normal)"),
+        ("scan_photos", "gpu") => t("boolean", "use the GPU for features and matching when COLMAP has CUDA (default true)"),
+        ("scan_photos", "glomap") => t("boolean", "solve the cameras with GLOMAP when installed (default false)"),
+        ("scan_photos", "level") => t("boolean", "stand the part on XY from the table plane (default true)"),
+        ("scan_photos", "remove_table") => t("boolean", "cut the table and loose bits away (default true)"),
+        ("scan_photos", "triangles") => json!({"type": "integer", "minimum": 0, "description": "thin the mesh to about this many triangles, 0 keeps all (default 40000)"}),
+        ("scan_photos", "scale") => json!({"oneOf": [
+            json!({"type": "number", "exclusiveMinimum": 0, "description": "mm per reconstruction unit"}),
+            json!({"type": "object", "description": "a reference block beside the part", "properties": {"reference": json!({"type": "array", "items": {"type": "number"}, "description": "its sizes in mm [a, b, c], or [d] for a ball"})}, "required": ["reference"], "additionalProperties": false}),
+            json!({"type": "object", "description": "two marks on an undistorted photo", "properties": {"photo": t("string", "photo file name"), "a": xy("first mark, pixels"), "b": xy("second mark, pixels"), "mm": t("number", "distance between the marks, mm")}, "required": ["photo", "a", "b", "mm"], "additionalProperties": false})
+        ], "description": "how to scale the mesh (default: the capture session's reference block, else unscaled)"}),
+        ("scan_photos", "name") => t("string", "feature name (default Scan <folder>)"),
         ("import_file", "path") => t("string", "file to import (.step, .stp, .x_t Parasolid, .iges, .igs, .stl, .obj, .dxf, .svg); relative paths are also looked for next to a `run` script"),
         ("import_file", "scale") => json!({"type": ["number", "string"], "exclusiveMinimum": 0, "description": "scale factor, e.g. 25.4 for a file in inches (default 1)"}),
         ("import_file", "merge_faces") => t("boolean", "meshes: join coplanar triangles into flat faces (default true)"),
