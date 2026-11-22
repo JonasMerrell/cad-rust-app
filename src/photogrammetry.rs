@@ -102,7 +102,8 @@ pub fn find_tools(s: &Settings) -> Tools {
             t.cuda = text.contains("with CUDA") && !text.contains("without CUDA");
         }
         if let Ok(o) = quiet(c).args(["feature_extractor", "-h"]).output() {
-            let h = String::from_utf8_lossy(&o.stdout);
+            // COLMAP 4 prints its help on stderr
+            let h = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
             t.new_options = h.contains("FeatureExtraction.use_gpu");
             t.new_max_size = h.contains("FeatureExtraction.max_image_size");
         }
