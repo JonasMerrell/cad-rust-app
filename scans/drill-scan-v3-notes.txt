@@ -1,0 +1,32 @@
+Drill scan cleanup v3: rCAD 2300fb3 (density trim), cleanup step only
+Run: scan_photos method=colmap quality=normal glomap=false, default reference from session.json, plain ~/opt/colmap/bin/colmap
+
+drill-scan-v3.html / drill-scan-v3.png
+  notes: trimmed the surface to the 98% that has photo points under it
+         kept the 38% of the mesh the cameras look at
+         couldn't find the reference block (the closest piece, 0.316 x 0.289 x 0.089 units, is 46% off): set the scale another way
+         cut away the table and 5495 loose bits; stood the part on XY; thinned 2408701 triangles to 39999
+  scale: unscaled (1.0) -- correct, the block is not in the dense cloud
+  bbox units: [-2.583,-2.397,0.0095] .. [2.586,2.393,3.119] = 5.17 x 4.79 x 3.11
+  triangles: 39999
+drill-scan-v3-70mm.png: same with scale=70 (temporary): bbox 362 x 335 x 218 mm
+Dome: still present.
+
+Cell counts (Python re-implementation of trim_to_points on dense/fused.ply, 5.06M points):
+  raw Poisson mesh median edge 0.006923 -> start cell 0.01385
+  growth: 0.01385 typical 5; 0.02215 typical 16; 0.03544 typical 48 -> final cell 0.03544, typical 48, min (5%) = 3
+  "near" = max count over the 3x3x3 neighbourhood of a triangle centroid's cell (what the trim tests)
+  Dome triangles (0.15-1.2 units above floor, >0.5 from drill points, r<2.6): 9,422
+    own cell p10/p50/p90 = 0/2/8, 3x3x3 max p10/p50/p90/p99 = 3/7/16/17
+  Drill-surface triangles (within 0.05 of yellow drill points, >0.1 above floor): 563,473
+    own cell p10/p50/p90 = 2/22/88, 3x3x3 max p10/p50/p90/p99 = 20/64/158/189
+  Floor triangles (|h|<0.05, r<2.6): 3,703,181
+    own cell p10/p50/p90 = 11/48/115, 3x3x3 max p10/p50/p90/p99 = 62/111/181/232
+  Kept fraction by threshold (fraction of typical -> min count): dome / drill / floor
+     5% (3):  92.2% /  99.8% / 100%
+    10% (5):  75.8% /  99.3% / 100%
+    20% (10): 30.2% /  97.4% / 100%
+    30% (15): 10.4% /  93.7% / 99.9%
+    50% (24):  0.0% /  87.4% / 99.2%
+  Fused points in the dome region (>0.5 from drill, 0.15-1.2 up, r<2.6): 1,245; yellow drill points: 61,230
+  Note: the drill classifier is yellow-only, so the black chuck/grip are under-sampled in "drill"; its p10 is pessimistic.
