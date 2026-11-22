@@ -397,16 +397,27 @@ fn plan(job: &Job, t: &Tools, method: Method) -> Result<Vec<Step>, String> {
     });
     match method {
         Method::Colmap => {
+            // the geometric-consistency pass runs every photo a second time: about twice as
+            // long for a cleaner surface, so Fast leaves it out
+            let geom = job.quality != Quality::Fast;
             steps.push(Step {
                 name: "Dense stereo (GPU)",
                 program: colmap.clone(),
-                args: vec!["patch_match_stereo".into(), "--workspace_path".into(), p(&dense), "--PatchMatchStereo.geom_consistency".into(), "true".into()],
+                args: vec!["patch_match_stereo".into(), "--workspace_path".into(), p(&dense), "--PatchMatchStereo.geom_consistency".into(), geom.to_string()],
                 cwd: w.clone(),
             });
             steps.push(Step {
                 name: "Fusing depth maps",
                 program: colmap.clone(),
-                args: vec!["stereo_fusion".into(), "--workspace_path".into(), p(&dense), "--output_path".into(), p(&dense.join("fused.ply"))],
+                args: vec![
+                    "stereo_fusion".into(),
+                    "--workspace_path".into(),
+                    p(&dense),
+                    "--input_type".into(),
+                    if geom { "geometric" } else { "photometric" }.into(),
+                    "--output_path".into(),
+                    p(&dense.join("fused.ply")),
+                ],
                 cwd: w.clone(),
             });
             steps.push(Step {
