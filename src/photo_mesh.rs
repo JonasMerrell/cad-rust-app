@@ -673,6 +673,43 @@ pub fn focus(cams: &[(DVec3, DVec3)]) -> Option<(DVec3, f64)> {
     Some((p, 0.6 * dist[dist.len() / 2]))
 }
 
+/// Soft floors (carpet, a cloth) stand up from the fitted plane in a ragged skirt round the
+/// part, joined to it where it stands. Drop what stays low (under 4% of the part's height)
+/// and lies outside the footprint of the part's higher surface.
+fn trim_skirt(m: &Mesh, pl: Plane, r0: DMat3, cut: f64, edge: f64, notes: &mut Vec<String>) -> Mesh {
+    use std::collections::HashSet;
+    let h = m.v.iter().map(|p| pl.dist(*p)).fold(0.0, f64::max);
+    let low = (2.0 * cut).max(0.04 * h);
+    let cell = edge.max(0.04 * h);
+    if !(cell > 0.0) {
+        return m.clone();
+    }
+    let key = |p: DVec3| {
+        let q = r0 * p;
+        ((q.x / cell).floor() as i64, (q.y / cell).floor() as i64)
+    };
+    let mut over: HashSet<(i64, i64)> = HashSet::new();
+    for p in m.v.iter().filter(|p| pl.dist(**p) > low) {
+        over.insert(key(*p));
+    }
+    if over.is_empty() {
+        return m.clone();
+    }
+    let inside = |p: DVec3| {
+        let (x, y) = key(p);
+        (-1..=1).any(|i| (-1..=1).any(|j| over.contains(&(x + i, y + j))))
+    };
+    let out = m.filter(|i| {
+        let t = m.tri(i);
+        t.iter().any(|p| pl.dist(*p) > low) || inside(t.iter().sum::<DVec3>() / 3.0)
+    });
+    let gone: f64 = (0..m.t.len()).map(|i| m.area(i)).sum::<f64>() - (0..out.t.len()).map(|i| out.area(i)).sum::<f64>();
+    if out.t.len() < m.t.len() {
+        notes.push(format!("dropped a low skirt round the part (soft floor), {:.0}% of its surface", 100.0 * gone / (0..m.t.len()).map(|i| m.area(i)).sum::<f64>().max(1e-300)));
+    }
+    out
+}
+
 /// `cams` are the photos' camera centres and viewing directions (empty when unknown): with
 /// them the mesh is first cropped to where the cameras look, so a scan of a whole room keeps
 /// the part in the middle, and the table found is the one under it.
@@ -802,6 +839,7 @@ pub fn clean(m: &Mesh, c: &Cleanup, cams: &[(DVec3, DVec3)]) -> Cleaned {
                 let kept = keep.iter().filter(|k| **k).count();
                 mesh = above.filter(|i| keep[piece[i] as usize]);
                 notes.push(format!("cut away the table and {} loose bits", n - kept - skip.iter().filter(|s| **s).count()));
+                mesh = trim_skirt(&mesh, pl, r0, cut, edge, &mut notes);
             }
         }
     }
@@ -1139,6 +1177,23 @@ mod tests {
         quad(&mut m, DVec3::new(-95.0, -90.0 + 50.8, 0.0), DVec3::new(76.2, -50.8, 0.0), DVec3::Z * 25.4, 20);
         let c = clean(&weld(&m), &Cleanup { reference: Some([25.4, 50.8, 76.2]), triangles: 0, ..Default::default() }, &[]);
         assert!(c.scale.is_none(), "{:?}", c.notes);
+    }
+
+    #[test]
+    fn drops_a_carpet_skirt_round_the_part() {
+        // the part stands on a ragged disc of carpet pile, joined to it, a little above the floor
+        let mut m = Mesh::default();
+        quad(&mut m, DVec3::new(-100.0, -100.0, 0.0), DVec3::X * 200.0, DVec3::Y * 200.0, 120);
+        add_box(&mut m, -10.0, -5.0, 30.0, 15.0, 40.0, 20);
+        let n = m.v.len();
+        quad(&mut m, DVec3::new(-30.0, -25.0, 0.8), DVec3::X * 80.0, DVec3::Y * 60.0, 40);
+        for p in &mut m.v[n..] {
+            p.z += 0.4 * ((p.x * 0.7).sin() * (p.y * 0.9).cos());
+        }
+        let c = clean(&weld(&m), &Cleanup { triangles: 0, ..Default::default() }, &[]);
+        let (lo, hi) = c.mesh.bbox();
+        let size = hi - lo;
+        assert!(size.x < 50.0 && size.y < 30.0 && (size.z - 40.0).abs() < 1.0, "{size:?} {:?}", c.notes);
     }
 
     #[test]
