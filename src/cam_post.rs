@@ -551,7 +551,8 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
                     e += 1;
                 }
                 if pts.len() >= 4 {
-                    for piece in fit_arcs(&pts) {
+                    let surface = op.is_some_and(|o| matches!(o.kind, OpKind::Parallel | OpKind::Waterline | OpKind::Scallop | OpKind::Pencil | OpKind::Deburr));
+                    for piece in fit_arcs_tol(&pts, if surface { CHORD_TOL_3D } else { CHORD_TOL }) {
                         match piece {
                             Piece::Line(p) => o.mv(1, p - origin, Some(*f)),
                             Piece::Arc { from, to, c, ccw } => o.arc(if ccw { 3 } else { 2 }, from - origin, to - origin, c - origin.truncate(), *f),
@@ -927,6 +928,10 @@ const ARC_TOL: f64 = 0.005;
 /// Largest bulge of an arc over a segment it replaces: the segments were themselves cut short of the
 /// curve they stand for (offsets keep within 0.004 mm), so the arc may run a little outside them.
 const CHORD_TOL: f64 = 0.02;
+/// The same for 3D finishing, whose points touch the part: there a bulge can be into it (a waterline round
+/// the Eclipse car's tail corners was fitted with arcs 0.02-0.05 into the wall), so arcs only where the
+/// segments already lie on them.
+const CHORD_TOL_3D: f64 = 0.002;
 
 enum Piece {
     Line(DVec3),
@@ -951,7 +956,7 @@ fn circle(a: DVec2, b: DVec2, c: DVec2) -> Option<(DVec2, f64)> {
 }
 
 /// Whether `pts` lie on one arc (within ARC_TOL, turning one way, Z even along it); its centre and direction.
-fn arc_of(pts: &[DVec3]) -> Option<(DVec2, bool)> {
+fn arc_of(pts: &[DVec3], chord_tol: f64) -> Option<(DVec2, bool)> {
     let n = pts.len();
     let (a, m, b) = (pts[0].truncate(), pts[n / 2].truncate(), pts[n - 1].truncate());
     let (c, r) = circle(a, m, b)?;
@@ -972,7 +977,7 @@ fn arc_of(pts: &[DVec3]) -> Option<(DVec2, bool)> {
         }
         dir = da.signum();
         // the chord's middle must stay near the arc too
-        if r - (r * r - p.distance_squared(q) / 4.0).max(0.0).sqrt() > CHORD_TOL {
+        if r - (r * r - p.distance_squared(q) / 4.0).max(0.0).sqrt() > chord_tol {
             return None;
         }
         sweep += da;
@@ -992,13 +997,17 @@ fn arc_of(pts: &[DVec3]) -> Option<(DVec2, bool)> {
 
 /// Replace runs of points that lie on circles (at least four segments long) by arcs; `pts[0]` is where the tool is.
 fn fit_arcs(pts: &[DVec3]) -> Vec<Piece> {
+    fit_arcs_tol(pts, CHORD_TOL)
+}
+
+fn fit_arcs_tol(pts: &[DVec3], chord_tol: f64) -> Vec<Piece> {
     let mut out = vec![];
     let mut i = 0;
     while i + 1 < pts.len() {
         let mut best = None;
         let mut j = i + 4;
         while j < pts.len() && j - i <= 400 {
-            match arc_of(&pts[i..=j]) {
+            match arc_of(&pts[i..=j], chord_tol) {
                 Some(a) => {
                     best = Some((j, a));
                     j += 1;
