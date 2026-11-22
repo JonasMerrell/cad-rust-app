@@ -1,0 +1,17 @@
+Drill scan v5: rCAD b2d2ad9 (drops low skirt outside the part's footprint), cleanup step only
+Run: scan_photos method=colmap quality=normal glomap=false scale=80.9 (mean of the CAL_0113 78.8 and CAL_0112 83.0 click scales)
+
+notes: trimmed the surface to the 71% that has photo points under it
+       kept the 51% of the mesh the cameras look at
+       cut away the table and 5799 loose bits
+       dropped a low skirt round the part (soft floor), 38% of its surface
+       stood the part on XY
+       thinned 1446738 triangles to 39999
+scale: 80.9 mm/unit (given)
+bbox mm: [-162.65,-120.42,0.97] .. [162.58,120.51,252.98] = 325 x 241 x 253 mm
+triangles: 39999 (export_web: 39699)
+
+Render: the carpet disc is gone and the drill's shape (chuck, body, grip, battery) is clear. A few flat, raised
+patches of floor/shadow remain on one side (left in the iso view), and they still widen the bbox in X.
+
+Drill model (drill-label-IMG_0030.png): "DC742  3/8" (10mm) CORDLESS DRILL DRIVER", a DeWalt DC742 (12 V NiCd pack).
