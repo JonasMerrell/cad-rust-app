@@ -24,3 +24,10 @@ Cross-check (drill-scan-v4-cal0112.png): {"photo":"CAL_0112.jpg","a":[1203,439],
 
 The height (~245-259 mm) is from these clicks, not from a known drill dimension; the earlier "70 mm/unit / 218 mm"
 was only my guess. The footprint (408 x 386 mm) is still the Poisson dome: drill-scan-v4.png still shows it at 35%.
+
+Correction after checking rcad-scan/part.ply (the kept mesh, units, z up):
+  z 0-0.1:   area 19.73 units^2, r p50/p90 = 1.77/2.45   <- a flat carpet disc, not a dome
+  z 0.1-0.5: area 1.57, r p90 0.87 | z 0.5-1.0: area 4.67, r p90 0.74 | z 1.0-1.5: area 2.09, r p90 0.59 | z 1.5-3.2: area 6.63
+  Everything above 0.1 units (~8 mm) is within ~0.9 units of the drill axis. So the 35% trim removed the dome.
+  What the iso render shows as a "dome" is a ~2.5-unit-radius disc of carpet (0-0.1 units thick) that remove_table
+  didn't cut: the carpet pile is thicker than the table-cut tolerance. The bbox footprint (408 x 386 mm) is that disc.
