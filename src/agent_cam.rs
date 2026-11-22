@@ -184,10 +184,49 @@ impl Session {
             let ik = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, k));
             inputs.insert(k, crate::cam_jaws::input_for(&self.ws.cams, k, ik)?);
         }
-        let stock = cam_paths::link_setups_each(&mut self.ws.cams, ci, &|k| inputs.get(&k).cloned().unwrap_or_else(|| input.clone()))?;
+        // everything the build depends on: the setups of the chain (without the stock boxes the link itself
+        // sets) and what each machines
+        let chain = cam_paths::setup_chain(&self.ws.cams, ci)?;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &k in chain.iter().chain(std::iter::once(&ci)) {
+                let mut ck = self.ws.cams[k].clone();
+                ck.stock.carried = None;
+                k.hash(&mut h);
+                serde_json::to_string(&ck).unwrap_or_default().hash(&mut h);
+                inputs.get(&k).unwrap_or(&input).hash_into(&mut h);
+            }
+            h.finish()
+        };
+        if let Some(b) = self.cam_cache.get(&ci).filter(|b| b.key == key) {
+            for (k, carried) in &b.carried {
+                self.ws.cams[*k].stock.carried = *carried;
+            }
+            return Ok((b.part.clone(), b.paths.clone(), b.stock.clone()));
+        }
+        // the stock this setup starts from: what the setup before it leaves (itself built once and cached, with
+        // its own chain), turned into this setup's orientation, as cam_paths::link_setups_each does
+        let stock = match chain.last() {
+            Some(&p) => {
+                self.cam_build_from(p)?;
+                let b = self.cam_cache.get(&p).ok_or("the setup before this one didn't build")?;
+                let (lo, hi) = cam_paths::stock_box(&self.ws.cams[p], &b.part);
+                let (a, z) = (b.part.to_part(lo), b.part.to_part(hi));
+                let start = b.after.reorient(b.part.rot, cam_paths::setup_matrix(&self.ws.cams[ci]));
+                self.ws.cams[ci].stock.carried = Some([a.min(z).to_array(), a.max(z).to_array()]);
+                Some(start)
+            }
+            None => {
+                self.ws.cams[ci].stock.carried = None;
+                None
+            }
+        };
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
-        let paths = cam_paths::generate_from(c, &part, stock.as_ref());
+        let (paths, after) = cam_paths::generate_with_stock(c, &part, stock.as_ref());
+        let carried = chain.iter().chain(std::iter::once(&ci)).map(|&k| (k, self.ws.cams[k].stock.carried)).collect();
+        self.cam_cache.insert(ci, super::CamBuild { key, part: part.clone(), paths: paths.clone(), stock: stock.clone(), after, carried });
         Ok((part, paths, stock))
     }
 
@@ -255,6 +294,11 @@ impl Session {
     /// As `cam_sim`, with the stock the setups before this one leave.
     fn cam_sim_left(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim, Option<StockMap>)> {
         let (part, paths, left) = self.cam_build_from(ci)?;
+        // the same build simulated at this resolution before: the same toolpaths on the same stock, so the same run
+        let key = (self.cam_cache.get(&ci).map(|b| b.key).unwrap_or_default(), resolution);
+        if let Some((_, _, _, sim)) = self.sim_cache.get(&key) {
+            return Ok((part, paths, sim.clone(), left));
+        }
         let c = &self.ws.cams[ci];
         let stock = cam_paths::stock_box(c, &part);
         let mut sim = Sim::new(c, &part, stock, &paths, resolution);
@@ -267,7 +311,28 @@ impl Session {
             sim.set_machine(c, &part, placed);
         }
         sim.run_to(usize::MAX, usize::MAX);
+        self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
         Ok((part, paths, sim, left))
+    }
+
+    /// A job's combined simulation, run to the end, shared like `cam_sim_left` (keyed by its stations' builds
+    /// and which of them it runs).
+    fn job_sim(&mut self, j: &crate::cam_job::Job, resolution: usize) -> R<(Cam, Part, Vec<Toolpath>, Sim)> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in &j.stations {
+            let i = self.ws.cams.iter().position(|c| c.name == s.cam.name);
+            (i.and_then(|i| self.cam_cache.get(&i)).map(|b| b.key), crate::cam_verify::toolpath_hash(&s.paths)).hash(&mut h);
+        }
+        j.order.hash(&mut h);
+        let key = (h.finish(), resolution);
+        if let Some((c, part, paths, sim)) = self.sim_cache.get(&key) {
+            return Ok((c.clone(), part.clone(), paths.clone(), sim.clone()));
+        }
+        let (c, part, paths, mut sim) = j.sim(resolution)?;
+        sim.run_to(usize::MAX, usize::MAX);
+        self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
+        Ok((c, part, paths, sim))
     }
 
     /// rcnc's Find stock on a setup that follows another: the stock's outline where the probe touches its sides
@@ -779,11 +844,7 @@ impl Session {
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 let job = self.cam_job(ci, a)?;
                 let (cam_owned, part, paths, sim) = match &job {
-                    Some(j) => {
-                        let (c, part, paths, mut sim) = j.sim(res)?;
-                        sim.run_to(usize::MAX, usize::MAX);
-                        (c, part, paths, sim)
-                    }
+                    Some(j) => self.job_sim(j, res)?,
                     None => {
                         let (part, paths, sim) = self.cam_sim(ci, res)?;
                         (self.ws.cams[ci].clone(), part, paths, sim)
@@ -1119,8 +1180,7 @@ impl Session {
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 if let Some(j) = self.cam_job(ci, a)? {
                     // a job: the whole program's combined simulation gates it the same way
-                    let (jc, jpart, _jpaths, mut sim) = j.sim(res)?;
-                    sim.run_to(usize::MAX, usize::MAX);
+                    let (jc, jpart, _jpaths, sim) = self.job_sim(&j, res)?;
                     let o = cam_paths::work_origin(&jc, &jpart);
                     let names = |id: u64| jc.op(id).map(|o| o.name.clone()).unwrap_or_default();
                     let problems: Vec<Value> = sim

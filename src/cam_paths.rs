@@ -114,7 +114,35 @@ pub struct PartInput {
     pub sketches: Vec<SketchPaths>,
 }
 
+impl PartInput {
+    /// Feed what the setup machines into a hasher (to tell whether a cached build still holds).
+    pub fn hash_into(&self, h: &mut impl std::hash::Hasher) {
+        use std::hash::Hash;
+        self.tris.len().hash(h);
+        for t in &self.tris {
+            for v in t {
+                for c in v.to_array() {
+                    c.to_bits().hash(h);
+                }
+            }
+        }
+        format!("{:?}", self.circles).hash(h);
+        for sk in &self.sketches {
+            (sk.id, &sk.name).hash(h);
+            for (pts, closed) in &sk.paths {
+                closed.hash(h);
+                for v in pts {
+                    for c in v.to_array() {
+                        c.to_bits().hash(h);
+                    }
+                }
+            }
+        }
+    }
+}
+
 /// The parts being machined, in setup coordinates.
+#[derive(Clone)]
 pub struct Part {
     pub tris: Vec<[DVec3; 3]>,
     pub circles: Vec<(DVec3, DVec3, f64)>,
@@ -1658,7 +1686,15 @@ fn contour(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
     let bottom = ctx.wz(op.bottom).unwrap_or(if cut_out { part_bottom - op.breakthrough } else { part_bottom });
     let r = t.radius();
     let slot = t.kind == ToolKind::Slot;
-    let lv = if slot { vec![bottom] } else { levels(top, bottom, stepdown(op, t), &ctx.geo.floors()) };
+    // the floors a pass stops at: outside the part only those where its outline changes (a step in the wall),
+    // not the floors of pockets inside it, so a full-height finishing pass stays one pass
+    let floors: Vec<f64> = if op.side == Side::Outside {
+        let outer = |z: f64| ctx.geo.shadow(z).iter().filter_map(|sh| sh.first()).map(|c| area(c).abs()).sum::<f64>();
+        ctx.geo.floors().into_iter().filter(|&f| (outer(f + 0.05) - outer(f - 0.05)).abs() > 0.01).collect()
+    } else {
+        ctx.geo.floors()
+    };
+    let lv = if slot { vec![bottom] } else { levels(top, bottom, stepdown(op, t), &floors) };
     let off = if slot { r - if op.slot_depth > 0.0 { op.slot_depth } else { r * 0.3 } } else { r + op.leave };
     let tab_top = bottom + op.tab_height;
     // the most a pass may take radially; extra passes outside the wall keep to it where the stock reaches further out
@@ -2860,6 +2896,25 @@ mod tests {
         assert!((shapes_area(&g.shadow(7.0)) - 2000.0).abs() < 1.0);
         assert!(inside(&g.shadow(7.0), [5.0, 5.0]) && !inside(&g.shadow(7.0), [20.0, 20.0]));
         assert_eq!(g.floors(), vec![10.0, 5.0]);
+    }
+
+    #[test]
+    fn an_outside_contour_does_not_stop_at_pocket_floors() {
+        // the plate's pocket floor (Z5) is inside the outline: a full-height outside pass stays one pass
+        let part = plate();
+        let (mut c, t) = setup();
+        let id = c.add_op(OpKind::Contour, t);
+        c.op_mut(id).unwrap().side = Side::Outside;
+        c.op_mut(id).unwrap().stepdown = Some(20.0);
+        let tp = &generate(&c, &part)[0];
+        let zs: Vec<f64> = tp.moves.iter().filter_map(|m| if let Move::Feed(p, _) = m { Some(p[2]) } else { None }).collect();
+        assert!(!zs.is_empty());
+        // the heights it runs level at (the leads ramp through the others)
+        let mut flat: Vec<f64> = zs.windows(2).filter(|w| (w[0] - w[1]).abs() < 1e-9).map(|w| (w[0] * 100.0).round() / 100.0).collect();
+        flat.dedup();
+        flat.sort_by(f64::total_cmp);
+        flat.dedup();
+        assert_eq!(flat.len(), 1, "passes at {flat:?}");
     }
 
     #[test]
