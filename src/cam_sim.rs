@@ -110,6 +110,19 @@ struct Cutter {
 
 pub const LUT_STEP: f64 = 0.002;
 
+/// The tool's height above its tip at `rho`, between the table's steps. Taking the step below instead (as
+/// the simulation did) puts a steep flank too low: a 2.24° tapered ball rises 25.6 mm per mm out there, so
+/// up to 0.05 mm, read as a gouge on a wall the flank only touches (the Eclipse car's tail corners).
+pub fn lut_at(lut: &[f32], rho: f64) -> f32 {
+    let x = (rho / LUT_STEP).max(0.0);
+    let i = (x as usize).min(lut.len().saturating_sub(1));
+    if i + 1 >= lut.len() {
+        return lut[i];
+    }
+    let f = (x - i as f64).clamp(0.0, 1.0) as f32;
+    lut[i] + (lut[i + 1] - lut[i]) * f
+}
+
 /// Height of a tool's cutting surface above its tip, every LUT_STEP mm out from the axis
 /// (empty for tools that cut under an overhang).
 pub fn tool_lut(t: &Tool) -> Vec<f32> {
@@ -1104,7 +1117,7 @@ impl Sim {
                         continue;
                     }
                     let rho = d2.sqrt();
-                    let z = tip + c.lut[((rho / LUT_STEP) as usize).min(c.lut.len() - 1)];
+                    let z = tip + lut_at(&c.lut, rho);
                     let k = (j * nx + i) as usize;
                     let s = self.stock[k];
                     if s > z {
@@ -1406,6 +1419,56 @@ mod tests {
             sim.run_to(usize::MAX, usize::MAX);
             assert!(sim.events.is_empty(), "hole at y = {y:?}: {:?}", sim.events);
             assert!(sim.removed > 0.0);
+        }
+    }
+
+    /// A 2.24° tapered ball (R1, as the SpeTool W01004) running along a wall that stands 8 mm above its tip,
+    /// just clear of the wall's top edge: the flank touches nothing, so no gouge. Reading the tool's height at
+    /// the table step below the cell's distance made the steep flank up to 0.05 mm too low and flagged it.
+    /// 0.05 mm closer it really cuts the wall and must be flagged.
+    #[test]
+    fn tapered_flank_beside_a_tall_wall_is_not_a_gouge() {
+        let v = |x: f64, y: f64, z: f64| DVec3::new(x, y, z);
+        let q = |a: DVec3, b: DVec3, c: DVec3, d: DVec3| [[a, b, c], [a, c, d]];
+        let (w, l, h) = (20.0, 20.0, 10.0);
+        let mut t = vec![];
+        t.extend(q(v(0., 0., h), v(w, 0., h), v(w, l, h), v(0., l, h)));
+        t.extend(q(v(0., 0., 0.), v(0., l, 0.), v(w, l, 0.), v(w, 0., 0.)));
+        t.extend(q(v(0., 0., 0.), v(w, 0., 0.), v(w, 0., h), v(0., 0., h)));
+        t.extend(q(v(w, 0., 0.), v(w, l, 0.), v(w, l, h), v(w, 0., h)));
+        t.extend(q(v(w, l, 0.), v(0., l, 0.), v(0., l, h), v(w, l, h)));
+        t.extend(q(v(0., l, 0.), v(0., 0., 0.), v(0., 0., h), v(0., l, h)));
+        let part = Part::new(&t, &[], "top");
+        let mut cam = Cam::default();
+        let tool = crate::cam::Tool { kind: ToolKind::TaperedBall, diameter: 3.175, corner_radius: 1.0, angle: 2.24, flute_length: 15.0,
+                                      shank_diameter: 3.175, stickout: 18.0, ..Default::default() };
+        let ti = cam.add_tool(tool.clone());
+        // the flank's radius at the wall's top edge (about 8 above the tip); the tip height is picked so that
+        // radius sits just short of one of the simulation's table steps
+        let reach_at = |tip_z: f64| {
+            let (mut lo, mut hi) = (0.9, 1.5875);
+            for _ in 0..60 {
+                let m = (lo + hi) / 2.0;
+                if crate::cam_3d::tool_height(&tool, m).unwrap() < h - tip_z { lo = m } else { hi = m }
+            }
+            hi
+        };
+        let tip_z = (0..200).map(|k| 2.0 + k as f64 * 0.0005).find(|&z| ((reach_at(z) / LUT_STEP).fract() - 0.88).abs() < 0.02).unwrap();
+        let reach = reach_at(tip_z);
+        assert!(reach > 1.25 && reach < 1.3, "{reach}");
+        let stock = (DVec3::new(0.0, -5.0, 0.0), DVec3::new(40.0, l + 5.0, h));
+        // clear of the edge by 0.0002: the step below is about 0.0018 mm nearer the axis, where the flank is
+        // 0.045 mm lower
+        let clear = 0.0002;
+        for (gap, real) in [(clear, false), (-0.05, true)] {
+            let x = w + reach + gap;
+            let moves = vec![Move::Rapid([x, -3.0, 20.0]), Move::Rapid([x, -3.0, tip_z]), Move::Feed([x, l + 3.0, tip_z], 1000.0), Move::Rapid([x, l + 3.0, 20.0])];
+            let tp = Toolpath { op: 1, tool: ti, moves, ..Default::default() };
+            let mut sim = Sim::new(&cam, &part, stock, &[tp], 1000);
+            assert!((sim.cell - 0.04).abs() < 1e-12);
+            sim.run_to(usize::MAX, usize::MAX);
+            let gouges: Vec<_> = sim.events.iter().filter(|e| e.kind == EventKind::Gouge).collect();
+            assert_eq!(!gouges.is_empty(), real, "gap {gap}: {gouges:?}");
         }
     }
 }
