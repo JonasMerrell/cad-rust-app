@@ -64,6 +64,7 @@ pub fn import_csv(text: &str) -> Result<Imported, String> {
             ("tool_taperAngle", "TA"),
             ("tool_threadPitch", "TP"),
             ("tool_shoulderDiameter", "shoulder-diameter"),
+            ("tool_shoulderLength", "shoulder-length"),
             ("tool_numberOfTeeth", "NT"),
         ] {
             if let Some(v) = n(field) {
@@ -183,7 +184,8 @@ fn fusion_tool(e: &Value) -> Result<Option<Tool>, String> {
         "tapered mill" => ToolKind::TaperedBall,
         "chamfer mill" | "counter sink" | "engrave" | "engraving" => ToolKind::Chamfer,
         "face mill" => ToolKind::FaceMill,
-        "slot mill" | "dovetail mill" => ToolKind::Slot,
+        "slot mill" => ToolKind::Slot,
+        "dovetail mill" => ToolKind::Dovetail,
         "thread mill" => ToolKind::ThreadMill,
         "drill" => ToolKind::Drill,
         "spot drill" => ToolKind::SpotDrill,
@@ -221,6 +223,27 @@ fn fusion_tool(e: &Value) -> Result<Option<Tool>, String> {
         ToolKind::Slot => {
             t.cutting_width = t.flute_length.min(d);
             t.neck_diameter = len(&["shoulder-diameter", "DN"]).unwrap_or(t.shank_diameter.min(d * 0.6));
+        }
+        ToolKind::Dovetail => {
+            // Fusion's dovetail: full diameter DC at the tip, the flank running in to the neck over the
+            // flute length; the taper angle is the flank's from the bottom face. When the neck isn't given
+            // it follows from the angle and flute length.
+            let lcf = len(&["LCF"]).filter(|v| *v > 0.0);
+            let angle = ta.filter(|a| *a > 1.0 && *a < 89.0);
+            let neck = len(&["shoulder-diameter", "DN"]).filter(|v| *v > 0.0 && *v < d);
+            t.neck_diameter = match (neck, lcf, angle) {
+                (Some(n), _, _) => n,
+                (None, Some(h), a) => (d - 2.0 * h / a.unwrap_or(45.0).to_radians().tan()).max(d * 0.2),
+                _ => d * 0.5,
+            };
+            t.angle = match (angle, lcf) {
+                (Some(a), _) => a,
+                (None, Some(h)) => (h / ((d - t.neck_diameter) / 2.0).max(1e-6)).atan().to_degrees(),
+                _ => 45.0,
+            };
+            t.flute_length = t.head_height();
+            t.cutting_width = t.flute_length;
+            t.neck_length = len(&["shoulder-length"]).filter(|v| *v > t.flute_length).unwrap_or(0.0);
         }
         ToolKind::ThreadMill => {
             // the toothed length: a single-profile mill (one tooth) cuts one pitch per lap, so it must
@@ -383,6 +406,20 @@ mod tests {
         assert_eq!((c.kind, c.angle, c.diameter, c.rpm), (ToolKind::Chamfer, 90.0, 12.7, 0.0));
         let tap = &r.tools[2];
         assert_eq!((tap.kind, tap.pitch, tap.feed), (ToolKind::Tap, 1.0, 500.0));
+    }
+
+    #[test]
+    fn reads_dovetail_mills() {
+        // the DMC2 library's row: Ø4 45° on a Ø2 neck 6 mm long, Ø4 shank, 50 mm long, 4 flutes
+        let head = "tool_index,preset_name,tool_type,tool_description,tool_number,tool_diameter,tool_numberOfFlutes,tool_material,tool_fluteLength,tool_bodyLength,tool_overallLength,tool_shaftDiameter,tool_shoulderLength,tool_cornerRadius,tool_tipDiameter,tool_tipAngle,tool_taperAngle,tool_spindleSpeed,tool_feedCutting,tool_feedPlunge,tool_feedEntry,tool_feedExit,tool_feedRamp,tool_feedPerTooth,tool_stepdown,tool_stepover,tool_coolant,tool_productId,tool_shoulderDiameter,tool_numberOfTeeth,tool_threadPitch\n";
+        let r = import_csv(&format!("{head}104,Default preset,dovetail mill,4mm 45 deg dovetail 4 flute,,4,4,carbide,1,,50,4,6,,,,45,,,,,,,,,,,,2,,\n")).unwrap();
+        let t = &r.tools[0];
+        assert_eq!((t.kind, t.diameter, t.angle, t.neck_diameter, t.neck_length, t.flutes, t.shank_diameter), (ToolKind::Dovetail, 4.0, 45.0, 2.0, 6.0, 4, 4.0));
+        assert!((t.head_height() - 1.0).abs() < 1e-9 && (t.flute_length - 1.0).abs() < 1e-9);
+        assert_eq!(t.shank_step(), Some((2.0, 6.0)));
+        // no neck given: it follows from the flute length and angle
+        let r = import_csv(&format!("{head}1,,dovetail mill,,,6,4,carbide,1.5,,50,6,,,,,45,,,,,,,,,,,,,,\n")).unwrap();
+        assert!((r.tools[0].neck_diameter - 3.0).abs() < 1e-9);
     }
 
     #[test]

@@ -22,6 +22,9 @@ pub enum ToolKind {
     Engrave,
     /// Slot mill (T-slot / keyseat / woodruff cutter): cuts sideways below a thin neck.
     Slot,
+    /// Dovetail cutter: an inverted cone (widest at the tip) on a thin neck; cuts dovetails and back
+    /// chamfers (the undersides of edges) from the side.
+    Dovetail,
     /// Single-profile or multi-tooth thread mill.
     ThreadMill,
     /// Face mill (indexable, large diameter).
@@ -36,7 +39,7 @@ pub enum ToolKind {
 }
 
 impl ToolKind {
-    pub const ALL: [ToolKind; 15] = [
+    pub const ALL: [ToolKind; 16] = [
         ToolKind::Flat,
         ToolKind::Ball,
         ToolKind::Bull,
@@ -44,6 +47,7 @@ impl ToolKind {
         ToolKind::Chamfer,
         ToolKind::Engrave,
         ToolKind::Slot,
+        ToolKind::Dovetail,
         ToolKind::ThreadMill,
         ToolKind::FaceMill,
         ToolKind::Drill,
@@ -63,6 +67,7 @@ impl ToolKind {
             ToolKind::Chamfer => "Chamfer mill",
             ToolKind::Engrave => "Engraving V-bit",
             ToolKind::Slot => "Slot mill",
+            ToolKind::Dovetail => "Dovetail cutter",
             ToolKind::ThreadMill => "Thread mill",
             ToolKind::FaceMill => "Face mill",
             ToolKind::Drill => "Drill",
@@ -83,6 +88,7 @@ impl ToolKind {
             ToolKind::Chamfer => "chamfer",
             ToolKind::Engrave => "engrave",
             ToolKind::Slot => "slot",
+            ToolKind::Dovetail => "dovetail",
             ToolKind::ThreadMill => "thread_mill",
             ToolKind::FaceMill => "face_mill",
             ToolKind::Drill => "drill",
@@ -103,6 +109,7 @@ impl ToolKind {
             "tapered" | "taper" | "tapered_ball_mill" => Some(ToolKind::TaperedBall),
             "vbit" | "v_bit" => Some(ToolKind::Engrave),
             "tslot" | "t_slot" | "keyseat" | "woodruff" | "slot_mill" => Some(ToolKind::Slot),
+            "dovetail_mill" | "dovetail_cutter" | "back_chamfer" | "undercut" => Some(ToolKind::Dovetail),
             "threadmill" => Some(ToolKind::ThreadMill),
             "facemill" => Some(ToolKind::FaceMill),
             "spot" => Some(ToolKind::SpotDrill),
@@ -115,6 +122,11 @@ impl ToolKind {
     /// Only plunges along its axis.
     pub fn is_hole_tool(self) -> bool {
         matches!(self, ToolKind::Drill | ToolKind::SpotDrill | ToolKind::CenterDrill | ToolKind::Tap | ToolKind::Reamer)
+    }
+
+    /// Cuts sideways under an overhang with a head wider than its neck (slot, dovetail and thread mills).
+    pub fn is_undercut(self) -> bool {
+        matches!(self, ToolKind::Slot | ToolKind::Dovetail | ToolKind::ThreadMill)
     }
 }
 
@@ -187,7 +199,8 @@ pub struct Tool {
     /// Flat tip diameter of a chamfer mill or V-bit.
     pub tip_diameter: f64,
     /// Included angle in degrees: chamfer mill and V-bit (90 = 45° chamfer), drill point (118/135),
-    /// spot drill (90/120); for a tapered ball mill the angle per side.
+    /// spot drill (90/120); for a tapered ball mill the angle per side; for a dovetail cutter the angle
+    /// between its flank and its flat bottom face (a "45°" or "60°" dovetail).
     pub angle: f64,
     pub flute_length: f64,
     /// Length out of the holder.
@@ -205,8 +218,12 @@ pub struct Tool {
     pub pitch: f64,
     /// Cutting height of a slot mill (its thickness) or a thread mill's toothed length.
     pub cutting_width: f64,
-    /// Neck diameter of a slot mill or thread mill.
+    /// Neck diameter of a slot mill, dovetail cutter or thread mill.
     pub neck_diameter: f64,
+    /// How far the neck reaches up from the tip before the full shank (Fusion's shoulder length); 0 = the
+    /// neck runs all the way up to the holder.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub neck_length: f64,
     /// "carbide", "hss" or "cobalt"
     pub material: String,
     /// Coolant for this tool; `Auto` = the setup's.
@@ -258,6 +275,7 @@ impl Default for Tool {
             pitch: 0.0,
             cutting_width: 0.0,
             neck_diameter: 0.0,
+            neck_length: 0.0,
             material: "carbide".into(),
             coolant: Coolant::Auto,
             tapping_head: false,
@@ -287,6 +305,7 @@ impl Tool {
             ToolKind::TaperedBall => format!("R{} tapered ball, {}° per side, Ø{d} shank", fmt_mm(self.corner_radius), fmt_mm(self.angle)),
             ToolKind::Chamfer | ToolKind::Engrave => format!("Ø{d} {}° {}", fmt_mm(self.angle), self.kind.label().to_lowercase()),
             ToolKind::Slot => format!("Ø{d} × {} slot mill", fmt_mm(self.cutting_width)),
+            ToolKind::Dovetail => format!("Ø{d} {}° dovetail, Ø{} neck, {} flutes", fmt_mm(self.dovetail_angle()), fmt_mm(2.0 * self.neck_radius()), self.flutes),
             ToolKind::ThreadMill => format!("Ø{d} thread mill, pitch {}", fmt_mm(self.pitch)),
             ToolKind::Tap => format!("M{} × {} tap", fmt_mm(self.diameter), fmt_mm(self.pitch)),
             ToolKind::Probe => format!("touch probe, Ø{d} stylus ball"),
@@ -312,6 +331,60 @@ impl Tool {
         } else {
             0.0
         }
+    }
+
+    /// Radius of the neck above the head of an undercut tool (slot, dovetail, thread mill).
+    pub fn neck_radius(&self) -> f64 {
+        let r = self.radius();
+        if self.neck_diameter > 0.0 {
+            (self.neck_diameter / 2.0).min(r)
+        } else if self.kind == ToolKind::Dovetail {
+            r * 0.5
+        } else {
+            r * 0.6
+        }
+    }
+
+    /// A dovetail's flank angle from its bottom face (45 when not set).
+    pub fn dovetail_angle(&self) -> f64 {
+        if self.angle > 1.0 && self.angle < 89.0 {
+            self.angle
+        } else {
+            45.0
+        }
+    }
+
+    /// Height of the cutting head of an undercut tool above its tip: a slot mill's thickness, a thread
+    /// mill's toothed length, a dovetail's flank from its full diameter in to the neck.
+    pub fn head_height(&self) -> f64 {
+        match self.kind {
+            ToolKind::Dovetail => ((self.radius() - self.neck_radius()) * self.dovetail_angle().to_radians().tan()).max(0.05),
+            _ => self.cutting_width.max(0.5),
+        }
+    }
+
+    /// Height of an undercut tool's head above its tip at `rho` from the axis (infinite on the neck,
+    /// None outside the head).
+    pub fn head_top(&self, rho: f64) -> Option<f64> {
+        let (r, neck) = (self.radius(), self.neck_radius());
+        if rho > r + 1e-9 {
+            return None;
+        }
+        if rho <= neck {
+            return Some(f64::INFINITY);
+        }
+        Some(match self.kind {
+            ToolKind::Dovetail => (r - rho) * self.dovetail_angle().to_radians().tan(),
+            _ => self.head_height(),
+        })
+    }
+
+    /// Where an undercut tool's neck ends and its shank starts: (shank radius, height above the tip),
+    /// when the shank is wider than the neck and the neck length is known.
+    pub fn shank_step(&self) -> Option<(f64, f64)> {
+        let (neck, w) = (self.neck_radius(), self.head_height());
+        let sr = self.shank_diameter / 2.0;
+        (self.kind.is_undercut() && self.neck_length > w + 1e-6 && sr > neck + 1e-6).then_some((sr, self.neck_length))
     }
 
     /// Profile of the cutter as (radius, height above the tip) points from the tip up, for drawing and simulation.
@@ -347,10 +420,19 @@ impl Tool {
                 let h = (r - tip).max(0.0) / half.tan();
                 vec![(0.0, 0.0), (tip, 0.0), (r, h), (r, len.max(h))]
             }
-            ToolKind::Slot | ToolKind::ThreadMill => {
-                let neck = if self.neck_diameter > 0.0 { self.neck_diameter / 2.0 } else { r * 0.6 };
-                let w = self.cutting_width.max(0.5);
-                vec![(0.0, 0.0), (r, 0.0), (r, w), (neck, w), (neck, len.max(w * 2.0))]
+            ToolKind::Slot | ToolKind::ThreadMill | ToolKind::Dovetail => {
+                let neck = self.neck_radius();
+                let w = self.head_height();
+                let mut v = if self.kind == ToolKind::Dovetail { vec![(0.0, 0.0), (r, 0.0), (neck, w)] } else { vec![(0.0, 0.0), (r, 0.0), (r, w), (neck, w)] };
+                match self.shank_step() {
+                    Some((sr, z)) => {
+                        v.push((neck, z));
+                        v.push((sr, z));
+                        v.push((sr, z + (len - z).max(2.0)));
+                    }
+                    None => v.push((neck, len.max(w * 2.0))),
+                }
+                v
             }
             _ => vec![(0.0, 0.0), (r, 0.0), (r, len)],
         }
@@ -478,6 +560,13 @@ pub fn suggest(tool: &mut Tool, stock: &str, max_rpm: f64, min_rpm: f64) {
             tool.feed = (tool.rpm * fz * 0.5 * flutes).round();
             tool.plunge_feed = (tool.feed * 0.5).round();
         }
+        ToolKind::Dovetail => {
+            // the head cuts on a thin neck: the chip load of a tool the size of the neck, halved
+            let neck = 2.0 * tool.neck_radius();
+            let fz = (0.008 * neck.max(0.5).powf(0.8)).clamp(0.003, 0.08) * k * 0.5;
+            tool.feed = (tool.rpm * fz * flutes).round();
+            tool.plunge_feed = (tool.feed * 0.5).round();
+        }
         _ => {
             tool.feed = (tool.rpm * fz * flutes).round();
             tool.plunge_feed = (tool.feed * 0.3).round();
@@ -556,6 +645,18 @@ pub fn presets() -> Vec<Tool> {
             t.neck_diameter = neck;
             t.flutes = 6;
             t.shank_diameter = neck.max(6.0);
+        });
+    }
+    // dovetails: diameter, angle, neck Ø, neck length
+    for (d, a, neck, reach) in [(4.0, 45.0, 2.0, 6.0), (6.0, 45.0, 3.0, 8.0), (6.35, 60.0, 3.0, 10.0), (10.0, 60.0, 4.0, 12.0)] {
+        add(ToolKind::Dovetail, d, &|t| {
+            t.angle = a;
+            t.neck_diameter = neck;
+            t.neck_length = reach;
+            t.flutes = 4;
+            t.shank_diameter = d.max(4.0).min(12.0);
+            t.flute_length = t.head_height();
+            t.stickout = (reach + 10.0).max(15.0);
         });
     }
     for (major, pitch) in [(3.0_f64, 0.5_f64), (4.0, 0.7), (5.0, 0.8), (6.0, 1.0), (8.0, 1.25), (10.0, 1.5), (12.0, 1.75)] {
@@ -815,7 +916,7 @@ impl OpKind {
         match self {
             OpKind::Face => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::FaceMill),
             OpKind::Clear | OpKind::Pocket => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::FaceMill),
-            OpKind::Contour => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot),
+            OpKind::Contour => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail),
             OpKind::Chamfer => matches!(k, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill),
             OpKind::Drill => matches!(k, ToolKind::Drill | ToolKind::SpotDrill | ToolKind::CenterDrill | ToolKind::Reamer | ToolKind::Flat),
             OpKind::Bore => matches!(k, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball),

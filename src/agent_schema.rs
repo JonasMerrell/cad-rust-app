@@ -722,7 +722,7 @@ pub(super) fn complete(tools: &mut [Value]) {
         let mut extra = extra;
         // fields serde leaves out at their defaults, so serde_fields can't see them
         let hidden: &[(&str, &str)] = match name.as_str() {
-            "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number")],
+            "cam_tool" => &[("tapping_head", "boolean"), ("reverse_ratio", "number"), ("neck_length", "number")],
             "create_cam" | "edit_cam" => &[("stay_down", "boolean"), ("feed_schedule", "boolean"), ("feed_target", "number")],
             "cam_op" => &[
                 ("chip_thinning", "boolean"),
