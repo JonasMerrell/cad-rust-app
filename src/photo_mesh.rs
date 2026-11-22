@@ -246,16 +246,43 @@ fn parse_ply(b: &[u8]) -> Result<Mesh, String> {
 /// Keep the triangles that lie near the points the surface was made from. Poisson meshing
 /// closes the surface, so where the photos saw nothing (over the top of the part, under the
 /// table, round the edges of the scan) it bulges out into smooth skins with no points under
-/// them. `size` is how near counts.
+/// them, or only a thin mist of stray points. `size` is how near counts: a grid of cells
+/// that size (grown until a typical point shares its cell with a few dozen others), where a
+/// cell counts as seen when it holds at least 5% of the points a typical point's cell holds.
 pub fn trim_to_points(m: &Mesh, pts: &[DVec3], size: f64) -> Mesh {
+    use std::collections::HashMap;
     if pts.is_empty() || !(size > 0.0) {
         return m.clone();
     }
-    let cell = |p: DVec3| ((p.x / size).floor() as i64, (p.y / size).floor() as i64, (p.z / size).floor() as i64);
-    let occupied: std::collections::HashSet<(i64, i64, i64)> = pts.iter().map(|p| cell(*p)).collect();
+    let mut size = size;
+    let mut count: HashMap<(i64, i64, i64), u32>;
+    let cell = |p: DVec3, s: f64| ((p.x / s).floor() as i64, (p.y / s).floor() as i64, (p.z / s).floor() as i64);
+    let mut tries = 0;
+    let typical = loop {
+        count = HashMap::new();
+        for p in pts {
+            *count.entry(cell(*p, size)).or_default() += 1;
+        }
+        // the cell count a typical point sees (the point-weighted median)
+        let mut c: Vec<u32> = count.values().cloned().collect();
+        c.sort_unstable();
+        let half = pts.len() as u64 / 2;
+        let mut acc = 0u64;
+        let typical = c.iter().find(|&&k| {
+            acc += k as u64;
+            acc >= half
+        });
+        let typical = typical.cloned().unwrap_or(1);
+        tries += 1;
+        if typical >= 40 || tries >= 5 {
+            break typical;
+        }
+        size *= 1.6;
+    };
+    let min = ((typical as f64 * 0.05).ceil() as u32).max(1);
     let near = |p: DVec3| {
-        let (x, y, z) = cell(p);
-        (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| occupied.contains(&(x + i, y + j, z + k)))))
+        let (x, y, z) = cell(p, size);
+        (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| count.get(&(x + i, y + j, z + k)).is_some_and(|&n| n >= min))))
     };
     m.filter(|i| near(m.tri(i).iter().sum::<DVec3>() / 3.0))
 }
@@ -1119,7 +1146,16 @@ mod tests {
         // a closed box surface, but the points only cover its sides (the top was never seen)
         let mut m = Mesh::default();
         add_box(&mut m, 0.0, 0.0, 10.0, 10.0, 10.0, 10);
-        let pts: Vec<DVec3> = m.v.iter().cloned().filter(|p| p.z < 9.0).collect();
+        // densely sampled where seen, plus a thin mist of stray points over the top
+        let mut pts: Vec<DVec3> = vec![];
+        for p in m.v.iter().filter(|p| p.z < 9.0) {
+            for k in 0..50 {
+                pts.push(*p + DVec3::splat(0.002 * k as f64));
+            }
+        }
+        for x in 0..10 {
+            pts.push(DVec3::new(x as f64 + 0.5, 5.0, 10.0));
+        }
         let t = trim_to_points(&m, &pts, 0.5);
         let (_, hi) = t.bbox();
         assert!(hi.z < 10.0 && t.t.len() > m.t.len() / 2, "{} of {}", t.t.len(), m.t.len());
