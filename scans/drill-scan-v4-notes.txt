@@ -1,0 +1,26 @@
+Drill scan v4: rCAD bab9d17 (trim cells under 35% of typical density), cleanup step only + scale from clicks
+Run: scan_photos method=colmap quality=normal glomap=false; plain ~/opt/colmap/bin/colmap
+
+Without clicks (default reference):
+  notes: trimmed the surface to the 71% that has photo points under it
+         kept the 51% of the mesh the cameras look at
+         couldn't find the reference block (the closest piece, 0.334 x 0.291 x 0.091 units, is 45% off): set the scale another way
+         cut away the table and 5799 loose bits; stood the part on XY; thinned 2440453 triangles to 40000
+  unscaled; bbox units [-2.584,-2.447,0.010] .. [2.589,2.445,3.120] = 5.17 x 4.89 x 3.11; 40000 triangles
+
+drill-scan-v4.html / drill-scan-v4.png  (scale from clicks, CAL_0113)
+  scale: {"photo":"CAL_0113.jpg","a":[1357,643],"b":[1299,824],"mm":50}
+         = bottom (floor) edge of the block's 25 x 50 end face, in rcad-scan/dense/images/CAL_0113.jpg
+  notes: same as above, plus "scale from the marks clicked on CAL_0113.jpg: 78.8211 mm per unit"
+  bbox mm: [-203.64,-192.85,0.80] .. [204.08,192.72,245.90] = 408 x 386 x 245 mm
+  triangles: 40000
+
+Cross-check (drill-scan-v4-cal0112.png): {"photo":"CAL_0112.jpg","a":[1203,439],"b":[1204,603],"mm":50}
+  same end face's floor edge, other photo -> 82.9761 mm per unit; bbox 429 x 406 x 258 mm
+  The two disagree by 5.3%. Mean 80.9 mm/unit -> drill ~252 mm tall.
+  Error sources: the block sits down in carpet pile, so its visible floor edge is fuzzy (fibres over it)
+  and is not exactly on the fitted "table" plane (the carpet top); +/-3 px on a 160-190 px edge is +/-2%.
+  drill-scan-v4-clicks.png shows the marks.
+
+The height (~245-259 mm) is from these clicks, not from a known drill dimension; the earlier "70 mm/unit / 218 mm"
+was only my guess. The footprint (408 x 386 mm) is still the Poisson dome: drill-scan-v4.png still shows it at 35%.
