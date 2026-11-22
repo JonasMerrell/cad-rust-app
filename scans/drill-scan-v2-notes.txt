@@ -1,0 +1,30 @@
+Drill scan cleanup v2: rCAD 81d659c (photogrammetry-colmap4), cleanup step only
+Run: scan_photos photos=~/scans/2026-11-21_1610-drill method=colmap quality=normal gpu=default(true) glomap=false
+Default reference from session.json (box 25 x 50 x 75 mm). RCAD_COLMAP=~/opt/colmap/bin/colmap (plain, no wrapper).
+
+Trim factor 2.0 (committed code), drill-scan-v2.html / drill-scan-v2.png
+  notes: trimmed the surface to the 96% that has photo points under it
+         kept the 38% of the mesh the cameras look at
+         found the 25.0 x 50.0 x 75.0 mm reference (its footprint's sides agree within 2.2%): 299.4460 mm per unit
+         cut away the table and 7471 loose bits; stood the part on XY; thinned 2686159 triangles to 40000
+  scale: 299.446 mm/unit (FALSE match: the block isn't reconstructed, true scale is ~70 mm/unit)
+  bbox mm: [-689.65,-710.25,2.62] .. [685.30,708.70,930.18]  = 1375 x 1419 x 928 mm
+  bbox units: 4.59 x 4.74 x 3.10
+  triangles: 40000
+
+Same with scale=70 (temporary, manual), drill-scan-v2-70mm.png
+  bbox mm: [-161.2,-166.0,0.6] .. [160.2,165.7,217.4] = 321 x 332 x 217 mm (height plausible for the drill; footprint is the dome)
+
+Trim factor 1.0 (local edit, not committed), drill-scan-v2-trim1.0.png
+  trimmed to 83%, kept 41%; false box match 412.2 mm/unit (5.2% off)
+  bbox mm 1871 x 1986 x 1282 = 4.54 x 4.82 x 3.11 units; 39999 triangles
+Trim factor 4.0 (local edit, not committed)
+  trimmed to 100%, kept 37%; box NOT found ("closest piece 0.149 x 0.184 x 0.087 units, is 35% off"), unscaled
+  bbox units 4.40 x 4.55 x 3.11; 39999 triangles
+
+Dome: present at all three factors (see drill-scan-v2-trims.png). 1.0 trims the most fringe, but none removes it.
+Cause: sparse noise points in fused.ply around the drill. Within 0.8-2.3 units of the drill axis at 0.1-1.0 units
+above the floor there are ~8.5k points, against ~1.7M floor points in the same rings: about 200x sparser,
+but enough to mark the trim grid's cells as occupied (and the 3x3x3 neighbour check widens it further).
+Suggest: a minimum point count per cell (or per-point density) in trim_to_points, rather than a larger or smaller cell.
+The block is in the CAL photos only and moved once after CAL_0107, so it is not in the dense cloud; any box match here is false.
