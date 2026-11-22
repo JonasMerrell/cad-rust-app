@@ -55,9 +55,12 @@ writes its own files into `rcad-scan/` inside the folder.
 - **Lock AE/AF**: tap the preview on the object to focus, then lock.
   Exposure, white balance and focus stay fixed for the session (locks by
   itself on the first photo unless turned off in Settings). Zoom is fixed at 1×.
-- **Calibration photos**: turn on, pick the reference (1-2-3 block, 2-4-6
-  block, ruler, other box, ball) and shoot it in the scene from a few angles.
-  Long-press to change the reference.
+- **Calibration photos**: put the reference (1-2-3 block, 2-4-6 block, ruler,
+  other box, ball) next to the part, not touching, *before the first photo*
+  and don't move it until the session is finished: reconstruction assumes a
+  still scene, so a moved reference can't be found. Turn calibration on for
+  the shots where it's fully in view and sharp. Long-press to change the
+  reference.
 - **Finish session**: marks it complete on netdash once the last photo lands.
   *Queue* lists sessions still on the phone. Uploads resume by themselves
   when the network is back, even with the app closed.
