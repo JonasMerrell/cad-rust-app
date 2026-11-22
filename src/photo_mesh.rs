@@ -284,7 +284,28 @@ pub fn trim_to_points(m: &Mesh, pts: &[DVec3], size: f64) -> Mesh {
         let (x, y, z) = cell(p, size);
         (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| count.get(&(x + i, y + j, z + k)).is_some_and(|&n| n >= min))))
     };
-    m.filter(|i| near(m.tri(i).iter().sum::<DVec3>() / 3.0))
+    let seen: Vec<bool> = (0..m.t.len()).map(|i| near(m.tri(i).iter().sum::<DVec3>() / 3.0)).collect();
+    // only drop wide unseen stretches (a dome, a skin over a hole): a small unseen patch on
+    // the part (a dark or shiny spot the photos matched poorly) is better filled than a hole
+    let unseen_idx: Vec<usize> = (0..m.t.len()).filter(|&i| !seen[i]).collect();
+    let unseen = m.filter(|i| !seen[i]);
+    let (piece, n) = pieces(&unseen);
+    let mut lo = vec![DVec3::splat(f64::INFINITY); n];
+    let mut hi = vec![DVec3::splat(f64::NEG_INFINITY); n];
+    for (j, &k) in piece.iter().enumerate() {
+        for p in unseen.tri(j) {
+            lo[k as usize] = lo[k as usize].min(p);
+            hi[k as usize] = hi[k as usize].max(p);
+        }
+    }
+    let mut keep = seen;
+    for (j, &i) in unseen_idx.iter().enumerate() {
+        let k = piece[j] as usize;
+        if (hi[k] - lo[k]).length() < 3.0 * size {
+            keep[i] = true;
+        }
+    }
+    m.filter(|i| keep[i])
 }
 
 fn find(h: &[u8], n: &[u8]) -> Option<usize> {
