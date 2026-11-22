@@ -552,11 +552,15 @@ inline int ex_face_count(const TopoDS_Shape &s) {
 // Boolean with a retry: when faces nearly touch (within a few microns) the exact
 // operation can leave slivers or invalid faces, so if the result fails the check it
 // is redone with a larger fuzzy tolerance that treats such near-misses as touching.
+// A result that is still invalid is returned without unifying: UnifySameDomain can
+// segfault on invalid shapes (FindCoordBounds on an edge without a pcurve).
 inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const TopoDS_Shape &b, int op) {
   EX_TRY
   TopoDS_Shape r = ex_boolean_raw(a, b, op, 1e-6);
   bool check = ex_face_count(a) + ex_face_count(b) < 1500;
+  bool valid = true;
   if (check && (r.IsNull() || !BRepCheck_Analyzer(r).IsValid())) {
+    valid = false;
     Bnd_Box bx;
     BRepBndLib::Add(a, bx);
     BRepBndLib::Add(b, bx);
@@ -565,13 +569,14 @@ inline std::unique_ptr<TopoDS_Shape> ex_boolean(const TopoDS_Shape &a, const Top
       TopoDS_Shape r2 = ex_boolean_raw(a, b, op, std::min(f, 0.05));
       if (!r2.IsNull() && BRepCheck_Analyzer(r2).IsValid()) {
         r = r2;
+        valid = true;
         break;
       }
     }
   }
   if (r.IsNull())
     return ex_null("boolean operation failed");
-  return ex_wrap(ex_unify_raw(r));
+  return ex_wrap(valid ? ex_unify_raw(r) : r);
   EX_CATCH("boolean")
 }
 
