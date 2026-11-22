@@ -279,7 +279,7 @@ pub fn trim_to_points(m: &Mesh, pts: &[DVec3], size: f64) -> Mesh {
         }
         size *= 1.6;
     };
-    let min = ((typical as f64 * 0.05).ceil() as u32).max(1);
+    let min = ((typical as f64 * 0.35).ceil() as u32).max(1);
     let near = |p: DVec3| {
         let (x, y, z) = cell(p, size);
         (-1..=1).any(|i| (-1..=1).any(|j| (-1..=1).any(|k| count.get(&(x + i, y + j, z + k)).is_some_and(|&n| n >= min))))
