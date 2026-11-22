@@ -68,6 +68,8 @@ pub struct Tools {
     /// OpenMVS's folder.
     pub openmvs: Option<PathBuf>,
     pub glomap: Option<PathBuf>,
+    /// COLMAP 4 has GLOMAP built in as `global_mapper`.
+    pub global_mapper: bool,
 }
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
@@ -107,6 +109,7 @@ pub fn find_tools(s: &Settings) -> Tools {
             t.new_options = h.contains("FeatureExtraction.use_gpu");
             t.new_max_size = h.contains("FeatureExtraction.max_image_size");
         }
+        t.global_mapper = quiet(c).args(["global_mapper", "-h"]).output().is_ok_and(|o| o.status.success());
     }
     let mvs_dir = |d: PathBuf| d.join(format!("DensifyPointCloud{EXE}")).is_file().then_some(d);
     t.openmvs = given(&s.openmvs)
@@ -272,7 +275,7 @@ pub struct Job {
     pub quality: Quality,
     /// Use the GPU for feature finding and matching (COLMAP with CUDA).
     pub gpu: bool,
-    /// Use GLOMAP for the camera solve when it's installed.
+    /// Solve all the cameras at once (COLMAP 4's global mapper, or GLOMAP) when available.
     pub glomap: bool,
 }
 
@@ -359,20 +362,19 @@ fn plan(job: &Job, t: &Tools, method: Method) -> Result<Vec<Step>, String> {
         cwd: w.clone(),
     });
     let sparse = w.join("sparse");
-    match (&t.glomap, job.glomap) {
-        (Some(g), true) => steps.push(Step {
-            name: "Solving cameras (GLOMAP)",
-            program: g.clone(),
-            args: vec!["mapper".into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
-            cwd: w.clone(),
-        }),
-        _ => steps.push(Step {
-            name: "Solving cameras",
-            program: colmap.clone(),
-            args: vec!["mapper".into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
-            cwd: w.clone(),
-        }),
-    }
+    let solve = |name: &'static str, program: PathBuf, cmd: &str| Step {
+        name,
+        program,
+        args: vec![cmd.into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
+        cwd: w.clone(),
+    };
+    // a global solve places every camera at once: often ten times faster than adding photos
+    // one by one (COLMAP 4 has GLOMAP built in; older ones need the separate program)
+    steps.push(match (job.glomap, t.global_mapper, &t.glomap) {
+        (true, true, _) => solve("Solving cameras (global)", colmap.clone(), "global_mapper"),
+        (true, false, Some(g)) => solve("Solving cameras (GLOMAP)", g.clone(), "mapper"),
+        _ => solve("Solving cameras", colmap.clone(), "mapper"),
+    });
     let dense = w.join("dense");
     // sparse/0 is the main model (the biggest one is picked before this step runs)
     steps.push(Step {
@@ -478,7 +480,7 @@ pub fn run(job: &Job, tools: &Tools, progress: &Sender<Progress>, cancel: &Arc<A
         let _ = std::fs::remove_dir_all(w.join("dense"));
     } else if state.method != m || state.quality != q {
         // the cameras still hold; redo the dense part
-        state.done.retain(|d| ["Finding features", "Matching photos", "Solving cameras", "Solving cameras (GLOMAP)"].contains(&d.as_str()));
+        state.done.retain(|d| ["Finding features", "Matching photos", "Solving cameras", "Solving cameras (GLOMAP)", "Solving cameras (global)"].contains(&d.as_str()));
         let _ = std::fs::remove_dir_all(w.join("dense"));
     }
     state.photos = photos.clone();

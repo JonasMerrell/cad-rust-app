@@ -631,7 +631,7 @@ impl Session {
                     "high" => pg::Quality::High,
                     _ => pg::Quality::Normal,
                 };
-                let job = pg::Job { photos: photos.clone(), method, quality, gpu: a.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true), glomap: a.get("glomap").and_then(|v| v.as_bool()).unwrap_or(false) };
+                let job = pg::Job { photos: photos.clone(), method, quality, gpu: a.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true), glomap: a.get("glomap").and_then(|v| v.as_bool()).unwrap_or(true) };
                 let tools = pg::find_tools(&pg::Settings::load());
                 let (tx, rx) = std::sync::mpsc::channel();
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
