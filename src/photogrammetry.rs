@@ -686,8 +686,8 @@ pub struct Scan {
 pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scale) -> Result<Scan, String> {
     let raw = photo_mesh::read_ply(&std::fs::read(&r.mesh).map_err(|e| format!("can't read {}: {e}", r.mesh.display()))?)?;
     let cams = photo_mesh::read_cameras(&r.model).unwrap_or_default();
-    // the cameras look at the part from above the table
-    let up = (!cams.is_empty()).then(|| cams.iter().map(|c| c.centre()).sum::<glam::DVec3>() / cams.len() as f64);
+    // where the photos were taken from and which way they look (towards the part)
+    let rig: Vec<(glam::DVec3, glam::DVec3)> = cams.iter().map(|c| (c.centre(), c.r.transpose() * glam::DVec3::Z)).collect();
     let mut c = cleanup.clone();
     if let Scale::Reference(dims) = scale {
         c.reference = dims.or_else(|| read_session(photos).and_then(|s| s.reference).and_then(|r| r.block()));
@@ -695,7 +695,7 @@ pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scal
             return Err("no reference block to look for: give its sizes, or click two ruler marks".into());
         }
     }
-    let cleaned = photo_mesh::clean(&raw, &c, up);
+    let cleaned = photo_mesh::clean(&raw, &c, &rig);
     let mut notes = cleaned.notes.clone();
     let factor = match scale {
         Scale::None => None,

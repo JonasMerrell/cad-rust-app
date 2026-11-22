@@ -565,21 +565,78 @@ fn footprint(pts: &[(f64, f64)]) -> [f64; 2] {
     best
 }
 
-/// How well a piece's box (sorted sizes) matches the reference's: the scale it implies and
-/// the spread of the per-axis scales (0 = a perfect match).
-fn reference_fit(size: [f64; 3], reference: [f64; 3]) -> (f64, f64) {
-    let mut a = size;
-    let mut b = reference;
-    a.sort_by(f64::total_cmp);
-    b.sort_by(f64::total_cmp);
-    let r: Vec<f64> = (0..3).map(|i| b[i] / a[i].max(1e-300)).collect();
-    let mean = r.iter().sum::<f64>() / 3.0;
-    let spread = (r.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - r.iter().cloned().fold(f64::INFINITY, f64::min)) / mean;
-    (mean, spread)
+/// How well a piece's box (footprint sides and height) matches the reference's sizes: the
+/// scale it implies, the spread of the per-side scales (0 = a perfect match), and whether
+/// only the footprint was used (the height can be off on a soft surface such as carpet,
+/// where the floor plane sits a few mm from where the block stands).
+fn reference_fit(fp: [f64; 2], h: f64, reference: [f64; 3]) -> (f64, f64, bool) {
+    let spread = |r: &[f64]| {
+        let mean = r.iter().sum::<f64>() / r.len() as f64;
+        (r.iter().cloned().fold(f64::NEG_INFINITY, f64::max) - r.iter().cloned().fold(f64::INFINITY, f64::min)) / mean
+    };
+    let mut best = (1.0, f64::INFINITY, false);
+    let mut fp = fp;
+    fp.sort_by(f64::total_cmp);
+    // which of the block's sides stands up
+    for up in 0..3 {
+        let mut flat: Vec<f64> = (0..3).filter(|&i| i != up).map(|i| reference[i]).collect();
+        flat.sort_by(f64::total_cmp);
+        let r = [flat[0] / fp[0].max(1e-300), flat[1] / fp[1].max(1e-300), reference[up] / h.max(1e-300)];
+        let all = spread(&r);
+        if all < best.1 {
+            best = (r.iter().sum::<f64>() / 3.0, all, false);
+        }
+        // footprint alone, when the height is within 25%
+        let two = spread(&r[..2]);
+        let hs = (r[2] / ((r[0] + r[1]) / 2.0) - 1.0).abs();
+        if hs < 0.25 && two * 2.0 < best.1 {
+            best = ((r[0] + r[1]) / 2.0, two * 2.0, true);
+        }
+    }
+    best
 }
 
-pub fn clean(m: &Mesh, c: &Cleanup, up_hint: Option<DVec3>) -> Cleaned {
+/// Where the cameras look: the point closest to all their viewing axes, and a radius that
+/// takes in what a photo shows around it (less than the cameras' distance).
+pub fn focus(cams: &[(DVec3, DVec3)]) -> Option<(DVec3, f64)> {
+    if cams.len() < 3 {
+        return None;
+    }
+    let mut a = DMat3::ZERO;
+    let mut b = DVec3::ZERO;
+    for (c, d) in cams {
+        let d = d.normalize();
+        let m = DMat3::IDENTITY - DMat3::from_cols(d * d.x, d * d.y, d * d.z);
+        a += m;
+        b += m * *c;
+    }
+    if a.determinant().abs() < 1e-12 {
+        return None;
+    }
+    let p = a.inverse() * b;
+    let mut dist: Vec<f64> = cams.iter().map(|(c, _)| (*c - p).length()).collect();
+    dist.sort_by(f64::total_cmp);
+    Some((p, 0.6 * dist[dist.len() / 2]))
+}
+
+/// `cams` are the photos' camera centres and viewing directions (empty when unknown): with
+/// them the mesh is first cropped to where the cameras look, so a scan of a whole room keeps
+/// the part in the middle, and the table found is the one under it.
+pub fn clean(m: &Mesh, c: &Cleanup, cams: &[(DVec3, DVec3)]) -> Cleaned {
     let mut notes = vec![];
+    let up_hint = (!cams.is_empty()).then(|| cams.iter().map(|(p, _)| *p).sum::<DVec3>() / cams.len() as f64);
+    let focus = focus(cams);
+    let cropped;
+    let m = match focus {
+        Some((p, r)) if c.remove_table => {
+            cropped = m.filter(|i| m.tri(i).iter().all(|q| (*q - p).length() < r));
+            if cropped.t.len() < m.t.len() {
+                notes.push(format!("kept the {:.0}% of the mesh the cameras look at", 100.0 * cropped.t.len() as f64 / m.t.len().max(1) as f64));
+            }
+            if cropped.t.len() > 100 { &cropped } else { m }
+        }
+        _ => m,
+    };
     let edge = m.median_edge();
     let table = if c.level || c.remove_table || c.reference.is_some() { find_table(m, edge, up_hint) } else { None };
     if (c.level || c.remove_table) && table.is_none() {
@@ -596,9 +653,18 @@ pub fn clean(m: &Mesh, c: &Cleanup, up_hint: Option<DVec3>) -> Cleaned {
     });
     if let (Some(pl), Some(r0)) = (table, r0) {
         // above the table by more than the mesh's noise there
-        let near: Vec<f64> = m.v.iter().map(|p| pl.dist(*p)).filter(|d| d.abs() < edge).collect();
-        let rms = (near.iter().map(|d| d * d).sum::<f64>() / near.len().max(1) as f64).sqrt();
-        let cut = (4.0 * rms).max(0.25 * edge);
+        // (a robust spread: the area-weighted median over the triangles, so the bottoms of
+        // the part's sides don't count)
+        let mut near: Vec<(f64, f64)> = (0..m.t.len()).map(|i| (pl.dist(m.tri(i).iter().sum::<DVec3>() / 3.0).abs(), m.area(i))).filter(|(d, _)| *d < edge).collect();
+        near.sort_by(|a, b| a.0.total_cmp(&b.0));
+        let half = near.iter().map(|x| x.1).sum::<f64>() / 2.0;
+        let mut acc = 0.0;
+        let med = near.iter().find(|x| {
+            acc += x.1;
+            acc >= half
+        });
+        let rms = 1.4826 * med.map(|x| x.0).unwrap_or(0.0);
+        let cut = (4.0 * rms).max(0.05 * edge);
         let above = m.filter(|i| m.tri(i).iter().all(|p| pl.dist(*p) > cut));
         let (piece, n) = pieces(&above);
         let mut area = vec![0.0; n];
@@ -614,12 +680,9 @@ pub fn clean(m: &Mesh, c: &Cleanup, up_hint: Option<DVec3>) -> Cleaned {
         let mut skip = vec![false; n];
         if let Some(reference) = c.reference {
             // each sizeable piece's box: footprint on the table and height above it
-            let total: f64 = area.iter().sum();
             let mut verts: Vec<Vec<DVec3>> = vec![vec![]; n];
             for (i, t) in above.t.iter().enumerate() {
-                if area[piece[i] as usize] > 0.01 * total {
-                    verts[piece[i] as usize].extend(t.iter().map(|&v| r0 * above.v[v as usize]));
-                }
+                verts[piece[i] as usize].extend(t.iter().map(|&v| r0 * above.v[v as usize]));
             }
             let best = (0..n)
                 .filter(|&k| verts[k].len() > 30)
@@ -632,28 +695,45 @@ pub fn clean(m: &Mesh, c: &Cleanup, up_hint: Option<DVec3>) -> Cleaned {
                     let h = zs[(zs.len() as f64 * 0.995) as usize];
                     let mid: Vec<(f64, f64)> = verts[k].iter().filter(|p| (p.z - pl.d) > 0.3 * h && (p.z - pl.d) < 0.8 * h).map(|p| (p.x, p.y)).collect();
                     let fp = footprint(&if mid.len() > 10 { mid } else { verts[k].iter().map(|p| (p.x, p.y)).collect() });
-                    let (s, spread) = reference_fit([fp[0], fp[1], h], reference);
-                    (k, s, spread)
+                    let (s, spread, flat) = reference_fit(fp, h, reference);
+                    (k, s, spread, flat, [fp[0], fp[1], h])
                 })
                 .min_by(|a, b| a.2.total_cmp(&b.2));
             match best {
-                Some((k, s, spread)) if spread < 0.06 => {
+                Some((k, s, spread, flat, _)) if spread < 0.06 => {
                     scale = Some(s);
                     skip[k] = true;
                     notes.push(format!(
-                        "found the {:.1} × {:.1} × {:.1} mm reference (sides agree within {:.1}%): {s:.4} mm per unit",
+                        "found the {:.1} × {:.1} × {:.1} mm reference ({} agree within {:.1}%): {s:.4} mm per unit",
                         reference[0],
                         reference[1],
                         reference[2],
+                        if flat { "its footprint's sides" } else { "its sides" },
                         spread * 100.0
                     ));
                 }
-                Some((_, _, spread)) => notes.push(format!("couldn't find the reference block (closest piece is {:.0}% off): set the scale another way", spread * 100.0)),
+                Some((_, _, spread, _, size)) => notes.push(format!(
+                    "couldn't find the reference block (the closest piece, {:.3} × {:.3} × {:.3} units, is {:.0}% off): set the scale another way",
+                    size[0],
+                    size[1],
+                    size[2],
+                    spread * 100.0
+                )),
                 None => notes.push("couldn't find the reference block: set the scale another way".into()),
             }
         }
         if c.remove_table {
-            if let Some(big) = (0..n).filter(|k| !skip[*k]).max_by(|a, b| area[*a].total_cmp(&area[*b])) {
+            // the part: big and near the middle of where the cameras look (the biggest piece
+            // alone can be a bit of floor or furniture in a room-sized scan)
+            let score = |k: usize| match focus {
+                Some((p, r)) => {
+                    let d = centre[k] - p;
+                    let off = (d - pl.n * d.dot(pl.n)).length() / (0.35 * r);
+                    area[k] * (-off * off).exp()
+                }
+                None => area[k],
+            };
+            if let Some(big) = (0..n).filter(|k| !skip[*k]).max_by(|a, b| score(*a).total_cmp(&score(*b))) {
                 // how far the biggest piece reaches from its centre
                 let reach = (0..above.t.len()).filter(|&i| piece[i] as usize == big).flat_map(|i| above.tri(i)).map(|p| (p - centre[big]).length()).fold(0.0, f64::max);
                 let keep: Vec<bool> = (0..n).map(|k| !skip[k] && (k == big || (area[k] > 0.02 * area[big] && (centre[k] - centre[big]).length() < 1.5 * reach))).collect();
@@ -970,7 +1050,7 @@ mod tests {
     #[test]
     fn finds_the_reference_block_for_scale() {
         let (m, _, _) = scene_with(true);
-        let c = clean(&m, &Cleanup { reference: Some([25.4, 50.8, 76.2]), triangles: 0, ..Default::default() }, None);
+        let c = clean(&m, &Cleanup { reference: Some([25.4, 50.8, 76.2]), triangles: 0, ..Default::default() }, &[]);
         let s = c.scale.expect("found the block");
         assert!((s - 50.0).abs() < 0.5, "{s} {:?}", c.notes);
         // the block is left out: the result is just the 40 x 20 box
@@ -978,8 +1058,48 @@ mod tests {
         let size = (hi - lo) * s;
         assert!((size.x - 40.0).abs() < 0.5 && (size.y - 20.0).abs() < 0.5, "{size:?}");
         // a wrong reference isn't matched
-        let c = clean(&m, &Cleanup { reference: Some([10.0, 10.0, 10.0]), triangles: 0, ..Default::default() }, None);
+        let c = clean(&m, &Cleanup { reference: Some([10.0, 10.0, 10.0]), triangles: 0, ..Default::default() }, &[]);
         assert!(c.scale.is_none());
+    }
+
+    /// A room-sized scan: a small part and a reference block on a floor, with a wall, a big
+    /// piece of furniture and floor clutter around; cameras circle the part.
+    #[test]
+    fn room_scan_keeps_the_part_the_cameras_look_at() {
+        let mut m = Mesh::default();
+        quad(&mut m, DVec3::new(-2000.0, -2000.0, 0.0), DVec3::X * 4000.0, DVec3::Y * 4000.0, 80);
+        // the part: 40 x 20 x 10 at the middle
+        add_box(&mut m, -10.0, -5.0, 30.0, 15.0, 10.0, 20);
+        // a 25 x 50 x 75 box lying flat beside it
+        add_box(&mut m, -120.0, -60.0, -45.0, -10.0, 25.0, 12);
+        // furniture: a sofa-sized block 1.5 m away, and a wall
+        add_box(&mut m, 1200.0, -600.0, 2000.0, 600.0, 450.0, 10);
+        quad(&mut m, DVec3::new(-2000.0, 1900.0, 0.0), DVec3::X * 4000.0, DVec3::Z * 2500.0, 30);
+        // cameras 400 mm out and 300 mm up, looking at the part
+        let target = DVec3::new(10.0, 5.0, 5.0);
+        let cams: Vec<(DVec3, DVec3)> = (0..24)
+            .map(|i| {
+                let a = i as f64 / 24.0 * std::f64::consts::TAU;
+                let c = DVec3::new(a.cos() * 400.0, a.sin() * 400.0, 300.0);
+                (c, (target - c).normalize())
+            })
+            .collect();
+        let c = clean(&m, &Cleanup { reference: Some([25.0, 50.0, 75.0]), triangles: 0, ..Default::default() }, &cams);
+        let s = c.scale.expect("found the box");
+        assert!((s - 1.0).abs() < 0.02, "{s} {:?}", c.notes);
+        let (lo, hi) = c.mesh.bbox();
+        let size = (hi - lo) * s;
+        assert!((size.x - 40.0).abs() < 1.0 && (size.y - 20.0).abs() < 1.0 && (size.z - 10.0).abs() < 1.0, "{size:?} {:?}", c.notes);
+    }
+
+    #[test]
+    fn reference_fit_trusts_the_footprint_on_a_soft_floor() {
+        // a 25 x 50 x 75 box lying flat, its height read 3 mm short (sunk into carpet)
+        let (s, spread, flat) = reference_fit([75.0, 50.0], 22.0, [25.0, 50.0, 75.0]);
+        assert!(flat && (s - 1.0).abs() < 1e-9 && spread < 1e-9);
+        // standing on end
+        let (s, spread, flat) = reference_fit([50.0, 25.0], 75.0, [25.0, 50.0, 75.0]);
+        assert!(!flat && (s - 1.0).abs() < 1e-9 && spread < 1e-9);
     }
 
     #[test]
@@ -987,7 +1107,7 @@ mod tests {
         let (m, r, _) = scene();
         let pl = find_table(&m, 0.01, None).unwrap();
         assert!(pl.n.dot(r * DVec3::Z) > 0.9999, "{:?}", pl.n);
-        let c = clean(&m, &Cleanup { level: true, remove_table: true, triangles: 0, reference: None }, None);
+        let c = clean(&m, &Cleanup { level: true, remove_table: true, triangles: 0, reference: None }, &[]);
         let (lo, hi) = c.mesh.bbox();
         let size = (hi - lo) * 50.0;
         // the box's sides start just above the cut; long side along X, centred on the origin
@@ -999,7 +1119,7 @@ mod tests {
     #[test]
     fn decimates_keeping_shape() {
         let (m, _, _) = scene();
-        let c = clean(&m, &Cleanup { level: true, remove_table: false, triangles: 0, reference: None }, None);
+        let c = clean(&m, &Cleanup { level: true, remove_table: false, triangles: 0, reference: None }, &[]);
         let full = c.mesh;
         let d = decimate(&full, 2000);
         assert!(d.t.len() <= 2000 && d.t.len() > 1500, "{}", d.t.len());
