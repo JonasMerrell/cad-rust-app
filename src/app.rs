@@ -198,7 +198,7 @@ pub struct App {
     /// An STL export on its way to the slicer: (temp path, name).
     pub pending_send: Option<(String, String)>,
     /// Result of the upload, filled in by the upload thread.
-    pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
+    pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<serde_json::Value, String>>>>,
     /// Studio lighting with reflections, for presentation.
     pub realistic: bool,
     /// Decoded decal images by (id, data hash): RGBA pixels and size.
@@ -1081,18 +1081,22 @@ impl App {
         });
     }
 
-    /// Make an STL of the parts and hand it to orcaweb.
+    /// Make an STL of the parts and slice it with the slicer command (orca-slice).
     pub fn send_to_slicer(&mut self) {
         if self.result.bodies.is_empty() {
             self.flash("There are no parts to print", ToastKind::Info);
             return;
         }
         let name = self.path.as_ref().and_then(|p| p.file_stem()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "part".into());
-        let tmp = std::env::temp_dir().join(format!("rcad-send-{}.stl", std::process::id()));
-        let path = tmp.to_string_lossy().to_string();
+        let dir = crate::printing::slice_dir();
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            self.flash(format!("Could not create {}: {e}", dir.display()), ToastKind::Error);
+            return;
+        }
+        let path = dir.join(format!("{}.stl", crate::printing::job_file_name(&name))).to_string_lossy().to_string();
         self.pending_send = Some((path.clone(), name));
         self.kernel.export(&self.doc, &format!("stl@{}", self.print.stl_tolerance), path);
-        self.flash_info("Sending to the slicer…", None);
+        self.flash_info("Slicing…", None);
     }
 
     fn print_settings_ui(&mut self, ui: &mut Ui) {
@@ -1100,8 +1104,14 @@ impl App {
         let before = self.print.clone();
         let p = &mut self.print;
         egui::Grid::new("print-settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
-            ui.label("Slicer (orcaweb)");
-            ui.add(egui::TextEdit::singleline(&mut p.orcaweb).desired_width(190.0));
+            ui.label("Slicer command");
+            ui.add(egui::TextEdit::singleline(&mut p.slicer).hint_text("orca-slice").desired_width(190.0));
+            ui.end_row();
+            ui.label("Process");
+            ui.add(egui::TextEdit::singleline(&mut p.process).hint_text("SimpleCore Parts 0.2").desired_width(190.0));
+            ui.end_row();
+            ui.label("Filament");
+            ui.add(egui::TextEdit::singleline(&mut p.filament).hint_text("SimpleCore ABS Sunlu").desired_width(190.0));
             ui.end_row();
             ui.label("STL detail");
             let cur = match p.stl_tolerance {
@@ -1229,16 +1239,17 @@ impl App {
                 Outcome::Interference(pairs) => crate::asm_ui::interference_result(self, pairs),
                 Outcome::Projected(tag, key, views) => crate::drawing_ui::projected(self, tag, key, views),
                 Outcome::Exported(err, path) if self.pending_send.as_ref().map(|p| p.0 == path).unwrap_or(false) => {
-                    let (_, name) = self.pending_send.take().unwrap();
+                    self.pending_send = None;
                     match err {
                         Some(e) => self.flash(format!("Could not make the STL: {e}"), ToastKind::Error),
                         None => {
-                            let bytes = std::fs::read(&path).unwrap_or_default();
-                            let _ = std::fs::remove_file(&path);
-                            let url = self.print.orcaweb.clone();
+                            let settings = self.print.clone();
                             let slot = self.send_result.clone();
                             std::thread::spawn(move || {
-                                let r = crate::printing::send_to_orcaweb(&url, &name, &bytes);
+                                let stl = std::path::PathBuf::from(&path);
+                                let gcode = stl.with_extension("gcode");
+                                let opts = crate::printing::SliceOptions::from_settings(&settings);
+                                let r = crate::printing::slice(&settings.slicer, &stl, &gcode, &opts);
                                 *slot.lock().unwrap() = Some(r);
                             });
                         }
@@ -1259,11 +1270,15 @@ impl App {
         }
         let sent = self.send_result.lock().ok().and_then(|mut s| s.take());
         match sent {
-            Some(Ok(url)) => {
-                crate::printing::open_url(&url);
-                self.flash_info("Sent to the slicer · its page opens in your browser", Some(Duration::from_secs(4)));
+            Some(Ok(r)) => {
+                let s = |k: &str| r.get(k).and_then(|v| v.as_str().map(String::from).or_else(|| v.as_f64().map(|f| f.to_string()))).unwrap_or_default();
+                let gcode = s("gcode");
+                if let Some(dir) = std::path::Path::new(&gcode).parent() {
+                    crate::printing::open_url(&dir.to_string_lossy());
+                }
+                self.flash_info(format!("Sliced: {} · {} g · {} layers · {gcode}", s("time"), s("filament_g"), s("layers")), Some(Duration::from_secs(8)));
             }
-            Some(Err(e)) => self.flash(format!("Could not send to the slicer: {e}"), ToastKind::Error),
+            Some(Err(e)) => self.flash(format!("Could not slice: {e}"), ToastKind::Error),
             None => {}
         }
         if was_loading && self.kernel_ready() {
@@ -1645,7 +1660,7 @@ impl App {
                 }
             }
         });
-        if ui.add(egui::Button::image_and_text(icons::image("printer", 15.0).tint(theme::text()), "Send to slicer")).on_hover_text(format!("Open the parts in orcaweb ({}) to slice and print", self.print.orcaweb)).clicked() {
+        if ui.add(egui::Button::image_and_text(icons::image("printer", 15.0).tint(theme::text()), "Send to slicer")).on_hover_text(format!("Slice the parts with {} (the G-code's folder opens; nothing is sent to the printer)", if self.print.slicer.trim().is_empty() { "orca-slice" } else { self.print.slicer.trim() })).clicked() {
             action = Some("send");
             ui.close();
         }

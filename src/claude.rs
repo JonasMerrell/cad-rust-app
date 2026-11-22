@@ -869,6 +869,7 @@ fn output_types(name: &str, a: &Value) -> Vec<(&'static str, Vec<String>)> {
         "export_web" | "export_setup_sheet" | "export_cam_simulation" => vec![("path", list(&["html", "htm"]))],
         "export_gcode" | "verify_gcode" => vec![("path", list(&["nc", "gcode", "ngc", "tap", "txt", "cnc", "g", "gc", "nci", "mpf"]))],
         "export_pcb" => vec![("path", list(&["zip"]))],
+        "send_to_slicer" => vec![("output", list(&["gcode"]))],
         "cam_soft_jaws" => vec![("export_step", list(&["step", "stp"]))],
         _ => vec![],
     }
@@ -876,17 +877,8 @@ fn output_types(name: &str, a: &Value) -> Vec<(&'static str, Vec<String>)> {
 
 /// The chat panel's limits on what Claude's tool calls may touch outside the document (the
 /// command line and MCP server have none): an existing file is only overwritten by a file of its
-/// own type, so a wrong path can't replace the user's document or an unrelated file; and the
-/// slicer gets the model only at the address the user set or on this computer or network.
+/// own type, so a wrong path can't replace the user's document or an unrelated file.
 fn check_outputs(name: &str, a: &Value) -> Result<(), String> {
-    if name == "send_to_slicer" {
-        if let Some(url) = a["url"].as_str() {
-            if url.trim() != crate::printing::load().orcaweb.trim() && !local_url(url) {
-                return Err(format!("send_to_slicer: {url} is not the slicer address set in rCAD or an address on this computer or local network; leave url out to use the setting"));
-            }
-        }
-        return Ok(());
-    }
     if name == "export_pcb" {
         // a path that isn't a .zip is a folder that gets every file (BOM.csv, CPL.csv, Gerbers…):
         // only a new or empty folder, or one an earlier export filled
@@ -909,29 +901,6 @@ fn check_outputs(name: &str, a: &Value) -> Result<(), String> {
         }
     }
     Ok(())
-}
-
-/// An http(s) address on this computer or a private network.
-fn local_url(url: &str) -> bool {
-    let Some(rest) = url.strip_prefix("http://").or_else(|| url.strip_prefix("https://")) else { return false };
-    let authority = rest.split(['/', '?', '#']).next().unwrap_or("");
-    if authority.contains('@') {
-        return false;
-    }
-    let host = if let Some(h) = authority.strip_prefix('[') {
-        h.split(']').next().unwrap_or("")
-    } else {
-        authority.split(':').next().unwrap_or("")
-    };
-    let host = host.to_ascii_lowercase();
-    if host == "localhost" || host.ends_with(".local") || host.ends_with(".lan") || host.ends_with(".home.arpa") {
-        return true;
-    }
-    match host.parse::<std::net::IpAddr>() {
-        Ok(std::net::IpAddr::V4(ip)) => ip.is_loopback() || ip.is_private() || ip.is_link_local(),
-        Ok(std::net::IpAddr::V6(ip)) => ip.is_loopback() || (ip.segments()[0] & 0xfe00) == 0xfc00 || (ip.segments()[0] & 0xffc0) == 0xfe80,
-        Err(_) => false,
-    }
 }
 
 fn short(s: &str, n: usize) -> String {
@@ -1574,16 +1543,6 @@ mod tests {
         let agents = claude_code_agents();
         assert_eq!(agents["cad-haiku"]["model"], "claude-haiku-5-5");
         assert_eq!(agents["cad-sonnet"]["model"], "claude-sonnet-5-5");
-    }
-
-    #[test]
-    fn local_slicer_addresses() {
-        for u in ["http://localhost:8080/", "https://192.168.1.20/orca", "http://10.0.0.5", "http://172.20.1.1:5000", "http://[::1]:80/", "http://printer.local/", "http://127.0.0.1"] {
-            assert!(local_url(u), "{u}");
-        }
-        for u in ["https://example.com/", "http://8.8.8.8/", "ftp://localhost/", "http://user@localhost/", "http://localhost.evil.com/", "http://172.32.0.1/", "file:///etc/passwd"] {
-            assert!(!local_url(u), "{u}");
-        }
     }
 
     #[test]

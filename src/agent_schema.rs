@@ -319,9 +319,15 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("import_file", "at") => xy("DXF/SVG: offset [x, y] in the sketch, mm"),
         ("printability", "overhang") => json!({"type": "number", "minimum": 0, "maximum": 90, "description": "overhang limit, degrees from vertical (default 45)"}),
         ("printability", "min_wall") => json!({"type": "number", "exclusiveMinimum": 0, "description": "thinnest printable wall, mm (default 0.8)"}),
-        ("send_to_slicer", "url") => t("string", "orcaweb address (default the app's setting)"),
-        ("send_to_slicer", "tolerance") => json!({"type": "number", "exclusiveMinimum": 0, "description": "STL tolerance, mm (default 0.01)"}),
-        ("send_to_slicer", "name") => t("string", "job name (default the document's)"),
+        ("send_to_slicer", "tolerance") => json!({"type": "number", "exclusiveMinimum": 0, "description": "STL tolerance, mm (default the app's setting, 0.01)"}),
+        ("send_to_slicer", "name") => t("string", "job name, used for the file names (default the document's)"),
+        ("send_to_slicer", "printer") => t("string", "printer preset (default SimpleCore; `orca-slice --list` lists them)"),
+        ("send_to_slicer", "process") => t("string", "process preset, e.g. \"SimpleCore Parts 0.25\" (default the app's setting, else SimpleCore Parts 0.2)"),
+        ("send_to_slicer", "filament") => json!({"type": ["string", "array"], "items": {"type": "string"}, "description": "filament preset, or one per extruder (default the app's setting, else SimpleCore ABS Sunlu)"}),
+        ("send_to_slicer", "lane") => json!({"type": "integer", "minimum": 1, "maximum": 9, "description": "Trad Rack lane 1-9 for a single-colour print"}),
+        ("send_to_slicer", "support") => json!({"type": "string", "enum": ["off", "normal", "tree"], "description": "supports (default the process preset's)"}),
+        ("send_to_slicer", "set") => json!({"type": "array", "items": {"type": "string"}, "description": "process overrides as key=value, e.g. wall_loops=4"}),
+        ("send_to_slicer", "output") => t("string", "G-code file (.gcode) or folder (default <temp>/rcad-slices/<name>.gcode)"),
         ("set_part" | "set_parts", "color") => {
             json!({"oneOf": [json!({"type": "string", "description": "#rrggbb"}), json!({"type": "array", "items": {"type": "integer", "minimum": 0, "maximum": 255}, "minItems": 3, "maxItems": 3, "description": "[r, g, b]"})], "description": "display colour"})
         }

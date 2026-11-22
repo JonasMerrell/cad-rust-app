@@ -560,15 +560,47 @@ impl Session {
                 json!({"overhang_limit_deg": overhang, "min_wall_mm": min_wall, "build_plate_z": round(floor), "parts": parts})
             }
             "send_to_slicer" => {
-                let url = a.get("url").and_then(|u| u.as_str()).map(String::from).unwrap_or_else(|| crate::printing::load().orcaweb);
-                let tol = a.get("tolerance").and_then(|t| t.as_f64()).unwrap_or(0.01);
-                let tmp = std::env::temp_dir().join(format!("cad-agent-send-{}.stl", std::process::id()));
-                self.kernel.export_blocking(&self.doc, &format!("stl@{tol}"), tmp.to_string_lossy().to_string())?;
-                let bytes = std::fs::read(&tmp).map_err(|e| e.to_string())?;
-                let _ = std::fs::remove_file(&tmp);
+                let settings = crate::printing::load();
+                let tol = a.get("tolerance").and_then(|t| t.as_f64()).unwrap_or(settings.stl_tolerance);
                 let name = a.get("name").and_then(|n| n.as_str()).map(String::from).or_else(|| self.path.as_ref().and_then(|p| std::path::Path::new(p).file_stem().map(|s| s.to_string_lossy().to_string()))).unwrap_or("part".into());
-                let page = crate::printing::send_to_orcaweb(&url, &name, &bytes)?;
-                json!({"slice_page": page, "stl_bytes": bytes.len()})
+                let file = crate::printing::job_file_name(&name);
+                let dir = crate::printing::slice_dir();
+                std::fs::create_dir_all(&dir).map_err(|e| format!("can't create {}: {e}", dir.display()))?;
+                let stl = dir.join(format!("{file}.stl"));
+                self.kernel.export_blocking(&self.doc, &format!("stl@{tol}"), stl.to_string_lossy().to_string())?;
+                let stl_bytes = std::fs::metadata(&stl).map(|m| m.len()).unwrap_or(0);
+                let output = match a.get("output").and_then(|o| o.as_str()) {
+                    Some(o) => std::path::PathBuf::from(self.input_path(o)),
+                    None => dir.join(format!("{file}.gcode")),
+                };
+                let strs = |k: &str| -> Vec<String> {
+                    match a.get(k) {
+                        Some(Value::String(s)) => vec![s.clone()],
+                        Some(Value::Array(v)) => v.iter().filter_map(|x| x.as_str().map(String::from)).collect(),
+                        _ => vec![],
+                    }
+                };
+                let mut opts = crate::printing::SliceOptions::from_settings(&settings);
+                if let Some(p) = a.get("printer").and_then(|v| v.as_str()) {
+                    opts.printer = Some(p.into());
+                }
+                if let Some(p) = a.get("process").and_then(|v| v.as_str()) {
+                    opts.process = Some(p.into());
+                }
+                let filaments = strs("filament");
+                if !filaments.is_empty() {
+                    opts.filaments = filaments;
+                }
+                opts.lane = a.get("lane").and_then(|v| v.as_u64()).map(|l| l as u32);
+                opts.support = a.get("support").and_then(|v| v.as_str()).map(String::from);
+                opts.set = strs("set");
+                let mut r = crate::printing::slice(&settings.slicer, &stl, &output, &opts)?;
+                if let Some(o) = r.as_object_mut() {
+                    o.insert("stl".into(), json!(stl.to_string_lossy()));
+                    o.insert("stl_bytes".into(), json!(stl_bytes));
+                    o.insert("note".into(), json!("Sliced only: nothing was sent to the printer. Ask before uploading or printing."));
+                }
+                r
             }
             "import_file" if crate::sketch_import::is_drawing(std::path::Path::new(&str_arg(a, "path")?)) => {
                 let path = self.input_path(&str_arg(a, "path")?);
@@ -1857,7 +1889,7 @@ pub(crate) fn tools() -> Value {
         {"name": "scan_photos", "description": "Photogrammetry: turn a folder of photos of a part (20+ overlapping shots all round it, on a textured table) into a mesh reference body in the active Part Studio, to measure and model against. Runs COLMAP (camera solve; dense surface with CUDA) and OpenMVS (dense surface on the CPU) as separate programs; work files go in <photos>/rcad-scan and a re-run with the same photos and settings carries on. method auto|colmap|openmvs|sparse, quality fast|normal|high. The mesh is cleaned: the table cut away (remove_table), stood on XY (level), thinned to about `triangles` (default 40000). scale: a number (mm per unit), {reference: [a, b, c]} sizes of a block beside the part (a 1-2-3 block is [25.4, 50.8, 76.2]; a ball [d]) found automatically, or {photo, a: [x, y], b: [x, y], mm} two marks clicked on an undistorted photo (rcad-scan/dense/images). Capture-app folders with a session.json reference block are scaled from it by default. Takes minutes to hours.", "inputSchema": obj(json!({"photos": {"type": "string"}, "method": {"type": "string"}, "quality": {"type": "string"}, "gpu": {"type": "boolean"}, "glomap": {"type": "boolean"}, "level": {"type": "boolean"}, "remove_table": {"type": "boolean"}, "triangles": {"type": "integer"}, "scale": {}, "name": {"type": "string"}}), &["photos"])},
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},
         {"name": "printability", "description": "3D-printing check of the parts as they sit (Z up, build plate at the lowest point): area of downward faces steeper than the overhang limit (default 45° from vertical, these need supports) and of walls thinner than min_wall (default 0.8 mm), with example points.", "inputSchema": obj(json!({"overhang": {"type": "number"}, "min_wall": {"type": "number"}}), &[])},
-        {"name": "send_to_slicer", "description": "Export the parts as STL (tolerance mm, default 0.01) and stage them in the orcaweb slicer (url defaults to the app's setting). Returns the page where the model can be sliced and sent to the printer.", "inputSchema": obj(json!({"url": {"type": "string"}, "tolerance": {"type": "number"}, "name": {"type": "string"}}), &[])},
+        {"name": "send_to_slicer", "description": "Export the parts as STL and slice them with the OrcaSlicer command line (orca-slice: Jonas's fork and SimpleCore presets; the command is the app's 3D printing setting). Returns the G-code path, estimated time, filament grams and layers. Only slices: it never uploads to the printer or starts a print.", "inputSchema": obj(json!({"tolerance": {"type": "number"}, "name": {"type": "string"}, "printer": {"type": "string"}, "process": {"type": "string"}, "filament": {"type": ["string", "array"], "items": {"type": "string"}}, "lane": {"type": "integer"}, "support": {"type": "string", "enum": ["off", "normal", "tree"]}, "set": {"type": "array", "items": {"type": "string"}}, "output": {"type": "string"}}), &[])},
         {"name": "set_part", "description": "Set a part's name, color (#rrggbb or [r,g,b]), material (PLA, ABS, PETG, Nylon, ASA, PC, PLA-CF, PETG-CF, ASA-CF, PET-CF, PPS-CF, PA6-CF, PA12-CF, Aluminium 6061, Aluminium 7075, Steel, Stainless steel 303, Tungsten alloy, Urethane foam, Stainless steel, Brass, Copper, Titanium, Oak, Pine, …: gives mass in the BOM), finish (matte, satin, glossy, metal, glass), hidden, or stock {shape: auto|plate|round, standard: auto|metric|imperial (nearest standard size up) or box (bounding box plus allowances), side and face allowances mm, custom: the stock really used} for its raw stock size (stock_size, BOM).", "inputSchema": obj(json!({"body": {"type": "array"}, "name": {"type": "string"}, "color": {}, "material": {"type": "string"}, "finish": {"type": "string"}, "hidden": {"type": "boolean"}, "stock": {"type": "object"}}), &["body"])},
         {"name": "set_parts", "description": "set_part for many parts at once, with one rebuild: parts is a list of {body, name, color, material, finish, hidden, stock}.", "inputSchema": obj(json!({"parts": {"type": "array"}}), &["parts"])},
         {"name": "add_decal", "description": "Lay a PNG/JPEG image on a flat face (a label or logo), centred on face.point. width in mm (height keeps the image's proportions), angle turns it about the face normal. Shown in the editor; not exported.", "inputSchema": obj(json!({"image": {"type": "string"}, "face": {"type": "object"}, "width": {"type": "number"}, "angle": {"type": "number"}}), &["image", "face"])},
