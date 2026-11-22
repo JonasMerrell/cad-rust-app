@@ -385,6 +385,10 @@ mod tests {
         assert_eq!(order, vec![(0, 0), (0, 1), (1, 0), (0, 2)]);
         // empty toolpaths are skipped
         assert_eq!(crate::cam_post::job_order(&[vec![None, Some(5)]]), vec![(0, 1)]);
+        // op 1 probe, end mill, chamfer mill; op 2 probe, end mill, ball, chamfer mill: the chamfer mill once,
+        // after the ball (the first station's next tool first would load it twice)
+        let order = crate::cam_post::job_order(&[vec![Some(99), Some(24), Some(1)], vec![Some(99), Some(24), Some(11), Some(1)]]);
+        assert_eq!(order, vec![(0, 0), (1, 0), (0, 1), (1, 1), (1, 2), (0, 2), (1, 3)]);
     }
 
     #[test]
