@@ -6,7 +6,8 @@ token as the Capture app). Standard library only.
 
     GET  /api/projects                      documents in the project folders
     POST /api/projects                      {"name"}: a new project with an empty document
-    GET  /api/doc/<id>                      one document: tabs, chats, whether Claude is busy on it
+    GET  /api/doc/<id>                      one document: tabs, each Part Studio's feature tree, chats,
+                                            whether Claude is busy on it
     GET  /api/doc/<id>/view[?assembly=N|studio=N][&t=<token>]
                                             rCAD's interactive web page of it (export_web), cached
     GET  /api/doc/<id>/tree[?assembly=N|studio=N]
@@ -84,6 +85,83 @@ def is_doc(path):
     except OSError:
         return False
     return head.lstrip().startswith(b"{") and DOC_MARK in head
+
+
+LENGTH_KEYS = ("depth", "radius", "distance", "thickness", "offset", "height", "length", "width")
+
+
+def _num(v, unit=""):
+    """A parameter as the editor shows it: an expression as typed, a plain number with its unit."""
+    v = str(v).strip()
+    try:
+        float(v)
+        return v + unit
+    except ValueError:
+        return v
+
+
+def feature_detail(op):
+    """A short line about one feature (what the tree shows under its name)."""
+    if not isinstance(op, dict):
+        return ""
+    t = op.get("type", "")
+    out = []
+    if t == "sketch":
+        pl = op.get("plane") or {}
+        if pl.get("kind") == "origin_plane":
+            out.append(f"{pl.get('plane', '')} plane")
+        elif pl.get("kind"):
+            out.append("on " + str(pl.get("kind")).replace("_", " "))
+        sk = op.get("sketch") or {}
+        n = len(sk.get("curves") or []) + len(sk.get("texts") or [])
+        if n:
+            out.append(f"{n} curve{'s' if n != 1 else ''}")
+        c = len(sk.get("constraints") or [])
+        if c:
+            out.append(f"{c} constraint{'s' if c != 1 else ''}")
+        return " · ".join(out)
+    for k in LENGTH_KEYS:
+        if op.get(k) not in (None, ""):
+            v = _num(op[k], " mm")
+            out.append(v if v.endswith(" mm") else f"{k} {v}")  # an expression: say what it sets
+            break
+    if op.get("angle") not in (None, "") and t in ("revolve", "circularPattern", "draft", "surfaceRevolve"):
+        out.append(_num(op["angle"], "°"))
+    if op.get("count") not in (None, ""):
+        out.append(f"× {_num(op['count'])}")
+    if t == "extrude" and op.get("end") not in (None, "", "blind"):
+        out.append(str(op["end"]).replace("_", " "))
+    if op.get("op") in ("remove", "intersect") or (op.get("op") == "new" and t != "boolean"):
+        out.append({"remove": "cut", "intersect": "intersect", "new": "new part"}[op["op"]])
+    for k in ("edges", "faces", "bodies"):
+        v = op.get(k)
+        if isinstance(v, list) and v:
+            out.append(f"{len(v)} {k[:-1] if len(v) == 1 else k}")
+            break
+    return " · ".join(out)
+
+
+def feature_tree(doc):
+    """One Part Studio's feature list, rollback bar and variables, for the phone's tree."""
+    if not isinstance(doc, dict):
+        return {"features": [], "rollback": None, "variables": []}
+    feats = []
+    for f in doc.get("features") or []:
+        if not isinstance(f, dict):
+            continue
+        op = f.get("op") if isinstance(f.get("op"), dict) else {}
+        feats.append({
+            "id": f.get("id"),
+            "name": f.get("name", ""),
+            "type": op.get("type", ""),
+            "detail": feature_detail(op),
+            "suppressed": bool(f.get("suppressed")),
+            "hidden": bool(f.get("hidden")),
+        })
+    rb = doc.get("rollback")
+    variables = [{"name": v.get("name", ""), "expr": str(v.get("expr", ""))}
+                 for v in doc.get("variables") or [] if isinstance(v, dict)]
+    return {"features": feats, "rollback": rb if isinstance(rb, int) else None, "variables": variables}
 
 
 class Job:
@@ -190,13 +268,15 @@ class Projects:
         except (OSError, ValueError):
             return None
         if "studios" in ws:
+            studios = [s for s in ws.get("studios") or [] if isinstance(s, dict)]
             info = {
-                "studios": [s.get("name", f"Part Studio {n + 1}") for n, s in enumerate(ws.get("studios") or [])],
+                "studios": [s.get("name", f"Part Studio {n + 1}") for n, s in enumerate(studios)],
                 "assemblies": [a.get("name", f"Assembly {n + 1}") for n, a in enumerate(ws.get("assemblies") or [])],
                 "drawings": len(ws.get("drawings") or []),
+                "trees": [feature_tree(s.get("doc")) for s in studios],
             }
         else:  # an old single Part Studio document
-            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": 0}
+            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": 0, "trees": [feature_tree(ws)]}
         self.info_cache[path] = (st.st_mtime_ns, st.st_size, info)
         return info
 
@@ -309,7 +389,11 @@ class Projects:
             return None, "rcad is not installed on this computer"
         st = os.stat(path)
         sel = f"a{assembly}" if assembly is not None else f"s{studio or 0}"
-        key = hashlib.sha256(f"{path}\0{st.st_mtime_ns}\0{st.st_size}\0{sel}\0{VIEW_VERSION}".encode()).hexdigest()[:24]
+        try:  # a new rcad build can change the page (it is compiled in), so it is part of the key
+            built = os.stat(rcad).st_mtime_ns
+        except OSError:
+            built = 0
+        key = hashlib.sha256(f"{path}\0{st.st_mtime_ns}\0{st.st_size}\0{sel}\0{VIEW_VERSION}\0{built}".encode()).hexdigest()[:24]
         os.makedirs(CACHE_DIR, exist_ok=True)
         out = os.path.join(CACHE_DIR, f"{key}.html")
         with self.lock:

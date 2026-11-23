@@ -1,115 +1,167 @@
 package org.rcad.mobile
 
-import android.app.Activity
-import android.app.AlertDialog
 import android.content.Context
-import android.content.res.Configuration
+import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorFilter
+import android.graphics.Matrix
+import android.graphics.Paint
+import android.graphics.Path
+import android.graphics.PixelFormat
 import android.graphics.Typeface
+import android.graphics.drawable.Drawable
 import android.graphics.drawable.GradientDrawable
+import android.graphics.drawable.RippleDrawable
+import android.content.res.ColorStateList
 import android.util.TypedValue
 import android.view.Gravity
 import android.view.View
-import android.widget.Button
+import android.view.ViewGroup
+import android.widget.ImageView
 import android.widget.LinearLayout
 import android.widget.TextView
+import androidx.core.graphics.PathParser
 
 /**
- * Colours and small builders for the screens, in the look of the OrcaSlicer fork's G-code page
- * (dark grey, translucent rounded panels with a thin border, Orca green), light when the phone is.
+ * Small helpers for building the screens in code, in the look of the OrcaSlicer phone app:
+ * a dark top bar with tabs, a light 3D scene, and a white tray (bottom sheet) with grey section rows.
  */
 object Ui {
-    var dark = true
-        private set
-    var BG = 0xFF1D1F22.toInt()
-    var PANEL = 0xEB24262A.toInt()
-    var PANEL_SOLID = 0xFF24262A.toInt()
-    var BORDER = 0xFF3A3D42.toInt()
-    var TEXT = 0xFFE8E8E8.toInt()
-    var MUTED = 0xFFA0A4AA.toInt()
-    var TRACK = 0xFF4A4E55.toInt()
-    var USER_BG = 0x2600AE42
-    const val ACCENT = 0xFF00AE42.toInt()
-    var ERR = 0xFFF85149.toInt()
-    var WARN = 0xFFF0A030.toInt()
-
-    /** Pick the palette for the phone's light or dark setting and colour the window. */
-    fun init(a: Activity) {
-        dark = (a.resources.configuration.uiMode and Configuration.UI_MODE_NIGHT_MASK) != Configuration.UI_MODE_NIGHT_NO
-        if (dark) {
-            BG = 0xFF1D1F22.toInt(); PANEL = 0xEB24262A.toInt(); PANEL_SOLID = 0xFF24262A.toInt(); BORDER = 0xFF3A3D42.toInt()
-            TEXT = 0xFFE8E8E8.toInt(); MUTED = 0xFFA0A4AA.toInt(); TRACK = 0xFF4A4E55.toInt(); USER_BG = 0x2600AE42
-            ERR = 0xFFF85149.toInt(); WARN = 0xFFF0A030.toInt()
-        } else {
-            BG = 0xFFE9EAEC.toInt(); PANEL = 0xF0FFFFFF.toInt(); PANEL_SOLID = 0xFFFFFFFF.toInt(); BORDER = 0xFFD0D3D8.toInt()
-            TEXT = 0xFF222222.toInt(); MUTED = 0xFF5D6168.toInt(); TRACK = 0xFFC7CAD0.toInt(); USER_BG = 0x2200AE42
-            ERR = 0xFFCF222E.toInt(); WARN = 0xFFB4540C.toInt()
-        }
-        a.window.statusBarColor = BG
-        a.window.navigationBarColor = BG
-        @Suppress("DEPRECATION")
-        a.window.decorView.systemUiVisibility = if (dark) 0 else (View.SYSTEM_UI_FLAG_LIGHT_STATUS_BAR or View.SYSTEM_UI_FLAG_LIGHT_NAVIGATION_BAR)
-    }
-
-    fun dialog(c: Context): AlertDialog.Builder =
-        AlertDialog.Builder(c, if (dark) android.R.style.Theme_Material_Dialog_Alert else android.R.style.Theme_Material_Light_Dialog_Alert)
+    // OrcaSlicer's light theme, with a blue accent
+    const val ACCENT = 0xFF2F80ED.toInt()
+    /** The accent on the dark top bar (lighter, for contrast on #2D2D30). */
+    const val ACCENT_ON_BAR = 0xFF6AA8F7.toInt()
+    const val ACCENT_SOFT = 0xFFE3EEFD.toInt()
+    const val BAR = 0xFF2D2D30.toInt()
+    const val BAR_TEXT = 0xFFFFFFFF.toInt()
+    const val BAR_DIM = 0xFFB6B6B6.toInt()
+    const val SHEET = 0xFFFFFFFF.toInt()
+    const val SECTION = 0xFFF7F7F7.toInt()
+    const val LINE = 0xFFDBDBDB.toInt()
+    const val LINE_SOFT = 0xFFEEEEEE.toInt()
+    const val TEXT = 0xFF323A3D.toInt()
+    const val MUTED = 0xFF6B6B6B.toInt()
+    const val FAINT = 0xFF9B9B9B.toInt()
+    const val ORANGE = 0xFFFF8000.toInt()
+    const val ERR = 0xFFD9534F.toInt()
+    const val SCENE = 0xFFEEF1F4.toInt()
+    const val USER_BUBBLE = ACCENT_SOFT
 
     fun dp(c: Context, v: Int): Int = TypedValue.applyDimension(TypedValue.COMPLEX_UNIT_DIP, v.toFloat(), c.resources.displayMetrics).toInt()
 
-    fun rounded(color: Int, radius: Float, stroke: Int? = null, strokePx: Int = 2) = GradientDrawable().apply {
+    fun rounded(color: Int, radius: Float, stroke: Int? = null, strokeW: Int = 2) = GradientDrawable().apply {
         setColor(color)
         cornerRadius = radius
-        if (stroke != null) setStroke(strokePx, stroke)
+        if (stroke != null) setStroke(strokeW, stroke)
     }
 
-    /** An Orca-style floating panel: translucent, rounded, thin border. */
-    fun panel(c: Context) = rounded(PANEL, dp(c, 8).toFloat(), BORDER, maxOf(1, dp(c, 1)))
+    /** A background that ripples when tapped. */
+    fun pressable(base: Drawable?, dark: Boolean = false) =
+        RippleDrawable(ColorStateList.valueOf(if (dark) 0x33FFFFFF else 0x1F000000), base, base ?: GradientDrawable().apply { setColor(Color.WHITE) })
 
-    fun text(c: Context, s: CharSequence, size: Float = 14f, color: Int = TEXT, bold: Boolean = false) = TextView(c).apply {
+    fun text(c: Context, s: CharSequence, size: Float = 15f, color: Int = TEXT, bold: Boolean = false) = TextView(c).apply {
         text = s
         textSize = size
         setTextColor(color)
-        if (bold) typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
+        if (bold) typeface = Typeface.DEFAULT_BOLD
         setTextIsSelectable(false)
     }
 
-    /** Orca's buttons: outlined; `primary` is filled green. */
-    fun button(c: Context, label: String, primary: Boolean = false, onClick: (View) -> Unit) = Button(c).apply {
+    /** The filled accent button (OrcaSlicer's "Slice plate", in blue). */
+    fun accentButton(c: Context, label: String, onClick: (View) -> Unit) = TextView(c).apply {
         text = label
-        isAllCaps = false
-        textSize = 13.5f
-        stateListAnimator = null
-        setTextColor(if (primary) Color.WHITE else TEXT)
-        background = if (primary) rounded(ACCENT, dp(c, 5).toFloat()) else rounded(Color.TRANSPARENT, dp(c, 5).toFloat(), BORDER, maxOf(1, dp(c, 1)))
-        minHeight = dp(c, 34)
-        minimumHeight = dp(c, 34)
-        minWidth = dp(c, 34)
-        minimumWidth = dp(c, 34)
-        setPadding(dp(c, 11), 0, dp(c, 11), 0)
+        textSize = 14f
+        typeface = Typeface.DEFAULT_BOLD
+        setTextColor(Color.WHITE)
+        gravity = Gravity.CENTER
+        background = pressable(rounded(ACCENT, dp(c, 6).toFloat()), dark = true)
+        minHeight = dp(c, 36)
+        setPadding(dp(c, 14), 0, dp(c, 14), 0)
         setOnClickListener(onClick)
     }
 
-    /** A tab of a segmented row: green text and underline when on. */
-    fun tab(c: Context, label: String, onClick: (View) -> Unit) = TextView(c).apply {
+    /** White outlined button, as in the Orca sidebar. */
+    fun outlineButton(c: Context, label: String, onClick: (View) -> Unit) = TextView(c).apply {
+        text = label
+        textSize = 14f
+        setTextColor(TEXT)
+        gravity = Gravity.CENTER
+        background = pressable(rounded(SHEET, dp(c, 6).toFloat(), LINE, dp(c, 1)))
+        minHeight = dp(c, 38)
+        setPadding(dp(c, 14), 0, dp(c, 14), 0)
+        setOnClickListener(onClick)
+    }
+
+    /** A preset combo box: outlined field with a chevron on the right. */
+    fun combo(c: Context, label: String, onClick: (View) -> Unit) = TextView(c).apply {
+        text = label
+        textSize = 14f
+        setTextColor(TEXT)
+        gravity = Gravity.CENTER_VERTICAL
+        isSingleLine = true
+        ellipsize = android.text.TextUtils.TruncateAt.END
+        background = pressable(rounded(SHEET, dp(c, 4).toFloat(), LINE, dp(c, 1)))
+        minHeight = dp(c, 40)
+        setPadding(dp(c, 10), 0, dp(c, 8), 0)
+        setCompoundDrawablesRelative(null, null, Icon(c, "chevronDown", MUTED, 18), null)
+        compoundDrawablePadding = dp(c, 6)
+        setOnClickListener(onClick)
+    }
+
+    /** An icon button for a bar: dark (top bar) or light (tray, over the scene). */
+    fun iconButton(c: Context, icon: String, color: Int, size: Int = 40, desc: String = icon, onClick: (View) -> Unit) = ImageView(c).apply {
+        setImageDrawable(Icon(c, icon, color, 22))
+        scaleType = ImageView.ScaleType.CENTER
+        contentDescription = desc
+        background = RippleDrawable(ColorStateList.valueOf(if (color == BAR_TEXT || color == BAR_DIM) 0x33FFFFFF else 0x1F000000), null,
+            GradientDrawable().apply { shape = GradientDrawable.OVAL; setColor(Color.WHITE) })
+        layoutParams = LinearLayout.LayoutParams(dp(c, size), dp(c, size))
+        setOnClickListener(onClick)
+    }
+
+    /** A tab in the dark top bar (Prepare / Preview / Device in Orca): the accent when selected. */
+    fun barTab(c: Context, label: String, onClick: (View) -> Unit) = TextView(c).apply {
         text = label
         textSize = 14f
         gravity = Gravity.CENTER
-        setPadding(dp(c, 12), dp(c, 6), dp(c, 12), dp(c, 6))
+        setTextColor(BAR_DIM)
+        setPadding(dp(c, 10), 0, dp(c, 10), 0)
+        background = RippleDrawable(ColorStateList.valueOf(0x33FFFFFF), null, null)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.MATCH_PARENT)
         setOnClickListener(onClick)
     }
 
-    fun setTab(t: TextView, on: Boolean) {
-        t.setTextColor(if (on) ACCENT else MUTED)
-        t.typeface = Typeface.create("sans-serif-medium", Typeface.NORMAL)
-        t.background = if (on) underline(t.context) else null
+    fun selectTab(t: TextView, on: Boolean) {
+        t.setTextColor(if (on) ACCENT_ON_BAR else BAR_DIM)
+        t.typeface = if (on) Typeface.DEFAULT_BOLD else Typeface.DEFAULT
     }
 
-    private fun underline(c: Context): android.graphics.drawable.Drawable {
-        val line = GradientDrawable().apply { setColor(ACCENT) }
-        return android.graphics.drawable.LayerDrawable(arrayOf<android.graphics.drawable.Drawable>(line)).apply {
-            setLayerGravity(0, Gravity.BOTTOM or Gravity.FILL_HORIZONTAL)
-            setLayerHeight(0, maxOf(2, dp(c, 2)))
-        }
+    /** The dark top bar. */
+    fun topBar(c: Context, vararg views: View) = LinearLayout(c).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(BAR)
+        setPadding(dp(c, 6), 0, dp(c, 6), 0)
+        views.forEach { addView(it) }
+    }
+
+    /** A grey section header in the tray: icon, bold title, something on the right. */
+    fun sectionRow(c: Context, icon: String?, title: String, right: View? = null) = LinearLayout(c).apply {
+        orientation = LinearLayout.HORIZONTAL
+        gravity = Gravity.CENTER_VERTICAL
+        setBackgroundColor(SECTION)
+        setPadding(dp(c, 12), dp(c, 8), dp(c, 12), dp(c, 8))
+        minimumHeight = dp(c, 44)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = dp(c, 4) }
+        if (icon != null) addView(ImageView(c).apply { setImageDrawable(Icon(c, icon, TEXT, 20)) },
+            LinearLayout.LayoutParams(dp(c, 20), dp(c, 20)).apply { marginEnd = dp(c, 8) })
+        addView(text(c, title, 15f, TEXT, bold = true), LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        if (right != null) addView(right)
+    }
+
+    fun divider(c: Context, color: Int = LINE_SOFT) = View(c).apply {
+        setBackgroundColor(color)
+        layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 1)
     }
 
     fun row(c: Context, vararg views: View) = LinearLayout(c).apply {
@@ -124,13 +176,40 @@ object Ui {
         views.forEach { addView(it) }
     }
 
-    /** A section title inside a panel (Orca's ".title"). */
-    fun title(c: Context, s: String) = text(c, s, 13.5f, TEXT, bold = true).apply { setPadding(0, dp(c, 10), 0, dp(c, 4)) }
-
-    /** A thin rule between sections. */
-    fun rule(c: Context) = View(c).apply {
-        setBackgroundColor(BORDER)
-        layoutParams = LinearLayout.LayoutParams(LinearLayout.LayoutParams.MATCH_PARENT, maxOf(1, dp(c, 1))).apply { topMargin = dp(c, 8) }
+    /**
+     * The activity's root: [content] padded clear of the status bar, navigation bar and keyboard
+     * (Android 15 draws apps edge to edge), with the top bar's colour behind the status bar and
+     * [bottom] behind the navigation bar.
+     */
+    fun screen(c: Context, content: View, bottom: Int = SHEET): View {
+        val bg = object : Drawable() {
+            var top = 0
+            private val p = Paint()
+            override fun draw(canvas: Canvas) {
+                val b = bounds
+                p.color = bottom
+                canvas.drawRect(b, p)
+                p.color = BAR
+                canvas.drawRect(b.left.toFloat(), b.top.toFloat(), b.right.toFloat(), (b.top + top).toFloat(), p)
+            }
+            override fun setAlpha(alpha: Int) {}
+            override fun setColorFilter(cf: ColorFilter?) {}
+            @Deprecated("Deprecated in Java")
+            override fun getOpacity() = PixelFormat.OPAQUE
+        }
+        return android.widget.FrameLayout(c).apply {
+            background = bg
+            addView(content)
+            setOnApplyWindowInsetsListener { v, insets ->
+                val w = androidx.core.view.WindowInsetsCompat.toWindowInsetsCompat(insets, v)
+                val bars = w.getInsets(androidx.core.view.WindowInsetsCompat.Type.systemBars())
+                val ime = w.getInsets(androidx.core.view.WindowInsetsCompat.Type.ime())
+                bg.top = bars.top
+                v.setPadding(bars.left, bars.top, bars.right, maxOf(bars.bottom, ime.bottom))
+                v.invalidate()
+                insets
+            }
+        }
     }
 
     /** "3 min ago" style time from Unix seconds. */
@@ -145,27 +224,48 @@ object Ui {
             else -> java.text.SimpleDateFormat("d MMM yyyy", java.util.Locale.getDefault()).format(java.util.Date(secs * 1000))
         }
     }
+}
 
-    /** A one-character mark for a feature kind in the tree. */
-    fun featureIcon(kind: String): String = when (kind) {
-        "sketch" -> "✎"
-        "extrude" -> "⬆"
-        "revolve" -> "↻"
-        "sweep", "loft" -> "∿"
-        "fillet" -> "◠"
-        "chamfer" -> "◺"
-        "hole" -> "◎"
-        "shell" -> "▢"
-        "draft" -> "⟋"
-        "mirror" -> "⇋"
-        "plane" -> "▱"
-        "helix" -> "⌇"
-        "import" -> "⇩"
-        "boolean" -> "⊕"
-        "split" -> "⫽"
-        "transform" -> "✥"
-        "sheetMetal" -> "⌐"
-        "custom" -> "ƒ"
-        else -> if (kind.contains("pattern", ignoreCase = true)) "⋮" else "•"
+/** One of the editor's stroked icons ([IconPaths]) as a drawable, [sizeDp] square. */
+class Icon(c: Context, name: String, color: Int, private val sizeDp: Int = 22) : Drawable() {
+    private val px = Ui.dp(c, sizeDp)
+    private val src: Path = try {
+        PathParser.createPathFromPathData(IconPaths.all[name] ?: IconPaths.all.getValue("more"))
+    } catch (e: RuntimeException) {
+        Path()
     }
+    private val path = Path()
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG).apply {
+        style = Paint.Style.STROKE
+        strokeCap = Paint.Cap.ROUND
+        strokeJoin = Paint.Join.ROUND
+        this.color = color
+    }
+
+    init {
+        setBounds(0, 0, px, px)
+    }
+
+    override fun getIntrinsicWidth() = px
+    override fun getIntrinsicHeight() = px
+
+    override fun draw(canvas: Canvas) {
+        val b = bounds
+        val s = minOf(b.width(), b.height()) / 24f
+        path.reset()
+        src.transform(Matrix().apply { setScale(s, s); postTranslate(b.left + (b.width() - 24 * s) / 2, b.top + (b.height() - 24 * s) / 2) }, path)
+        paint.strokeWidth = 1.7f * s
+        canvas.drawPath(path, paint)
+    }
+
+    override fun setAlpha(alpha: Int) {
+        paint.alpha = alpha
+    }
+
+    override fun setColorFilter(colorFilter: ColorFilter?) {
+        paint.colorFilter = colorFilter
+    }
+
+    @Deprecated("Deprecated in Java")
+    override fun getOpacity() = PixelFormat.TRANSLUCENT
 }

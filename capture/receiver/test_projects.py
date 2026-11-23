@@ -75,13 +75,27 @@ STUB = textwrap.dedent('''\
 ''')
 
 
+BODY = {
+    "format": "cad-rust-app/1", "units": "mm", "rollback": 2,
+    "variables": [{"name": "H", "expr": "15"}],
+    "features": [
+        {"id": 1, "name": "Sketch 1", "suppressed": False, "hidden": False,
+         "op": {"type": "sketch", "plane": {"kind": "origin_plane", "plane": "Top"},
+                "sketch": {"curves": [1, 2, 3, 4], "constraints": [1], "texts": []}}},
+        {"id": 2, "name": "Block", "op": {"type": "extrude", "depth": "H", "end": "blind", "op": "add"}},
+        {"id": 3, "name": "Pocket", "suppressed": True, "op": {"type": "extrude", "depth": "4", "end": "blind", "op": "remove"}},
+        {"id": 4, "name": "Round", "op": {"type": "fillet", "radius": "3", "edges": [1, 2, 3, 4]}},
+    ],
+}
+
+
 class ProjectsTest(unittest.TestCase):
     def setUp(self):
         self.tmp = tempfile.mkdtemp()
         self.projects_dir = os.path.join(self.tmp, "rCAD Projects")
         os.makedirs(os.path.join(self.projects_dir, "Bracket", ".rcad-cache"))
         with open(os.path.join(self.projects_dir, "Bracket", "bracket.json"), "w") as f:
-            json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Body", "doc": {}}],
+            json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Body", "doc": BODY}],
                        "assemblies": [{"name": "Arm"}]}, f, indent=2)
         with open(os.path.join(self.projects_dir, "Bracket", "notes.json"), "w") as f:
             f.write('{"not": "a document"}')
@@ -131,6 +145,14 @@ class ProjectsTest(unittest.TestCase):
         did = docs[0]["id"]
         st, d = self.req("GET", f"/api/doc/{did}")
         self.assertEqual((st, d["studios"], d["assemblies"]), (200, ["Body"], ["Arm"]))
+        tree = d["trees"][0]
+        self.assertEqual([(f["name"], f["type"], f["detail"], f["suppressed"]) for f in tree["features"]], [
+            ("Sketch 1", "sketch", "Top plane · 4 curves · 1 constraint", False),
+            ("Block", "extrude", "depth H", False),
+            ("Pocket", "extrude", "4 mm · cut", True),
+            ("Round", "fillet", "3 mm · 4 edges", False),
+        ])
+        self.assertEqual((tree["rollback"], tree["variables"]), (2, [{"name": "H", "expr": "15"}]))
         # the web view takes the token in the query too
         st, page = self.req("GET", f"/api/doc/{did}/view?t=tok", token=None, raw=True)
         self.assertEqual(st, 200)

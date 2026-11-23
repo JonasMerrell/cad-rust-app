@@ -6,11 +6,14 @@ to the same small service the rCAD Capture app uploads photos to.
 
 - **Documents**: every rCAD document in netdash's project folders, newest first, with search.
   *New* makes a project folder with an empty document.
-- **Look**: the OrcaSlicer fork's G-code page: the model fills the screen with translucent
-  panels floating over it, Orca green, dark or light with the phone.
-- **Feature tree**: the Part Studio's features in order (failing ones in red with the error,
-  suppressed ones struck through), its variables and parts; for an assembly, its instances and
-  mates. Tap one to ask Claude about it.
+- **Look**: the OrcaSlicer phone app's: a dark top bar with the Features and Claude tabs, the model
+  on a light scene, and a white tray you drag up from the bottom (the model stays framed above it),
+  with a blue accent. The icons are the editor's own (`gen_icons.py` copies them from
+  `src/icon_paths.rs`).
+- **Feature tree** (Features tab): the Part Studio's features in order with the rollback bar
+  (failing ones in red with the error, suppressed ones struck through), its parts and variables;
+  for an assembly, its instances and mates. Tap a feature to ask Claude about it, suppress it or
+  delete it (Claude does the edit on netdash).
 - **Viewer**: rCAD's own interactive web page of the document (the page *File → Export web
   viewer* writes), built on netdash with `export_web` and cached until the document changes. Pick
   any Part Studio or Assembly; assemblies keep their mate sliders and animations.

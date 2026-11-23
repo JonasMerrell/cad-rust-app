@@ -1,6 +1,7 @@
 package org.rcad.mobile
 
 import android.app.Activity
+import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
@@ -20,31 +21,34 @@ class MainActivity : Activity() {
     private lateinit var list: LinearLayout
     private lateinit var status: TextView
     private lateinit var search: EditText
+    private lateinit var header: TextView
     private var docs: List<JSONObject> = emptyList()
     private var loading = false
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
-        Ui.init(this)
         prefs = Prefs(this)
-        val title = Ui.text(this, "rCAD", 20f, bold = true).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
-        val bar = Ui.row(
-            this, title,
-            Ui.button(this, "New", primary = true) { newProjectDialog() },
-            space(),
-            Ui.button(this, "⟳") { refresh() },
-            space(),
-            Ui.button(this, "⚙") { settingsDialog() },
-        ).apply { setPadding(Ui.dp(context, 16), Ui.dp(context, 14), Ui.dp(context, 16), Ui.dp(context, 6)) }
-        status = Ui.text(this, "", 13f, Ui.MUTED).apply { setPadding(Ui.dp(context, 16), 0, Ui.dp(context, 16), Ui.dp(context, 6)) }
+        val logo = android.widget.ImageView(this).apply {
+            setImageResource(R.drawable.ic_launcher)
+            layoutParams = LinearLayout.LayoutParams(Ui.dp(context, 30), Ui.dp(context, 30)).apply { marginStart = Ui.dp(context, 4); marginEnd = Ui.dp(context, 10) }
+        }
+        val title = Ui.text(this, "rCAD", 19f, Ui.BAR_TEXT, bold = true).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+        val bar = Ui.topBar(
+            this, logo, title,
+            Ui.accentButton(this, "New project") { newProjectDialog() },
+            Ui.iconButton(this, "more", Ui.BAR_TEXT, desc = "More") { v -> moreMenu(v) },
+        ).apply { layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(context, 52)) }
+        status = Ui.text(this, "", 12.5f, Ui.MUTED).apply { setPadding(Ui.dp(context, 14), Ui.dp(context, 8), Ui.dp(context, 14), Ui.dp(context, 4)) }
         search = EditText(this).apply {
             hint = "Search documents"
             setSingleLine()
-            setTextColor(Ui.TEXT)
-            setHintTextColor(Ui.MUTED)
-            background = Ui.panel(context)
             textSize = 14f
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8))
+            setTextColor(Ui.TEXT)
+            setHintTextColor(Ui.FAINT)
+            background = Ui.rounded(Ui.SHEET, Ui.dp(context, 4).toFloat(), Ui.LINE, Ui.dp(context, 1))
+            setCompoundDrawablesRelative(Icon(context, "search", Ui.FAINT, 18), null, null, null)
+            compoundDrawablePadding = Ui.dp(context, 8)
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 9), Ui.dp(context, 10), Ui.dp(context, 9))
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun afterTextChanged(s: android.text.Editable?) = show()
                 override fun beforeTextChanged(s: CharSequence?, a: Int, b: Int, c: Int) {}
@@ -52,24 +56,53 @@ class MainActivity : Activity() {
             })
         }
         val searchWrap = LinearLayout(this).apply {
-            setPadding(Ui.dp(context, 16), 0, Ui.dp(context, 16), Ui.dp(context, 8))
+            setBackgroundColor(Ui.SHEET)
+            setPadding(Ui.dp(context, 12), Ui.dp(context, 10), Ui.dp(context, 12), Ui.dp(context, 10))
             addView(search, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT))
         }
+        header = Ui.text(this, "", 12.5f, Ui.MUTED)
         list = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(Ui.dp(context, 12), 0, Ui.dp(context, 12), Ui.dp(context, 24))
+            setBackgroundColor(Ui.SHEET)
         }
-        val scroll = ScrollView(this).apply { addView(list) }
-        setContentView(LinearLayout(this).apply {
+        val body = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.BG)
-            fitsSystemWindows = true
-            addView(bar)
-            addView(status)
+            setBackgroundColor(Ui.SHEET)
+            setPadding(0, 0, 0, Ui.dp(context, 24))
+            addView(Ui.sectionRow(context, "folder", "Documents", header).apply {
+                (layoutParams as LinearLayout.LayoutParams).topMargin = 0
+            })
             addView(searchWrap)
-            addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        })
+            addView(Ui.divider(context))
+            addView(list)
+        }
+        val scroll = ScrollView(this).apply {
+            setBackgroundColor(Ui.SHEET)
+            isFillViewport = true
+            addView(body)
+        }
+        setContentView(Ui.screen(this, LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(bar)
+            addView(LinearLayout(context).apply {
+                orientation = LinearLayout.VERTICAL
+                setBackgroundColor(Ui.SCENE)
+                addView(status)
+                addView(scroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+        }))
         handlePairing(intent)
+    }
+
+    private fun moreMenu(anchor: View) {
+        val m = android.widget.PopupMenu(this, anchor)
+        m.menu.add(0, 1, 0, "Refresh")
+        m.menu.add(0, 2, 1, "Settings")
+        m.setOnMenuItemClickListener {
+            if (it.itemId == 1) refresh() else settingsDialog()
+            true
+        }
+        m.show()
     }
 
     override fun onNewIntent(intent: Intent) {
@@ -81,8 +114,6 @@ class MainActivity : Activity() {
         super.onResume()
         refresh()
     }
-
-    private fun space() = View(this).apply { layoutParams = LinearLayout.LayoutParams(Ui.dp(context, 8), 1) }
 
     private fun handlePairing(intent: Intent?) {
         val uri = intent?.data ?: return
@@ -103,11 +134,13 @@ class MainActivity : Activity() {
     private fun refresh() {
         if (loading) return
         if (!prefs.paired) {
+            status.visibility = View.VISIBLE
             status.text = "Not paired. On the phone, open the pairing link from netdash (rcad_capture_receiver.py pair-url) and tap Open in rCAD, or fill in Settings."
             return
         }
         loading = true
         status.text = "Loading from netdash…"
+        status.visibility = View.VISIBLE
         Thread {
             try {
                 val api = Api.connect(prefs)
@@ -119,11 +152,16 @@ class MainActivity : Activity() {
                 if (!res.optBoolean("claude", true)) notes += "Claude Code isn't on netdash's PATH, so chats won't work"
                 runOnUiThread {
                     docs = out
-                    status.text = (listOf("${out.size} document${if (out.size == 1) "" else "s"} on ${api.base.removePrefix("http://")}") + notes).joinToString(". ")
+                    header.text = "${out.size} on ${api.base.removePrefix("http://")}"
+                    status.text = notes.joinToString(". ")
+                    status.visibility = if (notes.isEmpty()) View.GONE else View.VISIBLE
                     show()
                 }
             } catch (e: IOException) {
-                runOnUiThread { status.text = e.message ?: "Can't reach netdash" }
+                runOnUiThread {
+                    status.visibility = View.VISIBLE
+                    status.text = e.message ?: "Can't reach netdash"
+                }
             } finally {
                 runOnUiThread { loading = false }
             }
@@ -134,10 +172,10 @@ class MainActivity : Activity() {
         list.removeAllViews()
         val q = search.text.toString().trim().lowercase()
         val shown = docs.filter { q.isEmpty() || it.optString("name").lowercase().contains(q) || it.optString("project").lowercase().contains(q) }
-        if (shown.isEmpty() && docs.isNotEmpty()) list.addView(Ui.text(this, "No document matches.", 14f, Ui.MUTED).apply { setPadding(Ui.dp(context, 8), Ui.dp(context, 12), 0, 0) })
+        if (shown.isEmpty() && docs.isNotEmpty()) list.addView(Ui.text(this, "No document matches.", 14f, Ui.MUTED).apply { setPadding(Ui.dp(context, 14), Ui.dp(context, 14), 0, 0) })
         if (docs.isEmpty() && prefs.paired && !loading) {
-            list.addView(Ui.text(this, "No rCAD documents in netdash's project folders yet. Tap New to start one, or save a document into ~/Documents/rCAD Projects on netdash.", 14f, Ui.MUTED)
-                .apply { setPadding(Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8), 0) })
+            list.addView(Ui.text(this, "No rCAD documents in netdash's project folders yet. Tap New project to start one, or save a document into rCAD Projects on netdash.", 14f, Ui.MUTED)
+                .apply { setPadding(Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14), 0) })
         }
         for (d in shown) list.addView(docRow(d))
     }
@@ -153,15 +191,28 @@ class MainActivity : Activity() {
             if (d.optBoolean("git")) add("git")
             if (d.optBoolean("busy")) add("Claude is working")
         }.joinToString(" · ")
-        return LinearLayout(this).apply {
+        val busy = d.optBoolean("busy")
+        val texts = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.panel(context)
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 10), Ui.dp(context, 12), Ui.dp(context, 10))
-            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = Ui.dp(context, 8) }
-            addView(Ui.text(context, name, 15f, bold = true))
-            addView(Ui.text(context, sub, 13f, Ui.MUTED))
+            addView(Ui.text(context, name, 15.5f, bold = true).apply { isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END })
+            addView(Ui.text(context, sub, 12.5f, if (busy) Ui.ACCENT else Ui.MUTED).apply { isSingleLine = true; ellipsize = android.text.TextUtils.TruncateAt.END })
+        }
+        val row = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = android.view.Gravity.CENTER_VERTICAL
+            background = Ui.pressable(null)
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 11), Ui.dp(context, 10), Ui.dp(context, 11))
+            addView(android.widget.ImageView(context).apply { setImageDrawable(Icon(context, "partStudio", Ui.ACCENT, 24)) },
+                LinearLayout.LayoutParams(Ui.dp(context, 24), Ui.dp(context, 24)).apply { marginEnd = Ui.dp(context, 12) })
+            addView(texts, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+            addView(android.widget.ImageView(context).apply { setImageDrawable(Icon(context, "chevronRight", Ui.FAINT, 18)) })
             isClickable = true
             setOnClickListener { open(d.optString("id"), name) }
+        }
+        return LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(row)
+            addView(Ui.divider(context).apply { (layoutParams as LinearLayout.LayoutParams).marginStart = Ui.dp(context, 50) })
         }
     }
 
@@ -177,7 +228,7 @@ class MainActivity : Activity() {
 
     private fun newProjectDialog() {
         val name = field("Project name, e.g. hex tray")
-        Ui.dialog(this)
+        AlertDialog.Builder(this)
             .setTitle("New project")
             .setMessage("Makes a folder with an empty document in netdash's rCAD Projects. Then ask Claude to design something.")
             .setView(Ui.column(this, 20, name))
@@ -205,7 +256,7 @@ class MainActivity : Activity() {
             text = "The same address and token as rCAD Capture. The pairing link from netdash fills these in. Example address: http://192.168.0.247:8765"
             setPadding(0, 16, 0, 0)
         }
-        Ui.dialog(this)
+        AlertDialog.Builder(this)
             .setTitle("Settings")
             .setView(Ui.column(this, 20, urls, token, help))
             .setPositiveButton("Save") { _, _ ->

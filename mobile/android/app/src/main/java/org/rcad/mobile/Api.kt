@@ -31,6 +31,11 @@ class Prefs(context: Context) {
         get() = sp.getString("model", "") ?: ""
         set(v) = sp.edit().putString("model", v).apply()
 
+    /** The tray tab last open on a document: 0 features, 1 Claude. */
+    var lastPane: Int
+        get() = sp.getInt("lastPane", 0)
+        set(v) = sp.edit().putInt("lastPane", v).apply()
+
     /** The chat last open for each document, to come back to it. */
     fun chatFor(doc: String): String? = sp.getString("chat:$doc", null)
     fun setChatFor(doc: String, chat: String?) = sp.edit().putString("chat:$doc", chat).apply()

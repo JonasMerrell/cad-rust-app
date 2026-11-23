@@ -85,11 +85,11 @@ label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer
    folded away until "Model" is tapped. ?top= and ?bottom= are the heights (CSS px) the app's own
    panels cover, kept clear. */
 :root.app { --bg: #1d1f22; --bg2: #16181a; --panel: rgba(36, 38, 42, 0.92); --line: #3a3d42; --fg: #e8e8e8; --muted: #a0a4aa;
-  --accent: #00ae42; --accent-soft: rgba(0, 174, 66, 0.18); --warn: #f0a030; --pick: #ffb547; color-scheme: dark;
+  --accent: #5b9df2; --accent-soft: rgba(47, 128, 237, 0.18); --warn: #f0a030; --pick: #ffb547; color-scheme: dark;
   --app-top: 0px; --app-bottom: 0px; }
 @media (prefers-color-scheme: light) { :root.app:not([data-theme="dark"]) {
   --bg: #e9eaec; --bg2: #dcdee1; --panel: rgba(255, 255, 255, 0.94); --line: #d0d3d8; --fg: #222; --muted: #5d6168;
-  --accent: #00ae42; --accent-soft: rgba(0, 174, 66, 0.14); color-scheme: light; } }
+  --accent: #2f80ed; --accent-soft: rgba(47, 128, 237, 0.15); color-scheme: light; } }
 .app body { font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; }
 .app #app { grid-template-columns: minmax(0, 1fr); grid-template-rows: minmax(0, 1fr); }
 .app #panel { position: fixed; z-index: 5; top: calc(var(--app-top) + 56px); right: 12px; width: min(300px, calc(100vw - 24px));
