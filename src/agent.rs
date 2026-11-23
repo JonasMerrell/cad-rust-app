@@ -255,6 +255,10 @@ impl Session {
                     .iter()
                     .map(|f| json!({"id": f.id, "name": f.name, "kind": f.op.kind(), "suppressed": f.suppressed, "params": described_params(&f.op)}))
                     .collect::<Vec<_>>());
+                // notes the user pinned to faces, with the face as a pick for other tools
+                if !self.doc.notes.is_empty() {
+                    v["notes"] = json!(self.doc.notes.iter().map(|n| json!({"text": n.text, "face": n.face_ref()})).collect::<Vec<_>>());
+                }
                 v
             }
             "set_variable" => {

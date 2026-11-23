@@ -1157,6 +1157,8 @@ pub const SHORTCUTS: &[(&str, &[(&str, &str)])] = &[
             ("F", "Zoom to fit"),
             ("N", "Look normal to the selection"),
             ("M", "Measure"),
+            ("T", "Notes: click a face to pin a note to it"),
+            ("P", "Pencil: draw on the part and send it to Claude"),
             ("I", "Isolate the selected parts; I or Esc again shows the rest"),
             ("Ctrl+A", "Select every part"),
             ("Enter / Esc", "Accept / cancel a feature; Esc clears the selection"),
