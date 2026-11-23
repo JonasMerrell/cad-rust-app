@@ -45,12 +45,15 @@ EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 def default_roots():
     """rCAD's own projects folder (RCAD_PROJECTS, else "rCAD Projects" in Documents or home)."""
-    out = []
-    env = os.environ.get("RCAD_PROJECTS")
-    if env:
-        out.append(env)
     home = os.path.expanduser("~")
-    out += [os.path.join(home, "Documents", "rCAD Projects"), os.path.join(home, "rCAD Projects")]
+    docs, plain = os.path.join(home, "Documents", "rCAD Projects"), os.path.join(home, "rCAD Projects")
+    # the first is where new projects go: the same folder the editor uses (src/project.rs), which
+    # is in Documents only when that folder exists; the others are still listed
+    first = plain if not os.path.isdir(os.path.join(home, "Documents")) else docs
+    out = [os.environ["RCAD_PROJECTS"]] if os.environ.get("RCAD_PROJECTS") else []
+    for d in (first, docs, plain):
+        if d not in out:
+            out.append(d)
     return out
 
 
