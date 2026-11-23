@@ -195,7 +195,8 @@ fn commands(app: &App) -> Vec<Cmd> {
                 ));
             }
             v.push(cmd("Export OBJ…", "File", "export", None, "save download mesh", Action::Run(|a| a.export_obj())));
-            v.push(cmd("Send to slicer", "File", "printer", None, "3d print orca", Action::Run(|a| a.send_to_slicer())));
+            v.push(cmd("Print in OrcaSlicer", "File", "printer", None, "3d print orca slicer step slice", Action::Run(crate::orca::print_in_orca)));
+            v.push(cmd("Send to slicer", "File", "printer", None, "3d print orca web", Action::Run(|a| a.send_to_slicer())));
             for (label, u) in [("Units: millimetres", "mm"), ("Units: centimetres", "cm"), ("Units: metres", "m"), ("Units: inches", "in"), ("Units: feet", "ft")] {
                 v.push(cmd(
                     label,
