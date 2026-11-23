@@ -35,6 +35,7 @@ mod parasolid;
 mod camera;
 mod claude;
 mod claude_chats;
+mod claude_cli;
 mod claude_ui;
 mod dialog;
 mod doc;
@@ -129,7 +130,7 @@ mod workspace;
 /// Command line help; `prog` is the name the program was started as (normally rcad).
 fn usage(prog: &str) -> String {
     format!(
-        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} part.json --studio S [--part P]     open it on that Part Studio and part (OrcaSlicer's Edit in rCAD)\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} --version | --help",
+        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} part.json --studio S [--part P]     open it on that Part Studio and part (OrcaSlicer's Edit in rCAD)\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} chat --doc part.json --prompt TEXT  one request to Claude about a document, no window (JSON lines out)\n  {prog} --version | --help",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -138,7 +139,7 @@ fn main() -> eframe::Result {
     let args: Vec<String> = std::env::args().collect();
     let prog = args.first().and_then(|a| std::path::Path::new(a).file_stem()).map(|s| s.to_string_lossy().into_owned()).unwrap_or_else(|| "rcad".into());
     #[cfg(windows)]
-    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("--help") | Some("-h") | Some("--version") | Some("-V")) || args.get(1).map(|a| a.starts_with('-') && a != "--kernel-worker").unwrap_or(false) {
+    if matches!(args.get(1).map(|s| s.as_str()), Some("run") | Some("script") | Some("chat") | Some("--help") | Some("-h") | Some("--version") | Some("-V")) || args.get(1).map(|a| a.starts_with('-') && a != "--kernel-worker").unwrap_or(false) {
         // print to the terminal that started us (the MCP server talks over pipes and needs no console)
         unsafe {
             windows_sys::Win32::System::Console::AttachConsole(windows_sys::Win32::System::Console::ATTACH_PARENT_PROCESS);
@@ -161,6 +162,10 @@ fn main() -> eframe::Result {
                 std::process::exit(2);
             }
             std::process::exit(agent::run_script(path, stop));
+        }
+        Some("chat") => {
+            opencascade_sys::extra::ex_messages_to_stderr();
+            std::process::exit(claude_cli::main(&args[2..]));
         }
         Some("script") => {
             let Some(path) = args.get(2) else {

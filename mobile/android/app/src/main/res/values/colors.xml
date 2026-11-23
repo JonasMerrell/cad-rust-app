@@ -1,0 +1,8 @@
+<resources>
+    <!-- OrcaSlicer phone app palette, blue accent (see Ui.kt) -->
+    <color name="bar">#FF2D2D30</color>
+    <color name="scene">#FFEEF1F4</color>
+    <color name="sheet">#FFFFFFFF</color>
+    <color name="accent">#FF2F80ED</color>
+    <color name="text">#FF323A3D</color>
+</resources>

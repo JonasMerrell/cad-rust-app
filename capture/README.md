@@ -67,6 +67,9 @@ writes its own files into `rcad-scan/` inside the folder.
 
 ## Receiver on netdash
 
+The same service also serves the rCAD phone app (documents, web viewer and Claude chats,
+`rcad_projects.py`, see `mobile/README.md`); copy both Python files when installing.
+
 ```sh
 mkdir -p ~/.local/share/rcad-capture ~/.config/systemd/user
 cp capture/receiver/rcad_capture_receiver.py ~/.local/share/rcad-capture/

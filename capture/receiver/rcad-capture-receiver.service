@@ -1,10 +1,12 @@
-# systemd user unit. Install: cp rcad_capture_receiver.py to ~/.local/share/rcad-capture/ and this file to ~/.config/systemd/user/ then
+# systemd user unit. Install: cp rcad_capture_receiver.py and rcad_projects.py to ~/.local/share/rcad-capture/ and this file to ~/.config/systemd/user/ then
 #   systemctl --user daemon-reload && systemctl --user enable --now rcad-capture-receiver
 [Unit]
-Description=rCAD Capture photo receiver (photogrammetry uploads to ~/scans)
+Description=rCAD netdash service (Capture photo uploads to ~/scans; projects, viewer and Claude chats for the rCAD phone app)
 After=network-online.target
 
 [Service]
+# rcad and claude (Claude Code) are looked for on this PATH; RCAD_BIN can name rcad directly
+Environment=PATH=%h/.local/bin:%h/bin:%h/.npm-global/bin:%h/src/cad-rust-app/target/release:/usr/local/bin:/usr/bin:/bin
 ExecStart=/usr/bin/python3 %h/.local/share/rcad-capture/rcad_capture_receiver.py serve --root %h/scans --port 8765
 Restart=on-failure
 RestartSec=3
