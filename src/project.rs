@@ -168,7 +168,8 @@ fn collect(dir: &Path, prefix: &str, history: bool, skip: &Path, out: &mut Vec<(
     for e in items {
         let name = e.file_name().to_string_lossy().into_owned();
         let t = e.file_type().map_err(|e| e.to_string())?;
-        if (!history && name == ".git") || t.is_symlink() || e.path() == skip {
+        // Claude chats stay with their owner, not in a project that is passed on
+        if (!history && name == ".git") || name == crate::claude_chats::DIR || name == crate::orca::DIR || t.is_symlink() || e.path() == skip {
             continue;
         }
         let path = format!("{prefix}{name}");

@@ -82,7 +82,7 @@ impl Default for PhotoUi {
             method: Method::Auto,
             quality: Quality::Normal,
             gpu: true,
-            glomap: false,
+            glomap: true,
             settings: Settings::default(),
             tools: None,
             show_programs: false,
@@ -232,8 +232,16 @@ fn setup_ui(p: &mut PhotoUi, ui: &mut Ui) {
                 if ui.add_enabled(cuda, egui::Checkbox::new(&mut gpu, "Use the GPU")).on_disabled_hover_text("This COLMAP was built without CUDA").changed() {
                     p.gpu = gpu;
                 }
-                let glomap = p.tools.as_ref().is_some_and(|t| t.glomap.is_some());
-                ui.add_enabled(glomap, egui::Checkbox::new(&mut p.glomap, "Solve cameras with GLOMAP")).on_disabled_hover_text("GLOMAP isn't installed");
+                let global = p.tools.as_ref().is_some_and(|t| t.global_mapper || t.glomap.is_some());
+                let mut g = p.glomap && global;
+                if ui
+                    .add_enabled(global, egui::Checkbox::new(&mut g, "Fast global camera solve"))
+                    .on_hover_text("Place all the cameras at once instead of one photo at a time: often ten times faster")
+                    .on_disabled_hover_text("Needs COLMAP 4 or GLOMAP")
+                    .changed()
+                {
+                    p.glomap = g;
+                }
             });
             ui.end_row();
         });

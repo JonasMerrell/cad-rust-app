@@ -17,11 +17,21 @@ pub struct PrintSettings {
     pub overhang: f64,
     /// Walls thinner than this are flagged, mm.
     pub min_wall: f64,
+    /// OrcaSlicer program for "Print in OrcaSlicer"; empty finds it (see `orca::find_slicer`).
+    #[serde(default)]
+    pub orca_path: String,
+    /// Send parts the slicer has again whenever they change.
+    #[serde(default = "yes")]
+    pub orca_live: bool,
+}
+
+fn yes() -> bool {
+    true
 }
 
 impl Default for PrintSettings {
     fn default() -> Self {
-        PrintSettings { slicer: "orca-slice".into(), process: String::new(), filament: String::new(), stl_tolerance: 0.01, overhang: 45.0, min_wall: 0.8 }
+        PrintSettings { slicer: "orca-slice".into(), process: String::new(), filament: String::new(), stl_tolerance: 0.01, overhang: 45.0, min_wall: 0.8, orca_path: String::new(), orca_live: true }
     }
 }
 

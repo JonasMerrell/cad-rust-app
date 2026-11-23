@@ -63,6 +63,14 @@ impl Write for Fnv {
 pub fn key(doc: &Document, studios: impl FnOnce() -> String) -> u64 {
     let mut h = Fnv(0xcbf2_9ce4_8422_2325);
     let _ = write!(h, "rcad {} build {FORMAT}\n", env!("CARGO_PKG_VERSION"));
+    // notes don't change the geometry
+    let stripped;
+    let doc = if doc.notes.is_empty() {
+        doc
+    } else {
+        stripped = Document { notes: vec![], ..doc.clone() };
+        &stripped
+    };
     let _ = serde_json::to_writer(&mut h, doc);
     if derives(doc) {
         let _ = h.write_all(b"\nstudios\n");

@@ -26,6 +26,8 @@ pub enum Request {
     Export { id: u64, doc: Document, format: String, path: String },
     /// An assembly's placed parts as STEP (Part Studios from SetStudios), fused into one body with `single_body`.
     ExportAssembly { id: u64, items: Vec<kernel::AsmExportItem>, name: String, path: String, single_body: bool },
+    /// Each part to a STEP file of its own (answered with AsmExported).
+    ExportParts { id: u64, items: Vec<(kernel::AsmExportItem, String)> },
     Project { id: u64, tag: usize, key: String, doc: Document, views: Vec<kernel::ProjReq> },
     /// Mass properties, point classification or ray casting on a Part Studio's solids (agent tools).
     Query { id: u64, doc: Document, query: serde_json::Value },
@@ -80,6 +82,10 @@ pub fn worker_main() {
             }
             Request::ExportAssembly { id, items, name, path, single_body } => {
                 let result = kernel::export_assembly(&items, &name, &path, single_body);
+                send(&Reply::AsmExported { id, result });
+            }
+            Request::ExportParts { id, items } => {
+                let result = kernel::export_parts(&items);
                 send(&Reply::AsmExported { id, result });
             }
             Request::Project { id, tag, key, doc, views } => {
@@ -392,6 +398,14 @@ impl KernelClient {
         self.next_id += 1;
         self.send(&Request::ExportAssembly { id, items, name: name.into(), path: path.clone(), single_body });
         self.export = Some((id, path));
+    }
+
+    /// Write each part to its own STEP file; the outcome is AsmExported with `marker` as the path.
+    pub fn export_parts(&mut self, items: Vec<(kernel::AsmExportItem, String)>, marker: String) {
+        let id = self.next_id;
+        self.next_id += 1;
+        self.send(&Request::ExportParts { id, items });
+        self.export = Some((id, marker));
     }
 
     /// Process worker messages; returns finished results.

@@ -363,9 +363,15 @@ pub enum ToWorker {
         ws: String,
         studio: usize,
         settings: Settings,
+        /// A picture to go with the request (a PNG of the user's pencil drawing).
+        image: Option<Vec<u8>>,
     },
     /// Forget the conversation.
     Reset,
+    /// Pick up a saved conversation (see `claude_chats`). `recap` is the earlier conversation as
+    /// text, for when its full context can't be used (a Claude Code conversation that is gone, or
+    /// a chat continued with the other kind of sign-in).
+    Load { messages: Vec<Value>, cc_session: Option<String>, planned: Option<bool>, recap: Option<String> },
 }
 
 pub enum FromWorker {
@@ -390,6 +396,8 @@ pub enum FromWorker {
     Attempt,
     /// That request failed and will be sent again: drop what it streamed.
     Rewind,
+    /// What the conversation holds now, to save with the chat (sent just before `Done`).
+    State { messages: Vec<Value>, cc_session: Option<String>, planned: Option<bool> },
     Done {
         error: Option<String>,
     },
@@ -420,10 +428,19 @@ impl Worker {
                         ToWorker::Reset => {
                             chat.messages.clear();
                             chat.cc_session = None;
+                            chat.planned = None;
+                            chat.recap = None;
                         }
-                        ToWorker::Turn { text, context, ws, studio, settings } => {
+                        ToWorker::Load { messages, cc_session, planned, recap } => {
+                            chat.messages = messages;
+                            chat.cc_session = cc_session;
+                            chat.planned = planned;
+                            chat.recap = recap;
+                        }
+                        ToWorker::Turn { text, context, ws, studio, settings, image } => {
                             st.store(false, Ordering::Relaxed);
-                            let error = chat.turn(&text, &context, &ws, studio, &settings, &st, &send).err();
+                            let error = chat.turn(&text, &context, &ws, studio, &settings, image.as_deref(), &st, &send).err();
+                            send(FromWorker::State { messages: chat.messages.clone(), cc_session: chat.cc_session.clone(), planned: chat.planned });
                             send(FromWorker::Done { error });
                         }
                     }
@@ -455,6 +472,9 @@ struct Chat {
     base: String,
     /// Tokens each model used in this turn: input (all of it), of that read from the cache, output.
     usage: Vec<(String, u64, u64, u64)>,
+    /// A resumed chat's earlier conversation as text, sent with the next request when its full
+    /// context isn't there to continue.
+    recap: Option<String>,
 }
 
 /// One model working through a conversation with tools until it stops calling them.
@@ -549,7 +569,7 @@ impl Chat {
             .collect();
         let http = ureq::AgentBuilder::new().timeout_connect(Duration::from_secs(30)).timeout_read(Duration::from_secs(600)).try_proxy_from_env(true).build();
         let base = std::env::var("ANTHROPIC_BASE_URL").ok().filter(|u| !u.is_empty()).unwrap_or_else(|| API_URL.into());
-        Chat { session: None, seen: String::new(), seen_studio: 0, messages: vec![], tools: Value::Array(tools), http, stop, cc_session: None, bridge: None, planned: None, base, usage: vec![] }
+        Chat { session: None, seen: String::new(), seen_studio: 0, messages: vec![], tools: Value::Array(tools), http, stop, cc_session: None, bridge: None, planned: None, base, usage: vec![], recap: None }
     }
 
     /// The planner's tools: the ones that look, and delegate.
@@ -559,7 +579,8 @@ impl Chat {
         Value::Array(t)
     }
 
-    fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, image: Option<&[u8]>, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let cred = if settings.auth == Auth::ClaudeCode { None } else { Some(credentials(settings)?) };
         // start from what is open in the editor
         let stop_flag = self.stop.clone();
@@ -573,25 +594,39 @@ impl Chat {
             self.seen = json;
             self.seen_studio = cur;
         }
-        let prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
+        let mut prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
         if self.planned.is_some_and(|p| p != settings.delegates()) && (!self.messages.is_empty() || self.cc_session.is_some()) {
             self.messages.clear();
             self.cc_session = None;
             send(FromWorker::Notice("Planning with cheaper models was switched, so Claude starts a new conversation (the document stays as it is).".into()));
         }
         self.planned = Some(settings.delegates());
-        let Some(cred) = cred else { return self.claude_code_turn(&prompt, settings, stop, send) };
+        // a resumed Claude Code conversation that Claude Code no longer has (cleaned up, or saved on
+        // another computer) continues from the saved text instead
+        if self.cc_session.as_deref().is_some_and(|id| !claude_code_has_session(id)) {
+            self.cc_session = None;
+        }
+        let has_context = if cred.is_some() { !self.messages.is_empty() } else { self.cc_session.is_some() };
+        if let Some(r) = self.recap.take() {
+            if !has_context {
+                send(FromWorker::Notice("Continuing from the saved text of this chat (its full context isn't available here).".into()));
+                prompt = format!("<earlier_conversation>\nThis continues an earlier conversation about this document. What was said, as text:\n\n{r}\n</earlier_conversation>\n\n{prompt}");
+            }
+        }
+        let Some(cred) = cred else { return self.claude_code_turn(&prompt, image, settings, stop, send) };
         prune_images(&mut self.messages);
         let user = json!({"type": "text", "text": prompt});
+        let picture = image.map(image_block);
         // after a stopped turn the history already ends with the user's side
         let mut mark = Mark { len: self.messages.len(), merged: None };
         match self.messages.last_mut() {
             Some(m) if m["role"] == "user" => {
                 let c = m["content"].as_array_mut().unwrap();
                 mark.merged = Some(c.len());
+                c.extend(picture);
                 c.push(user);
             }
-            _ => self.messages.push(json!({"role": "user", "content": [user]})),
+            _ => self.messages.push(json!({"role": "user", "content": picture.into_iter().chain([user]).collect::<Vec<_>>()})),
         }
         let r = self.api_turn(&cred, settings, stop, send);
         if let Err(f) = &r {
@@ -1136,6 +1171,31 @@ hand every change to the document to the cad-sonnet or cad-haiku agent with the 
     )
 }
 
+/// Whether Claude Code still has the conversation `id` to `--resume` (it keeps them as
+/// `<config>/projects/<folder>/<id>.jsonl`, and removes old ones after a while). When the folder
+/// can't be read, say yes and let Claude Code decide.
+pub fn claude_code_has_session(id: &str) -> bool {
+    let config = std::env::var_os("CLAUDE_CONFIG_DIR")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").or_else(|| std::env::var_os("USERPROFILE")).map(|h| PathBuf::from(h).join(".claude")));
+    let Some(Ok(dirs)) = config.map(|c| std::fs::read_dir(c.join("projects"))) else { return true };
+    if id.is_empty() || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-') {
+        return false;
+    }
+    let file = format!("{id}.jsonl");
+    dirs.filter_map(|d| d.ok()).any(|d| d.path().join(&file).is_file())
+}
+
+/// A PNG as a Messages API image block.
+fn image_block(png: &[u8]) -> Value {
+    json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}})
+}
+
+/// A request with a picture, as a line of Claude Code's `--input-format stream-json`.
+fn cc_user_message(prompt: &str, png: &[u8]) -> Value {
+    json!({"type": "user", "message": {"role": "user", "content": [image_block(png), {"type": "text", "text": prompt}]}})
+}
+
 /// `claude --version`, to check Claude Code is installed.
 pub fn claude_code_version() -> Result<String, String> {
     let out = claude_command().arg("--version").output().map_err(|e| {
@@ -1152,25 +1212,26 @@ pub fn claude_code_version() -> Result<String, String> {
 impl Chat {
     /// One request through the Claude Code CLI (`claude -p`), which reaches the open document
     /// through `rcad mcp --bridge` and this worker. Follow-ups resume the same conversation.
-    fn claude_code_turn(&mut self, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn claude_code_turn(&mut self, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let bridge = match self.bridge.take() {
             Some(b) => b,
             None => Bridge::start()?,
         };
-        let r = self.claude_code_run(&bridge, prompt, settings, stop, send);
+        let r = self.claude_code_run(&bridge, prompt, image, settings, stop, send);
         self.bridge = Some(bridge);
         r
     }
 
-    fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         // calls left from a run that was stopped must not run now
         bridge.refuse_pending();
-        let r = self.claude_code_child(bridge, prompt, settings, stop, send);
+        let r = self.claude_code_child(bridge, prompt, image, settings, stop, send);
         bridge.refuse_pending();
         r
     }
 
-    fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    #[allow(clippy::too_many_arguments)]
+    fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let (addr, token) = (&bridge.addr, &bridge.token);
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         // the token goes in the server's environment, through a config file only the user can read,
@@ -1186,7 +1247,14 @@ impl Chat {
         let mut cmd = claude_command();
         let delegates = settings.delegates();
         let (builtin, allowed) = if delegates { ("Agent", "mcp__cad,Agent") } else { ("", "mcp__cad") };
-        cmd.args(["-p", prompt, "--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", builtin, "--allowedTools", allowed, "--permission-mode", "dontAsk"])
+        // a picture can't go on the command line: the request goes in on stdin as a stream-json
+        // user message then
+        if image.is_some() {
+            cmd.args(["-p", "--input-format", "stream-json"]);
+        } else {
+            cmd.args(["-p", prompt]);
+        }
+        cmd.args(["--output-format", "stream-json", "--verbose", "--strict-mcp-config", "--tools", builtin, "--allowedTools", allowed, "--permission-mode", "dontAsk"])
             .arg("--mcp-config")
             .arg(&mcp_file)
             .arg("--append-system-prompt")
@@ -1198,7 +1266,8 @@ impl Chat {
         if let Some(id) = &self.cc_session {
             cmd.args(["--resume", id]);
         }
-        cmd.current_dir(&dir).stdin(std::process::Stdio::null()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
+        let stdin = if image.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() };
+        cmd.current_dir(&dir).stdin(stdin).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
                 "Claude Code is not installed or not on PATH (set CLAUDE_CODE_PATH to its full path)".to_string()
@@ -1206,6 +1275,14 @@ impl Chat {
                 format!("could not start Claude Code: {e}")
             }
         })?;
+        if let (Some(png), Some(mut input)) = (image, child.stdin.take()) {
+            let msg = cc_user_message(prompt, png);
+            std::thread::spawn(move || {
+                use std::io::Write;
+                let _ = writeln!(input, "{msg}");
+                // closing stdin ends the input: one request
+            });
+        }
         let (ltx, lrx) = channel::<CcLine>();
         let stdout = child.stdout.take().unwrap();
         std::thread::spawn(move || {
@@ -1315,6 +1392,16 @@ mod tests {
             json!({"type": "message_delta", "delta": {"stop_reason": "tool_use"}, "usage": {"output_tokens": 9}}),
             json!({"type": "message_stop"}),
         ]
+    }
+
+    #[test]
+    fn a_picture_goes_to_claude_code_as_a_stream_json_user_message() {
+        let m = super::cc_user_message("what is this?", &[1, 2, 3]);
+        assert_eq!(m["type"], "user");
+        let c = m["message"]["content"].as_array().unwrap();
+        assert_eq!(c[0]["type"], "image");
+        assert_eq!(c[0]["source"]["data"], "AQID");
+        assert_eq!(c[1]["text"], "what is this?");
     }
 
     #[test]
