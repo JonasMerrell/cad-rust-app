@@ -68,6 +68,8 @@ pub struct Tools {
     /// OpenMVS's folder.
     pub openmvs: Option<PathBuf>,
     pub glomap: Option<PathBuf>,
+    /// COLMAP 4 has GLOMAP built in as `global_mapper`.
+    pub global_mapper: bool,
 }
 
 const EXE: &str = if cfg!(windows) { ".exe" } else { "" };
@@ -102,10 +104,12 @@ pub fn find_tools(s: &Settings) -> Tools {
             t.cuda = text.contains("with CUDA") && !text.contains("without CUDA");
         }
         if let Ok(o) = quiet(c).args(["feature_extractor", "-h"]).output() {
-            let h = String::from_utf8_lossy(&o.stdout);
+            // COLMAP 4 prints its help on stderr
+            let h = format!("{}{}", String::from_utf8_lossy(&o.stdout), String::from_utf8_lossy(&o.stderr));
             t.new_options = h.contains("FeatureExtraction.use_gpu");
             t.new_max_size = h.contains("FeatureExtraction.max_image_size");
         }
+        t.global_mapper = quiet(c).args(["global_mapper", "-h"]).output().is_ok_and(|o| o.status.success());
     }
     let mvs_dir = |d: PathBuf| d.join(format!("DensifyPointCloud{EXE}")).is_file().then_some(d);
     t.openmvs = given(&s.openmvs)
@@ -271,7 +275,7 @@ pub struct Job {
     pub quality: Quality,
     /// Use the GPU for feature finding and matching (COLMAP with CUDA).
     pub gpu: bool,
-    /// Use GLOMAP for the camera solve when it's installed.
+    /// Solve all the cameras at once (COLMAP 4's global mapper, or GLOMAP) when available.
     pub glomap: bool,
 }
 
@@ -358,20 +362,19 @@ fn plan(job: &Job, t: &Tools, method: Method) -> Result<Vec<Step>, String> {
         cwd: w.clone(),
     });
     let sparse = w.join("sparse");
-    match (&t.glomap, job.glomap) {
-        (Some(g), true) => steps.push(Step {
-            name: "Solving cameras (GLOMAP)",
-            program: g.clone(),
-            args: vec!["mapper".into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
-            cwd: w.clone(),
-        }),
-        _ => steps.push(Step {
-            name: "Solving cameras",
-            program: colmap.clone(),
-            args: vec!["mapper".into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
-            cwd: w.clone(),
-        }),
-    }
+    let solve = |name: &'static str, program: PathBuf, cmd: &str| Step {
+        name,
+        program,
+        args: vec![cmd.into(), "--database_path".into(), p(&w.join("database.db")), "--image_path".into(), p(&job.photos), "--output_path".into(), p(&sparse)],
+        cwd: w.clone(),
+    };
+    // a global solve places every camera at once: often ten times faster than adding photos
+    // one by one (COLMAP 4 has GLOMAP built in; older ones need the separate program)
+    steps.push(match (job.glomap, t.global_mapper, &t.glomap) {
+        (true, true, _) => solve("Solving cameras (global)", colmap.clone(), "global_mapper"),
+        (true, false, Some(g)) => solve("Solving cameras (GLOMAP)", g.clone(), "mapper"),
+        _ => solve("Solving cameras", colmap.clone(), "mapper"),
+    });
     let dense = w.join("dense");
     // sparse/0 is the main model (the biggest one is picked before this step runs)
     steps.push(Step {
@@ -394,16 +397,27 @@ fn plan(job: &Job, t: &Tools, method: Method) -> Result<Vec<Step>, String> {
     });
     match method {
         Method::Colmap => {
+            // the geometric-consistency pass runs every photo a second time: about twice as
+            // long for a cleaner surface, so Fast leaves it out
+            let geom = job.quality != Quality::Fast;
             steps.push(Step {
                 name: "Dense stereo (GPU)",
                 program: colmap.clone(),
-                args: vec!["patch_match_stereo".into(), "--workspace_path".into(), p(&dense), "--PatchMatchStereo.geom_consistency".into(), "true".into()],
+                args: vec!["patch_match_stereo".into(), "--workspace_path".into(), p(&dense), "--PatchMatchStereo.geom_consistency".into(), geom.to_string()],
                 cwd: w.clone(),
             });
             steps.push(Step {
                 name: "Fusing depth maps",
                 program: colmap.clone(),
-                args: vec!["stereo_fusion".into(), "--workspace_path".into(), p(&dense), "--output_path".into(), p(&dense.join("fused.ply"))],
+                args: vec![
+                    "stereo_fusion".into(),
+                    "--workspace_path".into(),
+                    p(&dense),
+                    "--input_type".into(),
+                    if geom { "geometric" } else { "photometric" }.into(),
+                    "--output_path".into(),
+                    p(&dense.join("fused.ply")),
+                ],
                 cwd: w.clone(),
             });
             steps.push(Step {
@@ -477,7 +491,7 @@ pub fn run(job: &Job, tools: &Tools, progress: &Sender<Progress>, cancel: &Arc<A
         let _ = std::fs::remove_dir_all(w.join("dense"));
     } else if state.method != m || state.quality != q {
         // the cameras still hold; redo the dense part
-        state.done.retain(|d| ["Finding features", "Matching photos", "Solving cameras", "Solving cameras (GLOMAP)"].contains(&d.as_str()));
+        state.done.retain(|d| ["Finding features", "Matching photos", "Solving cameras", "Solving cameras (GLOMAP)", "Solving cameras (global)"].contains(&d.as_str()));
         let _ = std::fs::remove_dir_all(w.join("dense"));
     }
     state.photos = photos.clone();
@@ -670,10 +684,23 @@ pub struct Scan {
 
 /// Clean the reconstructed mesh and work out its scale.
 pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scale) -> Result<Scan, String> {
-    let raw = photo_mesh::read_ply(&std::fs::read(&r.mesh).map_err(|e| format!("can't read {}: {e}", r.mesh.display()))?)?;
+    let mut raw = photo_mesh::read_ply(&std::fs::read(&r.mesh).map_err(|e| format!("can't read {}: {e}", r.mesh.display()))?)?;
+    let mut trim_note = None;
+    let fused = r.work.join("dense").join("fused.ply");
+    if r.method == Method::Colmap && cleanup.remove_table {
+        // Poisson closes the surface over what the photos never saw: trim it back to the points
+        if let Ok(pts) = std::fs::read(&fused).map_err(|e| e.to_string()).and_then(|b| photo_mesh::read_points(&b)) {
+            let before = raw.t.len();
+            let trimmed = photo_mesh::trim_to_points(&raw, &pts, 2.0 * raw.median_edge());
+            if trimmed.t.len() > 100 {
+                trim_note = Some(format!("trimmed the surface to the {:.0}% that has photo points under it", 100.0 * trimmed.t.len() as f64 / before.max(1) as f64));
+                raw = trimmed;
+            }
+        }
+    }
     let cams = photo_mesh::read_cameras(&r.model).unwrap_or_default();
-    // the cameras look at the part from above the table
-    let up = (!cams.is_empty()).then(|| cams.iter().map(|c| c.centre()).sum::<glam::DVec3>() / cams.len() as f64);
+    // where the photos were taken from and which way they look (towards the part)
+    let rig: Vec<(glam::DVec3, glam::DVec3)> = cams.iter().map(|c| (c.centre(), c.r.transpose() * glam::DVec3::Z)).collect();
     let mut c = cleanup.clone();
     if let Scale::Reference(dims) = scale {
         c.reference = dims.or_else(|| read_session(photos).and_then(|s| s.reference).and_then(|r| r.block()));
@@ -681,8 +708,17 @@ pub fn finish(r: &Reconstruction, photos: &Path, cleanup: &Cleanup, scale: &Scal
             return Err("no reference block to look for: give its sizes, or click two ruler marks".into());
         }
     }
-    let cleaned = photo_mesh::clean(&raw, &c, up);
-    let mut notes = cleaned.notes.clone();
+    let mut cleaned = photo_mesh::clean(&raw, &c, &rig);
+    // a block "found" that makes the part bigger than a room is a false match
+    if let Some(s) = cleaned.scale {
+        let (lo, hi) = cleaned.mesh.bbox();
+        let size = (hi - lo).max_element() * s;
+        if size > 3000.0 {
+            cleaned.notes.push(format!("ignored the reference match: it would make the part {:.1} m across. Set the scale another way", size / 1000.0));
+            cleaned.scale = None;
+        }
+    }
+    let mut notes: Vec<String> = trim_note.into_iter().chain(cleaned.notes.clone()).collect();
     let factor = match scale {
         Scale::None => None,
         Scale::Factor(f) => Some(*f),

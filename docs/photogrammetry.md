@@ -12,7 +12,7 @@ processes. You install them yourself, and their licences stay with them.
 | step | program | licence | hardware |
 |---|---|---|---|
 | features, matching, camera solve | [COLMAP](https://github.com/colmap/colmap/releases) | BSD | CPU, or faster on an NVIDIA GPU |
-| camera solve (optional, faster) | [GLOMAP](https://github.com/colmap/glomap) | BSD | CPU |
+| camera solve, global (default when available, often 10× faster) | COLMAP 4 `global_mapper`, or [GLOMAP](https://github.com/colmap/glomap) for older COLMAPs | BSD | CPU |
 | dense surface, GPU | COLMAP `patch_match_stereo` + `poisson_mesher` | BSD | NVIDIA GPU (CUDA build of COLMAP) |
 | dense surface, CPU | [OpenMVS](https://github.com/cdcseacave/openMVS/releases) `DensifyPointCloud` + `ReconstructMesh` | AGPL | CPU |
 | rough surface | COLMAP `delaunay_mesher` on the sparse points | BSD | CPU |
