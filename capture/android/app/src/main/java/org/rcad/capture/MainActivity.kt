@@ -366,12 +366,12 @@ class MainActivity : ComponentActivity() {
             when {
                 s == null -> newSessionDialog { calBtn.performClick() }
                 calMode -> { calMode = false; refreshUi() }
-                s.reference == null -> referenceDialog(s) { calMode = true; refreshUi() }
+                s.reference == null -> referenceDialog(s) { placementDialog(s) { calMode = true; refreshUi() } }
                 else -> { calMode = true; refreshUi() }
             }
         }
         calBtn.setOnLongClickListener {
-            session?.let { s -> referenceDialog(s) { calMode = true; refreshUi() } }
+            session?.let { s -> referenceDialog(s) { placementDialog(s) { calMode = true; refreshUi() } } }
             true
         }
 
@@ -415,7 +415,7 @@ class MainActivity : ComponentActivity() {
         calBtn.text = if (calMode) "Calibration ON" else "Calibration photos"
         shutter.isActivated = bursting || autoRunning
         if (!autoRunning) hintText.text = when {
-            calMode -> "Keep the ${s?.reference?.optString("label") ?: "reference"} fully in view, sharp, from several angles. Photos are tagged CAL_."
+            calMode -> "Keep the ${s?.reference?.optString("label") ?: "reference"} fully in view and sharp. Don't move it: it must stay put for the whole session."
             prefs.mode == 0 -> "Tap for one photo, hold for a burst. Tap the preview to focus."
             prefs.mode == 1 -> "Tap the shutter to start or stop interval shooting."
             else -> "Tap the shutter, then walk slowly around the object. Photos fire as you turn."
@@ -502,6 +502,31 @@ class MainActivity : ComponentActivity() {
                 if (p.kind == "ruler") { s.meta.put("ruler_mm", dims[0]); s.save() }
                 then()
             }
+            .setNegativeButton("Cancel", null)
+            .show()
+    }
+
+    /**
+     * Photogrammetry needs a still scene: the reference only gives scale if it sits in
+     * the same place, next to the part, in every photo of the session.
+     */
+    private fun placementDialog(s: LocalSession, then: () -> Unit) {
+        val label = s.reference?.optString("label") ?: "reference"
+        val late = s.shots > 0
+        val msg = buildString {
+            append("Put the $label next to the part (close, but not touching it) before the first photo, ")
+            append("and leave it there without moving it until you finish the session.\n\n")
+            append("Calibration photos are ordinary shots of the same scene where the $label is fully in view and sharp. ")
+            append("Don't pick it up, turn it or move it between shots: rCAD then can't find it.")
+            if (late) {
+                append("\n\nThis session already has ${s.shots} photos. If the $label wasn't sitting in this spot for all of them, ")
+                append("finish this session and start a new one with it in place from the start.")
+            }
+        }
+        AlertDialog.Builder(this)
+            .setTitle("Place the $label once, then leave it")
+            .setMessage(msg)
+            .setPositiveButton("It's in place") { _, _ -> then() }
             .setNegativeButton("Cancel", null)
             .show()
     }
