@@ -765,6 +765,30 @@ pub struct Document {
     /// Default geometry hidden in the viewport: "Origin", "Top", "Front", "Right".
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub hidden_defaults: Vec<String>,
+    /// Notes pinned to the model (see `Note`).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub notes: Vec<Note>,
+}
+
+/// A note the user pinned to a spot on the model, for themselves and for Claude.
+#[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
+pub struct Note {
+    pub id: u64,
+    pub text: String,
+    /// The pinned point on the face, and the face's outward normal.
+    pub at: [f64; 3],
+    pub normal: [f64; 3],
+    /// The face's persistent name, when the kernel gave it one: the pin follows that face
+    /// when a rebuild moves it.
+    #[serde(default, skip_serializing_if = "TopoName::is_empty")]
+    pub face: TopoName,
+}
+
+impl Note {
+    /// The face the note is on, as a pick (the form Claude's tools take faces in).
+    pub fn face_ref(&self) -> Ref {
+        Ref::Face { point: self.at, normal: self.normal, name: self.face.clone() }
+    }
 }
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
@@ -831,6 +855,7 @@ impl Default for Document {
             custom_features: vec![],
             decals: vec![],
             hidden_defaults: vec![],
+            notes: vec![],
         }
     }
 }

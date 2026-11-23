@@ -63,6 +63,8 @@ fn commands(app: &App) -> Vec<Cmd> {
                 v.push(cmd(crate::doc::kind_label(k), "Feature", k, crate::app::shortcut(k), "", Action::Feature(k)));
             }
             v.push(cmd("Measure", "View", "measure", Some("M"), "distance angle", Action::Run(|a| a.toggle_measure())));
+            v.push(cmd("Notes", "View", "note", Some("T"), "note comment pin annotate", Action::Run(crate::notes::toggle_adding)));
+            v.push(cmd("Pencil", "View", "pencil", Some("P"), "draw sketch markup claude", Action::Run(crate::notes::toggle_pencil)));
             let label = if app.isolation.is_some() { "Exit isolate" } else { "Isolate selected parts" };
             v.push(cmd(label, "View", "isolate", Some("I"), "only show hide others focus solo", Action::Run(|a| a.toggle_isolate())));
             v.push(cmd(

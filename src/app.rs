@@ -187,6 +187,10 @@ pub struct App {
     pub issue_focus: Option<[f64; 3]>,
     /// Isolate: only some parts (or assembly instances) are shown until it ends. View state only.
     pub isolation: Option<Isolation>,
+    /// Notes pinned to faces: adding mode and the note being edited (the notes are in `doc`).
+    pub notes: crate::notes::Notes,
+    /// Drawing on the model to show Claude (view state only).
+    pub pencil: Option<crate::notes::Pencil>,
     /// Sidebar width (shared by all tabs) and the tab it was last drawn for.
     pub side_w: f32,
     pub side_tab: Option<crate::workspace::Tab>,
@@ -289,6 +293,8 @@ impl App {
             was_narrow: None,
             issue_focus: None,
             isolation: None,
+            notes: Default::default(),
+            pencil: None,
             side_w: 300.0,
             side_tab: None,
             print: crate::printing::load(),
@@ -1389,6 +1395,9 @@ impl App {
             self.session.show_shortcuts = !self.session.show_shortcuts;
             return;
         }
+        if ctrl && pressed(Key::Z) && !shift && matches!(self.tab, crate::workspace::Tab::Studio(_)) && crate::notes::undo_stroke(self) {
+            return;
+        }
         if ctrl && pressed(Key::Z) {
             if shift {
                 self.redo()
@@ -1425,7 +1434,13 @@ impl App {
             return;
         }
         if pressed(Key::Escape) {
-            if self.awaiting_sketch_plane {
+            if self.pencil.is_some() {
+                self.pencil = None;
+            } else if self.notes.edit.is_some() {
+                self.notes.edit = None;
+            } else if self.notes.adding {
+                self.notes.adding = false;
+            } else if self.awaiting_sketch_plane {
                 self.awaiting_sketch_plane = false;
                 self.toast = None;
             } else if self.dialog.is_some() {
@@ -1472,6 +1487,12 @@ impl App {
         if pressed(Key::I) && self.dialog.is_none() {
             self.toggle_isolate();
         }
+        if pressed(Key::T) {
+            crate::notes::toggle_adding(self);
+        }
+        if pressed(Key::P) {
+            crate::notes::toggle_pencil(self);
+        }
         if pressed(Key::N) {
             self.view_normal_to_selection();
         }
@@ -1492,6 +1513,9 @@ impl App {
             self.measure = None;
         } else {
             self.measure = Some(Measure { picks: self.picks.clone(), ..Default::default() });
+            self.pencil = None;
+            self.notes.adding = false;
+            self.notes.edit = None;
             // one mode at a time: measuring ends the printability view
             if self.print_view {
                 self.print_view = false;
@@ -3066,6 +3090,10 @@ impl App {
             format!("Printability · red: overhang past {}° needs support · purple: wall thinner than {} mm", self.print.overhang, crate::expr::trim(self.print.min_wall, 2))
         } else if self.awaiting_sketch_plane {
             "Select a plane or flat face to sketch on · Esc cancels".to_string()
+        } else if self.pencil.is_some() {
+            "Pencil · drag to draw on the part, right-drag turns the view · Ctrl+Z undoes a stroke, Esc puts the pencil away".to_string()
+        } else if self.notes.adding {
+            "Notes · click a face to pin a note, click a pin to edit it · Ctrl+Enter saves, Esc ends".to_string()
         } else if let Some(m) = &self.measure {
             crate::viewport::measure_text(self, m)
         } else if self.dialog.is_some() {
@@ -3080,7 +3108,7 @@ impl App {
     /// The hint line, drawn over the bottom-left of the work area.
     fn hint_ui(&self, ctx: &egui::Context, area: egui::Rect) {
         let msg = self.hint_text();
-        if msg.is_empty() {
+        if msg.is_empty() || crate::notes::capturing(self) {
             return;
         }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hint")));
@@ -3750,6 +3778,7 @@ impl eframe::App for App {
             self.was_narrow = Some(narrow);
         }
         self.handle_screenshot(&ctx);
+        crate::notes::handle_capture(self, &ctx);
         crate::home::thumbnail(self, &ctx);
         // files dropped on the window: open documents, import models
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
@@ -3787,6 +3816,12 @@ impl eframe::App for App {
         // isolation belongs to the tab it was started in
         if self.isolation.as_ref().is_some_and(|i| i.tab != self.tab) {
             self.end_isolation();
+        }
+        // notes and the pencil are Part Studio tools
+        if !matches!(self.tab, crate::workspace::Tab::Studio(_)) || self.sketch.is_some() {
+            self.pencil = None;
+            self.notes.adding = false;
+            self.notes.edit = None;
         }
         // while Claude changes the document the editor is locked (claude_ui), keys included
         if !self.claude.busy() {

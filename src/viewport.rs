@@ -33,7 +33,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     app.camera.size = Vec2::new(rect.width().max(1.0), rect.height().max(1.0));
     paint_background(ui.painter(), rect, app.realistic);
 
-    let free = app.sketch.is_none() && app.hover.is_none();
+    let free = app.sketch.is_none() && app.hover.is_none() && app.pencil.is_none();
     navigate(app, ui, &resp, free);
     let local = |p: Pos2| Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
 
@@ -41,15 +41,30 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let pointer = resp.hover_pos();
     if app.sketch.is_some() {
         crate::sketcher::viewport_input(app, ui, &resp, rect);
+    } else if app.pencil.is_some() {
+        app.notes.hover = None;
+        crate::notes::input(app, ui, &resp, rect);
     } else if app.nav.is_none() {
-        let hit = pointer.filter(|_| !crate::home::hide_hover(app)).and_then(|p| pick(app, local(p)));
+        // note pins sit above the model
+        let pin = pointer.filter(|_| app.measure.is_none()).and_then(|p| crate::notes::pin_under(app, rect, p));
+        app.notes.hover = pin;
+        let hit = pointer.filter(|_| !crate::home::hide_hover(app) && pin.is_none()).and_then(|p| pick(app, local(p)));
         if hit != app.hover {
             app.hover = hit.clone();
             app.scene_dirty = true;
         }
+        if pin.is_some() {
+            ui.ctx().set_cursor_icon(egui::CursorIcon::PointingHand);
+        }
         if resp.clicked_by(egui::PointerButton::Primary) {
             let add = ui.input(|i| i.modifiers.shift || i.modifiers.command);
-            click(app, hit, add);
+            if let Some(id) = pin {
+                crate::notes::open(app, id);
+            } else if app.notes.adding && app.measure.is_none() && app.dialog.is_none() {
+                crate::notes::click(app, hit);
+            } else {
+                click(app, hit, add);
+            }
         }
     }
     if resp.secondary_clicked() {
@@ -85,9 +100,16 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         crate::sketcher::overlay(app, ui, &painter, rect);
     } else {
         model_overlay(app, &painter, rect);
+        if app.measure.is_none() {
+            crate::notes::paint(app, ui, &painter, rect);
+        }
+        crate::notes::paint_pencil(app, ui, &painter, rect);
     }
-    view_cube(app, ui, rect);
-    view_tools(app, ui, rect);
+    // the picture for Claude shows the model and the drawing, not the view's controls
+    if !crate::notes::capturing(app) {
+        view_cube(app, ui, rect);
+        view_tools(app, ui, rect);
+    }
     if app.sketch.is_none() {
         measure_window(app, ui, rect);
     }
@@ -383,8 +405,27 @@ pub fn pick(app: &App, s: Vec2) -> Option<Ref> {
     best.map(|b| b.1)
 }
 
+/// The nearest shown face under screen point `s`: depth along the (normalised) view ray, body and
+/// face index.
+pub fn face_hit(app: &App, s: Vec2) -> Option<(f64, crate::doc::BodyId, usize)> {
+    let (o, d) = app.camera.ray(s);
+    let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
+    let mut best: Option<(f64, crate::doc::BodyId, usize)> = None;
+    for b in app.result.bodies.iter().filter(|b| !app.part_hidden(b.id)) {
+        for (ti, tri) in b.indices.chunks(3).enumerate() {
+            let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+            if let Some(t) = ray_tri(o, d, v(tri[0]), v(tri[1]), v(tri[2])) {
+                if best.is_none_or(|x| t < x.0) && section_keeps(app, o + d * t) {
+                    best = Some((t, b.id, b.tri_face[ti] as usize));
+                }
+            }
+        }
+    }
+    best
+}
+
 /// Whether a face of a shown body lies in front of model point `p` (an edge point behind the part).
-fn occluded(app: &App, p: DVec3) -> bool {
+pub fn occluded(app: &App, p: DVec3) -> bool {
     let cam = &app.camera;
     let (o, d) = cam.ray(cam.project(p.as_vec3()));
     let (o, d) = (o.as_dvec3(), d.as_dvec3().normalize());
@@ -1146,6 +1187,12 @@ pub fn view_tools(app: &mut App, ui: &Ui, rect: egui::Rect) {
                     if btn(ui, "isolate", crate::app::ISOLATE_TIP, app.isolation.is_some()).clicked() {
                         app.toggle_isolate();
                     }
+                    if btn(ui, "note", "Notes: click a face to pin a note to it; Claude sees them too (T)", app.notes.adding).clicked() {
+                        crate::notes::toggle_adding(app);
+                    }
+                    if btn(ui, "pencil", "Pencil: draw on the part and send the drawing to Claude (P)", app.pencil.is_some()).clicked() {
+                        crate::notes::toggle_pencil(app);
+                    }
                     if btn(ui, "normal", "Normal to: look straight at the selected plane or face (N)", false).clicked() {
                         app.view_normal_to_selection();
                     }
@@ -1257,6 +1304,12 @@ fn context_menu(app: &mut App, ui: &mut Ui) {
                         let (p, n) = (*point, *normal);
                         close = true;
                         app.add_decal(p, n);
+                    }
+                }
+                if let Ref::Face { .. } = t {
+                    if ui.button("Add note here").clicked() {
+                        crate::notes::click(app, Some(t.clone()));
+                        close = true;
                     }
                 }
                 if t.is_planar() && ui.button("New sketch here").clicked() {

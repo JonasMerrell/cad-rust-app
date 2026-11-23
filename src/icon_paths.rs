@@ -26,6 +26,8 @@ pub const ICONS: &[(&str, &str)] = &[
     ("plane", "M8 6h13l-5 12H3z"),
     ("desktop", "M3 4h18v12H3zM8 20h8M12 16v4"),
     ("phone", "M7 2h10v20H7zM11 18h2"),
+    ("note", "M5 4h14v10l-6 6H5zM13 20v-6h6M8 8.5h8M8 12h5"),
+    ("pencil", "M4 20l1.2-4.8L16 4.4l3.6 3.6L8.8 18.8zM14 6.4l3.6 3.6M5.2 15.2l3.6 3.6"),
     ("chat", "M4 5h16v11H10l-5 4v-4H4zM9 10.5h.01M12 10.5h.01M15 10.5h.01"),
     ("more", "M12 5h.01M12 12h.01M12 19h.01"),
     ("photo", "M3 7h4l2-3h6l2 3h4v12H3zM12 10m-3.5 0a3.5 3.5 0 1 0 7 0a3.5 3.5 0 1 0 -7 0"),
