@@ -304,7 +304,8 @@ pub fn plan(ctx: &Ctx, op: &Operation, r: f64, fast: f64, slow: f64) -> Result<(
         ProbeCycle::Bore => {
             let hole = if p.size > 0.0 {
                 let c = at.ok_or("give the bore's middle (at) with its diameter")?;
-                let top = part_top_at(ctx, c.x + p.size / 2.0 + 1.0, c.y).or_else(|| part_top_at(ctx, c.x - p.size / 2.0 - 1.0, c.y)).unwrap_or(part.hi.z);
+                // a bore in the stock beside the part (a carrier between parts): its top is the stock's, not the part's
+                let top = part_top_at(ctx, c.x + p.size / 2.0 + 1.0, c.y).or_else(|| part_top_at(ctx, c.x - p.size / 2.0 - 1.0, c.y)).unwrap_or(ctx.stock.1.z);
                 Round { c, r: p.size / 2.0, top, bottom: part.lo.z }
             } else {
                 let holes: Vec<Round> = ctx.geo.holes().into_iter().map(|h| Round { c: DVec2::new(h.x, h.y), r: h.r, top: h.top, bottom: h.bottom }).collect();
@@ -580,6 +581,34 @@ mod tests {
         c.op_mut(id).unwrap().probing.as_mut().unwrap().size = 1.5;
         let paths = generate(&c, &part);
         assert!(paths[0].probe.is_none() && paths[0].warnings.iter().any(|w| w.contains("doesn't fit")), "{:?}", paths[0].warnings);
+    }
+
+    #[test]
+    fn a_bore_beside_the_part_is_probed_below_the_stocks_top() {
+        // a locating bore in the stock beside the part (a carrier between two parts): its top is the stock's top,
+        // not the part's (the probe went the stock-above-part height too deep)
+        let part = plate();
+        let mut c = setup("rcnc");
+        c.stock.side = 20.0;
+        c.stock.top = 3.0;
+        let (o, stock_top) = {
+            let ctx = crate::cam_paths::Ctx::new(&c, &part);
+            (ctx.origin, ctx.stock.1.z)
+        };
+        let at = DVec3::new(part.lo.x - 10.0, (part.lo.y + part.hi.y) / 2.0, 0.0) - o;
+        let id = probe_op(&mut c, |op| {
+            op.at = Some([at.x, at.y]);
+            let p = op.probing.as_mut().unwrap();
+            p.cycle = ProbeCycle::Bore;
+            p.size = 8.0;
+            p.depth = 1.0;
+        });
+        let paths = generate(&c, &part);
+        let tp = paths.iter().find(|p| p.op == id).unwrap();
+        let plan = tp.probe.as_ref().expect("plan");
+        let z = plan.steps.iter().find_map(|s| if let Step::Touch { from, .. } = s { Some(from[2]) } else { None }).unwrap();
+        let ball = c.tools[0].diameter / 2.0;
+        assert!((z - (stock_top - 1.0 - ball)).abs() < 1e-6, "touches at {z}, stock top {stock_top}, part top {}", part.hi.z);
     }
 
     #[test]

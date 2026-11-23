@@ -194,10 +194,49 @@ impl Session {
             let ik = crate::cam_ui::part_input(self.bodies(c.studio), self.studio_doc(c.studio), &crate::cam_jaws::input_bodies(&self.ws.cams, k));
             inputs.insert(k, crate::cam_jaws::input_for(&self.ws.cams, k, ik)?);
         }
-        let stock = cam_paths::link_setups_each(&mut self.ws.cams, ci, &|k| inputs.get(&k).cloned().unwrap_or_else(|| input.clone()))?;
+        // everything the build depends on: the setups of the chain (without the stock boxes the link itself
+        // sets) and what each machines
+        let chain = cam_paths::setup_chain(&self.ws.cams, ci)?;
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            for &k in chain.iter().chain(std::iter::once(&ci)) {
+                let mut ck = self.ws.cams[k].clone();
+                ck.stock.carried = None;
+                k.hash(&mut h);
+                serde_json::to_string(&ck).unwrap_or_default().hash(&mut h);
+                inputs.get(&k).unwrap_or(&input).hash_into(&mut h);
+            }
+            h.finish()
+        };
+        if let Some(b) = self.cam_cache.get(&ci).filter(|b| b.key == key) {
+            for (k, carried) in &b.carried {
+                self.ws.cams[*k].stock.carried = *carried;
+            }
+            return Ok((b.part.clone(), b.paths.clone(), b.stock.clone()));
+        }
+        // the stock this setup starts from: what the setup before it leaves (itself built once and cached, with
+        // its own chain), turned into this setup's orientation, as cam_paths::link_setups_each does
+        let stock = match chain.last() {
+            Some(&p) => {
+                self.cam_build_from(p)?;
+                let b = self.cam_cache.get(&p).ok_or("the setup before this one didn't build")?;
+                let (lo, hi) = cam_paths::stock_box(&self.ws.cams[p], &b.part);
+                let (a, z) = (b.part.to_part(lo), b.part.to_part(hi));
+                let start = b.after.reorient(b.part.rot, cam_paths::setup_matrix(&self.ws.cams[ci]));
+                self.ws.cams[ci].stock.carried = Some([a.min(z).to_array(), a.max(z).to_array()]);
+                Some(start)
+            }
+            None => {
+                self.ws.cams[ci].stock.carried = None;
+                None
+            }
+        };
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
-        let paths = cam_paths::generate_from(c, &part, stock.as_ref());
+        let (paths, after) = cam_paths::generate_with_stock(c, &part, stock.as_ref());
+        let carried = chain.iter().chain(std::iter::once(&ci)).map(|&k| (k, self.ws.cams[k].stock.carried)).collect();
+        self.cam_cache.insert(ci, super::CamBuild { key, part: part.clone(), paths: paths.clone(), stock: stock.clone(), after, carried });
         Ok((part, paths, stock))
     }
 
@@ -248,7 +287,7 @@ impl Session {
         Ok(json!({
             "name": c.name, "studio": c.studio, "orient": c.orient, "tilt": c.tilt, "origin": c.origin.key(), "work_zero": cam_paths::work_zero_note(c, &part), "post": c.post,
             "follows": c.follows, "setup_notes": c.setup_notes(), "coolant": c.coolant,
-            "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer, "spin_up": c.machine.spin_up, "spindle_power": c.machine.spindle_power, "spindle_efficiency": c.machine.spindle_efficiency, "spindle_rated_rpm": c.machine.spindle_rated_rpm, "max_cut_force": c.machine.max_cut_force},
+            "machine": {"name": c.machine.name, "travel": c.machine.travel, "max_feed": c.machine.max_feed, "link_feed": c.machine.link_feed, "max_rpm": c.max_rpm, "min_rpm": c.min_rpm, "rapid_rate": c.rapid_rate, "rapid_z": c.machine.rapid_z, "tool_changer": c.machine.tool_changer, "spin_up": c.machine.spin_up, "spindle_power": c.machine.spindle_power, "spindle_efficiency": c.machine.spindle_efficiency, "spindle_rated_rpm": c.machine.spindle_rated_rpm, "max_cut_force": c.machine.max_cut_force},
             "errors": errors, "hints": hints,
             "stock": {"min": w(lo), "max": w(hi), "material": c.stock.material, "side": c.stock.side, "top": c.stock.top, "bottom": c.stock.bottom, "size": c.stock.size},
             "part": {"min": w(part.lo), "max": w(part.hi)},
@@ -272,6 +311,11 @@ impl Session {
     /// As `cam_sim`, with the stock the setups before this one leave.
     fn cam_sim_left(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim, Option<StockMap>)> {
         let (part, paths, left) = self.cam_build_from(ci)?;
+        // the same build simulated at this resolution before: the same toolpaths on the same stock, so the same run
+        let key = (self.cam_cache.get(&ci).map(|b| b.key).unwrap_or_default(), resolution);
+        if let Some((_, _, _, sim)) = self.sim_cache.get(&key) {
+            return Ok((part, paths, sim.clone(), left));
+        }
         let c = &self.ws.cams[ci];
         let stock = cam_paths::stock_box(c, &part);
         let mut sim = Sim::new(c, &part, stock, &paths, resolution);
@@ -284,7 +328,28 @@ impl Session {
             sim.set_machine(c, &part, placed);
         }
         sim.run_to(usize::MAX, usize::MAX);
+        self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
         Ok((part, paths, sim, left))
+    }
+
+    /// A job's combined simulation, run to the end, shared like `cam_sim_left` (keyed by its stations' builds
+    /// and which of them it runs).
+    fn job_sim(&mut self, j: &crate::cam_job::Job, resolution: usize) -> R<(Cam, Part, Vec<Toolpath>, Sim)> {
+        use std::hash::{Hash, Hasher};
+        let mut h = std::collections::hash_map::DefaultHasher::new();
+        for s in &j.stations {
+            let i = self.ws.cams.iter().position(|c| c.name == s.cam.name);
+            (i.and_then(|i| self.cam_cache.get(&i)).map(|b| b.key), crate::cam_verify::toolpath_hash(&s.paths)).hash(&mut h);
+        }
+        j.order.hash(&mut h);
+        let key = (h.finish(), resolution);
+        if let Some((c, part, paths, sim)) = self.sim_cache.get(&key) {
+            return Ok((c.clone(), part.clone(), paths.clone(), sim.clone()));
+        }
+        let (c, part, paths, mut sim) = j.sim(resolution)?;
+        sim.run_to(usize::MAX, usize::MAX);
+        self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
+        Ok((c, part, paths, sim))
     }
 
     /// rcnc's Find stock on a setup that follows another: the stock's outline where the probe touches its sides
@@ -796,11 +861,7 @@ impl Session {
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 let job = self.cam_job(ci, a)?;
                 let (cam_owned, part, paths, sim) = match &job {
-                    Some(j) => {
-                        let (c, part, paths, mut sim) = j.sim(res)?;
-                        sim.run_to(usize::MAX, usize::MAX);
-                        (c, part, paths, sim)
-                    }
+                    Some(j) => self.job_sim(j, res)?,
                     None => {
                         let (part, paths, sim) = self.cam_sim(ci, res)?;
                         (self.ws.cams[ci].clone(), part, paths, sim)
@@ -1157,8 +1218,7 @@ impl Session {
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
                 if let Some(j) = self.cam_job(ci, a)? {
                     // a job: the whole program's combined simulation gates it the same way
-                    let (jc, jpart, jpaths, mut sim) = j.sim(res)?;
-                    sim.run_to(usize::MAX, usize::MAX);
+                    let (jc, jpart, jpaths, sim) = self.job_sim(&j, res)?;
                     let o = cam_paths::work_origin(&jc, &jpart);
                     let names = |id: u64| jc.op(id).map(|o| o.name.clone()).unwrap_or_default();
                     let problems: Vec<Value> = sim
@@ -1221,6 +1281,38 @@ impl Session {
                 let path = super::str_arg(a, "path")?;
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
                 let res = a.get("resolution").and_then(|v| v.as_u64()).unwrap_or(500).clamp(50, 2000) as usize;
+                if let Some(j) = self.cam_job(ci, a)? {
+                    // a job's program: each station's stretch read back with that station's setup, then the
+                    // combined simulation (both stations on the machine), as export_gcode gated it
+                    let mut items: Vec<(usize, Toolpath)> = vec![];
+                    for (si, chunk) in j.split_program(&text) {
+                        let s = &j.stations[si];
+                        let o = cam_paths::work_origin(&s.cam, &s.part);
+                        let stock = cam_paths::stock_box(&s.cam, &s.part);
+                        let safe = stock.1.z.max(s.part.hi.z) + 25.0;
+                        items.extend(crate::cam_verify::parse(&chunk, &s.cam, o, safe)?.into_iter().map(|tp| (si, tp)));
+                    }
+                    let moves: usize = items.iter().map(|(_, p)| p.moves.len()).sum();
+                    let placed = j.place(items);
+                    let (jc, jpart, _, mut sim) = j.sim_with(placed, res)?;
+                    sim.run_to(usize::MAX, usize::MAX);
+                    let o = cam_paths::work_origin(&jc, &jpart);
+                    let names = |id: u64| jc.op(id).map(|o| o.name.clone()).unwrap_or_default();
+                    let problems: Vec<Value> = sim
+                        .events
+                        .iter()
+                        .map(|e| json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label() } else { e.what.as_str() }, "operation": names(e.op), "op_id": e.op, "at": [round(e.at[0] - o.x), round(e.at[1] - o.y), round(e.at[2] - o.z)], "depth": round(e.depth)}))
+                        .collect();
+                    let all: Vec<Toolpath> = j.stations.iter().flat_map(|s| s.paths.iter().cloned()).collect();
+                    let now = crate::cam_verify::toolpath_hash(&all);
+                    let stamp = crate::cam_verify::read_stamp(&text);
+                    let stamp_v = match stamp {
+                        None => json!("none: not posted through the checked export"),
+                        Some((ok, h)) => json!({"says_ok": ok, "hash": h.map(|h| format!("{h:016x}")), "matches_the_setup_now": h == Some(now)}),
+                    };
+                    return Ok((json!({"ok": problems.is_empty() && stamp.map(|s| s.0).unwrap_or(false), "path": path, "stations": j.stations.len(), "moves_read": moves, "problems": problems, "stamp": stamp_v,
+                        "note": "a job's program: each station's moves read back with its own setup and simulated together on the machine"}), None));
+                }
                 let (part, paths, left) = self.cam_build_from(ci)?;
                 let c = self.ws.cams[ci].clone();
                 let o = cam_paths::work_origin(&c, &part);
@@ -1331,7 +1423,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "export_cam_simulation", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
         json!({"name": "export_setup_sheet", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). It simulates the exact toolpaths it posts first and refuses (an error, nothing written) when the simulation finds any problem: a rapid into stock, a gouge, a shank, holder or fixture hit, an overload. A clean program gets a \"(SIM OK: 0 problems ..., hash ...)\" line under its title. allow_problems: true writes it anyway, only to look at, as <name>.UNSAFE.<ext> with an UNSAFE header. Reports line count, cycle time, toolpath warnings and the simulation result.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "post": {"type": "string"}, "allow_problems": {"type": "boolean"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
-        json!({"name": "verify_gcode", "description": "Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "verify_gcode", "description": "For a setup that leads a job (create_cam with), the job's program: each station's stretch (by its G54…G59) read back with that station's setup and simulated together; stations [names] for a program posted with only some. Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
     ]
 }
 
