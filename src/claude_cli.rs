@@ -34,7 +34,8 @@ use serde_json::{json, Value};
 use crate::claude::{self, Auth, FromWorker, ToWorker};
 use crate::claude_chats::{self, Line};
 
-const USAGE: &str = "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] (--prompt TEXT | --prompt-file F)";
+const USAGE: &str =
+    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] (--prompt TEXT | --prompt-file F)";
 
 struct Args {
     doc: PathBuf,
@@ -144,7 +145,16 @@ pub fn main(args: &[String]) -> i32 {
         },
         None => {
             let t = claude_chats::now();
-            let m = claude_chats::Meta { format: 0, id: claude_chats::new_id(), document: String::new(), title: String::new(), created: t, updated: t, model: settings.model.clone(), lines: vec![] };
+            let m = claude_chats::Meta {
+                format: 0,
+                id: claude_chats::new_id(),
+                document: String::new(),
+                title: String::new(),
+                created: t,
+                updated: t,
+                model: settings.model.clone(),
+                lines: vec![],
+            };
             (m, claude_chats::Context::default())
         }
     };

@@ -484,6 +484,8 @@ def main(argv=None):
                    help="rCAD project folder for the phone app (default: RCAD_PROJECTS, ~/Documents/rCAD Projects, ~/rCAD Projects); repeatable")
     s.add_argument("--rcad", help="the rcad program (default: RCAD_BIN, PATH, ~/src/cad-rust-app/target/release/rcad)")
     s.add_argument("--model", help="Claude model for phone chats when the phone doesn't pick one (default: the editor's setting)")
+    s.add_argument("--auth", choices=["claude-code", "api-key", "console"],
+                   help="how phone chats sign in to Claude (default claude-code: this computer's Claude Code login)")
     q = sub.add_parser("pair-url", help="print the http pairing link; make a QR code of it and scan it with the phone")
     q.add_argument("--host", help="address the phone uses (default: this machine's LAN address)")
     q.add_argument("--port", type=int, default=8765)
@@ -492,7 +494,7 @@ def main(argv=None):
     if a.cmd == "pair-url":
         print(f"http://{a.host or primary_ip()}:{a.port}/pair?t={urllib.parse.quote(token)}")
         return 0
-    projects = rcad_projects.Projects(a.projects or None, a.rcad, a.model) if rcad_projects else None
+    projects = rcad_projects.Projects(a.projects or None, a.rcad, a.model, a.auth) if rcad_projects else None
     Handler.app = App(a.root, token, a.also_url, projects)
     srv = ThreadingHTTPServer((a.bind, a.port), Handler)
     srv.daemon_threads = True

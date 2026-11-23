@@ -114,11 +114,12 @@ class Job:
 
 
 class Projects:
-    def __init__(self, roots=None, rcad=None, model=None):
+    def __init__(self, roots=None, rcad=None, model=None, auth=None):
         roots = roots or default_roots()
         self.roots = [os.path.abspath(os.path.expanduser(r)) for r in roots]
         self.rcad_hint = rcad
         self.model = model
+        self.auth = auth  # None: Claude Code (rcad chat's default)
         self.jobs = {}
         self.busy = {}  # doc path -> job id
         self.lock = threading.Lock()
@@ -380,6 +381,8 @@ class Projects:
             model = MODELS.get(str(body.get("model") or ""), self.model)
             if model:
                 cmd += ["--model", model]
+            if self.auth:
+                cmd += ["--auth", self.auth]
             if body.get("effort") in EFFORTS:
                 cmd += ["--effort", body["effort"]]
             try:

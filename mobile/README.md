@@ -36,7 +36,7 @@ to the same small service the rCAD Capture app uploads photos to.
 
    Documents are looked for (four folders deep) in `RCAD_PROJECTS`, `~/Documents/rCAD Projects`
    and `~/rCAD Projects`; add others with `serve --projects DIR` (repeatable). `--model` sets the
-   default Claude model for phone chats.
+   default Claude model for phone chats, and `--auth api-key` uses an API key instead of Claude Code.
 
 ## Setup on the phone
 
