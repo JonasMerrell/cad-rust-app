@@ -11,6 +11,7 @@ Written 2026-11-23 from the thread "Design a zero-backlash 4th axis". Status: **
 - Steel machined parts are allowed if they make it smaller.
 - Jonas chose to **focus on a home-machined cycloidal gearbox** ("a good project", "we can hold tighter tolerances if we are careful"), using **in-situ probing and correcting**.
 - Since then Jonas has asked twice about cheaper harmonic gearboxes, so the cycloidal versus harmonic choice is not fully closed.
+- On the idea of a NEMA 23 driving a smaller harmonic reducer through a belt, Jonas said "if that's a bad idea don't do it". Finding: the belt and NEMA 23 are fine; the smaller reducer is not worth it (about half the stiffness, no smaller housing).
 
 ## Where everything is
 
@@ -18,7 +19,9 @@ Written 2026-11-23 from the thread "Design a zero-backlash 4th axis". Status: **
 |---|---|
 | Project files (this folder) | `fourth-axis/`: `REPORT.md`, `bom.csv`, `renders/`, `step/` for the harmonic design (iterations 1 to 6); `fourth-axis/cycloidal/`: `REPORT.md`, `MAKING.md`, `bom.csv`, `renders/`, `step/` |
 | Full working tree, every iteration, scripts, FEA | netdash, `~/dmc2/fourth-axis/` (cycloidal in `cycloidal/c1` to `c4`) |
-| Git | `JonasMerrell/cad-rust-app`, branch `claude/project-thread-33amtt`, folder `designs/fourth-axis/`. Head `1fcf1c2`. Not merged, no PR. |
+| Git | `JonasMerrell/cad-rust-app`, branch `claude/project-thread-33amtt`, folder `designs/fourth-axis/`. Design content is at `1fcf1c2`; later commits on the branch only add this handoff. Not merged, no PR. |
+| Worktree on netdash | `~/src/cad-rust-app-4axis`, on that branch, with its own built rCAD at `target/release/rcad`. Every script points at that binary. |
+| Python | `~/.venvs/ax/bin/python` (numpy, scipy, matplotlib, shapely, trimesh, PIL) |
 | rCAD change | Commit `a4045f6` on that branch adds a `probes` option to `solve_simulation` (FEA displacement at chosen points). Unmerged. |
 | Project memory | `dmc2-fourth-axis` |
 
@@ -68,7 +71,8 @@ Tolerance study (Monte Carlo): lost motion without preload is 36 arc-min as mill
 1. What measuring tools does Jonas have (micrometers and ranges, gauge pins, gauge or 1-2-3 blocks, dial test indicator, ring gauge), and have the probe's repeatability and the mill's X/Y reversal error been measured? This decides which tolerance row is realistic.
 2. Is shop air at about 6 bar acceptable for the brake? The fallback is a manual clamp screw.
 3. Cycloidal or harmonic as the build? Jonas sent an AliExpress listing (item 3256812979878137, about 138 USD, or 80 with a new-user discount) that could not be opened. Jonas was asked to paste its title and specs. Needed: strain-wave type, frame size (20 or 25 preferred, 17 workable), ratio, complete unit with crossed-roller output or bare set, torque, backlash, input bore.
-4. Which table corner is the tool setter on (back-left assumed), and where is one fixture-grid hole?
+4. Which table corner is the tool setter on (back-left assumed), and where is one fixture-grid hole? A right-hand corner would need a new machine check, because the headstock now stands at the right end.
+5. Should the NEMA 23 belt-to-strain-wave variant be modelled in full, like the cycloid (every screw, checks, BOM)? Offered, not requested. It would reuse the cycloid's motor mount and belt guard.
 
 ## Next steps
 
@@ -85,8 +89,38 @@ Tolerance study (Monte Carlo): lost motion without preload is 36 arc-min as mill
 - Bearing and bolted-joint stiffness are calculated or guessed, not vendor data.
 - The RU66 is drawn from THK's dimension table (no vendor STEP). The vise, home sensor, spot drill and O-rings are also not vendor CAD.
 - Most cycloidal BOM prices are estimates, because StepperOnline's pages refused automated reads.
+- The front 6001 shaft bearing of the cycloid sits in a blind pocket in carrier 1; puller notches are not drawn.
+- Iteration 6 has no modal run of its own.
 - Corrections already made: an early "5 arc-min as milled" estimate for the cycloid was wrong (36). Structure FEA had left a part out of the mesh (iteration 5 is 9.5 µm at the jaws, not 13.6). The machine check had the turned unit facing the wrong way in half the poses (fixed and rerun for iteration 6, c3 and c4). Modal runs for iterations 1 to 5 were not repeated after the FEA fix.
 
 ## How the work was run
 
 All modelling and simulation ran on netdash through a Remote Control session in `/home/jonas`. rCAD's FEA needs the iterative solver (about 8 GB and 2 minutes per load case); the direct solver used about 30 GB per run and the modal run needs about 30 GB on its own.
+- No job is running on netdash for this work as of 2026-11-24.
+
+## Scripts
+
+All in `scripts/`, run with `~/.venvs/ax/bin/python` from `~/dmc2/fourth-axis/`.
+
+- **Strain-wave design:** `build.py N`, `fea.py N [head tail brake modal steel]`, `calc.py N`, `dfm.py <N or folder>`, `machine_check.py N` (iterations 1 to 5), `machine_check6.py <N or absolute folder>` (turned unit with the tool setter), `extras.py N`, `bom.py N`, `report.py 5` then `report_addendum.py` (sections 14 and 15).
+- **Cycloidal design:** `cycloid.py` (tolerance study), `buildc.py N [outdir]`, `spider.py` (flexure carrier outline), `calcc.py N`, `feac.py N [head modal]`, `spider_fea.py N`, `extrasc.py N` (sections and exploded views), `bomc.py N`, `reportc.py N`.
+- **Publishing:** rsync `~/dmc2/fourth-axis/` into the worktree's `designs/fourth-axis/`, leaving out logs, STL, rCAD run JSONs and per-iteration STEP, then commit and push. The exclude list used was in a scratch folder and may be gone; the committed tree shows what was kept.
+
+## For whoever picks this up (rCAD pitfalls that cost time)
+
+- **Name the material in advanced-mode FEA.** With `material: ""` rCAD silently left a part out of the mesh and the structure looked too soft.
+- **`assembly_move`'s `rotate` is relative.** Rotate once at `assembly_insert`, or every second pose faces the wrong way.
+- **A part thinner than the mesh size is dropped without warning.** The modal run then shows 0 Hz modes; the cycloidal modal model replaces the brake disc, hub spacer and carrier 1 with one cylinder for that reason.
+- **Never run two simple-mode FEA solves at once** (about 30 GB each). Advanced mode uses `bcs`, one material for every part, and about 8 GB.
+- **The cycloid disc outlines have 2300 points each**, so the assembly interference check takes about 20 minutes. `machine_check6.py` leaves the reducer's internals out for that reason.
+- **`machine_check6.py` needs an absolute folder path** for a cycloidal iteration.
+- **`solve_simulation` takes `probes`** only with the worktree's rCAD (commit `a4045f6`).
+- **AliExpress and StepperOnline pages refuse automated reads.** Loading AliExpress in the headless browser was blocked by the session's permission settings and was not worked around.
+- Do not use `pkill -f` or `pgrep -f` with a pattern that also appears in the same command line.
+
+## Standing rules for this work
+
+- Do not touch the mill PC, do not order anything, do not move the machine, do not merge, and no PR unless Jonas asks.
+- Custom parts: flat plate, one 1/4 in carbide end mill from at most two sides, no tapped holes, no hole under 6.5 mm, inside corners R3.5 or more, nuts in milled pockets.
+- If CAM is written: every surface finished, every edge deburred, op 2 located from a notch that op 1 cuts in the carrier and probed before roughing.
+- No personal details in requests to vendor sites.
