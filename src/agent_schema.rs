@@ -300,7 +300,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("scan_photos", "method") => en(&["auto", "colmap", "openmvs", "sparse"], "dense surface: COLMAP on an NVIDIA GPU, OpenMVS on the CPU, or the rough sparse points (default auto: the best installed)"),
         ("scan_photos", "quality") => en(&["fast", "normal", "high"], "detail and time (default normal)"),
         ("scan_photos", "gpu") => t("boolean", "use the GPU for features and matching when COLMAP has CUDA (default true)"),
-        ("scan_photos", "glomap") => t("boolean", "solve the cameras with GLOMAP when installed (default false)"),
+        ("scan_photos", "glomap") => t("boolean", "solve all cameras at once (COLMAP 4 global_mapper, or GLOMAP) when available: often 10x faster (default true)"),
         ("scan_photos", "level") => t("boolean", "stand the part on XY from the table plane (default true)"),
         ("scan_photos", "remove_table") => t("boolean", "cut the table and loose bits away (default true)"),
         ("scan_photos", "triangles") => json!({"type": "integer", "minimum": 0, "description": "thin the mesh to about this many triangles, 0 keeps all (default 40000)"}),

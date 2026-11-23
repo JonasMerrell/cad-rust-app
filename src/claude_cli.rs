@@ -35,7 +35,7 @@ use crate::claude::{self, Auth, FromWorker, ToWorker};
 use crate::claude_chats::{self, Line};
 
 const USAGE: &str =
-    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] (--prompt TEXT | --prompt-file F)";
+    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] [--image drawing.png] (--prompt TEXT | --prompt-file F)";
 
 struct Args {
     doc: PathBuf,
@@ -46,10 +46,13 @@ struct Args {
     model: Option<String>,
     effort: Option<String>,
     no_delegate: bool,
+    /// A picture sent with the request (a pencil drawing, a photo), PNG.
+    image: Option<Vec<u8>>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut doc, mut chat, mut studio, mut prompt, mut auth, mut model, mut effort, mut no_delegate) = (None, None, 0, None, None, None, None, false);
+    let mut image = None;
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().ok_or_else(|| format!("{a} needs a value"));
@@ -73,12 +76,16 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--model" => model = Some(val()?),
             "--effort" => effort = Some(val()?),
             "--no-delegate" => no_delegate = true,
+            "--image" => {
+                let p = val()?;
+                image = Some(std::fs::read(&p).map_err(|e| format!("can't read {p}: {e}"))?);
+            }
             o => return Err(format!("unknown option {o}")),
         }
     }
     let doc = doc.ok_or("give --doc")?;
     let prompt = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).ok_or("give --prompt or --prompt-file")?;
-    Ok(Args { doc, chat, studio, prompt, auth, model, effort, no_delegate })
+    Ok(Args { doc, chat, studio, prompt, auth, model, effort, no_delegate, image })
 }
 
 fn emit(v: Value) {
@@ -176,7 +183,7 @@ pub fn main(args: &[String]) -> i32 {
         }
     });
     meta.lines.push(Line::User { text: a.prompt.clone() });
-    let _ = worker.tx.send(ToWorker::Turn { text: a.prompt.clone(), context: context(&doc, &ws, studio), ws: ws_text.clone(), studio, settings });
+    let _ = worker.tx.send(ToWorker::Turn { text: a.prompt.clone(), context: context(&doc, &ws, studio), ws: ws_text.clone(), studio, settings, image: a.image.clone() });
 
     let mut changed: Option<String> = None;
     // where the request now being sent started, to drop its text when it is sent again

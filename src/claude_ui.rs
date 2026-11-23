@@ -13,6 +13,16 @@ enum Entry {
     Thinking(String),
     Tool { name: String, detail: String, result: Option<(bool, String)>, image: Option<egui::TextureHandle> },
     Notice { text: String, error: bool },
+    /// A pencil drawing sent with the request after it.
+    Sketch(egui::TextureHandle),
+}
+
+/// A pencil drawing waiting to go with the next request (`crate::notes`).
+pub struct SketchAttachment {
+    png: Vec<u8>,
+    tex: egui::TextureHandle,
+    /// The strokes and the faces they cross, in words, for Claude.
+    text: String,
 }
 
 pub struct ClaudeUi {
@@ -55,6 +65,9 @@ pub struct ClaudeUi {
     list_open: bool,
     /// A chat whose Delete was clicked once.
     confirm_delete: Option<String>,
+    /// The pencil drawing for the next request.
+    pub sketch: Option<SketchAttachment>,
+    focus_input: bool,
 }
 
 impl Default for ClaudeUi {
@@ -87,6 +100,8 @@ impl Default for ClaudeUi {
             chats_for: None,
             list_open: false,
             confirm_delete: None,
+            sketch: None,
+            focus_input: false,
         }
     }
 }
@@ -102,6 +117,21 @@ impl ClaudeUi {
             Auth::ApiKey => self.settings.key().is_some(),
             Auth::Console | Auth::ClaudeCode => true,
         }
+    }
+}
+
+/// Put a pencil drawing (PNG of the viewport) on the next request, and open the panel for it.
+pub fn attach_sketch(app: &mut App, ctx: &egui::Context, png: Vec<u8>, text: String) {
+    let Ok(img) = image::load_from_memory(&png) else { return };
+    let rgba = img.to_rgba8();
+    let ci = egui::ColorImage::from_rgba_unmultiplied([rgba.width() as usize, rgba.height() as usize], rgba.as_raw());
+    let tex = ctx.load_texture("claude-sketch", ci, Default::default());
+    let c = &mut app.claude;
+    c.sketch = Some(SketchAttachment { png, tex, text });
+    c.open = true;
+    c.focus_input = true;
+    if c.input.trim().is_empty() {
+        c.input.clear();
     }
 }
 
@@ -375,6 +405,22 @@ fn chat(app: &mut App, ui: &mut Ui) {
         let (mut go, mut revert) = (false, false);
         let c = &mut app.claude;
         theme::field_style(ui);
+        // the pencil drawing that goes with the request
+        let mut drop_sketch = false;
+        if let Some(sk) = &c.sketch {
+            let size = sk.tex.size_vec2();
+            let w = ui.available_width().min(180.0 * size.x / size.y.max(1.0));
+            ui.add(egui::Image::new(&sk.tex).fit_to_exact_size(egui::vec2(w, w * size.y / size.x.max(1.0))).corner_radius(4));
+            ui.horizontal(|ui| {
+                let faces = sk.text.lines().filter(|l| l.starts_with("- ")).count();
+                ui.label(RichText::new(format!("Pencil drawing · {faces} face{} under the strokes", if faces == 1 { "" } else { "s" })).size(11.5).color(theme::muted()));
+                drop_sketch = ui.small_button("Remove").clicked();
+            });
+        }
+        if drop_sketch {
+            c.sketch = None;
+        }
+        let has_sketch = c.sketch.is_some();
         // a long request scrolls inside its box instead of pushing the buttons off the panel
         let r = ScrollArea::vertical()
             .id_salt("claude-input")
@@ -389,6 +435,9 @@ fn chat(app: &mut App, ui: &mut Ui) {
                 )
             })
             .inner;
+        if std::mem::take(&mut c.focus_input) {
+            r.request_focus();
+        }
         let enter = r.has_focus() && ui.input(|i| i.key_pressed(Key::Enter) && !i.modifiers.shift);
         if enter {
             // drop the newline the key press added
@@ -412,7 +461,8 @@ fn chat(app: &mut App, ui: &mut Ui) {
                         }
                     }
                 } else {
-                    go = (ui.add_enabled(!c.input.trim().is_empty(), egui::Button::new("Send")).clicked() || enter) && !c.input.trim().is_empty();
+                    let ready = !c.input.trim().is_empty() || has_sketch;
+                    go = (ui.add_enabled(ready, egui::Button::new("Send")).clicked() || enter) && ready;
                 }
             });
         });
@@ -529,6 +579,14 @@ fn entry(ui: &mut Ui, e: &Entry) {
                 ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(w, w * size.y / size.x.max(1.0))).corner_radius(6));
             }
         }
+        Entry::Sketch(tex) => {
+            ui.add_space(6.0);
+            let w = ui.available_width().min(320.0);
+            let size = tex.size_vec2();
+            ui.with_layout(Layout::top_down(Align::Max), |ui| {
+                ui.add(egui::Image::new(tex).fit_to_exact_size(egui::vec2(w, w * size.y / size.x.max(1.0))).corner_radius(6));
+            });
+        }
         Entry::Notice { text, error } => {
             ui.label(RichText::new(text).size(11.5).color(if *error { theme::error() } else { theme::muted() }));
         }
@@ -546,8 +604,16 @@ fn send(app: &mut App, ctx: &egui::Context) {
     app.sync_ws();
     let ws = app.ws.to_json();
     let studio = app.cur_studio;
-    let text = std::mem::take(&mut app.claude.input).trim().to_string();
-    let context = editor_context(app);
+    let mut text = std::mem::take(&mut app.claude.input).trim().to_string();
+    let mut context = editor_context(app);
+    let sketch = app.claude.sketch.take();
+    if let Some(sk) = &sketch {
+        if text.is_empty() {
+            text = "Look at what I drew on the part.".into();
+        }
+        context.push_str("\n");
+        context.push_str(&sk.text);
+    }
     let c = &mut app.claude;
     let worker = c.worker.get_or_insert_with(|| Worker::start(ctx.clone()));
     c.before = Some((ws.clone(), studio));
@@ -556,9 +622,13 @@ fn send(app: &mut App, ctx: &egui::Context) {
     c.confirm_revert = false;
     c.checkpointed.clear();
     c.busy = true;
+    let image = sketch.map(|sk| {
+        c.entries.push(Entry::Sketch(sk.tex));
+        sk.png
+    });
     c.entries.push(Entry::User(text.clone()));
     c.scroll_to_end = true;
-    let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone() });
+    let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone(), image });
 }
 
 /// What Claude is told about the editor with each request.
@@ -584,6 +654,11 @@ fn editor_context(app: &App) -> String {
         lines.push(format!("Selected: {}", serde_json::to_string(&app.picks).unwrap_or_default()));
     } else {
         lines.push("Selected: nothing".into());
+    }
+    if matches!(app.tab, Tab::Studio(_)) {
+        if let Some(n) = crate::notes::context(app) {
+            lines.push(n);
+        }
     }
     lines.join("\n")
 }
@@ -668,6 +743,8 @@ fn line_of(e: &Entry) -> Line {
         Entry::Thinking(t) => Line::Thinking { text: t.clone() },
         Entry::Tool { name, detail, result, .. } => Line::Tool { name: name.clone(), detail: detail.clone(), ok: result.as_ref().map(|r| r.0), summary: result.as_ref().map(|r| r.1.clone()).unwrap_or_default() },
         Entry::Notice { text, error } => Line::Notice { text: text.clone(), error: *error },
+        // the picture itself is in the conversation Claude continues from
+        Entry::Sketch(_) => Line::Notice { text: "(a pencil drawing went with the next message)".into(), error: false },
     }
 }
 

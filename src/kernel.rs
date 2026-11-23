@@ -3315,6 +3315,19 @@ fn placed(built: &mut HashMap<usize, Vec<Body>>, studios: &[Document], studio: u
     occ::transform(&b.shape, rot, DVec3::new(m[3], m[7], m[11])).ok()
 }
 
+/// Write each placed part to a STEP file of its own (`items`: part, path). The first error stops it.
+pub fn export_parts(items: &[(AsmExportItem, String)]) -> Result<Option<String>, String> {
+    let studios = STUDIOS.lock().map(|s| s.clone()).unwrap_or_default();
+    // each Part Studio is built once for all its parts
+    let mut built: HashMap<usize, Vec<Body>> = HashMap::new();
+    for ((studio, body, m, name), path) in items {
+        let s = placed(&mut built, &studios, *studio, *body, m).ok_or_else(|| format!("{name} could not be built"))?;
+        let color = studios.get(*studio).and_then(|d| d.parts.get(&crate::doc::body_key(*body))).and_then(|p| p.color);
+        occ::write_step_named(name, &[(&s, name.clone(), color)], path).map_err(|e| format!("{name}: {e}"))?;
+    }
+    Ok(None)
+}
+
 /// Write the placed parts of an assembly as STEP. With `single_body` every solid is fused into
 /// one body (when that fails the parts go in as one compound instead). Returns a note for the
 /// user about anything that didn't go as asked, or None.

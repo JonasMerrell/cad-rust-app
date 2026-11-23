@@ -255,6 +255,10 @@ impl Session {
                     .iter()
                     .map(|f| json!({"id": f.id, "name": f.name, "kind": f.op.kind(), "suppressed": f.suppressed, "params": described_params(&f.op)}))
                     .collect::<Vec<_>>());
+                // notes the user pinned to faces, with the face as a pick for other tools
+                if !self.doc.notes.is_empty() {
+                    v["notes"] = json!(self.doc.notes.iter().map(|n| json!({"text": n.text, "face": n.face_ref()})).collect::<Vec<_>>());
+                }
                 v
             }
             "set_variable" => {
@@ -631,7 +635,7 @@ impl Session {
                     "high" => pg::Quality::High,
                     _ => pg::Quality::Normal,
                 };
-                let job = pg::Job { photos: photos.clone(), method, quality, gpu: a.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true), glomap: a.get("glomap").and_then(|v| v.as_bool()).unwrap_or(false) };
+                let job = pg::Job { photos: photos.clone(), method, quality, gpu: a.get("gpu").and_then(|v| v.as_bool()).unwrap_or(true), glomap: a.get("glomap").and_then(|v| v.as_bool()).unwrap_or(true) };
                 let tools = pg::find_tools(&pg::Settings::load());
                 let (tx, rx) = std::sync::mpsc::channel();
                 let cancel = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));

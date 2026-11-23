@@ -63,6 +63,7 @@ mod mcu_cm0;
 mod mcu_rom;
 mod mcu_rp2040;
 mod measure;
+mod notes;
 mod pcb;
 mod photo_mesh;
 mod photo_ui;
@@ -94,6 +95,7 @@ mod icons;
 mod import;
 mod kernel;
 mod occ;
+mod orca;
 mod regions;
 mod printing;
 mod project;
@@ -128,7 +130,7 @@ mod workspace;
 /// Command line help; `prog` is the name the program was started as (normally rcad).
 fn usage(prog: &str) -> String {
     format!(
-        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} chat --doc part.json --prompt TEXT  one request to Claude about a document, no window (JSON lines out)\n  {prog} --version | --help",
+        "{prog} {}\n\nusage:\n  {prog} [part.json]                         open the editor\n  {prog} part.json --studio S [--part P]     open it on that Part Studio and part (OrcaSlicer's Edit in rCAD)\n  {prog} mcp                                 Model Context Protocol server on stdio (for AI agents)\n  {prog} run [--stop-on-error] script.json   run a JSON list of tool calls (see AGENTS.md)\n  {prog} script file.rhai [args…]            run a Rhai script with no window (see SCRIPTING.md)\n  {prog} chat --doc part.json --prompt TEXT  one request to Claude about a document, no window (JSON lines out)\n  {prog} --version | --help",
         env!("CARGO_PKG_VERSION")
     )
 }
@@ -201,6 +203,8 @@ fn main() -> eframe::Result {
             eprintln!("unknown option {a}\n\n{}", usage(&prog));
             std::process::exit(2);
         }
+        // how the slicer's "Edit in rCAD" starts rCAD: the document and the part to show
+        Some(_) if args.len() <= 6 && orca::request_from_args(&args).is_some() => {}
         Some(a) if args.len() > 2 => {
             eprintln!("unexpected arguments after {a}\n\n{}", usage(&prog));
             std::process::exit(2);

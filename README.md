@@ -58,7 +58,8 @@ build the part from features with a rollback bar, configurations, materials and 
   round bar a part fits in, shown in the BOM, the title block and as a CAM stock preset),
   measure (M: click faces, edges, vertices or parts for a window with their diameter, length,
   area or volume, and between two picks the minimum and centre distances with ΔX/ΔY/ΔZ and the
-  angle), section view, X-ray, and isolate (I: show only the selected parts or instances).
+  angle), section view, X-ray, isolate (I: show only the selected parts or instances), and notes
+  (T: click a face to pin a note to it; notes are saved with the document and Claude reads them).
 - **Command search** like Fusion 360: press S (or / or Ctrl+K while sketching) to find and run any
   command by name.
 - **Scan from photos** (File menu): photogrammetry turns 20-100 photos of a part into a mesh
@@ -251,6 +252,10 @@ renders, and each request can be undone from the panel. It connects through the 
 your computer (so requests use your Claude plan), an Anthropic API key, or a Claude Console account
 signed in with the `ant` CLI. A key is kept in `~/.config/cad-rust-app/claude.json`, readable only by you.
 
+To show Claude what you mean, press P (or the pencil beside the viewport) and draw on the part:
+the strokes stick to the model as you turn the view, and **Send to Claude** attaches a picture of the
+view with your drawing, plus the faces the strokes cross, to your next message.
+
 To keep costs down, Opus (or Fable) plans by default and cheaper models do the work: it looks at the
 document, writes each change as a task with exact values, names and refs, and hands it to Sonnet or
 Haiku, which make the edits and report back. The panel shows each handed-off task, the worker's notes
@@ -307,7 +312,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | Orbit / pan / zoom | right-drag / middle-drag or Shift+right-drag / wheel at the cursor |
 | Start a feature | Shift+S sketch, Shift+E extrude, Shift+R revolve, Shift+F fillet, Shift+H hole |
 | Views | 0–3, F to fit |
-| General | M measure, S command search, Ctrl+L Claude, Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+S save |
+| General | M measure, T notes, P pencil (draw for Claude), S command search, Ctrl+L Claude, Ctrl+Z / Ctrl+Shift+Z undo/redo, Ctrl+S save |
 | Sketch tools | L line, R rectangle, C circle, A arc, P point, D dimension, K trim, O offset, U project, Q construction, G grid snap, N normal-to |
 | Sketch constraints | with a selection, I/H/V/T/E/M/X; Enter finishes, Esc steps back |
 
@@ -323,6 +328,7 @@ and templates live in `~/.config/cad-rust-app/`.
 | `src/home.rs` | the start screen with recent documents |
 | `src/theme.rs` | colours, fonts and the card style of the panels |
 | `src/viewport.rs` | navigation, scene assembly, picking, measure, overlays |
+| `src/notes.rs` | notes pinned to faces, and the pencil that draws on the model for Claude |
 | `src/measure.rs` | the measure tool's numbers (sizes, min/centre distances, angles) and its window |
 | `src/render.rs` | wgpu pipelines (shaded meshes, thick lines, points, section clipping) |
 | `src/sketcher.rs` | sketch mode tools, constraints, dimensions |

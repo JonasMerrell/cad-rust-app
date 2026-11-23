@@ -187,6 +187,10 @@ pub struct App {
     pub issue_focus: Option<[f64; 3]>,
     /// Isolate: only some parts (or assembly instances) are shown until it ends. View state only.
     pub isolation: Option<Isolation>,
+    /// Notes pinned to faces: adding mode and the note being edited (the notes are in `doc`).
+    pub notes: crate::notes::Notes,
+    /// Drawing on the model to show Claude (view state only).
+    pub pencil: Option<crate::notes::Pencil>,
     /// Sidebar width (shared by all tabs) and the tab it was last drawn for.
     pub side_w: f32,
     pub side_tab: Option<crate::workspace::Tab>,
@@ -197,6 +201,8 @@ pub struct App {
     pub print_cache: std::cell::RefCell<std::collections::HashMap<crate::doc::BodyId, Vec<u8>>>,
     /// An STL export on its way to the slicer: (temp path, name).
     pub pending_send: Option<(String, String)>,
+    /// The link with OrcaSlicer (see `orca`).
+    pub orca: crate::orca::Link,
     /// Result of the upload, filled in by the upload thread.
     pub send_result: std::sync::Arc<std::sync::Mutex<Option<Result<String, String>>>>,
     /// Studio lighting with reflections, for presentation.
@@ -289,12 +295,15 @@ impl App {
             was_narrow: None,
             issue_focus: None,
             isolation: None,
+            notes: Default::default(),
+            pencil: None,
             side_w: 300.0,
             side_tab: None,
             print: crate::printing::load(),
             print_view: false,
             print_cache: Default::default(),
             pending_send: None,
+            orca: Default::default(),
             send_result: Default::default(),
             realistic: false,
             decal_images: Default::default(),
@@ -304,8 +313,12 @@ impl App {
             cc.egui_ctx.set_zoom_factor(z);
         }
         app.mark_saved();
-        if let Some(p) = std::env::args().skip(1).find(|a| !a.starts_with('-')) {
+        let args: Vec<String> = std::env::args().collect();
+        if let Some(p) = args.iter().skip(1).find(|a| !a.starts_with('-')) {
             app.open_path(std::path::PathBuf::from(p));
+            if let Some(r) = crate::orca::request_from_args(&args) {
+                app.orca.push_request(r);
+            }
         } else {
             app.home.open = true;
         }
@@ -1103,6 +1116,17 @@ impl App {
         let before = self.print.clone();
         let p = &mut self.print;
         egui::Grid::new("print-settings").num_columns(2).spacing([8.0, 6.0]).show(ui, |ui| {
+            ui.label("OrcaSlicer");
+            let found = crate::orca::find_slicer("").map(|p| p.display().to_string());
+            let hint = found.clone().unwrap_or_else(|| "path to orca-slicer".into());
+            ui.add(egui::TextEdit::singleline(&mut p.orca_path).hint_text(hint).desired_width(190.0)).on_hover_text(match &found {
+                Some(f) => format!("Leave empty to use {f}"),
+                None => "OrcaSlicer wasn't found where it usually is: enter its program here".into(),
+            });
+            ui.end_row();
+            ui.label("");
+            ui.checkbox(&mut p.orca_live, "Keep OrcaSlicer updated").on_hover_text("Parts sent to OrcaSlicer are sent again whenever they change, and update there in place");
+            ui.end_row();
             ui.label("Slicer (orcaweb)");
             ui.add(egui::TextEdit::singleline(&mut p.orcaweb).desired_width(190.0));
             ui.end_row();
@@ -1176,6 +1200,7 @@ impl App {
                     self.studio_results.insert(tag, r);
                     self.asm.scene_dirty = true;
                     self.dwg.dirty = true;
+                    crate::orca::after_rebuild(self, tag);
                 }
                 Outcome::Rebuilt(_, mut r) => {
                     self.cache_built(&r);
@@ -1222,6 +1247,7 @@ impl App {
                         self.name_imports.retain(|id| !built.contains(id) && self.doc.feature(*id).is_some());
                     }
                     self.result = r;
+                    crate::orca::after_rebuild(self, self.cur_studio);
                     self.print_cache.borrow_mut().clear();
                     self.scene_dirty = true;
                     if self.first_fit && (!self.result.bodies.is_empty() || self.doc.features.iter().any(|f| matches!(f.op, Op::Sketch { .. }) && !f.hidden)) {
@@ -1247,6 +1273,7 @@ impl App {
                         }
                     }
                 }
+                Outcome::AsmExported(r, path) if self.orca.pending.as_ref().is_some_and(|p| p.0 == path) => crate::orca::finish_send(self, r),
                 Outcome::AsmExported(r, path) => match r {
                     Ok(None) => self.flash_info(format!("Exported {path}"), Some(Duration::from_secs(3))),
                     Ok(Some(note)) => self.flash(format!("Exported {path}, but {note}"), ToastKind::Info),
@@ -1389,6 +1416,9 @@ impl App {
             self.session.show_shortcuts = !self.session.show_shortcuts;
             return;
         }
+        if ctrl && pressed(Key::Z) && !shift && matches!(self.tab, crate::workspace::Tab::Studio(_)) && crate::notes::undo_stroke(self) {
+            return;
+        }
         if ctrl && pressed(Key::Z) {
             if shift {
                 self.redo()
@@ -1425,7 +1455,13 @@ impl App {
             return;
         }
         if pressed(Key::Escape) {
-            if self.awaiting_sketch_plane {
+            if self.pencil.is_some() {
+                self.pencil = None;
+            } else if self.notes.edit.is_some() {
+                self.notes.edit = None;
+            } else if self.notes.adding {
+                self.notes.adding = false;
+            } else if self.awaiting_sketch_plane {
                 self.awaiting_sketch_plane = false;
                 self.toast = None;
             } else if self.dialog.is_some() {
@@ -1472,6 +1508,12 @@ impl App {
         if pressed(Key::I) && self.dialog.is_none() {
             self.toggle_isolate();
         }
+        if pressed(Key::T) {
+            crate::notes::toggle_adding(self);
+        }
+        if pressed(Key::P) {
+            crate::notes::toggle_pencil(self);
+        }
         if pressed(Key::N) {
             self.view_normal_to_selection();
         }
@@ -1492,6 +1534,9 @@ impl App {
             self.measure = None;
         } else {
             self.measure = Some(Measure { picks: self.picks.clone(), ..Default::default() });
+            self.pencil = None;
+            self.notes.adding = false;
+            self.notes.edit = None;
             // one mode at a time: measuring ends the printability view
             if self.print_view {
                 self.print_view = false;
@@ -1648,6 +1693,10 @@ impl App {
                 }
             }
         });
+        if ui.add(egui::Button::image_and_text(icons::image("printer", 15.0).tint(theme::text()), "Print in OrcaSlicer")).on_hover_text("Open the selected parts (or all in sight) in OrcaSlicer as STEP. Sending a part again updates it there.").clicked() {
+            action = Some("orca");
+            ui.close();
+        }
         if ui.add(egui::Button::image_and_text(icons::image("printer", 15.0).tint(theme::text()), "Send to slicer")).on_hover_text(format!("Open the parts in orcaweb ({}) to slice and print", self.print.orcaweb)).clicked() {
             action = Some("send");
             ui.close();
@@ -1724,6 +1773,7 @@ impl App {
             Some("obj") => self.export_obj(),
             Some("web") => self.export_web(),
             Some("send") => self.send_to_slicer(),
+            Some("orca") => crate::orca::print_in_orca(self),
             Some("png") => self.screenshot(ui.ctx()),
             _ => {}
         }
@@ -3066,6 +3116,10 @@ impl App {
             format!("Printability · red: overhang past {}° needs support · purple: wall thinner than {} mm", self.print.overhang, crate::expr::trim(self.print.min_wall, 2))
         } else if self.awaiting_sketch_plane {
             "Select a plane or flat face to sketch on · Esc cancels".to_string()
+        } else if self.pencil.is_some() {
+            "Pencil · drag to draw on the part, right-drag turns the view · Ctrl+Z undoes a stroke, Esc puts the pencil away".to_string()
+        } else if self.notes.adding {
+            "Notes · click a face to pin a note, click a pin to edit it · Ctrl+Enter saves, Esc ends".to_string()
         } else if let Some(m) = &self.measure {
             crate::viewport::measure_text(self, m)
         } else if self.dialog.is_some() {
@@ -3080,7 +3134,7 @@ impl App {
     /// The hint line, drawn over the bottom-left of the work area.
     fn hint_ui(&self, ctx: &egui::Context, area: egui::Rect) {
         let msg = self.hint_text();
-        if msg.is_empty() {
+        if msg.is_empty() || crate::notes::capturing(self) {
             return;
         }
         let painter = ctx.layer_painter(egui::LayerId::new(egui::Order::Middle, egui::Id::new("hint")));
@@ -3750,6 +3804,8 @@ impl eframe::App for App {
             self.was_narrow = Some(narrow);
         }
         self.handle_screenshot(&ctx);
+        crate::orca::frame(self, &ctx);
+        crate::notes::handle_capture(self, &ctx);
         crate::home::thumbnail(self, &ctx);
         // files dropped on the window: open documents, import models
         let dropped: Vec<std::path::PathBuf> = ctx.input(|i| i.raw.dropped_files.iter().map(|f| f.path().to_path_buf()).filter(|p| !p.as_os_str().is_empty()).collect());
@@ -3787,6 +3843,12 @@ impl eframe::App for App {
         // isolation belongs to the tab it was started in
         if self.isolation.as_ref().is_some_and(|i| i.tab != self.tab) {
             self.end_isolation();
+        }
+        // notes and the pencil are Part Studio tools
+        if !matches!(self.tab, crate::workspace::Tab::Studio(_)) || self.sketch.is_some() {
+            self.pencil = None;
+            self.notes.adding = false;
+            self.notes.edit = None;
         }
         // while Claude changes the document the editor is locked (claude_ui), keys included
         if !self.claude.busy() {
