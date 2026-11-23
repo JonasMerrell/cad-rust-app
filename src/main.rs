@@ -34,6 +34,7 @@ mod palette;
 mod parasolid;
 mod camera;
 mod claude;
+mod claude_chats;
 mod claude_ui;
 mod dialog;
 mod doc;
