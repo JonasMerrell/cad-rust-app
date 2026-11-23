@@ -1,11 +1,12 @@
 name: capture-apk
 
-# Builds the rCAD Capture Android app (capture/android) and tests its netdash receiver.
+# Builds the Android apps, rCAD Capture (capture/android) and rCAD (mobile/android), and tests
+# their netdash service (capture/receiver).
 on:
   push:
-    paths: ["capture/**", ".github/workflows/capture-apk.yml"]
+    paths: ["capture/**", "mobile/**", ".github/workflows/capture-apk.yml"]
   pull_request:
-    paths: ["capture/**", ".github/workflows/capture-apk.yml"]
+    paths: ["capture/**", "mobile/**", ".github/workflows/capture-apk.yml"]
   workflow_dispatch:
 
 jobs:
@@ -15,7 +16,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - name: Receiver tests
-        run: python3 -m unittest capture/receiver/test_receiver.py
+        run: python3 -m unittest capture/receiver/test_receiver.py capture/receiver/test_projects.py
       - uses: actions/setup-java@v4
         with:
           distribution: temurin
@@ -30,3 +31,10 @@ jobs:
         with:
           name: rcad-capture-apk
           path: capture/android/app/build/outputs/apk/release/app-release.apk
+      - name: Build rCAD app APK
+        working-directory: mobile/android
+        run: gradle --no-daemon assembleRelease
+      - uses: actions/upload-artifact@v4
+        with:
+          name: rcad-apk
+          path: mobile/android/app/build/outputs/apk/release/app-release.apk
