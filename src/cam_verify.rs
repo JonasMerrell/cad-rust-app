@@ -252,7 +252,8 @@ mod tests {
         assert_eq!(read_stamp(&t), Some((true, Some(h))));
         assert_eq!(read_stamp(&stamped("(x)\n", &stamp(3, h))), Some((false, Some(h))));
         assert_eq!(read_stamp("(x)\nG0 X0\n"), None);
-        assert_eq!(unsafe_path("/jobs/op2-bottom.nc"), "/jobs/op2-bottom.UNSAFE.nc");
+        // compared as paths: on Windows the file name is joined with a backslash
+        assert_eq!(std::path::Path::new(&unsafe_path("/jobs/op2-bottom.nc")), std::path::Path::new("/jobs/op2-bottom.UNSAFE.nc"));
         assert_eq!(unsafe_path("/jobs/op2-bottom.UNSAFE.nc"), "/jobs/op2-bottom.UNSAFE.nc");
     }
 
