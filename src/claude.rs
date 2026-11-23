@@ -14,6 +14,9 @@ use std::sync::mpsc::{Receiver, Sender, channel};
 use std::time::Duration;
 
 use base64::Engine;
+
+mod clis;
+pub use clis::{Cli, version as cli_version};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -69,6 +72,10 @@ pub enum Auth {
     Console,
     /// The Claude Code CLI on this computer, with its own login (a Claude plan or a key).
     ClaudeCode,
+    /// The Gemini CLI on this computer, with its own Google sign-in (a Gemini plan).
+    Gemini,
+    /// OpenAI's Codex CLI on this computer, signed in with ChatGPT (a ChatGPT plan).
+    Codex,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -80,11 +87,15 @@ pub struct Settings {
     pub effort: String,
     /// The chosen model plans and hands the tool work to Sonnet or Haiku, which costs less.
     pub delegate: bool,
+    /// The Gemini CLI's model; empty leaves it to the CLI (auto).
+    pub gemini_model: String,
+    /// Codex's model; empty leaves it to Codex.
+    pub codex_model: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into(), delegate: true }
+        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into(), delegate: true, gemini_model: String::new(), codex_model: String::new() }
     }
 }
 
@@ -105,7 +116,23 @@ impl Settings {
     /// Whether requests are planned by the chosen model and carried out by cheaper ones: only
     /// when the chosen model is not already one of the workers.
     pub fn delegates(&self) -> bool {
-        self.delegate && !WORKERS.iter().any(|w| w.1 == self.model)
+        self.delegate && Cli::of(self.auth).is_none() && !WORKERS.iter().any(|w| w.1 == self.model)
+    }
+
+    pub fn cli_model(&self, cli: Cli) -> &str {
+        match cli {
+            Cli::Gemini => &self.gemini_model,
+            Cli::Codex => &self.codex_model,
+        }
+    }
+
+    /// What the chat panel calls the assistant: Claude, or the other program.
+    pub fn assistant(&self) -> &'static str {
+        match Cli::of(self.auth) {
+            Some(Cli::Gemini) => "Gemini",
+            Some(Cli::Codex) => "Codex",
+            None => "Claude",
+        }
     }
 }
 
@@ -167,7 +194,7 @@ fn ant(args: &[&str]) -> Result<std::process::Output, String> {
 fn credentials(s: &Settings) -> Result<Cred, String> {
     match s.auth {
         Auth::ApiKey => s.key().map(Cred::Key).ok_or_else(|| "Add an API key in the Claude settings first".into()),
-        Auth::ClaudeCode => Err("Claude Code signs in by itself".into()),
+        Auth::ClaudeCode | Auth::Gemini | Auth::Codex => Err("This program signs in by itself".into()),
         Auth::Console => {
             // print-credentials refreshes the token when it has expired
             let out = ant(&["auth", "print-credentials", "--access-token"])?;
@@ -369,8 +396,8 @@ pub enum ToWorker {
     /// Forget the conversation.
     Reset,
     /// Pick up a saved conversation (see `claude_chats`). `recap` is the earlier conversation as
-    /// text, for when its full context can't be used (a Claude Code conversation that is gone, or
-    /// a chat continued with the other kind of sign-in).
+    /// text, for when its full context can't be used (a Claude Code, Gemini or Codex conversation
+    /// that is gone, or a chat continued with another kind of sign-in).
     Load { messages: Vec<Value>, cc_session: Option<String>, planned: Option<bool>, recap: Option<String> },
 }
 
@@ -472,8 +499,9 @@ struct Chat {
     base: String,
     /// Tokens each model used in this turn: input (all of it), of that read from the cache, output.
     usage: Vec<(String, u64, u64, u64)>,
-    /// A resumed chat's earlier conversation as text, sent with the next request when its full
-    /// context isn't there to continue.
+    /// The conversation so far as text (a resumed chat's saved text, then each request and
+    /// reply), sent with a request when its full context isn't there to continue: a saved
+    /// conversation that is gone, or a switch to another program partway through a chat.
     recap: Option<String>,
 }
 
@@ -581,7 +609,10 @@ impl Chat {
 
     #[allow(clippy::too_many_arguments)]
     fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, image: Option<&[u8]>, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
-        let cred = if settings.auth == Auth::ClaudeCode { None } else { Some(credentials(settings)?) };
+        let cli = Cli::of(settings.auth);
+        // Claude Code, Gemini and Codex keep the conversation themselves, by id
+        let by_id = settings.auth == Auth::ClaudeCode || cli.is_some();
+        let cred = if by_id { None } else { Some(credentials(settings)?) };
         // start from what is open in the editor
         let stop_flag = self.stop.clone();
         let session = self.session.get_or_insert_with(crate::agent::Session::new);
@@ -595,25 +626,68 @@ impl Chat {
             self.seen_studio = cur;
         }
         let mut prompt = format!("<editor>\n{context}\n</editor>\n\n{text}");
-        if self.planned.is_some_and(|p| p != settings.delegates()) && (!self.messages.is_empty() || self.cc_session.is_some()) {
-            self.messages.clear();
-            self.cc_session = None;
-            send(FromWorker::Notice("Planning with cheaper models was switched, so Claude starts a new conversation (the document stays as it is).".into()));
+        // (planning only exists with Claude; Gemini and Codex leave the setting as it was)
+        if cli.is_none() {
+            if self.planned.is_some_and(|p| p != settings.delegates()) && (!self.messages.is_empty() || self.cc_session.as_deref().is_some_and(|id| clis::session_cli(id).is_none())) {
+                self.messages.clear();
+                self.cc_session = None;
+                send(FromWorker::Notice("Planning with cheaper models was switched, so Claude starts a new conversation (the document stays as it is).".into()));
+            }
+            self.planned = Some(settings.delegates());
         }
-        self.planned = Some(settings.delegates());
-        // a resumed Claude Code conversation that Claude Code no longer has (cleaned up, or saved on
-        // another computer) continues from the saved text instead
-        if self.cc_session.as_deref().is_some_and(|id| !claude_code_has_session(id)) {
+        // a conversation id only means something to the program that made it
+        if by_id && self.cc_session.as_deref().is_some_and(|id| clis::session_cli(id) != cli) {
+            self.cc_session = None;
+        }
+        // a resumed conversation that the program no longer has (cleaned up, or saved on another
+        // computer) continues from the saved text instead
+        if self.cc_session.as_deref().is_some_and(|id| match clis::session_cli(id) {
+            None => !claude_code_has_session(id),
+            Some(c) => !clis::has_session(c, &id[c.prefix().len()..]),
+        }) {
             self.cc_session = None;
         }
         let has_context = if cred.is_some() { !self.messages.is_empty() } else { self.cc_session.is_some() };
-        if let Some(r) = self.recap.take() {
+        if let Some(r) = self.recap.as_deref().filter(|r| !r.trim().is_empty()) {
             if !has_context {
-                send(FromWorker::Notice("Continuing from the saved text of this chat (its full context isn't available here).".into()));
+                send(FromWorker::Notice("Continuing from the text of this chat so far (its full context isn't available here).".into()));
                 prompt = format!("<earlier_conversation>\nThis continues an earlier conversation about this document. What was said, as text:\n\n{r}\n</earlier_conversation>\n\n{prompt}");
             }
         }
-        let Some(cred) = cred else { return self.claude_code_turn(&prompt, image, settings, stop, send) };
+        // keep the text of this request and its reply, for a later switch to another program
+        let said = std::cell::RefCell::new(String::new());
+        let send = &|e: FromWorker| {
+            if let FromWorker::Text(t) = &e {
+                said.borrow_mut().push_str(t);
+            }
+            send(e)
+        };
+        let r = self.turn_with(&prompt, cred, cli, image, settings, stop, send);
+        let reply = said.into_inner();
+        let mut recap = self.recap.take().unwrap_or_default();
+        recap.push_str(&format!("User: {}\n", text.trim()));
+        if !reply.trim().is_empty() {
+            recap.push_str(&format!("{}: {}\n", settings.assistant(), reply.trim()));
+        }
+        // the latest part when it gets long
+        const KEEP: usize = 24_000;
+        if recap.len() > KEEP {
+            let mut cut = recap.len() - KEEP;
+            while !recap.is_char_boundary(cut) {
+                cut += 1;
+            }
+            recap = format!("[earlier part left out]\n{}", &recap[cut..]);
+        }
+        self.recap = Some(recap);
+        r
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn turn_with(&mut self, prompt: &str, cred: Option<Cred>, cli: Option<Cli>, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+        if let Some(cli) = cli {
+            return self.cli_turn(cli, prompt, image, settings, stop, send);
+        }
+        let Some(cred) = cred else { return self.claude_code_turn(prompt, image, settings, stop, send) };
         prune_images(&mut self.messages);
         let user = json!({"type": "text", "text": prompt});
         let picture = image.map(image_block);

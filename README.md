@@ -252,6 +252,16 @@ renders, and each request can be undone from the panel. It connects through the 
 your computer (so requests use your Claude plan), an Anthropic API key, or a Claude Console account
 signed in with the `ant` CLI. A key is kept in `~/.config/cad-rust-app/claude.json`, readable only by you.
 
+The same panel can run Google's **Gemini CLI** or OpenAI's **Codex CLI** instead, so requests use a
+Gemini plan (Google account sign-in) or a ChatGPT plan. Install the CLI (`npm install -g
+@google/gemini-cli` or `npm install -g @openai/codex`), sign in once (`gemini`, or `codex login`), and
+pick it under Connect in the panel's settings. rCAD gives it only its own cad tools (no shell, files
+or web): for Gemini through a run folder in `~/.config/cad-rust-app/gemini-run/` (settings, a tool
+policy and `GEMINI.md`), for Codex through a `rcad` profile, `~/.codex/rcad.config.toml`. Conversations
+resume like Claude Code's, and switching program partway through a chat carries on from its text.
+Codex gets pencil drawings as pictures; the Gemini CLI can't take a picture headless, so it gets the
+faces under the strokes only. Set `GEMINI_CLI_PATH` or `CODEX_PATH` if they aren't on PATH.
+
 To show Claude what you mean, press P (or the pencil beside the viewport) and draw on the part:
 the strokes stick to the model as you turn the view, and **Send to Claude** attaches a picture of the
 view with your drawing, plus the faces the strokes cross, to your next message.
