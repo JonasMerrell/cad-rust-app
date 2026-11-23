@@ -744,8 +744,8 @@ impl<'a> Pb<'a> {
         }
         let pitch = (std::f64::consts::TAU * rh * self.ramp.tan()).max(self.tool.diameter * 0.05);
         self.cut(DVec3::new(c.x + rh, c.y, z_from), self.feed);
-        helix(self, c.x, c.y, rh, z_from, z, -pitch, 1.0);
-        helix(self, c.x, c.y, rh, z, z, 0.0, 1.0);
+        let a = helix(self, c.x, c.y, rh, z_from, z, -pitch, 1.0, 0.0);
+        helix(self, c.x, c.y, rh, z, z, 0.0, 1.0, a);
         self.cut(DVec3::new(pts[0][0], pts[0][1], z), self.feed);
         true
     }
@@ -2238,12 +2238,22 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                     continue;
                 }
                 let bottom = ctx.wz(op.bottom).filter(|_| op.points.is_empty()).unwrap_or(h.bottom - through_extra);
-                let pitch = stepdown(op, t).min(2.0 * std::f64::consts::PI * rh * pb.ramp.tan()).max(0.05);
+                // spring_pass: rough by helix 0.1 inside the wall, then a full lap at the final radius at full
+                // depth and the same lap again (the cutter bends least on a light, even cut: the wall comes out
+                // round and to size down to the floor)
+                let finish = op.spring_pass && rh > 0.25;
+                let rr = if finish { rh - 0.1 } else { rh };
+                let pitch = stepdown(op, t).min(2.0 * std::f64::consts::PI * rr * pb.ramp.tan()).max(0.05);
                 let dir = if op.climb { 1.0 } else { -1.0 };
-                pb.approach(h.x + rh, h.y, entry);
-                pb.cut(DVec3::new(h.x + rh, h.y, top), pb.plunge);
-                helix(pb, h.x, h.y, rh, top, bottom, -pitch, dir);
-                helix(pb, h.x, h.y, rh, bottom, bottom, 0.0, dir);
+                pb.approach(h.x + rr, h.y, entry);
+                pb.cut(DVec3::new(h.x + rr, h.y, top), pb.plunge);
+                let a = helix(pb, h.x, h.y, rr, top, bottom, -pitch, dir, 0.0);
+                let a = helix(pb, h.x, h.y, rr, bottom, bottom, 0.0, dir, a);
+                if finish {
+                    pb.cut(DVec3::new(h.x + rh * a.cos(), h.y + rh * a.sin(), bottom), pb.feed);
+                    let a = helix(pb, h.x, h.y, rh, bottom, bottom, 0.0, dir, a);
+                    helix(pb, h.x, h.y, rh, bottom, bottom, 0.0, dir, a);
+                }
                 pb.cut(DVec3::new(h.x, h.y, bottom), pb.feed);
                 pb.rapid(DVec3::new(h.x, h.y, top + pb.retract));
             }
@@ -2276,7 +2286,7 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
                 pb.approach(h.x, h.y, entry);
                 pb.cut(DVec3::new(h.x, h.y, bottom), pb.plunge);
                 pb.cut(DVec3::new(h.x + rh, h.y, bottom), pb.feed * 0.5);
-                helix(pb, h.x, h.y, rh, bottom, bottom + pitch * revs, pitch, dir);
+                helix(pb, h.x, h.y, rh, bottom, bottom + pitch * revs, pitch, dir, 0.0);
                 let p = pb.pos.unwrap();
                 pb.cut(DVec3::new(h.x, h.y, p.z), pb.feed * 0.5);
                 pb.rapid(DVec3::new(h.x, h.y, top + pb.retract));
@@ -2298,16 +2308,21 @@ fn holes_op(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath) {
 
 /// Helix around (cx, cy) at radius r from z0 to z1 (pitch per turn, sign gives direction of travel;
 /// pitch 0 makes one flat circle). dir 1 = counter-clockwise.
-fn helix(pb: &mut Pb, cx: f64, cy: f64, r: f64, z0: f64, z1: f64, pitch: f64, dir: f64) {
+/// Starts at angle `a0` (radians) and returns the angle it ends at: a lap after a helix must carry on from where
+/// the helix stopped, or its first move cuts straight across the hole (and the post could fit that into an arc
+/// that leaves part of the floor edge uncut).
+fn helix(pb: &mut Pb, cx: f64, cy: f64, r: f64, z0: f64, z1: f64, pitch: f64, dir: f64, a0: f64) -> f64 {
     let turns = if pitch.abs() < 1e-9 { 1.0 } else { ((z1 - z0) / pitch).abs() };
     let seg = (2.0 * (1.0 - (0.005 / r).min(1.0)).acos()).clamp(0.05, 0.5);
     let n = ((turns * std::f64::consts::TAU / seg).ceil() as usize).max(8);
+    let mut a = a0;
     for i in 1..=n {
         let f = i as f64 / n as f64;
-        let a = dir * f * turns * std::f64::consts::TAU;
+        a = a0 + dir * f * turns * std::f64::consts::TAU;
         let z = if pitch.abs() < 1e-9 { z0 } else { z0 + (z1 - z0) * f };
         pb.cut(DVec3::new(cx + r * a.cos(), cy + r * a.sin(), z), pb.feed);
     }
+    a
 }
 
 /// The program's run time: each operation's moves, the spin-up wait at each spindle start (where the post
@@ -2827,6 +2842,44 @@ fn stats(tp: &mut Toolpath, tool: &Tool, cam: &Cam) {
 mod tests {
     use super::*;
     use crate::cam::{Cam, OpKind, Side, ToolKind};
+
+    /// A pocket's lap at the bottom carries on from where the helix stopped (its first move stays on the circle,
+    /// no cut straight across the hole), and with spring laps the final radius goes round in full twice at
+    /// the floor: every direction of the floor edge is reached at the final radius.
+    #[test]
+    fn bore_laps_continue_from_the_helix_and_go_all_round() {
+        let tool = Tool { kind: ToolKind::Flat, diameter: 6.35, ..Default::default() };
+        let mut pb = Pb { tool: &tool, moves: vec![], pos: Some(DVec3::new(0.75, 0.0, 0.0)), safe: 10.0, retract: 2.0, ramp: 3f64.to_radians(), feed: 1000.0, plunge: 300.0 };
+        let (r, rr) = (0.85, 0.75);
+        let a = helix(&mut pb, 0.0, 0.0, rr, 0.0, -3.15, -1.4, 1.0, 0.0);
+        let start_lap = pb.moves.len();
+        let a = helix(&mut pb, 0.0, 0.0, rr, -3.15, -3.15, 0.0, 1.0, a);
+        // no step across: consecutive points on the lap stay close together
+        let mut p = DVec3::from(pb.moves[start_lap - 1].end(DVec3::ZERO));
+        for m in &pb.moves[start_lap..] {
+            let q = m.end(p);
+            assert!(p.distance(q) < 0.25 && ((p + q) / 2.0).truncate().length() > rr - 0.01, "{p} -> {q}");
+            p = q;
+        }
+        pb.cut(DVec3::new(r * a.cos(), r * a.sin(), -3.15), 1000.0);
+        let a = helix(&mut pb, 0.0, 0.0, r, -3.15, -3.15, 0.0, 1.0, a);
+        helix(&mut pb, 0.0, 0.0, r, -3.15, -3.15, 0.0, 1.0, a);
+        // the final radius at the floor goes round twice without a gap: consecutive points on it, turning one way
+        let mut swept = 0.0;
+        let mut p = DVec3::ZERO;
+        let on = |q: DVec3| (q.z + 3.15).abs() < 1e-9 && (q.truncate().length() - r).abs() < 1e-9;
+        for m in &pb.moves {
+            let q = m.end(p);
+            if on(p) && on(q) {
+                let d = q.y.atan2(q.x) - p.y.atan2(p.x);
+                let d = (d + std::f64::consts::PI).rem_euclid(std::f64::consts::TAU) - std::f64::consts::PI;
+                assert!(d > 0.0 && d < 0.6, "{p} -> {q}");
+                swept += d;
+            }
+            p = q;
+        }
+        assert!(swept > 2.0 * std::f64::consts::TAU - 1e-6, "{swept}");
+    }
 
     #[test]
     fn a_ramp_back_over_the_entry_is_found() {
