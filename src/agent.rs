@@ -1953,13 +1953,18 @@ pub fn failed(v: &Value) -> bool {
 
 /// The environment variable that carries the chat panel's bridge token to `rcad mcp --bridge`.
 pub const BRIDGE_TOKEN_ENV: &str = "RCAD_BRIDGE_TOKEN";
+/// The environment variable that carries the bridge's address to `rcad mcp --bridge-from-env`.
+pub const BRIDGE_ADDR_ENV: &str = "RCAD_BRIDGE_ADDR";
 
 pub fn mcp_main() {
     // `--bridge ADDR --token T`: the rCAD chat panel started this server through Claude Code,
     // and tool calls go to the document open in that window
     let args: Vec<String> = std::env::args().collect();
     let arg = |k: &str| args.iter().position(|a| a == k).and_then(|i| args.get(i + 1)).cloned();
-    let bridge = arg("--bridge").map(|addr| (addr, std::env::var(BRIDGE_TOKEN_ENV).ok().filter(|t| !t.is_empty()).or_else(|| arg("--token")).unwrap_or_default()));
+    // `--bridge-from-env`: the address is in RCAD_BRIDGE_ADDR too (the Gemini and Codex CLIs keep
+    // their tool settings in a file that stays the same from one rCAD window to the next)
+    let addr = arg("--bridge").or_else(|| args.iter().any(|a| a == "--bridge-from-env").then(|| std::env::var(BRIDGE_ADDR_ENV).unwrap_or_default()));
+    let bridge = addr.map(|addr| (addr, std::env::var(BRIDGE_TOKEN_ENV).ok().filter(|t| !t.is_empty()).or_else(|| arg("--token")).unwrap_or_default()));
     let mut link: Option<(std::net::TcpStream, std::io::BufReader<std::net::TcpStream>)> = None;
     let mut forward = |name: &str, args: &Value| -> R<Value> {
         let (addr, token) = bridge.as_ref().unwrap();

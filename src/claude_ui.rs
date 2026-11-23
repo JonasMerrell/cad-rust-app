@@ -115,7 +115,7 @@ impl ClaudeUi {
     fn configured(&self) -> bool {
         match self.settings.auth {
             Auth::ApiKey => self.settings.key().is_some(),
-            Auth::Console | Auth::ClaudeCode => true,
+            Auth::Console | Auth::ClaudeCode | Auth::Gemini | Auth::Codex => true,
         }
     }
 }
@@ -191,7 +191,7 @@ fn lock_editor(app: &mut App, ctx: &egui::Context, area: egui::Rect) {
         let mut stop = false;
         ui.scope_builder(egui::UiBuilder::new().max_rect(card), |ui| {
             Frame::new().fill(theme::panel()).corner_radius(8).inner_margin(Margin::same(10)).show(ui, |ui| {
-                ui.label(RichText::new("Claude is changing the document").size(12.5).color(theme::text()));
+                ui.label(RichText::new(format!("{} is changing the document", app.claude.settings.assistant())).size(12.5).color(theme::text()));
                 stop = ui.button("Stop to edit it yourself").clicked();
             });
         });
@@ -207,7 +207,7 @@ fn lock_editor(app: &mut App, ctx: &egui::Context, area: egui::Rect) {
 fn header(app: &mut App, ui: &mut Ui) {
     ui.horizontal(|ui| {
         ui.add(crate::icons::image("chat", 17.0).tint(theme::accent()));
-        ui.label(RichText::new("Claude").family(theme::medium()).size(14.0).color(theme::text()));
+        ui.label(RichText::new(app.claude.settings.assistant()).family(theme::medium()).size(14.0).color(theme::text()));
         ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
             if ui.add(egui::Button::image(crate::icons::image("close", 15.0).tint(theme::text()))).on_hover_text("Close").clicked() {
                 app.claude.open = false;
@@ -234,7 +234,7 @@ fn header(app: &mut App, ui: &mut Ui) {
 }
 
 /// Run a check that starts a program (and may wait on the network) without freezing the window.
-fn off_thread(ctx: &egui::Context, f: fn() -> Result<String, String>) -> std::sync::mpsc::Receiver<Result<String, String>> {
+fn off_thread(ctx: &egui::Context, f: impl FnOnce() -> Result<String, String> + Send + 'static) -> std::sync::mpsc::Receiver<Result<String, String>> {
     let (tx, rx) = std::sync::mpsc::channel();
     let ctx = ctx.clone();
     std::thread::spawn(move || {
@@ -250,7 +250,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
         ui.label(RichText::new(t).size(11.5).color(theme::muted()));
     };
     ui.label(
-        RichText::new("Design in plain language: describe a part or a change, and Claude builds it in this document with the same tools as the MCP server.")
+        RichText::new(format!("Design in plain language: describe a part or a change, and {} builds it in this document with the same tools as the MCP server.", c.settings.assistant()))
             .size(12.0)
             .color(theme::text()),
     );
@@ -261,6 +261,8 @@ fn settings(app: &mut App, ui: &mut Ui) {
     ui.radio_value(&mut auth, Auth::ClaudeCode, "Claude Code (your Claude login)");
     ui.radio_value(&mut auth, Auth::ApiKey, "Anthropic API key");
     ui.radio_value(&mut auth, Auth::Console, "Claude Console account (ant CLI sign-in)");
+    ui.radio_value(&mut auth, Auth::Gemini, "Gemini CLI (your Google account / Gemini plan)");
+    ui.radio_value(&mut auth, Auth::Codex, "Codex CLI (your ChatGPT plan)");
     if auth != c.settings.auth {
         c.settings.auth = auth;
         let _ = crate::claude::save_settings(&c.settings);
@@ -328,6 +330,19 @@ fn settings(app: &mut App, ui: &mut Ui) {
                 c.check = Some(off_thread(ui.ctx(), crate::claude::claude_code_version));
             }
         }
+        Auth::Gemini | Auth::Codex => {
+            let cli = crate::claude::Cli::of(c.settings.auth).unwrap();
+            muted(
+                ui,
+                match cli {
+                    crate::claude::Cli::Gemini => "Runs Google's Gemini CLI on this computer with its own sign-in, so requests use your Google account's Gemini plan. Install it (npm install -g @google/gemini-cli) and run gemini once to sign in with Google. In the chat it can only use rCAD's tools.",
+                    crate::claude::Cli::Codex => "Runs OpenAI's Codex CLI on this computer with its own sign-in, so requests use your ChatGPT plan. Install it (npm install -g @openai/codex) and run codex login to sign in with ChatGPT. In the chat it can only use rCAD's tools.",
+                },
+            );
+            if ui.add_enabled(c.check.is_none(), egui::Button::new("Check")).clicked() {
+                c.check = Some(off_thread(ui.ctx(), move || crate::claude::cli_version(cli)));
+            }
+        }
     }
     if let Some(rx) = &c.login {
         if let Ok(r) = rx.try_recv() {
@@ -362,6 +377,37 @@ fn settings(app: &mut App, ui: &mut Ui) {
     ui.label(RichText::new("MODEL").family(theme::medium()).color(theme::muted()).size(10.5));
     ui.add_space(4.0);
     let mut changed = false;
+    if let Some(cli) = crate::claude::Cli::of(c.settings.auth) {
+        ui.horizontal(|ui| {
+            theme::field_style(ui);
+            let (field, hint) = match cli {
+                crate::claude::Cli::Gemini => (&mut c.settings.gemini_model, "auto (the CLI's choice)"),
+                crate::claude::Cli::Codex => (&mut c.settings.codex_model, "Codex's default"),
+            };
+            changed |= ui.add(egui::TextEdit::singleline(field).hint_text(hint).desired_width(170.0)).changed();
+            if cli == crate::claude::Cli::Codex {
+                egui::ComboBox::from_id_salt("claude-effort").selected_text(format!("Effort: {}", c.settings.effort)).width(110.0).show_ui(ui, |ui| {
+                    for e in EFFORTS {
+                        changed |= ui.selectable_value(&mut c.settings.effort, e.to_string(), *e).changed();
+                    }
+                });
+            }
+        });
+        muted(ui, match cli {
+            crate::claude::Cli::Gemini => "A Gemini model id (e.g. gemini-3.1-pro-preview), or leave it empty for auto.",
+            crate::claude::Cli::Codex => "A model id (e.g. gpt-5.5), or leave it empty for Codex's default. Effort sets its reasoning effort (max is xhigh).",
+        });
+        if changed {
+            let _ = crate::claude::save_settings(&c.settings);
+        }
+        if c.configured() {
+            ui.add_space(10.0);
+            if ui.button("Done").clicked() {
+                c.settings_open = false;
+            }
+        }
+        return;
+    }
     ui.horizontal(|ui| {
         theme::field_style(ui);
         let label = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or(c.settings.model.as_str()).to_string();
@@ -429,7 +475,7 @@ fn chat(app: &mut App, ui: &mut Ui) {
             .show(ui, |ui| {
                 ui.add(
                     egui::TextEdit::multiline(&mut c.input)
-                        .hint_text("Ask Claude to design or change something… (Enter sends, Shift+Enter for a new line)")
+                        .hint_text(format!("Ask {} to design or change something… (Enter sends, Shift+Enter for a new line)", c.settings.assistant()))
                         .desired_rows(3)
                         .desired_width(f32::INFINITY),
                 )
@@ -449,9 +495,22 @@ fn chat(app: &mut App, ui: &mut Ui) {
             if c.before.is_some() && c.changed && !c.busy {
                 revert = ui.small_button("Undo last request").on_hover_text("Put the document back the way it was before Claude's last request").clicked();
             } else {
-                let model = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or("");
-                let workers = if c.settings.delegates() { " + Sonnet/Haiku" } else { "" };
-                ui.label(RichText::new(format!("{model}{workers} · {}", c.settings.effort)).size(11.0).color(theme::muted()));
+                let line = match crate::claude::Cli::of(c.settings.auth) {
+                    Some(cli) => {
+                        let m = c.settings.cli_model(cli).trim();
+                        let m = if m.is_empty() { "default model" } else { m };
+                        match cli {
+                            crate::claude::Cli::Codex => format!("Codex · {m} · {}", c.settings.effort),
+                            crate::claude::Cli::Gemini => format!("Gemini CLI · {m}"),
+                        }
+                    }
+                    None => {
+                        let model = MODELS.iter().find(|m| m.0 == c.settings.model).map(|m| m.1).unwrap_or("");
+                        let workers = if c.settings.delegates() { " + Sonnet/Haiku" } else { "" };
+                        format!("{model}{workers} · {}", c.settings.effort)
+                    }
+                };
+                ui.label(RichText::new(line).size(11.0).color(theme::muted()));
             }
             ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                 if c.busy {
