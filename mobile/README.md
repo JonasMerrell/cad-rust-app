@@ -6,6 +6,11 @@ to the same small service the rCAD Capture app uploads photos to.
 
 - **Documents**: every rCAD document in netdash's project folders, newest first, with search.
   *New* makes a project folder with an empty document.
+- **Look**: the OrcaSlicer fork's G-code page: the model fills the screen with translucent
+  panels floating over it, Orca green, dark or light with the phone.
+- **Feature tree**: the Part Studio's features in order (failing ones in red with the error,
+  suppressed ones struck through), its variables and parts; for an assembly, its instances and
+  mates. Tap one to ask Claude about it.
 - **Viewer**: rCAD's own interactive web page of the document (the page *File → Export web
   viewer* writes), built on netdash with `export_web` and cached until the document changes. Pick
   any Part Studio or Assembly; assemblies keep their mate sliders and animations.
@@ -59,6 +64,7 @@ All on the receiver's port and token (see `capture/receiver/rcad_projects.py`):
     POST /api/projects {"name"}            new project
     GET  /api/doc/<id>                     tabs, saved chats, running request
     GET  /api/doc/<id>/view?studio=N|assembly=N&t=<token>
+    GET  /api/doc/<id>/tree?studio=N|assembly=N   feature tree, variables, parts / instances, mates
     GET  /api/doc/<id>/chats/<chat>
     POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?}  → {"job"}
     GET  /api/jobs/<job>?after=N           events (long poll)

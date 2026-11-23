@@ -2,10 +2,11 @@ package org.rcad.mobile
 
 import android.annotation.SuppressLint
 import android.app.Activity
-import android.app.AlertDialog
 import android.graphics.BitmapFactory
+import android.graphics.Paint
 import android.os.Bundle
 import android.util.Base64
+import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
@@ -21,40 +22,52 @@ import android.widget.LinearLayout
 import android.widget.ScrollView
 import android.widget.TextView
 import android.widget.Toast
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
 /**
- * One document: rCAD's own web viewer (the page export_web writes, made on netdash) above a chat
- * with Claude, which runs on netdash through Claude Code. Chats are the same ones the editor's
- * chat panel saves next to the document, so a conversation can go on in either place.
+ * One document, laid out like the OrcaSlicer fork's G-code page: rCAD's web viewer fills the
+ * screen (made on netdash with export_web, in its app mode), with floating panels over it: the
+ * document and tab at the top left, and at the bottom a panel with the feature tree and the chat
+ * with Claude, which runs on netdash through Claude Code. Chats are the ones the editor's chat
+ * panel saves next to the document, so a conversation can go on in either place.
  */
 class DocActivity : Activity() {
     private lateinit var prefs: Prefs
     private lateinit var docId: String
     private var api: Api? = null
     private var detail: JSONObject? = null
+    private var tree: JSONObject? = null
 
     private var assembly: Int? = null
     private var studio: Int = 0
     private var chatId: String? = null
     private var jobId: String? = null
     private var destroyed = false
-    /** 0 viewer above chat, 1 viewer only, 2 chat only. */
-    private var layoutMode = 0
+    /** 0 the feature tree, 1 the chat. */
+    private var tabShown = 0
+    private var sheetOpen = true
 
     private lateinit var web: WebView
-    private lateinit var webBox: FrameLayout
     private lateinit var webNote: TextView
+    private lateinit var info: LinearLayout
+    private lateinit var subtitle: TextView
+    private lateinit var stats: TextView
+    private lateinit var sheet: LinearLayout
+    private lateinit var sheetBody: FrameLayout
+    private lateinit var treeScroll: ScrollView
+    private lateinit var treeList: LinearLayout
     private lateinit var chatBox: LinearLayout
+    private lateinit var tabTree: TextView
+    private lateinit var tabChat: TextView
+    private lateinit var hideBtn: Button
     private lateinit var msgs: LinearLayout
     private lateinit var msgScroll: ScrollView
     private lateinit var input: EditText
     private lateinit var send: Button
-    private lateinit var tabBtn: Button
     private lateinit var chatBtn: Button
     private lateinit var modelBtn: Button
-    private lateinit var layoutBtn: Button
 
     // the streaming reply
     private var assistant: TextView? = null
@@ -65,33 +78,30 @@ class DocActivity : Activity() {
     private var attemptLen: Int? = null
     private var docChanged = false
 
+    private fun mp() = ViewGroup.LayoutParams.MATCH_PARENT
+    private fun wc() = ViewGroup.LayoutParams.WRAP_CONTENT
+
     @SuppressLint("SetJavaScriptEnabled")
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Ui.init(this)
         prefs = Prefs(this)
         docId = intent.getStringExtra("doc") ?: run { finish(); return }
         chatId = prefs.chatFor(docId)
         val name = intent.getStringExtra("name") ?: "Document"
+        val pad = Ui.dp(this, 12)
 
-        val title = Ui.text(this, name, 17f, bold = true).apply {
-            maxLines = 1
-            ellipsize = android.text.TextUtils.TruncateAt.END
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
-        }
-        tabBtn = Ui.button(this, "Part Studio ▾") { pickTab() }
-        layoutBtn = Ui.button(this, "⇕") { cycleLayout() }
-        val bar = Ui.row(this, Ui.button(this, "‹") { finish() }, gap(), title, gap(), tabBtn, gap(), layoutBtn)
-            .apply { setPadding(Ui.dp(context, 10), Ui.dp(context, 8), Ui.dp(context, 10), Ui.dp(context, 8)) }
-
+        // the model, full screen
         web = WebView(this).apply {
             settings.javaScriptEnabled = true
             settings.domStorageEnabled = true
-            settings.loadWithOverviewMode = true
-            settings.useWideViewPort = true
             setBackgroundColor(Ui.BG)
             webViewClient = object : WebViewClient() {
                 override fun onPageFinished(view: WebView?, url: String?) {
-                    if (url?.startsWith("http") == true) webNote.visibility = View.GONE
+                    if (url?.startsWith("http") == true) {
+                        webNote.visibility = View.GONE
+                        pushInsets()
+                    }
                 }
 
                 override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, error: WebResourceResponse?) {
@@ -106,56 +116,106 @@ class DocActivity : Activity() {
                 override fun shouldOverrideUrlLoading(view: WebView?, request: WebResourceRequest?): Boolean = false
             }
         }
-        webNote = Ui.text(this, "Building the 3D view on netdash…", 14f, Ui.MUTED).apply {
-            setPadding(Ui.dp(context, 20), Ui.dp(context, 20), Ui.dp(context, 20), Ui.dp(context, 20))
-            setBackgroundColor(Ui.BG)
-            gravity = android.view.Gravity.CENTER
+        webNote = Ui.text(this, "Building the 3D view on netdash…", 15f, Ui.MUTED).apply {
+            gravity = Gravity.CENTER
+            setPadding(pad * 2, pad * 2, pad * 2, pad * 2)
         }
-        webBox = FrameLayout(this).apply {
-            addView(web, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
-            addView(webNote, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+
+        // top left: the document (Orca's info panel)
+        val back = Ui.text(this, "‹", 26f, Ui.TEXT).apply {
+            setPadding(0, 0, Ui.dp(context, 10), Ui.dp(context, 2))
+            setOnClickListener { finish() }
         }
+        val title = Ui.text(this, name, 15f, bold = true).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+        }
+        subtitle = Ui.text(this, "Part Studio ▾", 13f, Ui.ACCENT).apply { setOnClickListener { pickTab() } }
+        stats = Ui.text(this, "", 13f, Ui.MUTED)
+        val texts = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            addView(title)
+            addView(subtitle)
+            addView(stats)
+        }
+        info = Ui.row(this, back, texts).apply {
+            background = Ui.panel(context)
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 8), pad, Ui.dp(context, 8))
+            gravity = Gravity.CENTER_VERTICAL
+        }
+
+        // bottom: feature tree and chat (Orca's side panel, which docks at the bottom on phones)
+        tabTree = Ui.tab(this, "Feature tree") { showTab(0) }
+        tabChat = Ui.tab(this, "Claude") { showTab(1) }
+        hideBtn = Ui.button(this, "Hide") { setSheet(!sheetOpen) }
+        val spacer = View(this).apply { layoutParams = LinearLayout.LayoutParams(0, 1, 1f) }
+        val tabs = Ui.row(this, tabTree, tabChat, spacer, hideBtn).apply { setPadding(Ui.dp(context, 4), Ui.dp(context, 4), Ui.dp(context, 8), Ui.dp(context, 4)) }
+
+        treeList = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, 0, pad, pad)
+        }
+        treeScroll = ScrollView(this).apply { addView(treeList) }
 
         chatBtn = Ui.button(this, "New chat ▾") { pickChat() }.apply {
             maxLines = 1
             ellipsize = android.text.TextUtils.TruncateAt.END
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            layoutParams = LinearLayout.LayoutParams(0, wc(), 1f)
         }
         modelBtn = Ui.button(this, modelLabel()) { pickModel() }
-        val chatBar = Ui.row(this, chatBtn, gap(), modelBtn).apply { setPadding(Ui.dp(context, 10), Ui.dp(context, 6), Ui.dp(context, 10), Ui.dp(context, 4)) }
+        val chatBar = Ui.row(this, chatBtn, gap(), modelBtn).apply { setPadding(pad, Ui.dp(context, 2), pad, Ui.dp(context, 4)) }
         msgs = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 4), Ui.dp(context, 12), Ui.dp(context, 12))
+            setPadding(pad, 0, pad, Ui.dp(context, 8))
         }
         msgScroll = ScrollView(this).apply { addView(msgs) }
         input = EditText(this).apply {
             hint = "Ask Claude to design or change something"
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.MUTED)
-            textSize = 15f
+            textSize = 14.5f
             maxLines = 5
-            background = Ui.rounded(Ui.PANEL, Ui.dp(context, 10).toFloat())
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8))
-            layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f)
+            background = Ui.rounded(Ui.BG, Ui.dp(context, 6).toFloat(), Ui.BORDER, maxOf(1, Ui.dp(context, 1)))
+            setPadding(Ui.dp(context, 10), Ui.dp(context, 7), Ui.dp(context, 10), Ui.dp(context, 7))
+            layoutParams = LinearLayout.LayoutParams(0, wc(), 1f)
         }
         send = Ui.button(this, "Send", primary = true) { if (jobId != null) stopJob() else sendPrompt() }
-        val inputRow = Ui.row(this, input, gap(), send).apply { setPadding(Ui.dp(context, 10), Ui.dp(context, 6), Ui.dp(context, 10), Ui.dp(context, 10)) }
+        val inputRow = Ui.row(this, input, gap(), send).apply { setPadding(pad, Ui.dp(context, 4), pad, pad) }
         chatBox = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            setBackgroundColor(Ui.PANEL)
             addView(chatBar)
-            addView(msgScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
+            addView(msgScroll, LinearLayout.LayoutParams(mp(), 0, 1f))
             addView(inputRow)
         }
-
-        setContentView(LinearLayout(this).apply {
+        sheetBody = FrameLayout(this).apply {
+            addView(treeScroll, FrameLayout.LayoutParams(mp(), mp()))
+            addView(chatBox, FrameLayout.LayoutParams(mp(), mp()))
+        }
+        sheet = LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
+            background = Ui.panel(context)
+            addView(tabs)
+            addView(Ui.rule(context).apply { (layoutParams as LinearLayout.LayoutParams).topMargin = 0 })
+            addView(sheetBody, LinearLayout.LayoutParams(mp(), 0, 1f))
+        }
+
+        val root = FrameLayout(this).apply {
             setBackgroundColor(Ui.BG)
             fitsSystemWindows = true
-            addView(bar)
-            addView(webBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1.15f))
-            addView(chatBox, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
-        })
+            addView(web, FrameLayout.LayoutParams(mp(), mp()))
+            addView(webNote, FrameLayout.LayoutParams(mp(), mp()))
+            addView(info, FrameLayout.LayoutParams(wc(), wc(), Gravity.TOP or Gravity.START).apply {
+                setMargins(pad, pad, pad, 0)
+            })
+            addView(sheet, FrameLayout.LayoutParams(mp(), wc(), Gravity.BOTTOM).apply { setMargins(pad, 0, pad, pad) })
+        }
+        setContentView(root)
+        // the panel takes about 42% of the height when open (more while typing, as the keyboard shrinks the window)
+        root.addOnLayoutChangeListener { _, _, top, _, bottom, _, oldTop, _, oldBottom ->
+            if (bottom - top != oldBottom - oldTop) sizeSheet(bottom - top)
+        }
+        info.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> pushInsets() }
+        showTab(if (chatId != null) 1 else 0)
         load(first = true)
     }
 
@@ -172,6 +232,43 @@ class DocActivity : Activity() {
     private fun showWebNote(t: String) {
         webNote.text = t
         webNote.visibility = View.VISIBLE
+    }
+
+    // ---------------------------------------------------------------- layout
+
+    private fun sizeSheet(h: Int) {
+        val lp = sheet.layoutParams as FrameLayout.LayoutParams
+        lp.height = if (sheetOpen) (h * 0.42f).toInt().coerceAtLeast(Ui.dp(this, 220)) else ViewGroup.LayoutParams.WRAP_CONTENT
+        sheet.layoutParams = lp
+        sheet.post { pushInsets() }
+    }
+
+    private fun setSheet(open: Boolean) {
+        sheetOpen = open
+        sheetBody.visibility = if (open) View.VISIBLE else View.GONE
+        hideBtn.text = if (open) "Hide" else "Show"
+        sizeSheet((sheet.parent as View).height)
+    }
+
+    private fun showTab(i: Int) {
+        tabShown = i
+        Ui.setTab(tabTree, i == 0)
+        Ui.setTab(tabChat, i == 1)
+        treeScroll.visibility = if (i == 0) View.VISIBLE else View.GONE
+        chatBox.visibility = if (i == 1) View.VISIBLE else View.GONE
+        if (!sheetOpen) setSheet(true)
+    }
+
+    /** Tell the page how much of the screen the panels cover, so its own buttons stay clear of them. */
+    private fun pushInsets() {
+        if (!::web.isInitialized) return
+        val d = resources.displayMetrics.density
+        val top = (info.bottom / d).toInt()
+        val bottom = ((web.height - sheet.top) / d).toInt().coerceAtLeast(0)
+        web.evaluateJavascript(
+            "(function(r){r.style.setProperty('--app-top','${top - 12}px');r.style.setProperty('--app-bottom','${bottom}px');})(document.documentElement)",
+            null,
+        )
     }
 
     // ---------------------------------------------------------------- document
@@ -213,21 +310,45 @@ class DocActivity : Activity() {
     }
 
     private fun updateTabLabel() {
-        tabBtn.text = (assembly?.let { names("assemblies").getOrNull(it) } ?: names("studios").getOrNull(studio) ?: "Part Studio") + " ▾"
+        val n = assembly?.let { names("assemblies").getOrNull(it) } ?: names("studios").getOrNull(studio) ?: "Part Studio"
+        val kind = if (assembly != null) "Assembly" else "Part Studio"
+        val many = names("studios").size + names("assemblies").size > 1
+        subtitle.text = "$kind · $n" + if (many) "  ▾" else ""
     }
 
+    /** Build (or fetch from the cache) the page and its feature tree, then show both. */
     private fun reloadViewer() {
         val a = api ?: return
-        showWebNote("Building the 3D view on netdash… (a big model can take a minute)")
-        web.loadUrl(a.viewUrl(docId, assembly, studio))
+        showWebNote("Building the 3D view on netdash…\n(a big model can take a minute)")
+        treeList.removeAllViews()
+        treeList.addView(Ui.text(this, "Loading the feature tree…", 13.5f, Ui.MUTED).apply { setPadding(0, Ui.dp(context, 8), 0, 0) })
+        val sel = if (assembly != null) "assembly=$assembly" else "studio=$studio"
+        val want = Pair(assembly, studio)
+        Thread {
+            try {
+                val t = a.get("/api/doc/${Api.enc(docId)}/tree?$sel", readMs = 16 * 60 * 1000)
+                runOnUiThread {
+                    if (want != Pair(assembly, studio)) return@runOnUiThread
+                    tree = t
+                    showTree(t)
+                    web.loadUrl(a.viewUrl(docId, assembly, studio) + "&app=1")
+                }
+            } catch (e: IOException) {
+                runOnUiThread {
+                    showWebNote("Couldn't show the model: ${e.message}")
+                    treeList.removeAllViews()
+                    treeList.addView(Ui.text(this, e.message ?: "Couldn't load the feature tree", 13.5f, Ui.ERR))
+                }
+            }
+        }.start()
     }
 
     private fun pickTab() {
         val studios = names("studios")
         val asms = names("assemblies")
-        val labels = studios.map { "Part Studio: $it" } + asms.map { "Assembly: $it" }
-        if (labels.isEmpty()) return
-        AlertDialog.Builder(this).setTitle("Show").setItems(labels.toTypedArray()) { _, i ->
+        val labels = studios.map { "Part Studio · $it" } + asms.map { "Assembly · $it" }
+        if (labels.size < 2) return
+        Ui.dialog(this).setTitle("Show").setItems(labels.toTypedArray()) { _, i ->
             if (i < studios.size) {
                 studio = i
                 assembly = null
@@ -239,11 +360,123 @@ class DocActivity : Activity() {
         }.show()
     }
 
-    private fun cycleLayout() {
-        layoutMode = (layoutMode + 1) % 3
-        webBox.visibility = if (layoutMode == 2) View.GONE else View.VISIBLE
-        chatBox.visibility = if (layoutMode == 1) View.GONE else View.VISIBLE
-        layoutBtn.text = when (layoutMode) { 1 -> "▤"; 2 -> "▣"; else -> "⇕" }
+    // ---------------------------------------------------------------- feature tree
+
+    private fun objs(a: JSONArray?): List<JSONObject> = (0 until (a?.length() ?: 0)).mapNotNull { a!!.optJSONObject(it) }
+
+    private fun showTree(t: JSONObject) {
+        treeList.removeAllViews()
+        if (t.optString("kind") == "assembly") {
+            val inst = objs(t.optJSONArray("instances"))
+            val mates = objs(t.optJSONArray("mates"))
+            val failed = t.optJSONArray("failed_mates")?.length() ?: 0
+            stats.text = "${inst.size} instance${if (inst.size == 1) "" else "s"} · ${mates.size} mate${if (mates.size == 1) "" else "s"}" +
+                if (failed > 0) " · $failed failed" else ""
+            stats.setTextColor(if (failed > 0) Ui.ERR else Ui.MUTED)
+            treeList.addView(Ui.title(this, "Instances"))
+            for (i in inst) {
+                val mark = if (i.optBoolean("sub")) "▣" else "◧"
+                val sub = listOfNotNull("fixed".takeIf { i.optBoolean("fixed") }, "hidden".takeIf { i.optBoolean("hidden") }).joinToString(", ")
+                treeList.addView(treeRow(mark, i.optString("name"), sub, dim = i.optBoolean("hidden"), error = null) {
+                    askAbout("instance \u201c${i.optString("name")}\u201d")
+                })
+            }
+            if (mates.isNotEmpty()) {
+                treeList.addView(Ui.title(this, "Mates"))
+                for (m in mates) treeList.addView(treeRow("⛓", m.optString("name"), m.optString("kind"), dim = false, error = null) {
+                    askAbout("mate \u201c${m.optString("name")}\u201d")
+                })
+            }
+            return
+        }
+        val feats = objs(t.optJSONArray("features"))
+        val parts = objs(t.optJSONArray("parts"))
+        val errs = feats.count { it.has("error") }
+        stats.text = "${parts.size} part${if (parts.size == 1) "" else "s"} · ${feats.size} feature${if (feats.size == 1) "" else "s"}" +
+            if (errs > 0) " · $errs failing" else ""
+        stats.setTextColor(if (errs > 0) Ui.ERR else Ui.MUTED)
+        if (feats.isEmpty()) {
+            treeList.addView(Ui.text(this, "No features yet. Ask Claude to design something.", 13.5f, Ui.MUTED).apply { setPadding(0, Ui.dp(context, 8), 0, 0) })
+        }
+        if (feats.isNotEmpty()) treeList.addView(Ui.title(this, "Features"))
+        for (f in feats) {
+            val err = if (f.has("error")) f.optString("error") else null
+            treeList.addView(treeRow(Ui.featureIcon(f.optString("kind")), f.optString("name"), f.optString("detail"), dim = f.optBoolean("suppressed"), error = err) {
+                featureDialog(f)
+            })
+        }
+        val vars = objs(t.optJSONArray("variables"))
+        if (vars.isNotEmpty()) {
+            treeList.addView(Ui.rule(this))
+            treeList.addView(Ui.title(this, "Variables"))
+            for (v in vars) treeList.addView(treeRow("#", v.optString("name"), "= " + v.optString("expr"), dim = false, error = null) {
+                askAbout("variable ${v.optString("name")} (now ${v.optString("expr")})")
+            })
+        }
+        if (parts.isNotEmpty()) {
+            treeList.addView(Ui.rule(this))
+            treeList.addView(Ui.title(this, "Parts"))
+            for (p in parts) {
+                val vol = p.optDouble("volume_mm3", Double.NaN)
+                val sub = if (vol.isNaN()) "" else if (vol >= 1000) "%.1f cm³".format(vol / 1000) else "%.0f mm³".format(vol)
+                treeList.addView(treeRow("◆", p.optString("name"), sub, dim = false, error = null) { askAbout("part \u201c${p.optString("name")}\u201d") })
+            }
+        }
+    }
+
+    private fun treeRow(mark: String, name: String, detail: String, dim: Boolean, error: String?, onTap: () -> Unit): View {
+        val color = when {
+            error != null -> Ui.ERR
+            dim -> Ui.MUTED
+            else -> Ui.TEXT
+        }
+        val icon = Ui.text(this, mark, 14f, if (error != null) Ui.ERR else Ui.ACCENT).apply {
+            gravity = Gravity.CENTER
+            layoutParams = LinearLayout.LayoutParams(Ui.dp(context, 22), wc())
+        }
+        val label = Ui.text(this, name, 14f, color).apply {
+            maxLines = 1
+            ellipsize = android.text.TextUtils.TruncateAt.END
+            if (dim) paintFlags = paintFlags or Paint.STRIKE_THRU_TEXT_FLAG
+        }
+        val col = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            layoutParams = LinearLayout.LayoutParams(0, wc(), 1f)
+            addView(label)
+            val sub = error ?: detail
+            if (sub.isNotEmpty()) addView(Ui.text(context, sub, 12f, if (error != null) Ui.ERR else Ui.MUTED).apply {
+                maxLines = 1
+                ellipsize = android.text.TextUtils.TruncateAt.END
+            })
+        }
+        return Ui.row(this, icon, gap(), col).apply {
+            setPadding(0, Ui.dp(context, 5), 0, Ui.dp(context, 5))
+            isClickable = true
+            setOnClickListener { onTap() }
+        }
+    }
+
+    private fun featureDialog(f: JSONObject) {
+        val lines = mutableListOf<String>()
+        lines += f.optString("kind")
+        if (f.optString("detail").isNotEmpty()) lines += f.optString("detail")
+        if (f.optBoolean("suppressed")) lines += "Suppressed"
+        if (f.has("error")) lines += "Error: " + f.optString("error")
+        val name = f.optString("name")
+        Ui.dialog(this).setTitle(name).setMessage(lines.joinToString("\n"))
+            .setPositiveButton("Ask Claude about it") { _, _ -> askAbout("feature \u201c$name\u201d") }
+            .setNegativeButton("Close", null)
+            .show()
+    }
+
+    /** Start a request about something in the tree: switch to the chat with its name typed. */
+    private fun askAbout(what: String) {
+        showTab(1)
+        val cur = input.text.toString().trim()
+        input.setText(if (cur.isEmpty()) "In the $what, " else "$cur (the $what) ")
+        input.setSelection(input.text.length)
+        input.requestFocus()
+        (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).showSoftInput(input, 0)
     }
 
     // ---------------------------------------------------------------- chats
@@ -258,7 +491,7 @@ class DocActivity : Activity() {
     private fun pickModel() {
         val keys = listOf("", "opus", "sonnet", "haiku")
         val labels = arrayOf("As set in rCAD on netdash", "Opus (plans, hands work to Sonnet/Haiku)", "Sonnet", "Haiku (quickest)")
-        AlertDialog.Builder(this).setTitle("Claude model").setSingleChoiceItems(labels, keys.indexOf(prefs.model).coerceAtLeast(0)) { d, i ->
+        Ui.dialog(this).setTitle("Claude model").setSingleChoiceItems(labels, keys.indexOf(prefs.model).coerceAtLeast(0)) { d, i ->
             prefs.model = keys[i]
             modelBtn.text = modelLabel()
             d.dismiss()
@@ -275,7 +508,7 @@ class DocActivity : Activity() {
             val n = it.optInt("requests")
             "${it.optString("title").ifEmpty { "Chat" }}\n${Ui.ago(it.optLong("updated"))} · $n request${if (n == 1) "" else "s"}"
         }
-        AlertDialog.Builder(this).setTitle("Chats about this document").setItems(labels.toTypedArray()) { _, i ->
+        Ui.dialog(this).setTitle("Chats about this document").setItems(labels.toTypedArray()) { _, i ->
             openChat(if (i == 0) null else list[i - 1].optString("id"))
         }.show()
     }
@@ -327,6 +560,7 @@ class DocActivity : Activity() {
         val a = api ?: run { load(); toast("Connecting to netdash…"); return }
         input.setText("")
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken, 0)
+        showTab(1)
         userBubble(text)
         resetStream()
         setBusy(true, null)
@@ -527,7 +761,7 @@ class DocActivity : Activity() {
 
     private fun userBubble(t: String) {
         msgs.addView(Ui.text(this, t, 15f).apply {
-            background = Ui.rounded(0xFF243A5A.toInt(), Ui.dp(context, 10).toFloat())
+            background = Ui.rounded(Ui.USER_BG, Ui.dp(context, 8).toFloat())
             setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8))
             setTextIsSelectable(true)
         }, lp(10))

@@ -1,7 +1,6 @@
 package org.rcad.mobile
 
 import android.app.Activity
-import android.app.AlertDialog
 import android.content.Intent
 import android.os.Bundle
 import android.text.InputType
@@ -26,11 +25,12 @@ class MainActivity : Activity() {
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
+        Ui.init(this)
         prefs = Prefs(this)
-        val title = Ui.text(this, "rCAD", 24f, bold = true).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
+        val title = Ui.text(this, "rCAD", 20f, bold = true).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
         val bar = Ui.row(
             this, title,
-            Ui.button(this, "New") { newProjectDialog() },
+            Ui.button(this, "New", primary = true) { newProjectDialog() },
             space(),
             Ui.button(this, "⟳") { refresh() },
             space(),
@@ -42,7 +42,8 @@ class MainActivity : Activity() {
             setSingleLine()
             setTextColor(Ui.TEXT)
             setHintTextColor(Ui.MUTED)
-            background = Ui.rounded(Ui.PANEL, Ui.dp(context, 10).toFloat())
+            background = Ui.panel(context)
+            textSize = 14f
             setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8))
             addTextChangedListener(object : android.text.TextWatcher {
                 override fun afterTextChanged(s: android.text.Editable?) = show()
@@ -154,11 +155,11 @@ class MainActivity : Activity() {
         }.joinToString(" · ")
         return LinearLayout(this).apply {
             orientation = LinearLayout.VERTICAL
-            background = Ui.rounded(Ui.PANEL, Ui.dp(context, 12).toFloat())
-            setPadding(Ui.dp(context, 14), Ui.dp(context, 12), Ui.dp(context, 14), Ui.dp(context, 12))
+            background = Ui.panel(context)
+            setPadding(Ui.dp(context, 12), Ui.dp(context, 10), Ui.dp(context, 12), Ui.dp(context, 10))
             layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { bottomMargin = Ui.dp(context, 8) }
-            addView(Ui.text(context, name, 16f, bold = true))
-            addView(Ui.text(context, sub, 12.5f, Ui.MUTED))
+            addView(Ui.text(context, name, 15f, bold = true))
+            addView(Ui.text(context, sub, 13f, Ui.MUTED))
             isClickable = true
             setOnClickListener { open(d.optString("id"), name) }
         }
@@ -176,7 +177,7 @@ class MainActivity : Activity() {
 
     private fun newProjectDialog() {
         val name = field("Project name, e.g. hex tray")
-        AlertDialog.Builder(this)
+        Ui.dialog(this)
             .setTitle("New project")
             .setMessage("Makes a folder with an empty document in netdash's rCAD Projects. Then ask Claude to design something.")
             .setView(Ui.column(this, 20, name))
@@ -204,7 +205,7 @@ class MainActivity : Activity() {
             text = "The same address and token as rCAD Capture. The pairing link from netdash fills these in. Example address: http://192.168.0.247:8765"
             setPadding(0, 16, 0, 0)
         }
-        AlertDialog.Builder(this)
+        Ui.dialog(this)
             .setTitle("Settings")
             .setView(Ui.column(this, 20, urls, token, help))
             .setPositiveButton("Save") { _, _ ->

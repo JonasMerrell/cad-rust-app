@@ -9,6 +9,8 @@ token as the Capture app). Standard library only.
     GET  /api/doc/<id>                      one document: tabs, chats, whether Claude is busy on it
     GET  /api/doc/<id>/view[?assembly=N|studio=N][&t=<token>]
                                             rCAD's interactive web page of it (export_web), cached
+    GET  /api/doc/<id>/tree[?assembly=N|studio=N]
+                                            the feature tree (or an assembly's instances and mates) of that page
     GET  /api/doc/<id>/chats/<chat>         a saved chat (the same .rcad-chats the editor uses)
     POST /api/doc/<id>/chat                 {"text", "chat_id"?, "studio"?, "model"?, "effort"?}
                                             starts a request: {"job", "chat_id"}
@@ -39,6 +41,10 @@ MAX_DEPTH = 4
 CACHE_DIR = os.path.expanduser("~/.cache/rcad-mobile")
 JOB_KEEP_SECS = 3600
 EXPORT_TIMEOUT = 15 * 60
+# bump when what a cached page holds changes
+VIEW_VERSION = 2
+# feature params worth showing in the tree, in this order
+SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -259,25 +265,42 @@ class Projects:
 
     # ---------------------------------------------------------------- viewer
 
-    def _run_script(self, rcad, steps, cwd, timeout):
+    def _run_script(self, rcad, steps, cwd, timeout, results=None):
+        """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result."""
         fd, sp = tempfile.mkstemp(suffix=".json", prefix="rcad-mobile-")
         with os.fdopen(fd, "w") as f:
             json.dump(steps, f)
         try:
-            r = subprocess.run([rcad, "run", "--stop-on-error", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+            # no --stop-on-error: a document whose features fail still opens and exports
+            r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return "rcad took too long"
         except OSError as e:
             return f"could not run rcad: {e}"
         finally:
             os.unlink(sp)
+        out = []
+        for ln in r.stdout.splitlines():
+            try:
+                v = json.loads(ln)
+            except ValueError:
+                continue
+            if isinstance(v, dict) and "tool" in v:
+                out.append(v)
+        if results is not None:
+            results.extend(out)
         if r.returncode != 0:
-            errs = [ln for ln in (r.stdout + "\n" + r.stderr).splitlines() if '"error"' in ln or "error" in ln.lower()]
-            return (errs[-1] if errs else r.stderr.strip()[-400:]) or f"rcad failed ({r.returncode})"
+            # the first step that failed outright (not one that only reports failing features)
+            hard = [v["error"] for v in out if isinstance(v.get("error"), str)]
+            if hard:
+                return hard[0]
+            if not out:
+                return r.stderr.strip()[-400:] or f"rcad failed ({r.returncode})"
         return None
 
     def view(self, did, assembly=None, studio=None):
-        """Path of the web page for a document (made with rCAD's export_web when the document changed), or (None, error)."""
+        """Path of the web page for a document (made with rCAD's export_web when the document changed), or (None, error).
+        The same run writes the feature tree beside it (see `tree`)."""
         path = self.resolve(did)
         if not path:
             return None, "no such document"
@@ -286,26 +309,46 @@ class Projects:
             return None, "rcad is not installed on this computer"
         st = os.stat(path)
         sel = f"a{assembly}" if assembly is not None else f"s{studio or 0}"
-        key = hashlib.sha256(f"{path}\0{st.st_mtime_ns}\0{st.st_size}\0{sel}".encode()).hexdigest()[:24]
+        key = hashlib.sha256(f"{path}\0{st.st_mtime_ns}\0{st.st_size}\0{sel}\0{VIEW_VERSION}".encode()).hexdigest()[:24]
         os.makedirs(CACHE_DIR, exist_ok=True)
         out = os.path.join(CACHE_DIR, f"{key}.html")
         with self.lock:
             lk = self.export_locks.setdefault(key, threading.Lock())
         with lk:
-            if os.path.isfile(out):
+            if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
                 return out, None
             args = {"path": out + ".tmp.html"}
+            steps = [{"tool": "open_document", "args": {"path": path}}]
             if assembly is not None:
                 args["assembly"] = assembly
+                steps.append({"tool": "assembly_info", "args": {"assembly": assembly}})
             else:
                 args["studio"] = studio or 0
-            steps = [{"tool": "open_document", "args": {"path": path}}, {"tool": "export_web", "args": args}]
-            err = self._run_script(rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT)
-            if err or not os.path.isfile(args["path"]):
+                if studio:
+                    steps.append({"tool": "switch_part_studio", "args": {"index": studio}})
+                steps.append({"tool": "describe", "args": {}})
+            steps.append({"tool": "export_web", "args": args})
+            results = []
+            err = self._run_script(rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT, results)
+            if not os.path.isfile(args["path"]):
                 return None, err or "export_web wrote nothing"
+            tree = make_tree(results, assembly)
+            with open(out[:-5] + ".tree.json", "w") as f:
+                json.dump(tree, f)
             os.replace(args["path"], out)
             self._prune_cache(path, sel, out)
         return out, None
+
+    def tree(self, did, assembly=None, studio=None):
+        """The feature tree (Part Studio) or instances and mates (Assembly) the viewer page was made with."""
+        out, err = self.view(did, assembly, studio)
+        if not out:
+            return None, err
+        try:
+            with open(out[:-5] + ".tree.json") as f:
+                return json.load(f), None
+        except (OSError, ValueError) as e:
+            return None, str(e)
 
     def _prune_cache(self, path, sel, keep):
         """Keep the cache small: pages older than a week go."""
@@ -455,6 +498,60 @@ class Projects:
             del self.jobs[jid]
 
 
+def _param_text(params):
+    if not isinstance(params, dict):
+        return ""
+    bits = []
+    for k in SHOWN_PARAMS:
+        v = params.get(k)
+        if v is None or v == "" or isinstance(v, (dict, list)):
+            continue
+        if k == "end" and v == "blind":
+            continue
+        if k == "op" and v in ("add", "new"):
+            continue
+        bits.append(f"{k} {v}")
+    return ", ".join(bits[:3])
+
+
+def make_tree(results, assembly):
+    """What the phone shows beside the model, from the results of the viewer run."""
+    by = {}
+    for v in results:
+        if isinstance(v.get("result"), dict):
+            by[v["tool"]] = v["result"]
+    if assembly is not None:
+        a = by.get("assembly_info") or {}
+        return {
+            "kind": "assembly",
+            "name": a.get("name"),
+            "instances": [{"id": i.get("id"), "name": i.get("name"), "fixed": bool(i.get("fixed")), "hidden": bool(i.get("hidden")),
+                           "sub": i.get("sub_assembly") is not None} for i in a.get("instances") or []],
+            "mates": [{"name": m.get("name") or m.get("kind"), "kind": m.get("kind"), "between": m.get("between") or m.get("instances")}
+                      for m in a.get("mates") or []],
+            "failed_mates": a.get("failed_mates") or [],
+            "bom": a.get("bom") or [],
+        }
+    d = by.get("describe") or by.get("open_document") or {}
+    errors = {e.get("feature"): e.get("error") for e in d.get("errors") or [] if isinstance(e, dict)}
+    feats = []
+    for f in d.get("features") or []:
+        item = {"id": f.get("id"), "name": f.get("name"), "kind": f.get("kind"), "suppressed": bool(f.get("suppressed")),
+                "detail": _param_text(f.get("params"))}
+        if f.get("id") in errors:
+            item["error"] = errors[f.get("id")]
+        feats.append(item)
+    return {
+        "kind": "studio",
+        "units": d.get("units"),
+        "features": feats,
+        "variables": d.get("variables") or [],
+        "parts": [{"name": p.get("name"), "volume_mm3": p.get("volume_mm3"), "bbox_mm": p.get("bbox_mm")} for p in d.get("parts") or []],
+        "errors": [e for e in d.get("errors") or []],
+        "warnings": len(d.get("warnings") or []),
+    }
+
+
 def handle(h, method, p, projects, body=None):
     """Route a request of the receiver's handler `h` (path parts `p`, already authorised; `body` the
     parsed JSON of a POST). True if handled."""
@@ -480,6 +577,13 @@ def handle(h, method, p, projects, body=None):
                 h.send_json(404 if err == "no such document" else 500, {"error": err})
                 return True
             h.send_file(out, "text/html; charset=utf-8")
+            return True
+        if method == "GET" and p[3:] == ["tree"]:
+            t, err = projects.tree(did, assembly=qi("assembly"), studio=qi("studio"))
+            if t is None:
+                h.send_json(404 if err == "no such document" else 500, {"error": err})
+            else:
+                h.send_json(200, t)
             return True
         if method == "GET" and len(p) == 5 and p[3] == "chats":
             c = projects.chat(did, p[4])

@@ -37,7 +37,18 @@ STUB = textwrap.dedent('''\
                 json.dump(doc, open(args["path"], "w"), indent=2)
             elif t == "export_web":
                 open(args["path"], "w").write("<html>%s %s</html>" % (doc["studios"][0]["name"], json.dumps(args)))
-            print(json.dumps({"tool": t, "ok": True}))
+            elif t == "describe":
+                print(json.dumps({"tool": t, "result": {"units": "mm", "parts": [{"name": "Part 1", "volume_mm3": 12.0}],
+                    "errors": [{"feature": 2, "name": "Fillet 1", "error": "radius too big"}],
+                    "features": [{"id": 1, "name": "Sketch 1", "kind": "sketch", "suppressed": False, "params": {}},
+                                 {"id": 2, "name": "Fillet 1", "kind": "fillet", "suppressed": False, "params": {"radius": "3", "edges": []}}],
+                    "variables": [{"name": "w", "expr": "40"}]}}))
+                continue
+            elif t == "assembly_info":
+                print(json.dumps({"tool": t, "result": {"name": "Arm", "instances": [{"id": 1, "name": "Body <1>", "fixed": True}],
+                    "mates": [{"kind": "revolute", "name": "Hinge"}], "bom": [], "failed_mates": []}}))
+                continue
+            print(json.dumps({"tool": t, "result": {"ok": True}}))
         sys.exit(0)
     if a[0] == "chat":
         o = dict(zip(a[1::2], a[2::2]))
@@ -127,6 +138,14 @@ class ProjectsTest(unittest.TestCase):
         st, page = self.req("GET", f"/api/doc/{did}/view?assembly=0", raw=True)
         self.assertIn('"assembly": 0', page)
         self.assertEqual(self.req("GET", f"/api/doc/{did}/view?t=bad", token=None)[0], 401)
+        # the feature tree that goes with the page
+        st, t = self.req("GET", f"/api/doc/{did}/tree")
+        self.assertEqual((st, t["kind"]), (200, "studio"))
+        self.assertEqual([f["name"] for f in t["features"]], ["Sketch 1", "Fillet 1"])
+        self.assertEqual((t["features"][1]["detail"], t["features"][1]["error"]), ("radius 3", "radius too big"))
+        self.assertEqual(t["variables"], [{"name": "w", "expr": "40"}])
+        st, t = self.req("GET", f"/api/doc/{did}/tree?assembly=0")
+        self.assertEqual((t["kind"], t["instances"][0]["name"], t["mates"][0]["name"]), ("assembly", "Body <1>", "Hinge"))
 
     def test_ids_stay_inside_the_project_folders(self):
         outside = os.path.join(self.tmp, "secret.json")
