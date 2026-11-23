@@ -4,6 +4,7 @@ use egui::{Align, Frame, Key, Layout, Margin, RichText, ScrollArea, Ui};
 
 use crate::app::App;
 use crate::claude::{Auth, EFFORTS, FromWorker, MODELS, Settings, ToWorker, Worker};
+use crate::claude_chats::{self, Line};
 use crate::theme;
 
 enum Entry {
@@ -42,6 +43,18 @@ pub struct ClaudeUi {
     scroll_to_end: bool,
     /// Part Studios that got their undo step in this request: one per request, not per tool call.
     checkpointed: Vec<usize>,
+    /// The chat being had, as saved in the document's folder (`claude_chats`): its id once saved
+    /// (or about to be), when it started, and what Claude continues from.
+    chat_id: Option<String>,
+    chat_created: u64,
+    context: claude_chats::Context,
+    /// The document's saved chats, newest first, and the document they were listed for.
+    chats: Vec<claude_chats::Meta>,
+    chats_for: Option<Option<std::path::PathBuf>>,
+    /// Showing the chat list instead of the conversation.
+    list_open: bool,
+    /// A chat whose Delete was clicked once.
+    confirm_delete: Option<String>,
 }
 
 impl Default for ClaudeUi {
@@ -67,6 +80,13 @@ impl Default for ClaudeUi {
             confirm_revert: false,
             scroll_to_end: false,
             checkpointed: vec![],
+            chat_id: None,
+            chat_created: 0,
+            context: Default::default(),
+            chats: vec![],
+            chats_for: None,
+            list_open: false,
+            confirm_delete: None,
         }
     }
 }
@@ -92,6 +112,9 @@ pub fn toggle(app: &mut App) {
 /// Handle what the worker sent, then draw the panel (when open).
 pub fn panel(app: &mut App, ui: &mut Ui) {
     poll(app, ui.ctx());
+    if app.claude.chats_for.as_ref() != Some(&app.path) {
+        refresh_chats(app);
+    }
     if !app.claude.open || app.phone {
         lock_editor(app, ui.ctx(), ui.ctx().content_rect());
         return;
@@ -103,6 +126,8 @@ pub fn panel(app: &mut App, ui: &mut Ui) {
         ui.add_space(4.0);
         if app.claude.settings_open || !app.claude.configured() {
             ScrollArea::vertical().auto_shrink([false, false]).show(ui, |ui| settings(app, ui));
+        } else if app.claude.list_open && !app.claude.busy {
+            ScrollArea::vertical().id_salt("claude-chats").auto_shrink([false, false]).show(ui, |ui| chat_list(app, ui));
         } else {
             chat(app, ui);
         }
@@ -164,11 +189,15 @@ fn header(app: &mut App, ui: &mut Ui) {
                 c.settings_open = !c.settings_open;
             }
             if !c.entries.is_empty() && !c.busy && ui.add(egui::Button::image(crate::icons::image("plus", 15.0).tint(theme::text()))).on_hover_text("New chat").clicked() {
-                c.entries.clear();
-                c.before = None;
-                if let Some(w) = &c.worker {
-                    let _ = w.tx.send(ToWorker::Reset);
-                }
+                new_chat(c);
+            }
+            if c.configured()
+                && !c.busy
+                && (!c.chats.is_empty() || c.list_open)
+                && ui.add(egui::Button::image(crate::icons::image("history", 15.0).tint(theme::text())).selected(c.list_open)).on_hover_text("Earlier chats").clicked()
+            {
+                c.list_open = !c.list_open;
+                c.confirm_delete = None;
             }
         });
     });
@@ -394,6 +423,23 @@ fn chat(app: &mut App, ui: &mut Ui) {
     ScrollArea::vertical().id_salt("claude-chat").auto_shrink([false, false]).stick_to_bottom(true).show(ui, |ui| {
         ui.set_width(ui.available_width());
         if app.claude.entries.is_empty() {
+            if !app.claude.chats.is_empty() {
+                ui.add_space(8.0);
+                ui.label(RichText::new("Continue a chat about this document:").size(12.0).color(theme::muted()));
+                let mut open = None;
+                for m in app.claude.chats.iter().take(3) {
+                    if chat_row(ui, m).clicked() {
+                        open = Some(m.id.clone());
+                    }
+                }
+                if app.claude.chats.len() > 3 && ui.small_button(format!("All {} chats…", app.claude.chats.len())).clicked() {
+                    app.claude.list_open = true;
+                }
+                if let Some(id) = open {
+                    resume(app, ui.ctx(), &id);
+                }
+                ui.add_space(6.0);
+            }
             ui.add_space(8.0);
             ui.label(RichText::new("Describe what to build or change, for example:").size(12.0).color(theme::muted()));
             for ex in [
@@ -597,6 +643,7 @@ fn poll(app: &mut App, ctx: &egui::Context) {
                     s.truncate(l);
                 }
             }
+            FromWorker::State { messages, cc_session, planned } => c.context = claude_chats::Context { messages, claude_code_session: cc_session, planned },
             FromWorker::Done { error } => {
                 c.busy = false;
                 app.sync_ws();
@@ -606,7 +653,200 @@ fn poll(app: &mut App, ctx: &egui::Context) {
                 if let Some(e) = error {
                     c.entries.push(Entry::Notice { text: e, error: true });
                 }
+                save_chat(app);
             }
+        }
+    }
+}
+
+// ------------------------------------------------------------ saved chats
+
+fn line_of(e: &Entry) -> Line {
+    match e {
+        Entry::User(t) => Line::User { text: t.clone() },
+        Entry::Assistant(t) => Line::Assistant { text: t.clone() },
+        Entry::Thinking(t) => Line::Thinking { text: t.clone() },
+        Entry::Tool { name, detail, result, .. } => Line::Tool { name: name.clone(), detail: detail.clone(), ok: result.as_ref().map(|r| r.0), summary: result.as_ref().map(|r| r.1.clone()).unwrap_or_default() },
+        Entry::Notice { text, error } => Line::Notice { text: text.clone(), error: *error },
+    }
+}
+
+fn entry_of(l: &Line) -> Entry {
+    match l {
+        Line::User { text } => Entry::User(text.clone()),
+        Line::Assistant { text } => Entry::Assistant(text.clone()),
+        Line::Thinking { text } => Entry::Thinking(text.clone()),
+        Line::Tool { name, detail, ok, summary } => Entry::Tool { name: name.clone(), detail: detail.clone(), result: ok.map(|ok| (ok, summary.clone())), image: None },
+        Line::Notice { text, error } => Entry::Notice { text: text.clone(), error: *error },
+    }
+}
+
+fn refresh_chats(app: &mut App) {
+    let c = &mut app.claude;
+    c.chats = app.path.as_deref().map(claude_chats::list).unwrap_or_default();
+    c.chats_for = Some(app.path.clone());
+    if c.chats.is_empty() {
+        c.list_open = false;
+    }
+}
+
+/// Start a new conversation (the one before is saved already).
+fn new_chat(c: &mut ClaudeUi) {
+    c.entries.clear();
+    c.before = None;
+    c.changed = false;
+    c.chat_id = None;
+    c.context = Default::default();
+    c.list_open = false;
+    if let Some(w) = &c.worker {
+        let _ = w.tx.send(ToWorker::Reset);
+    }
+}
+
+/// Save the conversation with the document (when it has a file; an unsaved document's chat is
+/// saved with it the first time it is saved).
+fn save_chat(app: &mut App) {
+    let Some(doc) = app.path.clone() else { return };
+    let c = &mut app.claude;
+    if c.entries.is_empty() {
+        return;
+    }
+    let id = match &c.chat_id {
+        Some(id) => id.clone(),
+        None => {
+            c.chat_created = claude_chats::now();
+            c.chat_id.insert(claude_chats::new_id()).clone()
+        }
+    };
+    let mut meta = claude_chats::Meta {
+        format: 0,
+        id,
+        document: String::new(),
+        title: String::new(),
+        created: c.chat_created,
+        updated: 0,
+        model: c.settings.model.clone(),
+        lines: c.entries.iter().map(line_of).collect(),
+    };
+    if let Err(e) = claude_chats::save(&doc, &mut meta, &c.context) {
+        c.entries.push(Entry::Notice { text: format!("Could not save this chat: {e}"), error: true });
+    }
+    refresh_chats(app);
+}
+
+/// Pick a saved chat up where it was left.
+fn resume(app: &mut App, ctx: &egui::Context, id: &str) {
+    let Some(doc) = app.path.clone() else { return };
+    let c = &mut app.claude;
+    if c.busy {
+        return;
+    }
+    match claude_chats::load(&doc, id) {
+        Ok((meta, context)) => {
+            let worker = c.worker.get_or_insert_with(|| Worker::start(ctx.clone()));
+            let recap = Some(claude_chats::recap(&meta.lines)).filter(|r| !r.is_empty());
+            let _ = worker.tx.send(ToWorker::Load { messages: context.messages.clone(), cc_session: context.claude_code_session.clone(), planned: context.planned, recap });
+            c.entries = meta.lines.iter().map(entry_of).collect();
+            c.chat_id = Some(meta.id);
+            c.chat_created = meta.created;
+            c.context = context;
+            c.before = None;
+            c.changed = false;
+            c.list_open = false;
+            c.scroll_to_end = true;
+        }
+        Err(e) => c.entries.push(Entry::Notice { text: format!("Could not open that chat: {e}"), error: true }),
+    }
+}
+
+/// Another document was opened (or a new one started): its own chats, not this conversation.
+pub fn document_opened(app: &mut App) {
+    let c = &mut app.claude;
+    if c.busy {
+        // what it is still doing belongs to the document that was open
+        if let Some(w) = c.worker.take() {
+            w.stop.store(true, std::sync::atomic::Ordering::Relaxed);
+        }
+        c.busy = false;
+    }
+    new_chat(c);
+    c.chats_for = None;
+}
+
+/// The document was saved (perhaps somewhere new): its chat goes with it.
+pub fn document_saved(app: &mut App) {
+    if !app.claude.busy {
+        save_chat(app);
+    }
+    app.claude.chats_for = None;
+}
+
+fn chat_row(ui: &mut Ui, m: &claude_chats::Meta) -> egui::Response {
+    let n = m.requests();
+    let sub = format!("{} · {n} request{}", claude_chats::ago(m.updated), if n == 1 { "" } else { "s" });
+    let mut job = egui::text::LayoutJob::default();
+    RichText::new(format!("{}\n", m.title)).size(12.0).color(theme::text()).append_to(&mut job, ui.style(), egui::FontSelection::Default, Align::LEFT);
+    RichText::new(sub).size(10.5).color(theme::muted()).append_to(&mut job, ui.style(), egui::FontSelection::Default, Align::LEFT);
+    ui.add(egui::Button::new(job).wrap().fill(theme::panel_2()).min_size(egui::vec2(ui.available_width(), 0.0)))
+}
+
+fn chat_list(app: &mut App, ui: &mut Ui) {
+    ui.label(RichText::new("CHATS ABOUT THIS DOCUMENT").family(theme::medium()).color(theme::muted()).size(10.5));
+    ui.label(RichText::new("Saved in the project folder on this computer (not synced to GitHub).").size(11.0).color(theme::muted()));
+    ui.add_space(4.0);
+    let (mut open, mut delete) = (None, None);
+    let cur = app.claude.chat_id.clone();
+    for m in &app.claude.chats {
+        ui.horizontal(|ui| {
+            let confirming = app.claude.confirm_delete.as_deref() == Some(m.id.as_str());
+            ui.with_layout(Layout::right_to_left(Align::Min), |ui| {
+                let del = if confirming {
+                    ui.small_button(RichText::new("Delete").color(theme::error())).on_hover_text("Click again to delete this chat")
+                } else {
+                    ui.add(egui::Button::image(crate::icons::image("delete", 14.0).tint(theme::muted())).frame(false)).on_hover_text("Delete this chat")
+                };
+                if del.clicked() {
+                    delete = Some((m.id.clone(), confirming));
+                }
+                ui.with_layout(Layout::top_down(Align::Min), |ui| {
+                    ui.set_width(ui.available_width());
+                    let n = m.requests();
+                    let current = if cur.as_deref() == Some(m.id.as_str()) { " · open now" } else { "" };
+                    let mut job = egui::text::LayoutJob::default();
+                    RichText::new(format!("{}\n", m.title)).size(12.0).color(theme::text()).append_to(&mut job, ui.style(), egui::FontSelection::Default, Align::LEFT);
+                    RichText::new(format!("{} · {n} request{}{current}", claude_chats::ago(m.updated), if n == 1 { "" } else { "s" })).size(10.5).color(theme::muted()).append_to(
+                        &mut job,
+                        ui.style(),
+                        egui::FontSelection::Default,
+                        Align::LEFT,
+                    );
+                    if ui.add(egui::Button::new(job).wrap().fill(theme::panel_2()).min_size(egui::vec2(ui.available_width(), 0.0))).clicked() {
+                        open = Some(m.id.clone());
+                    }
+                });
+            });
+        });
+    }
+    if let Some((id, confirmed)) = delete {
+        if confirmed {
+            if let Some(doc) = app.path.clone() {
+                let _ = claude_chats::delete(&doc, &id);
+            }
+            if app.claude.chat_id.as_deref() == Some(id.as_str()) {
+                // the open conversation carries on, as a chat of its own again
+                app.claude.chat_id = None;
+            }
+            app.claude.confirm_delete = None;
+            refresh_chats(app);
+        } else {
+            app.claude.confirm_delete = Some(id);
+        }
+    }
+    if let Some(id) = open {
+        if app.claude.chat_id.as_deref() == Some(id.as_str()) {
+            app.claude.list_open = false;
+        } else {
+            resume(app, ui.ctx(), &id);
         }
     }
 }

@@ -665,6 +665,7 @@ impl App {
         self.camera.set_view(StdView::Iso);
         self.fit_view();
         self.mark_saved();
+        crate::claude_ui::document_opened(self);
     }
 
     /// Put the live Part Studio back into the workspace.
@@ -885,6 +886,7 @@ impl App {
                 crate::home::touch(self, &p);
                 self.path = Some(p);
                 self.mark_saved();
+                crate::claude_ui::document_opened(self);
             }
             Err(e) => self.flash(format!("Could not open {}: {e}", p.display()), ToastKind::Error),
         }
@@ -918,6 +920,7 @@ impl App {
                 self.flash_info(format!("Saved {}{committed}", p.display()), Some(Duration::from_secs(secs)));
                 self.path = Some(p.clone());
                 self.saved_ok(&p);
+                crate::claude_ui::document_saved(self);
             }
             Err(e) => {
                 // what the save was for (closing, opening another document) doesn't happen
