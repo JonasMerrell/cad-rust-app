@@ -1,13 +1,16 @@
-//! 3D-printing helpers: sending parts to the orcaweb slicer, and the printability
-//! view (overhangs and thin walls).
-
-use std::io::{Read, Write};
+//! 3D-printing helpers: slicing the parts with the OrcaSlicer command line (`orca-slice`), and
+//! the printability view (overhangs and thin walls).
 
 /// User settings for printing, kept in ~/.config/cad-rust-app/printing.json.
 #[derive(Clone, Debug, serde::Serialize, serde::Deserialize, PartialEq)]
+#[serde(default)]
 pub struct PrintSettings {
-    /// orcaweb's address, e.g. http://192.168.0.247:8080
-    pub orcaweb: String,
+    /// The slicer command: `orca-slice` (Jonas's OrcaSlicer fork with his presets) or a path to it.
+    pub slicer: String,
+    /// Process preset; empty for the slicer's default.
+    pub process: String,
+    /// Filament preset; empty for the slicer's default.
+    pub filament: String,
     /// STL detail: largest distance between the mesh and the true surface, mm.
     pub stl_tolerance: f64,
     /// Overhang angle from vertical beyond which faces need support, degrees.
@@ -28,7 +31,7 @@ fn yes() -> bool {
 
 impl Default for PrintSettings {
     fn default() -> Self {
-        PrintSettings { orcaweb: "http://192.168.0.247:8080".into(), stl_tolerance: 0.01, overhang: 45.0, min_wall: 0.8, orca_path: String::new(), orca_live: true }
+        PrintSettings { slicer: "orca-slice".into(), process: String::new(), filament: String::new(), stl_tolerance: 0.01, overhang: 45.0, min_wall: 0.8, orca_path: String::new(), orca_live: true }
     }
 }
 
@@ -48,40 +51,99 @@ pub fn save(s: &PrintSettings) {
     }
 }
 
-/// Upload an STL to orcaweb's staging endpoint; returns the URL of its slice page.
-pub fn send_to_orcaweb(base: &str, name: &str, stl: &[u8]) -> Result<String, String> {
-    let base = base.trim().trim_end_matches('/');
-    let rest = base.strip_prefix("http://").ok_or("the slicer address must start with http://")?;
-    let (hostport, prefix) = match rest.find('/') {
-        Some(i) => (&rest[..i], &rest[i..]),
-        None => (rest, ""),
-    };
-    let addr = if hostport.contains(':') { hostport.to_string() } else { format!("{hostport}:80") };
-    let boundary = format!("cadapp{:x}", std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_nanos()).unwrap_or(0));
-    let fname: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
-    let mut body = format!("--{boundary}\r\nContent-Disposition: form-data; name=\"model\"; filename=\"{fname}.stl\"\r\nContent-Type: model/stl\r\n\r\n").into_bytes();
-    body.extend_from_slice(stl);
-    body.extend_from_slice(format!("\r\n--{boundary}--\r\n").as_bytes());
-    let req = format!(
-        "POST {prefix}/gridfinity/stage HTTP/1.1\r\nHost: {hostport}\r\nContent-Type: multipart/form-data; boundary={boundary}\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
-        body.len()
-    );
-    use std::net::ToSocketAddrs;
-    let sock = addr.to_socket_addrs().map_err(|e| format!("can't find {hostport}: {e}"))?.next().ok_or("no address")?;
-    let mut s = std::net::TcpStream::connect_timeout(&sock, std::time::Duration::from_secs(5)).map_err(|e| format!("can't reach the slicer at {base}: {e}"))?;
-    s.set_read_timeout(Some(std::time::Duration::from_secs(30))).ok();
-    s.write_all(req.as_bytes()).and_then(|_| s.write_all(&body)).map_err(|e| e.to_string())?;
-    let mut resp = vec![];
-    s.read_to_end(&mut resp).map_err(|e| e.to_string())?;
-    let text = String::from_utf8_lossy(&resp);
-    let status = text.split_whitespace().nth(1).unwrap_or("");
-    if status != "200" {
-        return Err(format!("the slicer answered {status}"));
+/// What to slice with; empty fields leave the slicer's defaults.
+#[derive(Clone, Debug, Default)]
+pub struct SliceOptions {
+    pub printer: Option<String>,
+    pub process: Option<String>,
+    pub filaments: Vec<String>,
+    /// Trad Rack lane 1-9 for a single-colour print.
+    pub lane: Option<u32>,
+    /// "off", "normal" or "tree"; None keeps the process preset's choice.
+    pub support: Option<String>,
+    /// Extra `key=value` overrides.
+    pub set: Vec<String>,
+}
+
+impl SliceOptions {
+    /// The settings' process and filament, when they are set.
+    pub fn from_settings(s: &PrintSettings) -> Self {
+        let some = |v: &str| (!v.trim().is_empty()).then(|| v.trim().to_string());
+        SliceOptions { process: some(&s.process), filaments: some(&s.filament).into_iter().collect(), ..Default::default() }
     }
-    let json = text.split("\r\n\r\n").nth(1).unwrap_or("");
-    let v: serde_json::Value = serde_json::from_str(json.trim()).map_err(|_| "the slicer's answer was not understood")?;
-    let redirect = v.get("redirect").and_then(|r| r.as_str()).ok_or("the slicer did not return a page")?;
-    Ok(format!("{base}{redirect}"))
+
+    fn args(&self) -> Vec<String> {
+        let mut a = vec![];
+        let mut push = |k: &str, v: &str| {
+            a.push(k.to_string());
+            a.push(v.to_string());
+        };
+        if let Some(p) = &self.printer {
+            push("-p", p);
+        }
+        if let Some(p) = &self.process {
+            push("-P", p);
+        }
+        for f in &self.filaments {
+            push("-f", f);
+        }
+        if let Some(l) = self.lane {
+            push("--lane", &l.to_string());
+        }
+        if let Some(s) = &self.support {
+            push("--support", s);
+        }
+        for s in &self.set {
+            push("--set", s);
+        }
+        a
+    }
+}
+
+/// Where sliced files go when no path is given: <temp>/rcad-slices.
+pub fn slice_dir() -> std::path::PathBuf {
+    std::env::temp_dir().join("rcad-slices")
+}
+
+/// A file name made of the job name's safe characters.
+pub fn job_file_name(name: &str) -> String {
+    let n: String = name.chars().map(|c| if c.is_ascii_alphanumeric() || "._-".contains(c) { c } else { '_' }).collect();
+    if n.is_empty() { "part".into() } else { n }
+}
+
+/// Slice an STL with the slicer command. `output` is a .gcode file or a folder. Returns the
+/// slicer's summary: {gcode, layers, height_mm, filament_g, time, size_bytes, …}. Never uploads
+/// to the printer or starts a print.
+pub fn slice(slicer: &str, model: &std::path::Path, output: &std::path::Path, opts: &SliceOptions) -> Result<serde_json::Value, String> {
+    let slicer = if slicer.trim().is_empty() { "orca-slice" } else { slicer.trim() };
+    let out = std::process::Command::new(slicer)
+        .arg(model)
+        .args(opts.args())
+        .arg("-o")
+        .arg(output)
+        .stdin(std::process::Stdio::null())
+        .output()
+        .map_err(|e| {
+            if e.kind() == std::io::ErrorKind::NotFound {
+                format!("the slicer command `{slicer}` was not found; install orca-slice or set its path in the 3D printing settings")
+            } else {
+                format!("could not run `{slicer}`: {e}")
+            }
+        })?;
+    let stderr = String::from_utf8_lossy(&out.stderr);
+    if !out.status.success() {
+        // the first line says what failed; the last few lines of the slicer's log follow
+        let lines: Vec<&str> = stderr.lines().filter(|l| !l.trim().is_empty()).collect();
+        let mut msg = lines.first().map(|l| l.trim_start_matches("orca-slice: ").to_string()).unwrap_or_else(|| format!("the slicer exited with {}", out.status));
+        if lines.len() > 1 {
+            let tail = &lines[lines.len().saturating_sub(6).max(1)..];
+            msg.push_str("\n");
+            msg.push_str(&tail.join("\n"));
+        }
+        return Err(msg);
+    }
+    let stdout = String::from_utf8_lossy(&out.stdout);
+    serde_json::from_str(stdout.trim()).map_err(|_| format!("the slicer's output was not understood: {}", stdout.trim().chars().take(300).collect::<String>()))
 }
 
 /// Open a URL in the default browser.
