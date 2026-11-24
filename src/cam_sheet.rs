@@ -688,6 +688,9 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             format!("{} mm / {}% Ø", fmt_mm(cam_paths::stepdown(op, t)), (cam_paths::stepover(op, t) / t.diameter.max(1e-9) * 100.0).round())
         };
         let mut notes: Vec<String> = vec![];
+        if !op.pause.trim().is_empty() {
+            notes.push(format!("STOPS FIRST: {}", op.pause.trim()));
+        }
         match cam.coolant_for(t, Some(op)) {
             crate::cam::Coolant::Flood => notes.push("flood coolant".into()),
             crate::cam::Coolant::Mist => notes.push("mist coolant".into()),

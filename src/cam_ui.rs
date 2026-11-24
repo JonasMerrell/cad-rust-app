@@ -39,6 +39,8 @@ pub struct CamUi {
     lib_kind: Option<ToolKind>,
     lib_search: String,
     pub sim: Option<Sim>,
+    /// The finished run of `sim` is on disk (`cam_sim_cache`): it was loaded from there, or kept.
+    sim_kept: bool,
     pub sim_on: bool,
     /// The view has been fitted to the stock once.
     pub fitted: bool,
@@ -415,6 +417,45 @@ pub(crate) fn toggle_sim(app: &mut App) {
     app.cam.scene_dirty = true;
     if app.cam.sim_on && app.cam.sim.is_none() {
         start_sim(app, true);
+        load_kept_sim(app);
+    }
+}
+
+/// The key of the run `start_sim` sets up, for the disk cache.
+fn sim_disk_key(app: &App) -> Option<u64> {
+    let (c, part) = (cam(app)?, app.cam.part.as_deref()?);
+    let stock = cam_paths::stock_box(c, part);
+    crate::cam_sim_cache::key(c, part, stock, &app.cam.paths, app.cam.stock_in.as_deref(), SIM_RESOLUTION, 0)
+}
+
+/// A fresh simulation that is to run to the end: take the finished run from the disk cache when it has it.
+fn load_kept_sim(app: &mut App) {
+    let dirs = crate::cam_sim_cache::dirs(&app.kernel.cache_dirs);
+    if dirs.is_empty() || app.cam.sim.as_ref().is_none_or(|s| s.done > 0 || s.total() == 0) {
+        return;
+    }
+    let Some(k) = sim_disk_key(app) else { return };
+    let Some(sim) = app.cam.sim.as_mut() else { return };
+    if crate::cam_sim_cache::load(&dirs, k, sim) {
+        app.cam.sim_target = sim.total();
+        app.cam.sim_kept = true;
+        app.cam.sim_mesh_done = usize::MAX;
+        app.cam.scene_dirty = true;
+    }
+}
+
+/// Keep a simulation that has run to the end on disk (once).
+fn keep_sim(app: &mut App) {
+    if app.cam.sim_kept || app.cam.sim.as_ref().is_none_or(|s| s.total() == 0 || s.done < s.total()) {
+        return;
+    }
+    app.cam.sim_kept = true;
+    let dirs = crate::cam_sim_cache::dirs(&app.kernel.cache_dirs);
+    if dirs.is_empty() {
+        return;
+    }
+    if let (Some(k), Some(sim)) = (sim_disk_key(app), app.cam.sim.as_ref()) {
+        crate::cam_sim_cache::store(&dirs, k, sim);
     }
 }
 
@@ -1612,6 +1653,10 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         ui.text_edit_singleline(&mut o.name);
     });
     row(ui, "Tool", |ui| tool_combo(ui, &snapshot, o.kind, &mut o.tool));
+    row(ui, "Pause before", |ui| {
+        ui.add(egui::TextEdit::singleline(&mut o.pause).hint_text("no stop").desired_width(220.0))
+            .on_hover_text("Stop before this operation with this message for the operator (spindle and coolant off, M0), e.g. to blow chips out before a finish or before probing bores");
+    });
     if snapshot.tools.iter().all(|t| !o.kind.accepts(t.kind)) {
         ui.label(RichText::new("No suitable tool yet: add one from the library.").color(theme::error_soft()).size(12.0));
     }
@@ -2433,10 +2478,13 @@ pub(crate) fn web_sim_dialog(app: &mut App) {
 
 // ---------------------------------------------------------------- simulation
 
+/// The simulation grid's cells along the stock's longer side.
+const SIM_RESOLUTION: usize = 500;
+
 fn start_sim(app: &mut App, run: bool) {
     let (Some(c), Some(part)) = (cam(app).cloned(), app.cam.part.clone()) else { return };
     let stock = cam_paths::stock_box(&c, &part);
-    let mut sim = Sim::new(&c, &part, stock, &app.cam.paths, 500);
+    let mut sim = Sim::new(&c, &part, stock, &app.cam.paths, SIM_RESOLUTION);
     if let Some(m) = &app.cam.stock_in {
         sim.start_from(m);
     }
@@ -2471,6 +2519,7 @@ fn start_sim(app: &mut App, run: bool) {
     }
     app.cam.sim_target = if run { sim.total() } else { 0 };
     app.cam.sim = Some(sim);
+    app.cam.sim_kept = false;
     app.cam.sim_mesh_done = usize::MAX;
     app.cam.playing = false;
     app.cam.scene_dirty = true;
@@ -2562,6 +2611,7 @@ fn step_sim(app: &mut App, ctx: &egui::Context) {
     if app.cam.sim.is_none() && !app.cam.paths.is_empty() && !app.cam.computing {
         start_sim(app, false);
         app.cam.sim_target = app.cam.sim.as_ref().map(|s| s.total()).unwrap_or(0);
+        load_kept_sim(app);
     }
     let dt = ctx.input(|i| i.stable_dt).min(0.1);
     let speed = if app.cam.speed <= 0.0 { 200.0 } else { app.cam.speed };
@@ -2583,6 +2633,8 @@ fn step_sim(app: &mut App, ctx: &egui::Context) {
         sim.run_to(target, 60_000);
         ctx.request_repaint();
     }
+    keep_sim(app);
+    let Some(sim) = &mut app.cam.sim else { return };
     if app.cam.playing {
         ctx.request_repaint();
     }

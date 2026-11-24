@@ -1014,23 +1014,60 @@ pub fn forget_paths() {
     *MEMO.lock().unwrap() = None;
 }
 
+/// The memo's entries are kept on disk too (`cam_build_cache`, in the folders of the document worked on:
+/// `cam_sim_saves::set_doc`), so the next session regenerates only what an edit changed as well. Their keys
+/// there add the app version (the memo's keys hash everything an entry depends on, but not the code that made it).
+fn disk_key(what: &str, key: u64) -> u64 {
+    use std::hash::Hasher;
+    let mut h = crate::cam_build_cache::Fnv::default();
+    h.write(format!("rcad {} cam op {what} 1\n", env!("CARGO_PKG_VERSION")).as_bytes());
+    h.write_u64(key);
+    h.finish()
+}
+
+fn disk_dirs() -> Vec<std::path::PathBuf> {
+    crate::cam_sim_saves::build_dirs().into_iter().map(|d| d.join(crate::cam_build_cache::SUB)).collect()
+}
+
+fn no_stock() -> StockMap {
+    StockMap { x0: 0.0, y0: 0.0, cell: 0.0, nx: 0, ny: 0, hi: vec![], lo: vec![] }
+}
+
 fn memo_path(key: u64) -> Option<Toolpath> {
-    memo(|m| {
+    let got = memo(|m| {
         let t = m.tick;
         m.paths.get_mut(&key).map(|e| {
             e.0 = t;
             e.1.clone()
         })
+    });
+    got.or_else(|| {
+        let (mut p, _) = crate::cam_build_cache::load(&disk_dirs(), disk_key("path", key))?;
+        let tp = (p.len() == 1).then(|| p.remove(0))?;
+        memo(|m| {
+            m.paths.insert(key, (m.tick, tp.clone()));
+            evict(&mut m.paths, MEMO_PATHS);
+        });
+        Some(tp)
     })
 }
 
 fn memo_stock(key: u64) -> Option<StockMap> {
-    memo(|m| {
+    let got = memo(|m| {
         let t = m.tick;
         m.stocks.get_mut(&key).map(|e| {
             e.0 = t;
             e.1.clone()
         })
+    });
+    got.or_else(|| {
+        let (p, s) = crate::cam_build_cache::load(&disk_dirs(), disk_key("stock", key))?;
+        (p.is_empty() && s.nx > 0).then_some(())?;
+        memo(|m| {
+            m.stocks.insert(key, (m.tick, s.clone()));
+            evict(&mut m.stocks, MEMO_STOCKS);
+        });
+        Some(s)
     })
 }
 
@@ -1045,14 +1082,16 @@ fn keep_path(key: u64, tp: &Toolpath) {
     memo(|m| {
         m.paths.insert(key, (m.tick, tp.clone()));
         evict(&mut m.paths, MEMO_PATHS);
-    })
+    });
+    crate::cam_build_cache::store(&disk_dirs(), disk_key("path", key), std::slice::from_ref(tp), &no_stock());
 }
 
 fn keep_stock(key: u64, s: &StockMap) {
     memo(|m| {
         m.stocks.insert(key, (m.tick, s.clone()));
         evict(&mut m.stocks, MEMO_STOCKS);
-    })
+    });
+    crate::cam_build_cache::store(&disk_dirs(), disk_key("stock", key), &[], s);
 }
 
 fn hash_of(f: impl FnOnce(&mut std::collections::hash_map::DefaultHasher)) -> u64 {
@@ -2529,6 +2568,10 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
     if let Some(m) = stock_in {
         sim.start_from(m);
     }
+    // the run picks up from states kept on disk (`cam_sim_saves`), and each toolpath's new links are kept by
+    // the key of the run to its end: they depend on nothing else (the stock up to there, the path before)
+    crate::cam_sim_saves::keep_ops(&mut sim, cam, &paths, 0);
+    let keys: Option<Vec<u64>> = sim.saves.as_ref().map(|s| s.path_keys.clone());
     let fixtures: Vec<(DVec3, DVec3)> = fixture_boxes(cam, part, work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect();
     let fix_clear = if cam.fixture_clearance > 0.0 { cam.fixture_clearance } else { cam.retract.max(1.0) };
     // the highest stock (or fixture) within `r` of (x, y)
@@ -2568,7 +2611,9 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
     for k in 0..paths.len() {
         let n = paths[k].moves.len();
         if paths[k].probe.is_some() || n == 0 {
-            sim.run_to(base + n, usize::MAX);
+            if keys.is_none() {
+                sim.run_to(base + n, usize::MAX);
+            }
             base += n;
             prev = None;
             continue;
@@ -2589,6 +2634,13 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
             }
             _ => None,
         };
+        let memo = keys.as_ref().map(|ks| crate::cam_sim_saves::links_key(ks[k], from));
+        let kept = memo.and_then(crate::cam_sim_saves::moves);
+        let hit = kept.is_some();
+        if let Some(kept) = kept {
+            out = kept;
+            i = n;
+        }
         while i < n {
             let m = paths[k].moves[i];
             if let Move::Rapid(_) = m {
@@ -2686,7 +2738,14 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
             from = None;
             i += 1;
         }
-        sim.run_to(base + n, usize::MAX);
+        match memo {
+            // (with states kept, the run goes on only as far as the next toolpath worked out here needs)
+            None => {
+                sim.run_to(base + n, usize::MAX);
+            }
+            Some(key) if !hit => crate::cam_sim_saves::keep_moves(key, &out),
+            Some(_) => {}
+        }
         base += n;
         // where its last cut ended (before its retract)
         let last_cut = out.iter().rev().find(|m| !matches!(m, Move::Rapid(_))).map(|_| {
@@ -2712,6 +2771,7 @@ pub fn tighten_links(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut pa
         if let Some(m) = stock_in {
             check.start_from(m);
         }
+        crate::cam_sim_saves::keep_ops(&mut check, cam, &paths, 0);
         check.run_to(usize::MAX, usize::MAX);
         let mut hits: Vec<usize> = check.events.iter().filter(|e| e.kind == crate::cam_sim::EventKind::Rapid).map(|e| e.step).collect();
         if hits.is_empty() {
@@ -3547,6 +3607,45 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn gcode_pause_before_an_operation() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.add_op(OpKind::Face, t);
+        let fin = c.add_op(OpKind::Contour, t);
+        c.ops.iter_mut().find(|o| o.id == fin).unwrap().pause = "Blow the chips out of the slots".into();
+        let paths = generate(&c, &part);
+        let (origin, top) = {
+            let ctx = Ctx::new(&c, &part);
+            (ctx.origin, ctx.stock.1.z)
+        };
+        for post in ["mach3", "rcnc", "linuxcnc", "grbl"] {
+            c.post = post.into();
+            let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
+            let l: Vec<&str> = g.lines().collect();
+            let p = l.iter().position(|x| x.starts_with("(PAUSE before")).expect(&g);
+            let op = l.iter().position(|x| x.ends_with(" - Contour)")).unwrap();
+            assert!(p < op, "{post}: before the operation's comment: {g}");
+            let block = &l[p..op];
+            let m0 = block.iter().position(|x| *x == "M0").expect(&g);
+            assert!(block[m0 - 1].contains("Blow the chips out of the slots [spindle and coolant are off], then press Cycle Start"), "{post}: the message right before M0: {g}");
+            assert!(block[..m0].contains(&"M5") && block[..m0].contains(&"M9"), "{post}: {g}");
+            if post != "grbl" {
+                assert!(block[1] == "G53 G0 Z0", "{post}: up first: {g}");
+            }
+            // the spindle and coolant come back for the operation (one tool: no tool change in between)
+            let rest = &l[op..];
+            let s = rest.iter().position(|x| x.starts_with('S') && x.ends_with(" M3")).expect(&g);
+            let first_move = rest.iter().position(|x| x.starts_with("G1") || x.starts_with("G0 X") || x.starts_with("G0 Y")).unwrap();
+            assert!(s < first_move && rest[..first_move].contains(&"M8"), "{post}: {g}");
+            assert_eq!(g.matches("PAUSE before").count(), 1);
+        }
+        // the operations are the same either way: the pause is in the post only
+        let mut q = c.clone();
+        q.ops.iter_mut().for_each(|o| o.pause.clear());
+        assert_eq!(crate::cam_verify::toolpath_hash(&paths), crate::cam_verify::toolpath_hash(&generate(&q, &part)));
     }
 
     #[test]
