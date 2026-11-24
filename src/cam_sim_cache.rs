@@ -409,6 +409,35 @@ bin_struct!(crate::cam_cutting::ToolGeom { diameter, ball, flutes, stickout, flu
 bin_struct!(crate::cam_sim::OpLoad { op, step, at, area, width, depth, diameter, max_area, ratio, geometric, feed, rpm, cut, uses });
 bin_struct!(crate::cam_sim::OpChatter { op, margin, at, width, depth, stable, rpm, hz, k, kt, geom, zeta, climb, scale });
 bin_struct!(crate::cam_sim::OpChips { op, max_fill, at, open_s, slot_s, pocket_s, recut_mm, deep_slot_mm });
+impl Bin for crate::cam_paths::Move {
+    fn put(&self, w: &mut Vec<u8>) {
+        use crate::cam_paths::Move::*;
+        match *self {
+            Rapid(p) => (0u8, p).put(w),
+            Feed(p, f) => (1u8, (p, f)).put(w),
+            Tap { z, r, pitch } => (2u8, [z, r, pitch]).put(w),
+            Dwell(s) => (3u8, s).put(w),
+        }
+    }
+    fn get(r: &mut &[u8]) -> Option<Self> {
+        use crate::cam_paths::Move::*;
+        Some(match u8::get(r)? {
+            0 => Rapid(<[f64; 3]>::get(r)?),
+            1 => {
+                let (p, f) = <([f64; 3], f64)>::get(r)?;
+                Feed(p, f)
+            }
+            2 => {
+                let [z, r, pitch] = <[f64; 3]>::get(r)?;
+                Tap { z, r, pitch }
+            }
+            3 => Dwell(f64::get(r)?),
+            _ => return None,
+        })
+    }
+}
+
+bin_struct!(crate::cam_sim::LoadSample { step, width, depth, area, len, feed, power, worst });
 bin_struct!(crate::cam_sim::OpAir { op, feed_mm, feed_s, air_mm, air_s, light_mm, light_s, link_mm, link_s });
 
 #[cfg(test)]

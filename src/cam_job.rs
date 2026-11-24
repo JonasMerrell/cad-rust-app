@@ -346,6 +346,7 @@ impl Job {
             let placed = crate::cam_machine::Placed::new(l, lead.reference(), DVec3::from(lead.cam.on_table));
             sim.set_machine(&c, &part, std::sync::Arc::new(placed));
         }
+        crate::cam_sim_saves::keep_ops(&mut sim, &c, &paths, 0);
         Ok((c, part, paths, sim))
     }
 }

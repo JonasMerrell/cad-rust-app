@@ -270,6 +270,7 @@ impl Session {
                 self.doc.units = serde_json::from_value(json!(units)).map_err(|_| "units must be mm, cm, m, in or ft")?;
                 self.path = None;
                 self.saved_keys.clear();
+                crate::cam_sim_saves::set_doc(None);
                 self.rebuild()?;
                 json!({"ok": true})
             }
@@ -281,6 +282,7 @@ impl Session {
                 self.ws = ws;
                 self.cur = 0;
                 self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(std::path::Path::new(&path)));
+                crate::cam_sim_saves::set_doc(Some(std::path::Path::new(&path)));
                 self.path = Some(path);
                 self.saved_keys = self.studio_keys();
                 self.rebuild()?;
@@ -292,6 +294,7 @@ impl Session {
                 write_out(&path, self.ws.to_json())?;
                 if self.path.as_deref() != Some(path.as_str()) {
                     self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(std::path::Path::new(&path)));
+                    crate::cam_sim_saves::set_doc(Some(std::path::Path::new(&path)));
                 }
                 self.path = Some(path.clone());
                 // what is built of the document as saved is kept for the next session

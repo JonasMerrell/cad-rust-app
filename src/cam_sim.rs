@@ -347,6 +347,9 @@ pub struct Sim {
     pub removed_by_move: Option<Vec<(f32, f32)>>,
     /// The stock in blocks of `BLOCK` x `BLOCK` cells, so a tool position skips the blocks it can't reach.
     bounds: Bounds,
+    /// Where the run keeps its state at the start of each toolpath on disk, and picks it up from again
+    /// (`cam_sim_saves::Saves`, set by `cam_sim_saves::keep_ops`).
+    pub(crate) saves: Option<Box<crate::cam_sim_saves::Saves>>,
 }
 
 /// Cells per side of a `Bounds` block.
@@ -802,6 +805,7 @@ impl Sim {
             part_gaps: Default::default(),
             removed_by_move: None,
             bounds: Bounds::default(),
+            saves: None,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -1092,6 +1096,184 @@ impl Sim {
         Some(w)
     }
 
+    /// Everything a run has done so far, as bytes (`cam_sim_saves`): the stock and what cut it, the
+    /// problems and results so far, and every running total and window the moves still to come build on, so a
+    /// run picked up from here (`load_state`) goes on exactly as this one would.
+    pub(crate) fn state_bytes(&self) -> Vec<u8> {
+        use crate::cam_sim_cache::Bin;
+        let mut w = Vec::with_capacity(self.stock.len() * 25 + 4096);
+        self.nx.put(&mut w);
+        self.ny.put(&mut w);
+        [self.x0, self.y0, self.cell].put(&mut w);
+        self.done.put(&mut w);
+        self.pos.put(&mut w);
+        self.events.put(&mut w);
+        self.removed.put(&mut w);
+        self.max_h.put(&mut w);
+        self.floor.put(&mut w);
+        self.loads.put(&mut w);
+        self.air.put(&mut w);
+        self.chip_ops.put(&mut w);
+        self.chatter.put(&mut w);
+        self.time.put(&mut w);
+        let mut voids: Vec<(u32, Vec<(f32, f32)>)> = self.voids.iter().map(|(k, v)| (*k, v.clone())).collect();
+        voids.sort_by_key(|v| v.0);
+        voids.put(&mut w);
+        self.machine.as_ref().map(|m| (m.since, m.hit_parts.clone())).put(&mut w);
+        self.load_win.iter().map(|x| ((x.0, x.1), x.2)).collect::<Vec<_>>().put(&mut w);
+        self.load_of.put(&mut w);
+        self.feed.put(&mut w);
+        self.tapping.put(&mut w);
+        let [vol, depth, at] = self.chips.state();
+        ((vol.clone(), depth.clone()), at.clone()).put(&mut w);
+        self.last_chip.put(&mut w);
+        [self.confinement.0, self.confinement.1].put(&mut w);
+        self.conf_age.put(&mut w);
+        self.last_width.put(&mut w);
+        self.last_depth.put(&mut w);
+        self.profile.put(&mut w);
+        self.removed_by_move.as_ref().map(|r| r[..self.done.min(r.len())].to_vec()).put(&mut w);
+        (self.bounds.nx, self.bounds.ny).put(&mut w);
+        self.bounds.top.put(&mut w);
+        self.bounds.stale.put(&mut w);
+        for x in self.stock.iter().chain(&self.lo) {
+            x.put(&mut w);
+        }
+        w.extend(self.gouged.iter().map(|g| *g as u8));
+        for c in &self.cuts {
+            c.put(&mut w);
+        }
+        w
+    }
+
+    /// Pick the run up from `state_bytes` of this same simulation part way (the same setup, grid, recording
+    /// and moves up to there). False (and this one untouched) when it doesn't fit.
+    pub(crate) fn load_state(&mut self, b: &[u8]) -> bool {
+        use crate::cam_sim_cache::Bin;
+        type Machine = Option<(f64, Vec<(usize, Vec<usize>)>)>;
+        let r = &mut &b[..];
+        let n = self.nx * self.ny;
+        let got = (|| -> Option<_> {
+            let (nx, ny, origin) = (usize::get(r)?, usize::get(r)?, <[f64; 3]>::get(r)?);
+            if (nx, ny) != (self.nx, self.ny) || origin.map(f64::to_bits) != [self.x0, self.y0, self.cell].map(f64::to_bits) {
+                return None;
+            }
+            let done = usize::get(r)?;
+            let pos = DVec3::get(r)?;
+            let events = Vec::<SimEvent>::get(r)?;
+            let removed = f64::get(r)?;
+            let (max_h, floor) = (f32::get(r)?, f32::get(r)?);
+            let loads = Vec::<OpLoad>::get(r)?;
+            let air = Vec::<OpAir>::get(r)?;
+            let chip_ops = Vec::<OpChips>::get(r)?;
+            let chatter = Vec::<OpChatter>::get(r)?;
+            let time = f64::get(r)?;
+            let voids = Vec::<(u32, Vec<(f32, f32)>)>::get(r)?;
+            let machine = Machine::get(r)?;
+            let load_win = Vec::<((f32, f64), f32)>::get(r)?;
+            let load_of = Option::<(usize, u64)>::get(r)?;
+            let (feed, tapping) = (f64::get(r)?, bool::get(r)?);
+            let ((vol, depth), at) = <((Vec<f64>, Vec<f64>), Vec<f64>)>::get(r)?;
+            let chips = [vol, depth, at];
+            let last_chip = f64::get(r)?;
+            let confinement = <[f64; 2]>::get(r)?;
+            let conf_age = u32::get(r)?;
+            let (last_width, last_depth) = (f64::get(r)?, f64::get(r)?);
+            let profile = Option::<Vec<LoadSample>>::get(r)?;
+            let removed_by_move = Option::<Vec<(f32, f32)>>::get(r)?;
+            let bounds = (<(usize, usize)>::get(r)?, Vec::<f32>::get(r)?, Vec::<bool>::get(r)?);
+            Some((done, pos, events, removed, max_h, floor, loads, air, chip_ops, chatter, time, voids, machine, load_win, load_of, feed, tapping, chips, last_chip, confinement, conf_age, last_width, last_depth, profile, removed_by_move, bounds))
+        })();
+        let Some((done, pos, events, removed, max_h, floor, loads, air, chip_ops, chatter, time, voids, machine, load_win, load_of, feed, tapping, chips, last_chip, confinement, conf_age, last_width, last_depth, profile, removed_by_move, bounds)) = got else {
+            return false;
+        };
+        // the same recording as this run, and as many moves at least
+        if done > self.moves.len() || machine.is_some() != self.machine.is_some() || profile.is_some() != self.profile.is_some() || removed_by_move.is_some() != self.removed_by_move.is_some() {
+            return false;
+        }
+        if removed_by_move.as_ref().is_some_and(|m| m.len() != done) || bounds.1.len() != bounds.0 .0 * bounds.0 .1 || bounds.2.len() != bounds.1.len() {
+            return false;
+        }
+        // the grids: two f32s, a bool and three (u8, f32) per cell
+        if r.len() != n * (4 + 4 + 1 + 3 * 5) {
+            return false;
+        }
+        let grid = |r: &mut &[u8]| (0..n).map(|_| f32::get(r)).collect::<Option<Vec<f32>>>();
+        let (Some(stock), Some(lo)) = (grid(r), grid(r)) else { return false };
+        let gouged: Vec<bool> = r[..n].iter().map(|g| *g != 0).collect();
+        *r = &r[n..];
+        let Some(cuts) = (0..n).map(|_| <[(u8, f32); 3]>::get(r)).collect::<Option<Vec<_>>>() else { return false };
+        let mut chip_map = self.chips.clone();
+        if !chip_map.set_state(chips) {
+            return false;
+        }
+        (self.stock, self.lo, self.gouged, self.cuts) = (stock, lo, gouged, cuts);
+        (self.done, self.pos, self.events, self.removed, self.max_h, self.floor) = (done, pos, events, removed, max_h, floor);
+        (self.loads, self.air, self.chip_ops, self.chatter, self.time) = (loads, air, chip_ops, chatter, time);
+        self.voids = voids.into_iter().collect();
+        if let (Some(m), Some((since, hits))) = (self.machine.as_mut(), machine) {
+            (m.since, m.hit_parts) = (since, hits);
+        }
+        self.load_win = load_win.into_iter().map(|((a, b), c)| (a, b, c)).collect();
+        (self.load_of, self.feed, self.tapping, self.chips) = (load_of, feed, tapping, chip_map);
+        (self.last_chip, self.confinement, self.conf_age) = (last_chip, (confinement[0], confinement[1]), conf_age);
+        (self.last_width, self.last_depth) = (last_width, last_depth);
+        self.profile = profile;
+        if let (Some(all), Some(got)) = (self.removed_by_move.as_mut(), removed_by_move) {
+            all[..done].copy_from_slice(&got);
+        }
+        let ((bnx, bny), top, stale) = bounds;
+        self.bounds.nx = bnx;
+        self.bounds.ny = bny;
+        self.bounds.top = top;
+        self.bounds.stale = stale;
+        self.bounds.of = (self.stock.as_ptr() as usize, self.stock.len());
+        true
+    }
+
+    /// Hash what a run starts from, besides its setup and toolpaths (`cam_sim_saves::keep_ops`): the grid, the
+    /// stock and part on it, the fixtures and what it records.
+    pub(crate) fn hash_start(&self, h: &mut impl std::hash::Hasher) {
+        let f = |h: &mut dyn std::hash::Hasher, x: f64| h.write_u64(x.to_bits());
+        for x in [self.x0, self.y0, self.cell, self.top as f64, self.bottom as f64, self.max_h as f64, self.floor as f64, self.fixture_top, self.link_above, self.chatter_scale] {
+            f(h, x);
+        }
+        h.write_u64(self.nx as u64);
+        h.write_u64(self.ny as u64);
+        for x in self.stock.iter().chain(&self.lo).chain(&self.part).chain(&self.part_lo) {
+            h.write_u32(x.to_bits());
+        }
+        let mut gaps: Vec<_> = self.part_gaps.iter().collect();
+        gaps.sort_by_key(|g| *g.0);
+        for (k, v) in gaps {
+            h.write_u32(*k);
+            for (a, b) in v {
+                h.write_u32(a.to_bits());
+                h.write_u32(b.to_bits());
+            }
+        }
+        h.write(&self.gouged.iter().map(|g| *g as u8).collect::<Vec<_>>());
+        for c in &self.cuts {
+            for (i, z) in c {
+                h.write_u8(*i);
+                h.write_u32(z.to_bits());
+            }
+        }
+        for (lo, hi) in &self.fixtures {
+            for x in lo.to_array().into_iter().chain(hi.to_array()) {
+                f(h, x);
+            }
+        }
+        h.write_u64(self.done as u64);
+        h.write_u8(self.machine.is_some() as u8);
+        h.write_u8(self.profile.is_some() as u8);
+        h.write_u8(self.removed_by_move.is_some() as u8);
+        let p = self.pos.to_array();
+        for x in p {
+            f(h, x);
+        }
+    }
+
     /// Take the outcome of a finished run (`finished_bytes`) of this same simulation: this one fresh from
     /// `new` (and `set_machine`), on the same grid with the same moves. False (and this one untouched) when
     /// it doesn't fit.
@@ -1130,6 +1312,7 @@ impl Sim {
         *r = &r[n..];
         let Some(cuts) = (0..n).map(|_| <[(u8, f32); 3]>::get(r)).collect::<Option<Vec<_>>>() else { return false };
         (self.stock, self.lo, self.gouged, self.cuts) = (stock, lo, gouged, cuts);
+        self.stock_changed();
         (self.done, self.pos, self.events, self.removed, self.max_h) = (done, pos, events, removed, max_h);
         (self.loads, self.air, self.chip_ops, self.chatter, self.time) = (loads, air, chip_ops, chatter, time);
         self.voids = voids.into_iter().collect();
@@ -1169,10 +1352,14 @@ impl Sim {
     /// Returns true when it reached the target.
     pub fn run_to(&mut self, target: usize, budget: usize) -> bool {
         let target = target.min(self.moves.len());
+        if self.saves.is_some() && self.done < target {
+            crate::cam_sim_saves::pick_up(self, target);
+        }
         if self.bounds.of != (self.stock.as_ptr() as usize, self.stock.len()) {
             self.bounds.refresh(&self.stock, self.nx, self.ny);
         }
         let mut spent = 0usize;
+        let mut save_at = self.saves.as_ref().map(|s| s.next_at()).unwrap_or(usize::MAX);
         while self.done < target {
             let (ci, op, m) = self.moves[self.done];
             let step = self.done;
@@ -1192,6 +1379,10 @@ impl Sim {
                 Move::Dwell(_) => {}
             }
             self.done += 1;
+            if self.done == save_at {
+                crate::cam_sim_saves::save_here(self);
+                save_at = self.saves.as_ref().map(|s| s.next_at()).unwrap_or(usize::MAX);
+            }
             if spent >= budget {
                 break;
             }

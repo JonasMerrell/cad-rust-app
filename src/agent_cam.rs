@@ -356,7 +356,9 @@ impl Session {
             let placed = std::sync::Arc::new(Sim::place_machine(c, &part, stock, l));
             sim.set_machine(c, &part, placed);
         }
-        // simulated before, in this session or an earlier one: the run kept on disk
+        // simulated before, in this session or an earlier one: the run kept on disk, or picked up from where the
+        // toolpaths it shares with an earlier run end
+        crate::cam_sim_saves::keep_ops(&mut sim, c, &paths, 0);
         let disk = crate::cam_sim_cache::key(c, &part, stock, &paths, left.as_ref(), resolution, 0);
         crate::cam_sim_cache::run(&self.sim_dirs(), disk, &mut sim);
         self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
@@ -1400,6 +1402,7 @@ impl Session {
             let placed = std::sync::Arc::new(Sim::place_machine(&c, &part, stock, l));
             sim.set_machine(&c, &part, placed);
         }
+        crate::cam_sim_saves::keep_ops(&mut sim, &c, &read, 0);
         let now = crate::cam_verify::toolpath_hash(&paths);
         let moves: usize = read.iter().map(|p| p.moves.len()).sum();
         Ok(VerifyRun { ci, path, text, moves, now, sim, part, job: None })
