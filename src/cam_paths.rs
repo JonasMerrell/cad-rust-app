@@ -2345,6 +2345,10 @@ pub fn cycle_time(cam: &Cam, paths: &[Toolpath]) -> f64 {
         if rpm != Some(r) && t.kind != ToolKind::Probe {
             rpm = Some(r);
             total += cam.machine.spin_up.max(0.0);
+            // the rcnc post's dwell in air at the new speed
+            if cam.post == "rcnc" {
+                total += cam.rcnc.speed_dwell();
+            }
         }
         let start = tp.moves[0].end(DVec3::ZERO);
         if let Some(e) = end {
@@ -3446,12 +3450,34 @@ mod tests {
             if post == "rcnc" {
                 // rcnc's own M6 handles the pause and the measuring
                 assert!(!g.contains("MSG") && !g.contains("G43"), "{g}");
-                // rcnc's M6 measures and its M3 waits for the spindle: no probe cycle or dwell on top
+                // rcnc's M6 measures and its M3 waits for the spindle: no probe cycle or spin-up dwell on top
                 let mut p = c.clone();
                 p.probe.mode = "setter".into();
                 p.machine.spin_up = 5.0;
+                p.rcnc.speed_dwell = Some(0.0);
                 let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
                 assert!(!g.contains("G38") && !g.contains("G31") && !g.contains("G4 "), "{g}");
+                // by default 3 s in air right after each speed change, for the bog guard
+                p.rcnc.speed_dwell = None;
+                let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
+                let lines: Vec<&str> = g.lines().collect();
+                let s = lines.iter().position(|l| l.starts_with('S') && l.ends_with(" M3")).expect(&g);
+                assert_eq!(lines[s + 1], "G4 P3", "{g}");
+                assert_eq!(g.matches("G4 P3").count(), g.lines().filter(|l| l.starts_with('S') && l.ends_with(" M3")).count(), "{g}");
+                // the header lines rcnc reads: right under the title, nothing when not asked for
+                assert!(!g.contains("REQUIRE_GUARD") && !g.contains("RECORD_AUDIO") && !g.contains("(STOCK"), "{g}");
+                p.rcnc.require_guard = true;
+                p.rcnc.record_audio = true;
+                p.rcnc.stock_note = "26.6 x 101 x 12.34 6061 (measured)".into();
+                let g = crate::cam_post::gcode(&p, &paths, origin, top + c.clearance);
+                let head: Vec<&str> = g.lines().take(4).collect();
+                assert!(head[1] == "(STOCK 26.6 x 101 x 12.34 6061 [measured])" && head[2].starts_with("(RCNC REQUIRE_GUARD:") && head[3].starts_with("(RCNC RECORD_AUDIO:"), "{g}");
+                // only rcnc writes them
+                let mut m = p.clone();
+                m.post = "mach3".into();
+                let g = crate::cam_post::gcode(&m, &paths, origin, top + c.clearance);
+                assert!(!g.contains("REQUIRE_GUARD") && !g.contains("(STOCK") && !g.contains("G4 P3"), "{g}");
+                p.rcnc = Default::default();
                 // probing the stock's top and middle becomes rcnc's Find stock, after loading the probe and before
                 // the first cutter, with no spindle in between
                 let mut t = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Probe).unwrap();
@@ -3488,6 +3514,30 @@ mod tests {
                 let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
                 let want2 = format!("(RCNC FIND_STOCK SIZE=25.4,98,{} AT={},{},{} TOL=1 DEPTH=4 JAWX=-1 JAWZ=2.5 JAWAT=-9.8)", n(size.z), n(at.x), n(at.y), n(at.z));
                 assert!(g.contains(&want2), "{g}");
+                // Find stock from the saved vise location: VISE= replaces the touched jaw (rcnc takes one or the other)
+                p.rcnc.vise = "left".into();
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                let base = format!("(RCNC FIND_STOCK SIZE=25.4,98,{} AT={},{},{} TOL=1 DEPTH=4", n(size.z), n(at.x), n(at.y), n(at.z));
+                assert!(g.contains(&format!("{base} VISE=1)")), "{g}");
+                // the right station grips op 1's finished walls, narrower than the stock box: JAWAT from the
+                // fixed jaw's fixture (the -X box beside the stock; the shim under it doesn't count)
+                let (lo, hi) = (stock.0 - origin, stock.1 - origin);
+                let mid_y = (lo.y + hi.y) / 2.0;
+                p.rcnc.vise = "right".into();
+                p.fixtures = vec![
+                    crate::cam::Fixture { name: "fixed jaw (-X)".into(), min: [lo.x - 12.7 + 0.8, mid_y - 47.75, lo.z], max: [lo.x + 0.8, mid_y + 47.75, lo.z + 4.7] },
+                    crate::cam::Fixture { name: "moving jaw (+X)".into(), min: [hi.x, mid_y - 47.75, lo.z], max: [hi.x + 12.7, mid_y + 47.75, lo.z + 4.7] },
+                    crate::cam::Fixture { name: "shim".into(), min: [lo.x - 5.0, lo.y, lo.z - 1.0], max: [hi.x, hi.y, lo.z] },
+                ];
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                assert!(g.contains(&format!("{base} VISE=-1 JAWAT={})", n(lo.x + 0.8))), "{g}");
+                // the left station's jaw on the stock's side: no JAWAT; a given jaw_at wins
+                p.rcnc.vise = "left".into();
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                assert!(g.contains(&format!("{base} VISE=1)")), "{g}");
+                p.rcnc.jaw_at = Some(7.25);
+                let g = crate::cam_post::gcode_noted(&p, &paths, origin, top + c.clearance, None, Some(stock));
+                assert!(g.contains(&format!("{base} VISE=1 JAWAT=7.25)")), "{g}");
             }
             // work zero at the stock top: nothing cuts above Z0
             for l in g.lines().filter(|l| l.starts_with("G1") || l.starts_with('Z')) {

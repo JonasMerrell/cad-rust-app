@@ -493,6 +493,18 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             &[],
             "your own G-code lines",
         ),
+        ("create_cam" | "edit_cam", "rcnc") => obj(
+            json!({
+                "require_guard": t("boolean", "an (RCNC REQUIRE_GUARD) line: rcnc refuses Cycle Start unless its bog guard (feed hold when the heard spindle speed sags) is armed"),
+                "record_audio": t("boolean", "an (RCNC RECORD_AUDIO) line: rcnc records the run's sound beside the program"),
+                "speed_dwell": json!({"type": "number", "minimum": 0, "description": "seconds in air after each spindle start or speed change (G4 P), where the bog guard learns the no-load speed (default 3; 0: none)"}),
+                "stock_note": t("string", "a (STOCK ...) line under the title: the stock the program is for, e.g. \"26.6 x 101 x 12.34 6061 as measured 2026-11-20\""),
+                "vise": en(&["", "left", "right"], "Find stock from the vise location rcnc saved: left (the station left of the fixed centre block, VISE=1) or right (VISE=-1); X from the saved jaw, no jog to the stock"),
+                "jaw_at": t("number", "with vise: work X of the fixed jaw's face (JAWAT=) where it grips narrower than the stock box (op 2 on op 1's walls); default from the fixtures"),
+            }),
+            &[],
+            "requests only the rcnc post writes",
+        ),
         ("create_cam" | "edit_cam", "follows") => t("string", "name of an earlier Manufacture tab whose leftover stock this setup starts from"),
         ("create_cam" | "edit_cam", "min_rpm") => t("number", "slowest useful spindle speed"),
         ("create_cam" | "edit_cam", "max_rpm") => t("number", "fastest spindle speed"),

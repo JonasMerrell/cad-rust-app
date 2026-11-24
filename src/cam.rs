@@ -1519,6 +1519,56 @@ pub struct PostText {
     pub footer: String,
 }
 
+/// Requests the `rcnc` post writes for Jonas's rcnc mill controller (other posts leave them out).
+#[derive(Clone, Debug, Default, Serialize, Deserialize, PartialEq)]
+#[serde(default)]
+pub struct Rcnc {
+    /// `(RCNC REQUIRE_GUARD …)`: rcnc refuses Cycle Start unless its bog guard (feed hold when the heard
+    /// spindle speed sags) is armed. For cuts beyond the ones already proven on the machine.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub require_guard: bool,
+    /// `(RCNC RECORD_AUDIO …)`: rcnc records the run's sound beside the program (calibration passes).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub record_audio: bool,
+    /// Seconds in air after each spindle start or speed change, before the tool goes near the work (`G4 P`):
+    /// rcnc's bog guard learns that speed's no-load speed there. None: 3; 0: none.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub speed_dwell: Option<f64>,
+    /// A `(STOCK …)` line under the title, e.g. "26.6 x 101 x 12.34 6061 as measured 2026-11-20", so an old
+    /// program can't pass for one made for other stock.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub stock_note: String,
+    /// Find stock from the vise location rcnc saved (`FIND_STOCK VISE=`): "left" (the station left of the
+    /// fixed centre block, its jaw on the stock's +X side: VISE=1) or "right" (jaw on the -X side: VISE=-1).
+    /// X then comes from the saved jaw, with no touch and no jog to the stock. Empty: not used.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub vise: String,
+    /// With `vise`: the work X of the fixed jaw's face (`JAWAT=`), where the face the jaw grips isn't the
+    /// stock's side (op 2 gripping op 1's finished walls under a wider raw band). None: from the fixtures (the
+    /// nearest box on the jaw's side), written only when it differs from the stock's side.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub jaw_at: Option<f64>,
+}
+
+impl Rcnc {
+    pub fn speed_dwell(&self) -> f64 {
+        self.speed_dwell.unwrap_or(3.0).max(0.0)
+    }
+
+    /// The `VISE=` side: 1 for the left station, -1 for the right, None when not used.
+    pub fn vise_side(&self) -> Option<i8> {
+        match self.vise.trim().to_ascii_lowercase().as_str() {
+            "left" => Some(1),
+            "right" => Some(-1),
+            _ => None,
+        }
+    }
+
+    fn is_default(&self) -> bool {
+        *self == Rcnc::default()
+    }
+}
+
 /// A fixture preset placed against the stock (`lo`, `hi` in setup coordinates): vise jaws along the
 /// front and back faces, clamps and screws over the edges in turn (left, right, front, back), each
 /// overlapping the stock by a quarter of its size. Returned in work coordinates.
@@ -1778,6 +1828,10 @@ pub struct Cam {
     pub probe: Probe,
     /// The user's own G-code for the start, tool changes and end of the program.
     pub post_text: PostText,
+    /// rcnc requests (bog guard, sound recording, dwell after speed changes, stock line, Find stock from the
+    /// saved vise location); only the rcnc post writes them.
+    #[serde(skip_serializing_if = "Rcnc::is_default")]
+    pub rcnc: Rcnc,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -1837,6 +1891,7 @@ impl Default for Cam {
             jaws_of: String::new(),
             probe: Probe::default(),
             post_text: PostText::default(),
+            rcnc: Rcnc::default(),
             tools: vec![],
             ops: vec![],
             next_id: 1,
@@ -2075,6 +2130,9 @@ pub struct MachineSettings {
     pub machine: Machine,
     pub probe: Probe,
     pub post_text: PostText,
+    /// The rcnc requests that belong to the machine (bog guard, recording, dwell); the setup's own (vise
+    /// station, jaw face, stock line) are left out.
+    pub rcnc: Rcnc,
 }
 
 impl Default for MachineSettings {
@@ -2097,6 +2155,7 @@ impl MachineSettings {
             machine: c.machine.clone(),
             probe: c.probe.clone(),
             post_text: c.post_text.clone(),
+            rcnc: Rcnc { vise: String::new(), jaw_at: None, stock_note: String::new(), ..c.rcnc.clone() },
         }
     }
 
@@ -2112,6 +2171,7 @@ impl MachineSettings {
         c.machine = self.machine.clone();
         c.probe = self.probe.clone();
         c.post_text = self.post_text.clone();
+        c.rcnc = Rcnc { vise: c.rcnc.vise.clone(), jaw_at: c.rcnc.jaw_at, stock_note: c.rcnc.stock_note.clone(), ..self.rcnc.clone() };
     }
 }
 
