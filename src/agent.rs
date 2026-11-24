@@ -69,6 +69,9 @@ pub struct Session {
     /// Finished stock simulations of built setups and jobs, by their build keys and resolution: the pictures,
     /// simulate_cam and the export gate of the same toolpaths share one run instead of each simulating.
     pub(crate) sim_cache: HashMap<(u64, usize), (crate::cam::Cam, crate::cam_paths::Part, Vec<crate::cam_paths::Toolpath>, crate::cam_sim::Sim)>,
+    /// The last FEA solve, keyed by its study and the Part Studio it analyses: render_simulation after
+    /// solve_simulation (one picture per field or mode) reuses it instead of meshing and solving again.
+    pub(crate) fea_cache: Option<(u64, crate::fea::Study, std::sync::Arc<crate::fea::Outcome>)>,
 }
 
 /// One setup built: its key, the parts, the toolpaths, the stock the setups before it leave, and the stock
@@ -103,6 +106,7 @@ impl Session {
             crashed: false,
             cam_cache: HashMap::new(),
             sim_cache: HashMap::new(),
+            fea_cache: None,
         }
     }
 

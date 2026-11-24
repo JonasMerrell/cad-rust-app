@@ -50,6 +50,17 @@ STUB = textwrap.dedent('''\
                 continue
             elif t in ("export_cam_simulation", "export_setup_sheet"):
                 open(args["path"], "w").write("<html>%s %s</html>" % (t, json.dumps(args)))
+            elif t == "solve_simulation":
+                sys.stderr.write("Beam: Solving 50% (1 s)\\n"); sys.stderr.flush()
+                time.sleep(1.5)
+                print(json.dumps({"tool": t, "result": {"analysis": "static", "material": "Steel", "max_von_mises_mpa": 62.07,
+                    "max_stress_at": [0, 0, 10], "factor_of_safety": 1.2, "max_displacement_mm": 0.2007, "warnings": [],
+                    "reactions": [{"support": "Fixed 1", "magnitude_n": 100}], "material_props": {"E_mpa": 200000, "yield_mpa": 250},
+                    "mesh": {"elements": 9024, "nodes": 15041, "element": "10-node tetrahedron", "element_size_mm": 2.5}}}))
+                continue
+            elif t == "render_simulation":
+                png = b"\\x89PNG\\r\\n\\x1a\\n" + b"\\x00\\x00\\x00\\rIHDR" + (900).to_bytes(4, "big") + (700).to_bytes(4, "big")
+                open(args["path"], "wb").write(png)
             elif t == "export_drawing":
                 open(args["path"], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297"><text>sheet %d</text></svg>' % args["sheet"])
             elif t == "drawing_info":
@@ -122,7 +133,10 @@ class ProjectsTest(unittest.TestCase):
         with open(os.path.join(self.projects_dir, "Bracket", "bracket.json"), "w") as f:
             json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Body", "doc": BODY}],
                        "assemblies": [{"name": "Arm"}], "cams": [{"name": "Plate"}],
-                       "drawings": [{"name": "Plate"}]}, f, indent=2)
+                       "drawings": [{"name": "Plate"}],
+                       "simulations": [{"name": "Beam", "analysis": "static", "material": "Steel",
+                                        "supports": [{"name": "Fixed 1", "kind": "fixed", "faces": [{}]}],
+                                        "loads": [{"name": "Force 1", "kind": "force", "value": 100, "faces": [{}]}]}]}, f, indent=2)
         with open(os.path.join(self.projects_dir, "Bracket", "notes.json"), "w") as f:
             f.write('{"not": "a document"}')
         stub = os.path.join(self.tmp, "rcad")
@@ -236,6 +250,32 @@ class ProjectsTest(unittest.TestCase):
                                                          "ask": "In the drawing's title block, set the material to "})
         st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0&page=2")
         self.assertEqual([r["name"] for r in {s["title"]: s for s in t["sections"]}["Views"]["rows"]], ["Iso"])
+
+    def test_simulation_tab_solves_in_the_background(self):
+        did = self.doc()[0]["id"]
+        self.assertEqual(self.req("GET", f"/api/doc/{did}")[1]["simulations"], ["Beam"])
+        # the first ask starts the solve and gets a page that reloads itself
+        st, page = self.req("GET", f"/api/doc/{did}/view?simulation=0", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn("Solving the simulation", page)
+        self.assertIn("location.reload()", page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?simulation=0")
+        self.assertEqual((t["kind"], t["building"]), ("simulation", True))
+        for _ in range(50):
+            st, page = self.req("GET", f"/api/doc/{did}/view?simulation=0", raw=True)
+            if "Solving" not in page:
+                break
+            time.sleep(0.2)
+        self.assertIn('"label": "Stress"', page)
+        self.assertIn('"label": "Safety"', page)
+        self.assertIn("data:image/png;base64,", page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?simulation=0")
+        self.assertEqual(t["summary"], "Static · Steel · max 62.1 MPa · safety 1.2 · 0.201 mm")
+        sec = {s["title"]: s for s in t["sections"]}
+        self.assertEqual(sec["Results"]["rows"][0]["name"], "Factor of safety 1.2")
+        self.assertTrue(sec["Results"]["rows"][0]["error"])
+        self.assertEqual([r["name"] for r in sec["Supports and loads"]["rows"]], ["Fixed 1", "Force 1"])
+        self.assertEqual(sec["Supports and loads"]["rows"][1]["sub"], "force · 100 N")
 
     def test_ids_stay_inside_the_project_folders(self):
         outside = os.path.join(self.tmp, "secret.json")
