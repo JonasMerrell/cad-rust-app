@@ -160,6 +160,67 @@ impl Session {
         })))
     }
 
+    /// The standard two-station part job (`cam_part_job`): plan it, then make it with the ordinary tool calls.
+    fn plan_part_job(&mut self, a: &Value) -> R<Value> {
+        self.sync();
+        let studio = a.get("studio").and_then(|v| v.as_u64()).ok_or("plan_part_job: give studio (the Part Studio of the part)")? as usize;
+        if studio >= self.ws.studios.len() {
+            return Err(format!("no Part Studio {studio}"));
+        }
+        // the machine both setups get, as create_cam would make it
+        let mut tmp = cam::new_setup("plan".into(), studio, &self.ws.cams, cam::load_machine());
+        set_machine_arg(&mut tmp, a)?;
+        if let Some(b) = a.get("bodies") {
+            tmp.bodies = serde_json::from_value(b.clone()).map_err(|_| "bodies: [[feature, index], …]")?;
+        }
+        tmp.orient = a.get("op1").and_then(|o| o.get("orient")).and_then(|v| v.as_str()).unwrap_or("bottom").to_string();
+        let (limits, _) = tmp.machine.cut_limits();
+        if tmp.machine.model.is_empty() {
+            return Err("plan_part_job: the machine needs a model with vise stations (machine.model, cam_machine vise)".into());
+        }
+        let model = crate::cam_machine::load(&tmp.machine.model)?;
+        let station = |k: &str, d: &str| -> R<f64> {
+            let n = a.get(k).and_then(|o| o.get("station")).and_then(|v| v.as_str()).unwrap_or(d);
+            let s = model.model.vise.iter().find(|s| s.name.eq_ignore_ascii_case(n)).ok_or_else(|| format!("plan_part_job: machine {} has no vise station {n}", model.model.name))?;
+            Ok(s.grip + s.clearance)
+        };
+        let jaw_limit = [station("op1", "left")?, station("op2", "right")?];
+        // the part's thickness as op 1 sees it
+        self.ensure_built(studio)?;
+        self.ws.cams.push(tmp.clone());
+        let ci = self.ws.cams.len() - 1;
+        let input = crate::cam_ui::part_input(self.bodies(studio), self.studio_doc(studio), &crate::cam_jaws::input_bodies(&self.ws.cams, ci));
+        self.ws.cams.pop();
+        if input.tris.is_empty() {
+            return Err(format!("Part Studio {studio} has no parts to machine"));
+        }
+        let part = Part::from_input(&input, &tmp);
+        let facts = crate::cam_part_job::Facts {
+            cams: self.ws.cams.len(),
+            part_t: part.hi.z - part.lo.z,
+            jaw_limit,
+            caution: Box::new(move |rpm| limits.available(rpm) * limits.caution),
+            machine: a.get("machine").cloned().unwrap_or(Value::Null),
+        };
+        let plan = crate::cam_part_job::plan(a, &facts)?;
+        for (i, s) in plan.steps.iter().enumerate() {
+            let tool = s["tool"].as_str().unwrap_or("");
+            self.cam_call(tool, &s["args"]).map_err(|e| format!("plan_part_job: step {i} ({tool} {}): {e}", s["args"]["name"].as_str().unwrap_or("")))?;
+        }
+        let mut v = json!({"plan": plan.summary, "warnings": plan.warnings, "steps": plan.steps});
+        // built once, now that every operation is in (unless asked not to)
+        if a.get("build").and_then(|b| b.as_bool()).unwrap_or(true) {
+            let mut infos = vec![];
+            for k in [facts.cams, facts.cams + 1] {
+                let info = self.cam_info(k)?;
+                infos.push(json!({"cam": k, "name": info["name"], "cycle_time_s": info["cycle_time_s"], "warnings": info["warnings"], "errors": info["errors"],
+                    "operations": info["operations"].as_array().map(|o| o.iter().map(|x| json!({"id": x["id"], "name": x["name"], "time_s": x["time_s"], "warnings": x["warnings"]})).collect::<Vec<_>>())}));
+            }
+            v["setups"] = json!(infos);
+        }
+        Ok(v)
+    }
+
     /// The setup's parts and toolpaths.
     fn cam_build(&mut self, ci: usize) -> R<(Part, Vec<Toolpath>)> {
         self.cam_build_from(ci).map(|(p, t, _)| (p, t))
@@ -579,7 +640,7 @@ impl Session {
     /// The CAM tools. One that fails leaves the Manufacture tabs as they were (an operation
     /// added before a bad setting was found, a post changed before the export failed, …).
     pub(super) fn cam_call(&mut self, name: &str, a: &Value) -> R<(Value, Option<Vec<u8>>)> {
-        const CHANGES_CAMS: [&str; 8] = ["create_cam", "edit_cam", "import_tool_library", "cam_tool", "cam_op", "cam_template", "export_gcode", "import_cutlog"];
+        const CHANGES_CAMS: [&str; 9] = ["create_cam", "edit_cam", "import_tool_library", "cam_tool", "cam_op", "cam_template", "export_gcode", "import_cutlog", "plan_part_job"];
         if !CHANGES_CAMS.contains(&name) {
             return self.cam_call_inner(name, a);
         }
@@ -873,6 +934,7 @@ impl Session {
                 let ci = self.cam_idx(a)?;
                 self.cam_info(ci)?
             }
+            "plan_part_job" => self.plan_part_job(a)?,
             "import_cutlog" => {
                 let ci = self.cam_idx(a)?;
                 let path = self.input_path(a.get("path").and_then(|p| p.as_str()).ok_or("give path (a .cutlog.json rcnc wrote)")?);
@@ -1581,6 +1643,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "export_cam_simulation", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
         json!({"name": "export_setup_sheet", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). It simulates the exact toolpaths it posts first and refuses (an error, nothing written) when the simulation finds any problem: a rapid into stock, a gouge, a shank, holder or fixture hit, an overload. A clean program gets a \"(SIM OK: 0 problems ..., hash ...)\" line under its title. allow_problems: true writes it anyway, only to look at, as <name>.UNSAFE.<ext> with an UNSAFE header. Reports line count, cycle time, toolpath warnings and the simulation result.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "post": {"type": "string"}, "allow_problems": {"type": "boolean"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "plan_part_job", "description": "The standard two-station part job for a vise with two stations (op 1 from the raw blank in one, op 2 flipped in the other, one rCAD job): from the part (studio, bodies: one part or a pair on one blank), the measured blank (stock {size [x, y, z], material}), the vise stations (op1/op2 {station, shim, shims, orient (op 1, default bottom), origin (op 2), z_reference, work_offset}) and the machine (machine: as create_cam; its model needs cam_machine vise stations), it makes both setups (rcnc post, bog guard, stay-down links, Find stock from the saved vise location) with the chamfer mill, the 1/4 end mill and the probe (tools {chamfer | flat | probe: cam_tool overrides}), and the standard operations, each with a key: op 1 probe_top, probe_centre, face (face, default 0.2), rough (adaptive in laps to just over the jaws, rough_levels (default levels of up to 6 mm), power target from the material's speeds, rough_cap default the spindle's caution at that speed), walls (one full-height climb finish pass with arc leads), carrier_bores (carrier {points [[x,y],[x,y]], diameter 7.5, probe_depth 1}), edge_break; op 2 probe_top, probe_centre, bore_a (with a stop to blow the bores out), bore_b (Find bores), face (to the part's top, face2_levels, default levels of up to 2 mm), band (a light rough of what is above op 1's walls: it separates the parts), seam_chamfer (seam_chamfer: its size; warns when the op 1 / op 2 seam would show), edge_break. speeds overrides the material's (aluminium: rough 9000 rpm at 650 W, face and finish 12000, chamfer 24000; brass: 18000, 300 W). ops {\"op2.face\": {cam_op arguments}} changes any of them (null removes an argument), skip [\"op1.edge_break\"] leaves some out, extra [{setup: op1 | op2, before | after: key (default before edge_break), key, op: {kind, …cam_op arguments}}] adds the part's own (pockets, channels, 3D finishing, engraving); with [setup names] adds more setups to the job. Operations go in with build: false and both setups build once at the end (build: false skips that). Returns the plan's numbers (the walls' reach, levels, power), warnings, the setups' times and warnings, and steps: the exact tool calls, to keep as a script.", "inputSchema": obj(json!({"name": {"type": "string"}, "studio": {"type": "integer"}, "bodies": {"type": "array"}, "stock": {"type": "object"}, "machine": {}, "op1": {"type": "object"}, "op2": {"type": "object"}, "face": {"type": "number"}, "carrier": {"type": "object"}, "seam_chamfer": {"type": "number"}, "rough_levels": {"type": "number"}, "rough_cap": {"type": "number"}, "face2_levels": {"type": "number"}, "speeds": {"type": "object"}, "tools": {"type": "object"}, "ops": {"type": "object"}, "skip": {"type": "array"}, "extra": {"type": "array"}, "with": {"type": "array"}, "require_guard": {"type": "boolean"}, "build": {"type": "boolean"}}), &["studio", "stock"])}),
         json!({"name": "verify_gcode", "description": "For a setup that leads a job (create_cam with), the job's program: each station's stretch (by its G54…G59) read back with that station's setup and simulated together; stations [names] for a program posted with only some. Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems. programs [{cam, path, stations}] checks several programs in one call, their simulations side by side on the CPU's cores (each the same as on its own): results in programs, ok when every one is.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}, "programs": {"type": "array"}}), &[])}),
     ]
 }
