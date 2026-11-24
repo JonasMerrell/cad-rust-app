@@ -17,6 +17,13 @@ to the same small service the rCAD Capture app uploads photos to.
 - **Viewer**: rCAD's own interactive web page of the document (the page *File → Export web
   viewer* writes), built on netdash with `export_web` and cached until the document changes. Pick
   any Part Studio or Assembly; assemblies keep their mate sliders and animations.
+- **Manufacture tabs**: the toolpath playback page (`export_cam_simulation`: stock being cut,
+  tool, fixtures, time line) with a chip for the setup sheet. The tray lists the simulation's
+  problems (grouped by operation and kind), the operations with tool and time, the tools and the
+  operator's notes; tap a row to ask Claude about it. The app remembers the last tab per document.
+- **Drawing tabs**: each sheet as vector graphics (`export_drawing` SVG): pinch to zoom, drag to
+  pan, double-tap to zoom in or back out; chips switch sheets. The tray lists the sheet's views,
+  dimensions, GD&T, notes and the title block.
 - **Claude**: a chat under the viewer. Requests run on netdash as `rcad chat`, which is the
   editor's chat panel without the window: the same tools and instructions, signed in through
   Claude Code with your own Claude plan. Claude edits the document file, and the viewer reloads
@@ -66,8 +73,9 @@ All on the receiver's port and token (see `capture/receiver/rcad_projects.py`):
     GET  /api/projects                     documents
     POST /api/projects {"name"}            new project
     GET  /api/doc/<id>                     tabs, saved chats, running request
-    GET  /api/doc/<id>/view?studio=N|assembly=N&t=<token>
-    GET  /api/doc/<id>/tree?studio=N|assembly=N   feature tree, variables, parts / instances, mates
+    GET  /api/doc/<id>/view?studio=N|assembly=N|cam=N|drawing=N[&page=P]&t=<token>
+    GET  /api/doc/<id>/tree?studio=N|assembly=N|cam=N|drawing=N   feature tree, variables, parts / instances, mates /
+                                                    for other tabs: summary, pages and sections of rows
     GET  /api/doc/<id>/chats/<chat>
     POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?}  → {"job"}
     GET  /api/jobs/<job>?after=N           events (long poll)

@@ -48,6 +48,31 @@ STUB = textwrap.dedent('''\
                 print(json.dumps({"tool": t, "result": {"name": "Arm", "instances": [{"id": 1, "name": "Body <1>", "fixed": True}],
                     "mates": [{"kind": "revolute", "name": "Hinge"}], "bom": [], "failed_mates": []}}))
                 continue
+            elif t in ("export_cam_simulation", "export_setup_sheet"):
+                open(args["path"], "w").write("<html>%s %s</html>" % (t, json.dumps(args)))
+            elif t == "export_drawing":
+                open(args["path"], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297"><text>sheet %d</text></svg>' % args["sheet"])
+            elif t == "drawing_info":
+                print(json.dumps({"tool": t, "result": {"name": "Plate", "sheets": 2, "sheet_size": "A3", "warnings": [],
+                    "views": [{"id": 1, "dir": "front", "scale": 2, "sheet": 1}, {"id": 2, "dir": "section:front", "letter": "A", "scale": 2, "sheet": 1},
+                              {"id": 3, "dir": "iso", "assembly": 0, "scale": 1, "sheet": 2}],
+                    "dimensions": [{"view": 1, "kind": "horizontal", "text": "60"}, {"view": 3, "kind": "diameter", "text": "8"}],
+                    "notes": [{"text": "Break sharp edges", "sheet": 1}], "gdt": [],
+                    "title_block": {"part": "Plate", "material": "AlMg3", "first_angle": False}}}))
+                continue
+            elif t == "cam_info":
+                print(json.dumps({"tool": t, "result": {"name": "Plate", "cycle_time_s": 970, "post": "mach3", "errors": [],
+                    "tools": [{"id": 1, "number": 3, "description": "6 mm flat end mill", "rpm": 12000, "feed": 800}],
+                    "operations": [{"name": "Pocket 1", "kind": "pocket", "tool": 1, "tool_number": 3, "time_s": 59, "warnings": []},
+                                   {"name": "Contour 1", "kind": "contour", "tool": 1, "tool_number": 3, "time_s": 302,
+                                    "warnings": ["cuts 13.5 mm deep but the flutes are only 13 mm long"]}],
+                    "setup_notes": ["clamp it in the vise"]}}))
+                continue
+            elif t == "simulate_cam":
+                print(json.dumps({"tool": t, "result": {"ok": False, "removed_mm3": 5000, "problems": [
+                    {"operation": "Pocket 1", "what": "tool overloaded", "at": [1, 2, -7]},
+                    {"operation": "Pocket 1", "what": "tool overloaded", "at": [3, 2, -7]}]}}))
+                continue
             print(json.dumps({"tool": t, "result": {"ok": True}}))
         sys.exit(0)
     if a[0] == "chat":
@@ -96,7 +121,8 @@ class ProjectsTest(unittest.TestCase):
         os.makedirs(os.path.join(self.projects_dir, "Bracket", ".rcad-cache"))
         with open(os.path.join(self.projects_dir, "Bracket", "bracket.json"), "w") as f:
             json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Body", "doc": BODY}],
-                       "assemblies": [{"name": "Arm"}]}, f, indent=2)
+                       "assemblies": [{"name": "Arm"}], "cams": [{"name": "Plate"}],
+                       "drawings": [{"name": "Plate"}]}, f, indent=2)
         with open(os.path.join(self.projects_dir, "Bracket", "notes.json"), "w") as f:
             f.write('{"not": "a document"}')
         stub = os.path.join(self.tmp, "rcad")
@@ -168,6 +194,48 @@ class ProjectsTest(unittest.TestCase):
         self.assertEqual(t["variables"], [{"name": "w", "expr": "40"}])
         st, t = self.req("GET", f"/api/doc/{did}/tree?assembly=0")
         self.assertEqual((t["kind"], t["instances"][0]["name"], t["mates"][0]["name"]), ("assembly", "Body <1>", "Hinge"))
+
+    def test_cam_tab(self):
+        did = self.doc()[0]["id"]
+        st, d = self.req("GET", f"/api/doc/{did}")
+        self.assertEqual(d["cams"], ["Plate"])
+        st, page = self.req("GET", f"/api/doc/{did}/view?cam=0", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn("export_cam_simulation", page)
+        st, page = self.req("GET", f"/api/doc/{did}/view?cam=0&page=sheet", raw=True)
+        self.assertIn("export_setup_sheet", page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?cam=0")
+        self.assertEqual((st, t["kind"]), (200, "cam"))
+        self.assertEqual(t["summary"], "16 min 10 s cycle · 2 operations · 5.0 cm³ removed · mach3")
+        self.assertEqual([p["label"] for p in t["pages"]], ["Simulation", "Setup sheet"])
+        sec = {s["title"]: s for s in t["sections"]}
+        self.assertEqual(list(sec), ["Problems", "Operations", "Tools", "Before running"])
+        # the same problem in one operation is one row
+        self.assertEqual([r["name"] for r in sec["Problems"]["rows"]], ["2× tool overloaded"])
+        self.assertEqual(sec["Problems"]["rows"][0]["sub"], "Pocket 1 first at X1 Y2 Z-7")
+        ops = sec["Operations"]["rows"]
+        self.assertEqual((ops[0]["sub"], ops[0]["icon"], ops[1]["error"]), ("T3 · 6 mm flat end mill · 59 s", "camPocket", True))
+        self.assertEqual(self.req("GET", f"/api/doc/{did}/view?cam=5")[0], 404)
+
+    def test_drawing_tab(self):
+        did = self.doc()[0]["id"]
+        self.assertEqual(self.req("GET", f"/api/doc/{did}")[1]["drawings"], ["Plate"])
+        st, page = self.req("GET", f"/api/doc/{did}/view?drawing=0", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn("<text>sheet 1</text>", page)
+        self.assertIn("Plate · sheet 1", page)
+        st, page = self.req("GET", f"/api/doc/{did}/view?drawing=0&page=2", raw=True)
+        self.assertIn("<text>sheet 2</text>", page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0")
+        self.assertEqual(t["summary"], "A3 · sheet 1 of 2 · 1 dimension · third-angle")
+        self.assertEqual([(p["id"], p["label"]) for p in t["pages"]], [("", "Sheet 1"), ("2", "Sheet 2")])
+        sec = {s["title"]: s for s in t["sections"]}
+        self.assertEqual([r["name"] for r in sec["Views"]["rows"]], ["Front", "Section A"])
+        self.assertEqual([r["name"] for r in sec["Dimensions"]["rows"]], ["60"])
+        self.assertEqual(sec["Title block"]["rows"][1], {"name": "AlMg3", "sub": "Material", "icon": "properties",
+                                                         "ask": "In the drawing's title block, set the material to "})
+        st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0&page=2")
+        self.assertEqual([r["name"] for r in {s["title"]: s for s in t["sections"]}["Views"]["rows"]], ["Iso"])
 
     def test_ids_stay_inside_the_project_folders(self):
         outside = os.path.join(self.tmp, "secret.json")

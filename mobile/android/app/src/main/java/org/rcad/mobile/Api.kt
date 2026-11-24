@@ -39,6 +39,9 @@ class Prefs(context: Context) {
     /** The chat last open for each document, to come back to it. */
     fun chatFor(doc: String): String? = sp.getString("chat:$doc", null)
     fun setChatFor(doc: String, chat: String?) = sp.edit().putString("chat:$doc", chat).apply()
+    /** The tab last shown for a document, as "kind:index:page". */
+    fun tabFor(doc: String): String? = sp.getString("tab:$doc", null)
+    fun setTabFor(doc: String, tab: String) = sp.edit().putString("tab:$doc", tab).apply()
 
     fun orderedUrls(): List<String> {
         val all = urls
@@ -90,10 +93,8 @@ class Api(val base: String, val token: String) {
     fun ping(): JSONObject = read(open("/api/ping", "GET", connectMs = 2500, readMs = 4000))
 
     /** The viewer page's address (the web view sends no headers on its own, so the token goes in the query). */
-    fun viewUrl(doc: String, assembly: Int?, studio: Int?): String {
-        val sel = if (assembly != null) "&assembly=$assembly" else "&studio=${studio ?: 0}"
-        return "$base/api/doc/${enc(doc)}/view?t=${enc(token)}$sel"
-    }
+    /** The page showing one tab; [sel] is the tab as a query ("studio=0", "cam=1&page=sheet"). */
+    fun viewUrl(doc: String, sel: String): String = "$base/api/doc/${enc(doc)}/view?t=${enc(token)}&$sel"
 
     companion object {
         fun enc(s: String): String = URLEncoder.encode(s, "UTF-8").replace("+", "%20")
