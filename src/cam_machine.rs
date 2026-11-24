@@ -99,6 +99,9 @@ pub struct MachineModel {
     pub table_on: Carrier,
     /// The point on the table that setups are placed from, as modelled (the middle of its top).
     pub table: [f64; 3],
+    /// The stations of the vise on the table (`cam_vise`): setups name one to be held in it.
+    #[serde(skip_serializing_if = "Vec::is_empty")]
+    pub vise: Vec<crate::cam_vise::ViseStation>,
 }
 
 impl Default for MachineModel {
@@ -113,6 +116,7 @@ impl Default for MachineModel {
             holders: false,
             table_on: Carrier::Y,
             table: [0.0; 3],
+            vise: vec![],
         }
     }
 }
@@ -282,6 +286,7 @@ pub fn guess(name: &str, parts: Vec<(String, [u8; 3], Vec<[Vec3; 3]>)>) -> Machi
         holders: false,
         table_on,
         table: table.to_array(),
+        vise: vec![],
     };
     // travel: as far as each axis's parts can slide along the parts they touch on what carries them (its
     // guide rails); a Z axis also stops with the spindle at the table

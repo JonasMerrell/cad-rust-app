@@ -2441,7 +2441,7 @@ fn start_sim(app: &mut App, run: bool) {
         sim.start_from(m);
     }
     if !c.machine.model.is_empty() {
-        match crate::cam_machine::load(&c.machine.model) {
+        match crate::cam_vise::machine_for(&c) {
             Ok(l) => {
                 // placing a detailed machine takes a moment: keep it while nothing it depends on changes
                 let key = {
