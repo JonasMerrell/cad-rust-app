@@ -69,11 +69,16 @@ struct Cutter {
     radius: f64,
     /// Height of the cutting surface above the tip by distance from the axis, every LUT_STEP mm.
     lut: Vec<f32>,
+    /// `lut_floor[i]`: no `lut_at` from step i out gives less (see `lut_floor`).
+    lut_floor: Vec<f32>,
     /// Shank radius and bottom height above the tip.
     shank_r: f64,
     shank_z: f32,
     /// Cells under the holder (every other cell) and how far above the tip its underside is there.
     holder: Vec<(i32, i32, f32)>,
+    /// How far out `holder` reaches (cells) and its lowest underside above the tip.
+    holder_reach: i32,
+    holder_low: f32,
     /// Cuts under an overhang (slot mills, dovetails, thread mills): the head takes material out of the
     /// middle of a column (see `Sim::voids`), and is checked against the part's solid, not its top.
     undercut: bool,
@@ -131,6 +136,23 @@ pub fn lut_at(lut: &[f32], rho: f64) -> f32 {
     }
     let f = (x - i as f64).clamp(0.0, 1.0) as f32;
     lut[i] + (lut[i + 1] - lut[i]) * f
+}
+
+/// For each step of a tool's table, a height no `lut_at` at that step or further out goes under, as it is
+/// computed in f32: the least of the table from there on. Where the table falls between two steps the
+/// interpolation can round a hair under its lower end, so that step counts a micrometre lower.
+fn lut_floor(lut: &[f32]) -> Vec<f32> {
+    let mut out = vec![0.0f32; lut.len()];
+    let mut least = f32::INFINITY;
+    for i in (0..lut.len()).rev() {
+        let mut here = lut[i];
+        if i + 1 < lut.len() && lut[i + 1] < lut[i] {
+            here = lut[i + 1] - 1e-3;
+        }
+        least = least.min(here);
+        out[i] = least;
+    }
+    out
 }
 
 /// Height of a tool's cutting surface above its tip, every LUT_STEP mm out from the axis
@@ -203,7 +225,10 @@ impl Cutter {
             }
         }
         let body = tool_body(t);
-        Cutter { radius: r, lut, head, upper, flank, chamfer_band: None, shank_r: neck, shank_z: flutes as f32, holder, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail).then(|| (2.0 * r, area_limit(if undercut { 2.0 * neck } else { 2.0 * r }, &t.material))), nominal: 1.0, geom: crate::cam_cutting::tool_geom(t), rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
+        let lut_floor = lut_floor(&lut);
+        let holder_reach = holder.iter().map(|h| h.0.abs().max(h.1.abs())).max().unwrap_or(0);
+        let holder_low = holder.iter().map(|h| h.2).fold(f32::INFINITY, f32::min);
+        Cutter { radius: r, lut, lut_floor, head, upper, flank, chamfer_band: None, shank_r: neck, shank_z: flutes as f32, holder, holder_reach, holder_low, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail).then(|| (2.0 * r, area_limit(if undercut { 2.0 * neck } else { 2.0 * r }, &t.material))), nominal: 1.0, geom: crate::cam_cutting::tool_geom(t), rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
     }
 }
 
@@ -247,7 +272,8 @@ pub struct Sim {
     pub cell: f64,
     pub nx: usize,
     pub ny: usize,
-    /// Top of the material over each cell (EMPTY once cut through) and its bottom.
+    /// Top of the material over each cell (EMPTY once cut through) and its bottom. Code outside that sets
+    /// them calls `stock_changed` after.
     pub stock: Vec<f32>,
     pub lo: Vec<f32>,
     pub part: Vec<f32>,
@@ -265,6 +291,9 @@ pub struct Sim {
     pub events: Vec<SimEvent>,
     pub removed: f64,
     pub(crate) max_h: f32,
+    /// A height no stock bottom (`lo`) is under: they only rise as undercut cutters take the bottom of a
+    /// column, so the least of them when the stock was set stays one (`Work::floor`).
+    floor: f32,
     /// Fixtures (setup coordinates).
     fixtures: Vec<(DVec3, DVec3)>,
     /// The highest fixture top: the tool's tip above it can't touch them.
@@ -316,6 +345,133 @@ pub struct Sim {
     /// When set, material removed by each move (mm³, by move index) and the deepest cut it took (mm): which
     /// feed moves cut nothing (`cam_feed_schedule::link_feeds`).
     pub removed_by_move: Option<Vec<(f32, f32)>>,
+    /// The stock in blocks of `BLOCK` x `BLOCK` cells, so a tool position skips the blocks it can't reach.
+    bounds: Bounds,
+    /// Where the run keeps its state at the start of each toolpath on disk, and picks it up from again
+    /// (`cam_sim_saves::Saves`, set by `cam_sim_saves::keep_ops`).
+    pub(crate) saves: Option<Box<crate::cam_sim_saves::Saves>>,
+}
+
+/// Cells per side of a `Bounds` block.
+const BLOCK: usize = 8;
+
+/// For each block of cells, a height none of its stock is above: exact after `refresh`, and still above it
+/// (never below) as cuts lower the stock, until the block is worked out again. A tool position whose cutting
+/// surface over a block is at or above that height can't touch any cell in it, and the cell loops leave a cell
+/// the tool doesn't touch as it is, so skipping those blocks changes nothing. Worked out from the stock when a
+/// run starts on a stock array it wasn't made for, and whenever `start_from` sets the stock; the cell loops mark
+/// the blocks they cut.
+#[derive(Clone, Default)]
+struct Bounds {
+    nx: usize,
+    ny: usize,
+    top: Vec<f32>,
+    stale: Vec<bool>,
+    /// The stock array the bounds were worked out for (its address and length).
+    of: (usize, usize),
+    /// The blocks the last `reach` found within reach, row by row: first block column and row, columns.
+    reach: Vec<bool>,
+    at: (usize, usize, usize),
+    /// Tests: every block within reach, as the loops were before the bounds.
+    #[cfg(test)]
+    off: bool,
+}
+
+impl Bounds {
+    fn refresh(&mut self, stock: &[f32], nx: usize, ny: usize) {
+        self.nx = nx.div_ceil(BLOCK);
+        self.ny = ny.div_ceil(BLOCK);
+        self.top = vec![EMPTY; self.nx * self.ny];
+        self.stale = vec![false; self.nx * self.ny];
+        for j in 0..ny {
+            let row = (j / BLOCK) * self.nx;
+            for i in 0..nx {
+                let b = row + i / BLOCK;
+                let s = stock[j * nx + i];
+                if s > self.top[b] {
+                    self.top[b] = s;
+                }
+            }
+        }
+        self.of = (stock.as_ptr() as usize, stock.len());
+    }
+
+    /// The height of block (bi, bj), worked out again if cuts lowered its stock since.
+    fn top(&mut self, bi: usize, bj: usize, stock: &[f32], nx: usize, ny: usize) -> f32 {
+        let b = bj * self.nx + bi;
+        if self.stale[b] {
+            let mut t = EMPTY;
+            for j in bj * BLOCK..((bj + 1) * BLOCK).min(ny) {
+                for &s in &stock[j * nx + bi * BLOCK..j * nx + ((bi + 1) * BLOCK).min(nx)] {
+                    if s > t {
+                        t = s;
+                    }
+                }
+            }
+            self.top[b] = t;
+            self.stale[b] = false;
+        }
+        self.top[b]
+    }
+
+    fn lowered(&mut self, i: usize, j: usize) {
+        self.stale[(j / BLOCK) * self.nx + i / BLOCK] = true;
+    }
+
+    /// Which blocks over the cells i0..=i1, j0..=j1 may have stock above `floor(rho)`, where `floor` gives a
+    /// height the tool's surface at `p` is nowhere under from `rho` out, and `rho` is a block's nearest cell
+    /// centre's distance from `p` (or less). Into `reach`, read with `reaches`.
+    #[allow(clippy::too_many_arguments)]
+    fn find_reach(&mut self, stock: &[f32], g: (f64, f64, f64, usize, usize), cells: (i32, i32, i32, i32), p: DVec3, floor: impl Fn(f64) -> f32) {
+        let (x0, y0, cell, nx, ny) = g;
+        self.reach.clear();
+        if cells.0 > cells.1 || cells.2 > cells.3 {
+            // off the grid: the cell loops have nothing to visit
+            self.at = (0, 0, 0);
+            return;
+        }
+        let (i0, i1, j0, j1) = (cells.0 as usize, cells.1 as usize, cells.2 as usize, cells.3 as usize);
+        let (b0, b1, c0, c1) = (i0 / BLOCK, i1 / BLOCK, j0 / BLOCK, j1 / BLOCK);
+        self.at = (b0, c0, b1 - b0 + 1);
+        for bj in c0..=c1 {
+            // the block's cell centres, as the cell loops work them out
+            let (ya, yb) = (y0 + (bj * BLOCK).max(j0) as f64 * cell, y0 + ((bj + 1) * BLOCK - 1).min(j1) as f64 * cell);
+            let dy = (ya - p.y).max(p.y - yb).max(0.0);
+            for bi in b0..=b1 {
+                let (xa, xb) = (x0 + (bi * BLOCK).max(i0) as f64 * cell, x0 + ((bi + 1) * BLOCK - 1).min(i1) as f64 * cell);
+                let dx = (xa - p.x).max(p.x - xb).max(0.0);
+                let top = self.top(bi, bj, stock, nx, ny);
+                #[cfg(test)]
+                let top = if self.off { f32::INFINITY } else { top };
+                self.reach.push(top > floor((dx * dx + dy * dy).sqrt()));
+            }
+        }
+    }
+
+    /// A height none of the stock over cells i0..=i1, j0..=j1 is above (EMPTY for none).
+    fn top_over(&mut self, stock: &[f32], nx: usize, ny: usize, cells: (i32, i32, i32, i32)) -> f32 {
+        let (i0, i1, j0, j1) = (cells.0.max(0), cells.1.min(nx as i32 - 1), cells.2.max(0), cells.3.min(ny as i32 - 1));
+        let mut t = EMPTY;
+        #[cfg(test)]
+        if self.off {
+            return f32::INFINITY;
+        }
+        if i0 > i1 || j0 > j1 {
+            return t;
+        }
+        for bj in j0 as usize / BLOCK..=j1 as usize / BLOCK {
+            for bi in i0 as usize / BLOCK..=i1 as usize / BLOCK {
+                t = t.max(self.top(bi, bj, stock, nx, ny));
+            }
+        }
+        t
+    }
+
+    /// Whether the block of cell (i, j) is within reach (see `find_reach`).
+    fn reaches(&self, i: i32, j: i32) -> bool {
+        let (b0, c0, w) = self.at;
+        self.reach[(j as usize / BLOCK - c0) * w + i as usize / BLOCK - b0]
+    }
 }
 
 /// How much of [a, b] lies inside the column [lo, hi] once the gaps (sorted, disjoint) are taken out.
@@ -620,6 +776,7 @@ impl Sim {
             events: vec![],
             removed: 0.0,
             max_h: hi.z as f32,
+            floor: lo.z as f32,
             fixture_top: f64::INFINITY,
             machine: None,
             load_win: Default::default(),
@@ -647,6 +804,8 @@ impl Sim {
             part_lo: vec![],
             part_gaps: Default::default(),
             removed_by_move: None,
+            bounds: Bounds::default(),
+            saves: None,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -851,6 +1010,7 @@ impl Sim {
             lo: &self.lo,
             part: &self.part,
             max_h: self.max_h,
+            floor: self.floor,
             fixtures: &m.fixtures,
         };
         let hits = m.placed.check(p, *gauge, pts, &work);
@@ -884,11 +1044,282 @@ impl Sim {
             }
         }
         self.max_h = top.max(self.bottom);
+        self.stock_changed();
+    }
+
+    /// Work out again what the run keeps about the stock (`bounds`, `floor`) after `stock` or `lo` were set
+    /// from outside (a run read back from a cache, say). Cuts keep them up to date themselves.
+    pub(crate) fn stock_changed(&mut self) {
+        self.floor = self.lo.iter().copied().fold(f32::INFINITY, f32::min);
+        self.bounds.refresh(&self.stock, self.nx, self.ny);
     }
 
     /// The stock as it is now.
     pub fn stock_map(&self) -> StockMap {
         StockMap { x0: self.x0, y0: self.y0, cell: self.cell, nx: self.nx, ny: self.ny, hi: self.stock.clone(), lo: self.lo.clone() }
+    }
+
+    /// A run that has finished, as bytes for the disk cache (`cam_sim_cache`): what it did to the stock and
+    /// what it found. None when it hasn't finished, or records the load samples or each move's cut (the feed
+    /// schedule's runs, which aren't kept).
+    pub fn finished_bytes(&self) -> Option<Vec<u8>> {
+        use crate::cam_sim_cache::Bin;
+        if self.done < self.moves.len() || self.profile.is_some() || self.removed_by_move.is_some() {
+            return None;
+        }
+        let mut w = Vec::with_capacity(self.stock.len() * 34 + 4096);
+        self.nx.put(&mut w);
+        self.ny.put(&mut w);
+        self.moves.len().put(&mut w);
+        [self.x0, self.y0, self.cell].put(&mut w);
+        self.done.put(&mut w);
+        self.pos.put(&mut w);
+        self.events.put(&mut w);
+        self.removed.put(&mut w);
+        self.max_h.put(&mut w);
+        self.loads.put(&mut w);
+        self.air.put(&mut w);
+        self.chip_ops.put(&mut w);
+        self.chatter.put(&mut w);
+        self.time.put(&mut w);
+        let mut voids: Vec<(u32, Vec<(f32, f32)>)> = self.voids.iter().map(|(k, v)| (*k, v.clone())).collect();
+        voids.sort_by_key(|v| v.0);
+        voids.put(&mut w);
+        self.machine.as_ref().map(|m| m.hit_parts.clone()).put(&mut w);
+        for x in self.stock.iter().chain(&self.lo) {
+            x.put(&mut w);
+        }
+        w.extend(self.gouged.iter().map(|g| *g as u8));
+        for c in &self.cuts {
+            c.put(&mut w);
+        }
+        Some(w)
+    }
+
+    /// Everything a run has done so far, as bytes (`cam_sim_saves`): the stock and what cut it, the
+    /// problems and results so far, and every running total and window the moves still to come build on, so a
+    /// run picked up from here (`load_state`) goes on exactly as this one would.
+    pub(crate) fn state_bytes(&self) -> Vec<u8> {
+        use crate::cam_sim_cache::Bin;
+        let mut w = Vec::with_capacity(self.stock.len() * 25 + 4096);
+        self.nx.put(&mut w);
+        self.ny.put(&mut w);
+        [self.x0, self.y0, self.cell].put(&mut w);
+        self.done.put(&mut w);
+        self.pos.put(&mut w);
+        self.events.put(&mut w);
+        self.removed.put(&mut w);
+        self.max_h.put(&mut w);
+        self.floor.put(&mut w);
+        self.loads.put(&mut w);
+        self.air.put(&mut w);
+        self.chip_ops.put(&mut w);
+        self.chatter.put(&mut w);
+        self.time.put(&mut w);
+        let mut voids: Vec<(u32, Vec<(f32, f32)>)> = self.voids.iter().map(|(k, v)| (*k, v.clone())).collect();
+        voids.sort_by_key(|v| v.0);
+        voids.put(&mut w);
+        self.machine.as_ref().map(|m| (m.since, m.hit_parts.clone())).put(&mut w);
+        self.load_win.iter().map(|x| ((x.0, x.1), x.2)).collect::<Vec<_>>().put(&mut w);
+        self.load_of.put(&mut w);
+        self.feed.put(&mut w);
+        self.tapping.put(&mut w);
+        let [vol, depth, at] = self.chips.state();
+        ((vol.clone(), depth.clone()), at.clone()).put(&mut w);
+        self.last_chip.put(&mut w);
+        [self.confinement.0, self.confinement.1].put(&mut w);
+        self.conf_age.put(&mut w);
+        self.last_width.put(&mut w);
+        self.last_depth.put(&mut w);
+        self.profile.put(&mut w);
+        self.removed_by_move.as_ref().map(|r| r[..self.done.min(r.len())].to_vec()).put(&mut w);
+        (self.bounds.nx, self.bounds.ny).put(&mut w);
+        self.bounds.top.put(&mut w);
+        self.bounds.stale.put(&mut w);
+        for x in self.stock.iter().chain(&self.lo) {
+            x.put(&mut w);
+        }
+        w.extend(self.gouged.iter().map(|g| *g as u8));
+        for c in &self.cuts {
+            c.put(&mut w);
+        }
+        w
+    }
+
+    /// Pick the run up from `state_bytes` of this same simulation part way (the same setup, grid, recording
+    /// and moves up to there). False (and this one untouched) when it doesn't fit.
+    pub(crate) fn load_state(&mut self, b: &[u8]) -> bool {
+        use crate::cam_sim_cache::Bin;
+        type Machine = Option<(f64, Vec<(usize, Vec<usize>)>)>;
+        let r = &mut &b[..];
+        let n = self.nx * self.ny;
+        let got = (|| -> Option<_> {
+            let (nx, ny, origin) = (usize::get(r)?, usize::get(r)?, <[f64; 3]>::get(r)?);
+            if (nx, ny) != (self.nx, self.ny) || origin.map(f64::to_bits) != [self.x0, self.y0, self.cell].map(f64::to_bits) {
+                return None;
+            }
+            let done = usize::get(r)?;
+            let pos = DVec3::get(r)?;
+            let events = Vec::<SimEvent>::get(r)?;
+            let removed = f64::get(r)?;
+            let (max_h, floor) = (f32::get(r)?, f32::get(r)?);
+            let loads = Vec::<OpLoad>::get(r)?;
+            let air = Vec::<OpAir>::get(r)?;
+            let chip_ops = Vec::<OpChips>::get(r)?;
+            let chatter = Vec::<OpChatter>::get(r)?;
+            let time = f64::get(r)?;
+            let voids = Vec::<(u32, Vec<(f32, f32)>)>::get(r)?;
+            let machine = Machine::get(r)?;
+            let load_win = Vec::<((f32, f64), f32)>::get(r)?;
+            let load_of = Option::<(usize, u64)>::get(r)?;
+            let (feed, tapping) = (f64::get(r)?, bool::get(r)?);
+            let ((vol, depth), at) = <((Vec<f64>, Vec<f64>), Vec<f64>)>::get(r)?;
+            let chips = [vol, depth, at];
+            let last_chip = f64::get(r)?;
+            let confinement = <[f64; 2]>::get(r)?;
+            let conf_age = u32::get(r)?;
+            let (last_width, last_depth) = (f64::get(r)?, f64::get(r)?);
+            let profile = Option::<Vec<LoadSample>>::get(r)?;
+            let removed_by_move = Option::<Vec<(f32, f32)>>::get(r)?;
+            let bounds = (<(usize, usize)>::get(r)?, Vec::<f32>::get(r)?, Vec::<bool>::get(r)?);
+            Some((done, pos, events, removed, max_h, floor, loads, air, chip_ops, chatter, time, voids, machine, load_win, load_of, feed, tapping, chips, last_chip, confinement, conf_age, last_width, last_depth, profile, removed_by_move, bounds))
+        })();
+        let Some((done, pos, events, removed, max_h, floor, loads, air, chip_ops, chatter, time, voids, machine, load_win, load_of, feed, tapping, chips, last_chip, confinement, conf_age, last_width, last_depth, profile, removed_by_move, bounds)) = got else {
+            return false;
+        };
+        // the same recording as this run, and as many moves at least
+        if done > self.moves.len() || machine.is_some() != self.machine.is_some() || profile.is_some() != self.profile.is_some() || removed_by_move.is_some() != self.removed_by_move.is_some() {
+            return false;
+        }
+        if removed_by_move.as_ref().is_some_and(|m| m.len() != done) || bounds.1.len() != bounds.0 .0 * bounds.0 .1 || bounds.2.len() != bounds.1.len() {
+            return false;
+        }
+        // the grids: two f32s, a bool and three (u8, f32) per cell
+        if r.len() != n * (4 + 4 + 1 + 3 * 5) {
+            return false;
+        }
+        let grid = |r: &mut &[u8]| (0..n).map(|_| f32::get(r)).collect::<Option<Vec<f32>>>();
+        let (Some(stock), Some(lo)) = (grid(r), grid(r)) else { return false };
+        let gouged: Vec<bool> = r[..n].iter().map(|g| *g != 0).collect();
+        *r = &r[n..];
+        let Some(cuts) = (0..n).map(|_| <[(u8, f32); 3]>::get(r)).collect::<Option<Vec<_>>>() else { return false };
+        let mut chip_map = self.chips.clone();
+        if !chip_map.set_state(chips) {
+            return false;
+        }
+        (self.stock, self.lo, self.gouged, self.cuts) = (stock, lo, gouged, cuts);
+        (self.done, self.pos, self.events, self.removed, self.max_h, self.floor) = (done, pos, events, removed, max_h, floor);
+        (self.loads, self.air, self.chip_ops, self.chatter, self.time) = (loads, air, chip_ops, chatter, time);
+        self.voids = voids.into_iter().collect();
+        if let (Some(m), Some((since, hits))) = (self.machine.as_mut(), machine) {
+            (m.since, m.hit_parts) = (since, hits);
+        }
+        self.load_win = load_win.into_iter().map(|((a, b), c)| (a, b, c)).collect();
+        (self.load_of, self.feed, self.tapping, self.chips) = (load_of, feed, tapping, chip_map);
+        (self.last_chip, self.confinement, self.conf_age) = (last_chip, (confinement[0], confinement[1]), conf_age);
+        (self.last_width, self.last_depth) = (last_width, last_depth);
+        self.profile = profile;
+        if let (Some(all), Some(got)) = (self.removed_by_move.as_mut(), removed_by_move) {
+            all[..done].copy_from_slice(&got);
+        }
+        let ((bnx, bny), top, stale) = bounds;
+        self.bounds.nx = bnx;
+        self.bounds.ny = bny;
+        self.bounds.top = top;
+        self.bounds.stale = stale;
+        self.bounds.of = (self.stock.as_ptr() as usize, self.stock.len());
+        true
+    }
+
+    /// Hash what a run starts from, besides its setup and toolpaths (`cam_sim_saves::keep_ops`): the grid, the
+    /// stock and part on it, the fixtures and what it records.
+    pub(crate) fn hash_start(&self, h: &mut impl std::hash::Hasher) {
+        let f = |h: &mut dyn std::hash::Hasher, x: f64| h.write_u64(x.to_bits());
+        for x in [self.x0, self.y0, self.cell, self.top as f64, self.bottom as f64, self.max_h as f64, self.floor as f64, self.fixture_top, self.link_above, self.chatter_scale] {
+            f(h, x);
+        }
+        h.write_u64(self.nx as u64);
+        h.write_u64(self.ny as u64);
+        for x in self.stock.iter().chain(&self.lo).chain(&self.part).chain(&self.part_lo) {
+            h.write_u32(x.to_bits());
+        }
+        let mut gaps: Vec<_> = self.part_gaps.iter().collect();
+        gaps.sort_by_key(|g| *g.0);
+        for (k, v) in gaps {
+            h.write_u32(*k);
+            for (a, b) in v {
+                h.write_u32(a.to_bits());
+                h.write_u32(b.to_bits());
+            }
+        }
+        h.write(&self.gouged.iter().map(|g| *g as u8).collect::<Vec<_>>());
+        for c in &self.cuts {
+            for (i, z) in c {
+                h.write_u8(*i);
+                h.write_u32(z.to_bits());
+            }
+        }
+        for (lo, hi) in &self.fixtures {
+            for x in lo.to_array().into_iter().chain(hi.to_array()) {
+                f(h, x);
+            }
+        }
+        h.write_u64(self.done as u64);
+        h.write_u8(self.machine.is_some() as u8);
+        h.write_u8(self.profile.is_some() as u8);
+        h.write_u8(self.removed_by_move.is_some() as u8);
+        let p = self.pos.to_array();
+        for x in p {
+            f(h, x);
+        }
+    }
+
+    /// Take the outcome of a finished run (`finished_bytes`) of this same simulation: this one fresh from
+    /// `new` (and `set_machine`), on the same grid with the same moves. False (and this one untouched) when
+    /// it doesn't fit.
+    pub fn load_finished(&mut self, b: &[u8]) -> bool {
+        use crate::cam_sim_cache::Bin;
+        type Hits = Option<Vec<(usize, Vec<usize>)>>;
+        let r = &mut &b[..];
+        let n = self.nx * self.ny;
+        let head = (|| -> Option<_> {
+            let (nx, ny, moves, origin) = (usize::get(r)?, usize::get(r)?, usize::get(r)?, <[f64; 3]>::get(r)?);
+            if (nx, ny, moves) != (self.nx, self.ny, self.moves.len()) || origin.map(f64::to_bits) != [self.x0, self.y0, self.cell].map(f64::to_bits) {
+                return None;
+            }
+            let done = usize::get(r)?;
+            let pos = DVec3::get(r)?;
+            let events = Vec::<SimEvent>::get(r)?;
+            let removed = f64::get(r)?;
+            let max_h = f32::get(r)?;
+            let loads = Vec::<OpLoad>::get(r)?;
+            let air = Vec::<OpAir>::get(r)?;
+            let chip_ops = Vec::<OpChips>::get(r)?;
+            let chatter = Vec::<OpChatter>::get(r)?;
+            let time = f64::get(r)?;
+            let voids = Vec::<(u32, Vec<(f32, f32)>)>::get(r)?;
+            let hits = Hits::get(r)?;
+            Some((done, pos, events, removed, max_h, loads, air, chip_ops, chatter, time, voids, hits))
+        })();
+        let Some((done, pos, events, removed, max_h, loads, air, chip_ops, chatter, time, voids, hits)) = head else { return false };
+        // the grids: two f32s, a bool and three (u8, f32) per cell
+        if done != self.moves.len() || r.len() != n * (4 + 4 + 1 + 3 * 5) || hits.is_some() != self.machine.is_some() {
+            return false;
+        }
+        let grid = |r: &mut &[u8]| (0..n).map(|_| f32::get(r)).collect::<Option<Vec<f32>>>();
+        let (Some(stock), Some(lo)) = (grid(r), grid(r)) else { return false };
+        let gouged: Vec<bool> = r[..n].iter().map(|g| *g != 0).collect();
+        *r = &r[n..];
+        let Some(cuts) = (0..n).map(|_| <[(u8, f32); 3]>::get(r)).collect::<Option<Vec<_>>>() else { return false };
+        (self.stock, self.lo, self.gouged, self.cuts) = (stock, lo, gouged, cuts);
+        self.stock_changed();
+        (self.done, self.pos, self.events, self.removed, self.max_h) = (done, pos, events, removed, max_h);
+        (self.loads, self.air, self.chip_ops, self.chatter, self.time) = (loads, air, chip_ops, chatter, time);
+        self.voids = voids.into_iter().collect();
+        if let (Some(m), Some(h)) = (self.machine.as_mut(), hits) {
+            m.hit_parts = h;
+        }
+        true
     }
 
     pub fn total(&self) -> usize {
@@ -921,7 +1352,14 @@ impl Sim {
     /// Returns true when it reached the target.
     pub fn run_to(&mut self, target: usize, budget: usize) -> bool {
         let target = target.min(self.moves.len());
+        if self.saves.is_some() && self.done < target {
+            crate::cam_sim_saves::pick_up(self, target);
+        }
+        if self.bounds.of != (self.stock.as_ptr() as usize, self.stock.len()) {
+            self.bounds.refresh(&self.stock, self.nx, self.ny);
+        }
         let mut spent = 0usize;
+        let mut save_at = self.saves.as_ref().map(|s| s.next_at()).unwrap_or(usize::MAX);
         while self.done < target {
             let (ci, op, m) = self.moves[self.done];
             let step = self.done;
@@ -941,6 +1379,10 @@ impl Sim {
                 Move::Dwell(_) => {}
             }
             self.done += 1;
+            if self.done == save_at {
+                crate::cam_sim_saves::save_here(self);
+                save_at = self.saves.as_ref().map(|s| s.next_at()).unwrap_or(usize::MAX);
+            }
             if spent >= budget {
                 break;
             }
@@ -1316,9 +1758,17 @@ impl Sim {
             // a probe stops a hair short of a wall: within a cell of its ball's outline the stock map can't
             // tell that from a touch
             let probe_inner = (c.radius - self.cell).max(0.0);
-            for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
+            let cells = ((ci0 - n).max(0), (ci0 + n).min(nx - 1), (cj0 - n).max(0), (cj0 + n).min(ny - 1));
+            // the blocks with stock above the cutting surface somewhere (a cell with none above it is one this
+            // loop leaves as it is)
+            let fl = &c.lut_floor;
+            self.bounds.find_reach(&self.stock, (self.x0, self.y0, self.cell, self.nx, self.ny), cells, p, |rho| tip + fl[((rho / LUT_STEP).max(0.0) as usize).min(fl.len() - 1)]);
+            for j in cells.2..=cells.3 {
                 let dy = self.y0 + j as f64 * self.cell - p.y;
-                for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
+                for i in cells.0..=cells.1 {
+                    if !self.bounds.reaches(i, j) {
+                        continue;
+                    }
                     let dx = self.x0 + i as f64 * self.cell - p.x;
                     let d2 = dx * dx + dy * dy;
                     if d2 > r2 {
@@ -1353,6 +1803,7 @@ impl Sim {
                         }
                         // cut right through the column: nothing left over this cell
                         self.stock[k] = if top_z <= floor { EMPTY } else { top_z };
+                        self.bounds.lowered(i as usize, j as usize);
                         let tag = (ci + 1).min(250) as u8;
                         let h = &mut self.cuts[k];
                         if h[0].0 != tag {
@@ -1433,6 +1884,7 @@ impl Sim {
                             lo = lo.max(m.remove(0).1);
                         }
                         m.retain(|g| g.0 > lo && g.1 < hi);
+                        self.bounds.lowered(i as usize, j as usize);
                         if hi <= lo + 1e-4 {
                             self.stock[k] = EMPTY;
                             self.voids.remove(&(k as u32));
@@ -1474,12 +1926,18 @@ impl Sim {
         }
         let mut shank_hit = 0.0f32;
         let mut holder_hit = 0.0f32;
+        // (each check below looks for stock above a height: where the bounds say there is none over the cells it
+        // looks at, it can't find any)
         if check_holder {
             let sz = tip + c.shank_z;
             // cells clearly inside the shank (it may rub a wall its own flutes cut)
             let rs = c.shank_r - 0.02;
             let n = (rs / self.cell).ceil() as i32;
+            let clear = self.bounds.top_over(&self.stock, self.nx, self.ny, (ci0 - n, ci0 + n, cj0 - n, cj0 + n)) <= sz + 0.01;
             for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
+                if clear {
+                    break;
+                }
                 let dy = self.y0 + j as f64 * self.cell - p.y;
                 for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
                     let dx = self.x0 + i as f64 * self.cell - p.x;
@@ -1496,7 +1954,11 @@ impl Sim {
             if let Some((ur, uz)) = c.upper {
                 let (uz, rs) = (tip + uz, ur - 0.02);
                 let n = (rs / self.cell).ceil() as i32;
+                let clear = self.bounds.top_over(&self.stock, self.nx, self.ny, (ci0 - n, ci0 + n, cj0 - n, cj0 + n)) <= uz + 0.01;
                 for j in (cj0 - n).max(0)..=(cj0 + n).min(ny - 1) {
+                    if clear {
+                        break;
+                    }
                     let dy = self.y0 + j as f64 * self.cell - p.y;
                     for i in (ci0 - n).max(0)..=(ci0 + n).min(nx - 1) {
                         let dx = self.x0 + i as f64 * self.cell - p.x;
@@ -1510,7 +1972,10 @@ impl Sim {
                     }
                 }
             }
-            for &(di, dj, dz) in &c.holder {
+            let n = c.holder_reach;
+            // the lowest of the holder's undersides, as each is worked out below (or lower)
+            let clear = self.bounds.top_over(&self.stock, self.nx, self.ny, (ci0 - n, ci0 + n, cj0 - n, cj0 + n)) <= (tip + c.holder_low) + 0.01;
+            for &(di, dj, dz) in if clear { &[][..] } else { &c.holder[..] } {
                 let (i, j) = (ci0 + di, cj0 + dj);
                 if i < 0 || j < 0 || i >= nx || j >= ny {
                     continue;
@@ -1772,6 +2237,72 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::cam::ToolKind;
+
+    /// The blocks the cell loops skip change nothing: the same cuts with every block looked at (as before the
+    /// bounds) leave the same stock, bit for bit, and find the same problems, loads and air. A flat end mill
+    /// roughs into a step, a ball mill finishes over it (taking the stock left by the first), a pass runs the
+    /// holder into a wall and a plunge buries the shank.
+    #[test]
+    fn skipping_blocks_out_of_reach_changes_nothing() {
+        let part = Part::new(&[], &[], "top");
+        let mut cam = Cam::default();
+        let mut flat = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Flat && (t.diameter - 6.0).abs() < 0.5).unwrap();
+        flat.stickout = 20.0;
+        let ball = crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Ball).unwrap();
+        let (tf, tb) = (cam.add_tool(flat), cam.add_tool(ball));
+        let stock = (DVec3::new(0.0, 0.0, 0.0), DVec3::new(60.0, 40.0, 30.0));
+        let mut rough = vec![Move::Rapid([-5.0, 3.0, 35.0])];
+        for (k, z) in [27.0, 24.0, 21.0].into_iter().enumerate() {
+            for j in 0..12 {
+                let y = 3.0 + j as f64 * 3.0;
+                let (a, b) = if j % 2 == 0 { (-5.0, 40.0 + 2.0 * k as f64) } else { (40.0 + 2.0 * k as f64, -5.0) };
+                rough.push(Move::Feed([a, y, z], 1200.0));
+                rough.push(Move::Feed([b, y, z], 1200.0));
+            }
+        }
+        // the holder over the wall the roughing left, then the shank down into the stock beside it
+        rough.extend([Move::Rapid([-5.0, 20.0, 40.0]), Move::Feed([55.0, 20.0, 12.0], 800.0), Move::Rapid([55.0, 20.0, 40.0]), Move::Rapid([30.0, 30.0, 40.0]), Move::Feed([30.0, 30.0, 0.5], 300.0)]);
+        let mut finish = vec![Move::Rapid([0.0, 0.0, 35.0])];
+        for j in 0..40 {
+            let y = j as f64;
+            let z = |x: f64| 20.0 + 0.15 * x + 0.5 * (y * 0.3).sin();
+            let xs: Vec<f64> = (0..=30).map(|i| i as f64 * 2.0).collect();
+            for x in if j % 2 == 0 { xs.clone() } else { xs.iter().rev().copied().collect() } {
+                finish.push(Move::Feed([x, y, z(x)], 1500.0));
+            }
+        }
+        let paths = [Toolpath { op: 1, tool: tf, moves: rough, ..Default::default() }, Toolpath { op: 2, tool: tb, moves: finish, ..Default::default() }];
+        let run = |off: bool| {
+            let mut sim = Sim::new(&cam, &part, stock, &paths, 400);
+            sim.bounds.off = off;
+            sim.removed_by_move = Some(vec![(0.0, 0.0); sim.total()]);
+            // in pieces, as the editor runs it
+            while !sim.run_to(usize::MAX, 500) {}
+            sim
+        };
+        let (a, b) = (run(false), run(true));
+        let bits = |v: &[f32]| v.iter().map(|x| x.to_bits()).collect::<Vec<_>>();
+        assert_eq!(bits(&a.stock), bits(&b.stock));
+        assert_eq!(bits(&a.lo), bits(&b.lo));
+        assert_eq!(a.removed.to_bits(), b.removed.to_bits());
+        assert_eq!(format!("{:?}", a.events), format!("{:?}", b.events));
+        assert_eq!(format!("{:?}", a.removed_by_move), format!("{:?}", b.removed_by_move));
+        assert_eq!(serde_json::to_string(&a.loads).unwrap(), serde_json::to_string(&b.loads).unwrap());
+        assert!(a.events.iter().any(|e| e.kind == EventKind::Holder) && a.events.iter().any(|e| e.kind == EventKind::Shank), "{:?}", a.events);
+        assert!(a.removed > 1000.0);
+        // and the bounds stay above the stock in every block
+        let mut s = a.clone();
+        let (nx, ny) = (s.nx, s.ny);
+        for bj in 0..s.bounds.ny {
+            for bi in 0..s.bounds.nx {
+                let before = s.bounds.top[bj * s.bounds.nx + bi];
+                let exact = s.bounds.top(bi, bj, &a.stock, nx, ny);
+                assert!(before >= exact);
+            }
+        }
+        s.bounds.refresh(&a.stock, nx, ny);
+        assert!(a.floor <= a.lo.iter().copied().fold(f32::INFINITY, f32::min));
+    }
 
     /// A drill pecking down through a plate: every re-entry rapid stops 0.3 mm above the last depth, so it
     /// must never cut. The hole sits a hair off the grid (as a hole found on a real model does), which puts

@@ -88,6 +88,7 @@ impl Session {
         }
         let doc = self.ws.studios.get(studio).ok_or_else(|| format!("no Part Studio {studio}"))?.doc.clone();
         let r: RebuildResult = self.kernel.rebuild_blocking(studio, &doc)?;
+        self.keep_built(&r);
         self.others.insert(studio, r);
         Ok(())
     }
