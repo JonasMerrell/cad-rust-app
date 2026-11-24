@@ -72,6 +72,10 @@ pub struct Session {
     /// The last FEA solve, keyed by its study and the Part Studio it analyses: render_simulation after
     /// solve_simulation (one picture per field or mode) reuses it instead of meshing and solving again.
     pub(crate) fea_cache: Option<(u64, crate::fea::Study, std::sync::Arc<crate::fea::Outcome>)>,
+    /// Build-cache keys (`build_cache`) of the Part Studios as they were opened or last saved: their built
+    /// geometry is kept on disk, so the next session that opens the same document reads it back instead of
+    /// rebuilding. Studios changed since are built as usual and not kept (as in the editor).
+    saved_keys: std::collections::HashSet<u64>,
 }
 
 /// One setup built: its key, the parts, the toolpaths, the stock the setups before it leave, and the stock
@@ -107,6 +111,7 @@ impl Session {
             cam_cache: HashMap::new(),
             sim_cache: HashMap::new(),
             fea_cache: None,
+            saved_keys: Default::default(),
         }
     }
 
@@ -140,6 +145,7 @@ impl Session {
         self.others.clear();
         self.proj.clear();
         self.result = self.kernel.rebuild_blocking(self.cur, &self.doc)?;
+        self.keep_built(&self.result.clone());
         for f in &mut self.doc.features {
             if let (Op::Sketch { frame, .. }, Some(fr)) = (&mut f.op, self.result.frames.get(&f.id)) {
                 *frame = *fr;
@@ -148,6 +154,24 @@ impl Session {
         // persistent names of the faces and edges features refer to, so later changes keep them
         self.doc.apply_ref_updates(&self.result.refs);
         Ok(())
+    }
+
+    /// The build-cache key of every Part Studio as the kernel would build it now.
+    fn studio_keys(&mut self) -> std::collections::HashSet<u64> {
+        self.sync();
+        self.kernel.set_studios(self.ws.studios.iter().map(|s| s.doc.clone()).collect());
+        self.ws.studios.iter().map(|s| self.kernel.cache_key(&s.doc)).collect()
+    }
+
+    /// Keep a Part Studio's built geometry on disk when it is the document as opened or saved.
+    fn keep_built(&self, r: &RebuildResult) {
+        if r.key != 0 && self.saved_keys.contains(&r.key) {
+            if let Some(dir) = self.kernel.cache_dirs.first() {
+                if let Err(e) = crate::build_cache::store_now(dir, r) {
+                    log::warn!("could not cache built geometry in {}: {e}", dir.display());
+                }
+            }
+        }
     }
 
     fn status(&self) -> Value {
@@ -249,6 +273,8 @@ impl Session {
                 self.cur = 0;
                 self.doc.units = serde_json::from_value(json!(units)).map_err(|_| "units must be mm, cm, m, in or ft")?;
                 self.path = None;
+                self.saved_keys.clear();
+                crate::cam_sim_saves::set_doc(None);
                 self.rebuild()?;
                 json!({"ok": true})
             }
@@ -259,7 +285,10 @@ impl Session {
                 self.doc = ws.studios.first().map(|s| s.doc.clone()).unwrap_or_default();
                 self.ws = ws;
                 self.cur = 0;
+                self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(std::path::Path::new(&path)));
+                crate::cam_sim_saves::set_doc(Some(std::path::Path::new(&path)));
                 self.path = Some(path);
+                self.saved_keys = self.studio_keys();
                 self.rebuild()?;
                 self.status()
             }
@@ -267,7 +296,16 @@ impl Session {
                 let path = a.get("path").and_then(|p| p.as_str()).map(String::from).or(self.path.clone()).ok_or("give a path")?;
                 self.sync();
                 write_out(&path, self.ws.to_json())?;
+                if self.path.as_deref() != Some(path.as_str()) {
+                    self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(std::path::Path::new(&path)));
+                    crate::cam_sim_saves::set_doc(Some(std::path::Path::new(&path)));
+                }
                 self.path = Some(path.clone());
+                // what is built of the document as saved is kept for the next session
+                self.saved_keys = self.studio_keys();
+                for r in std::iter::once(&self.result).chain(self.others.values()).cloned().collect::<Vec<_>>() {
+                    self.keep_built(&r);
+                }
                 json!({"saved": path})
             }
             "describe" => {
