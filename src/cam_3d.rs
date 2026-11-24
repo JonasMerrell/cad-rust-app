@@ -1711,6 +1711,148 @@ fn seg_dist(p: DVec3, a: DVec3, b: DVec3) -> f64 {
 
 // ---------------------------------------------------------------- adaptive clearing
 
+/// What a level's clearing is planned from (`Level::planner`): the tool radius, stepover, helix and direction.
+#[derive(Clone, Copy)]
+pub(crate) struct Planner {
+    pub r: f64,
+    pub step: f64,
+    pub helix: f64,
+    pub climb: bool,
+}
+
+/// A level's passes planned (`Planner::clear`), not cut yet: the passes and rings of each growth in turn.
+#[derive(Default)]
+pub(crate) struct LevelPlan {
+    grows: Vec<(Vec<(usize, Piece)>, Vec<Ring>)>,
+}
+
+impl Planner {
+    fn orient(&self, c: &Contour, outer: bool) -> Contour {
+        let ccw = crate::cam_paths::area(c) > 0.0;
+        // outer loops have the free region inside: counter-clockwise puts what's outside on the right
+        let want_ccw = if outer { self.climb } else { !self.climb };
+        if ccw == want_ccw {
+            c.clone()
+        } else {
+            c.iter().rev().copied().collect()
+        }
+    }
+
+    /// Clear the level: `a` = where the centre may go, `material` = the stock there, `cleared` = centres the
+    /// tool has already cleared round (besides those whose tool misses the material).
+    pub(crate) fn clear(&self, a: &Shapes, material: &Shapes, cleared: &Shapes) -> LevelPlan {
+        let r = self.r;
+        let mut free = difference(a, &offset(material, r - GAP));
+        if !cleared.is_empty() {
+            free = union_all(&[flat(&free), flat(&intersect(cleared, a))].concat());
+        }
+        // a hole the tool only just fits (a bore from an earlier setup, say) is no place to start from: rings
+        // growing out of it are arcs tighter than the tool, where the edge runs several times the stepover into
+        // the material for every one the centre moves. Leave such holes to the passes that come from open ground,
+        // which break through into them; they are a start only for material nothing else reaches.
+        let room = std::f64::consts::PI * r * r;
+        let (holes, open): (Shapes, Shapes) = free.iter().cloned().partition(|sh| shapes_area(&vec![sh.clone()]) < room);
+        let mut holes = if open.is_empty() { vec![] } else { holes };
+        if !holes.is_empty() {
+            free = open;
+        }
+        // first everything but a stepover-wide band along the walls, with the passes turning away before they
+        // reach it (a pass that runs into the wall takes the corner the passes before it left there, head-on);
+        // then the walls, in passes along them that take that band
+        let inner = opened(&offset(a, -self.step), 0.05);
+        let mut plan = LevelPlan::default();
+        if !inner.is_empty() {
+            let (pieces, rings, f) = self.grow(&inner, a, material, free, false, &mut vec![]);
+            plan.grows.push((pieces, rings));
+            free = f;
+        }
+        let (pieces, rings, _) = self.grow(a, a, material, free, true, &mut holes);
+        plan.grows.push((pieces, rings));
+        plan
+    }
+
+    /// Grow the cleared centres `free` within `lim` (part of `a`) until no material is left that it reaches;
+    /// `seed`: start from `holes` (small clear spots set aside), then with a helix into the material, for what
+    /// can't be reached otherwise.
+    fn grow(&self, lim: &Shapes, a: &Shapes, material: &Shapes, mut free: Shapes, seed: bool, holes: &mut Shapes) -> (Vec<(usize, Piece)>, Vec<Ring>, Shapes) {
+        let r = self.r;
+        let h = (0.2 * r).clamp(0.05, 1.0);
+        let bridge = (1.5 * r).max(1.0);
+        // the rings first, then their passes in an order that keeps the tool in one place (see `emit`)
+        let mut rings: Vec<Ring> = vec![];
+        let mut pieces: Vec<(usize, Piece)> = vec![];
+        for _ in 0..5000 {
+            let remaining = opened(&difference(material, &offset(&free, r)), 0.02);
+            if shapes_area(&remaining) < 0.05 {
+                break;
+            }
+            // centres whose tool reaches the material that is left
+            let near = offset(&remaining, r - GAP);
+            // the new ring with its corners rounded to the tool's radius: a pass that runs into a sharp corner of
+            // it (where it meets a wall) takes the corner the passes before it left there head-on. The corners
+            // come off in later rings, which round them a stepover further in; the last bits without rounding.
+            // Where the ground is narrower than the tool (a channel between two walls less than 2 r apart in
+            // centres) a rounding of r takes the whole ring away: round tighter there rather than not at all, or
+            // each pass across the channel starts with a stepover straight along the wall into the face, the
+            // front half of the tool in the cut. Rounded, the ring leaves the walls tangentially and the cut
+            // grows from nothing, as on a trochoid. Round a curve of radius ρ the edge takes (ρ + r) / ρ times
+            // what the centre moves, so a tighter rounding grows by less: as much at its heaviest as a ring
+            // rounded to r.
+            let had = shapes_area(&free);
+            let plain = union_all(&[flat(&free), flat(&intersect(&offset(&free, self.step), lim))].concat());
+            let mut grown = union_all(&[flat(&free), flat(&opened(&intersect(&offset(&free, self.step), lim), r))].concat());
+            if shapes_area(&grown) - had < 0.05 * self.step * r {
+                // (a tighter rounding only where it takes a good part of what a plain ring as wide would: in a
+                // channel, not for the last slivers in a corner, which would take many rings of next to nothing)
+                let worth = 0.5 * (shapes_area(&plain) - had);
+                grown = [0.8 * r, 0.6 * r, 0.4 * r, 0.25 * r]
+                    .iter()
+                    .map(|round| {
+                        let share = 2.0 * round / (round + r);
+                        let ring = intersect(&offset(&free, self.step * share), lim);
+                        (share, union_all(&[flat(&free), flat(&opened(&ring, *round))].concat()))
+                    })
+                    .find(|(share, g)| shapes_area(g) - had >= (share * worth).max(0.05 * self.step * r))
+                    .map(|(_, g)| g)
+                    .unwrap_or(plain);
+            }
+            if shapes_area(&grown) - shapes_area(&free) < 1e-3 {
+                if !seed {
+                    break;
+                }
+                // what is left can't be reached from open ground: from the holes set aside, if there are any
+                if !holes.is_empty() {
+                    free = union_all(&[flat(&free), flat(holes)].concat());
+                    holes.clear();
+                    continue;
+                }
+                // material enclosed all round (or out of reach): a helix in where it is roomiest
+                match roomiest(&intersect(a, &near), r) {
+                    Some((c, room)) => {
+                        let rh = self.helix.min(room * 0.9).max(0.0);
+                        rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
+                        pieces.push((rings.len() - 1, Piece::Helix(c, rh)));
+                        free = union_all(&[flat(&free), flat(&intersect(&vec![vec![circle(c, rh.max(0.02))]], a))].concat());
+                        continue;
+                    }
+                    None => break,
+                }
+            }
+            let mut segs: Vec<crate::cam_contour::Seg> = vec![];
+            for sh in &grown {
+                for (i, c) in sh.iter().enumerate() {
+                    segs.extend(crate::cam_contour::clip(&self.orient(c, i == 0), &near, h, bridge));
+                }
+            }
+            rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
+            pieces.extend(segs.into_iter().map(|sg| (rings.len() - 1, Piece::Seg(sg))));
+            free = grown;
+        }
+        (pieces, rings, free)
+    }
+
+}
+
 /// Offset-following adaptive clearing of one level. Everything is in tool-centre space: `a` is where the
 /// centre may go (outside the part and its allowance), `material` the stock at this level.
 ///
@@ -1934,124 +2076,24 @@ impl Level<'_, '_> {
     /// The loop oriented so the material outside the free region is on the cutting side: climb milling (a
     /// spindle turning clockwise, M3) has it on the right of travel, as an outside contour going clockwise
     /// round the part.
-    fn orient(&self, c: &Contour, outer: bool) -> Contour {
-        let ccw = crate::cam_paths::area(c) > 0.0;
-        // outer loops have the free region inside: counter-clockwise puts what's outside on the right
-        let want_ccw = if outer { self.climb } else { !self.climb };
-        if ccw == want_ccw {
-            c.clone()
-        } else {
-            c.iter().rev().copied().collect()
-        }
+    /// The planning half of a level (no path builder: it can run beside other levels).
+    pub(crate) fn planner(&self) -> Planner {
+        Planner { r: self.r, step: self.step, helix: self.helix, climb: self.climb }
     }
 
     /// Clear the level: `a` = where the centre may go, `material` = the stock there, `cleared` = centres the
-    /// tool has already cleared round (besides those whose tool misses the material).
+    /// tool has already cleared round (see `Planner::clear`).
     pub(crate) fn clear(&mut self, a: &Shapes, material: &Shapes, cleared: &Shapes) {
-        let r = self.r;
-        let mut free = difference(a, &offset(material, r - GAP));
-        if !cleared.is_empty() {
-            free = union_all(&[flat(&free), flat(&intersect(cleared, a))].concat());
-        }
-        // a hole the tool only just fits (a bore from an earlier setup, say) is no place to start from: rings
-        // growing out of it are arcs tighter than the tool, where the edge runs several times the stepover into
-        // the material for every one the centre moves. Leave such holes to the passes that come from open ground,
-        // which break through into them; they are a start only for material nothing else reaches.
-        let room = std::f64::consts::PI * r * r;
-        let (holes, open): (Shapes, Shapes) = free.iter().cloned().partition(|sh| shapes_area(&vec![sh.clone()]) < room);
-        let mut holes = if open.is_empty() { vec![] } else { holes };
-        if !holes.is_empty() {
-            free = open;
-        }
-        // first everything but a stepover-wide band along the walls, with the passes turning away before they
-        // reach it (a pass that runs into the wall takes the corner the passes before it left there, head-on);
-        // then the walls, in passes along them that take that band
-        let inner = opened(&offset(a, -self.step), 0.05);
-        if !inner.is_empty() {
-            free = self.grow(&inner, a, material, free, false, &mut vec![]);
-        }
-        self.grow(a, a, material, free, true, &mut holes);
+        let plan = self.planner().clear(a, material, cleared);
+        self.cut(plan, a);
     }
 
-    /// Grow the cleared centres `free` within `lim` (part of `a`) until no material is left that it reaches;
-    /// `seed`: start from `holes` (small clear spots set aside), then with a helix into the material, for what
-    /// can't be reached otherwise.
-    fn grow(&mut self, lim: &Shapes, a: &Shapes, material: &Shapes, mut free: Shapes, seed: bool, holes: &mut Shapes) -> Shapes {
-        let r = self.r;
-        let h = (0.2 * r).clamp(0.05, 1.0);
-        let bridge = (1.5 * r).max(1.0);
-        // the rings first, then their passes in an order that keeps the tool in one place (see `emit`)
-        let mut rings: Vec<Ring> = vec![];
-        let mut pieces: Vec<(usize, Piece)> = vec![];
-        for _ in 0..5000 {
-            let remaining = opened(&difference(material, &offset(&free, r)), 0.02);
-            if shapes_area(&remaining) < 0.05 {
-                break;
-            }
-            // centres whose tool reaches the material that is left
-            let near = offset(&remaining, r - GAP);
-            // the new ring with its corners rounded to the tool's radius: a pass that runs into a sharp corner of
-            // it (where it meets a wall) takes the corner the passes before it left there head-on. The corners
-            // come off in later rings, which round them a stepover further in; the last bits without rounding.
-            // Where the ground is narrower than the tool (a channel between two walls less than 2 r apart in
-            // centres) a rounding of r takes the whole ring away: round tighter there rather than not at all, or
-            // each pass across the channel starts with a stepover straight along the wall into the face, the
-            // front half of the tool in the cut. Rounded, the ring leaves the walls tangentially and the cut
-            // grows from nothing, as on a trochoid. Round a curve of radius ρ the edge takes (ρ + r) / ρ times
-            // what the centre moves, so a tighter rounding grows by less: as much at its heaviest as a ring
-            // rounded to r.
-            let had = shapes_area(&free);
-            let plain = union_all(&[flat(&free), flat(&intersect(&offset(&free, self.step), lim))].concat());
-            let mut grown = union_all(&[flat(&free), flat(&opened(&intersect(&offset(&free, self.step), lim), r))].concat());
-            if shapes_area(&grown) - had < 0.05 * self.step * r {
-                // (a tighter rounding only where it takes a good part of what a plain ring as wide would: in a
-                // channel, not for the last slivers in a corner, which would take many rings of next to nothing)
-                let worth = 0.5 * (shapes_area(&plain) - had);
-                grown = [0.8 * r, 0.6 * r, 0.4 * r, 0.25 * r]
-                    .iter()
-                    .map(|round| {
-                        let share = 2.0 * round / (round + r);
-                        let ring = intersect(&offset(&free, self.step * share), lim);
-                        (share, union_all(&[flat(&free), flat(&opened(&ring, *round))].concat()))
-                    })
-                    .find(|(share, g)| shapes_area(g) - had >= (share * worth).max(0.05 * self.step * r))
-                    .map(|(_, g)| g)
-                    .unwrap_or(plain);
-            }
-            if shapes_area(&grown) - shapes_area(&free) < 1e-3 {
-                if !seed {
-                    break;
-                }
-                // what is left can't be reached from open ground: from the holes set aside, if there are any
-                if !holes.is_empty() {
-                    free = union_all(&[flat(&free), flat(holes)].concat());
-                    holes.clear();
-                    continue;
-                }
-                // material enclosed all round (or out of reach): a helix in where it is roomiest
-                match roomiest(&intersect(a, &near), r) {
-                    Some((c, room)) => {
-                        let rh = self.helix.min(room * 0.9).max(0.0);
-                        rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
-                        pieces.push((rings.len() - 1, Piece::Helix(c, rh)));
-                        free = union_all(&[flat(&free), flat(&intersect(&vec![vec![circle(c, rh.max(0.02))]], a))].concat());
-                        continue;
-                    }
-                    None => break,
-                }
-            }
-            let mut segs: Vec<crate::cam_contour::Seg> = vec![];
-            for sh in &grown {
-                for (i, c) in sh.iter().enumerate() {
-                    segs.extend(crate::cam_contour::clip(&self.orient(c, i == 0), &near, h, bridge));
-                }
-            }
-            rings.push(Ring { free: free.clone(), remaining: remaining.clone(), near: near.clone() });
-            pieces.extend(segs.into_iter().map(|sg| (rings.len() - 1, Piece::Seg(sg))));
-            free = grown;
+    /// Cut a level planned by `Planner::clear` (with the same `a`), its rings in the order they were grown.
+    pub(crate) fn cut(&mut self, plan: LevelPlan, a: &Shapes) {
+        let h = (0.2 * self.r).clamp(0.05, 1.0);
+        for (pieces, rings) in plan.grows {
+            self.emit(pieces, &rings, a, h);
         }
-        self.emit(pieces, &rings, a, h);
-        free
     }
 
     /// Cut the rings' passes. A pass waits only for the passes of earlier rings near it (they clear what it
@@ -2430,11 +2472,11 @@ fn widest(d: f64, depth: f64) -> f64 {
 
 /// The stepover at which a cut `depth` deep at `feed` takes `target` W at the shaft (the cutting model), at
 /// most `max_area` / depth wide and `widest`, and within what the tool takes (force, bend, chip).
-fn power_step(ctx: &Ctx, t: &Tool, depth: f64, feed: f64, target: f64, max_width: f64, widest: f64) -> f64 {
-    let rpm = ctx.cam.spindle_rpm(t);
-    let m = crate::cam_cutting::material(&ctx.cam.stock.material);
+fn power_step(cam: &crate::cam::Cam, t: &Tool, depth: f64, feed: f64, target: f64, max_width: f64, widest: f64) -> f64 {
+    let rpm = cam.spindle_rpm(t);
+    let m = crate::cam_cutting::material(&cam.stock.material);
     let g = crate::cam_cutting::tool_geom(t);
-    let (lim, _) = ctx.cam.machine.cut_limits();
+    let (lim, _) = cam.machine.cut_limits();
     let hi = max_width.min(widest).min(t.diameter).max(0.02 * t.diameter);
     let ok = |w: f64| {
         let c = crate::cam_cutting::cut(&g, &m, w, depth, feed, rpm, w * depth);
@@ -2508,7 +2550,6 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         if rpm > 0.0 && feed > 0.0 { POWER_SHARE * avail * 60_000.0 / (feed * kc) } else { f64::INFINITY }
     };
     let mut narrowed = f64::INFINITY;
-    let mut z_prev = top;
     let mut any = false;
     // how high the part (with its allowance) and the stock left stand under the tool along a move; above the
     // level before, this op has taken everything else
@@ -2529,40 +2570,50 @@ pub(crate) fn adaptive(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpath
         }
         h
     };
-    for z in levels(top, bottom, stepdown(op, t), &kept) {
+    // each level planned on its own (the levels side by side: each depends only on its own height and the one
+    // above it), then cut one after another, as they were when planned in turn
+    let zs: Vec<f64> = levels(top, bottom, stepdown(op, t), &kept).into_iter().collect();
+    // the part's outlines first, in the order the levels ask for them (the outline cache goes by height)
+    let shadows: Vec<(Shapes, Option<Shapes>)> = zs.iter().map(|&z| (ctx.geo.shadow(z - op.leave_floor), stock.map(|_| ctx.geo.shadow(z)))).collect();
+    let cam = ctx.cam;
+    let planned: Vec<Option<(f64, f64, f64, Shapes, LevelPlan)>> = par_map(zs.len(), |i, _| {
+        let z = zs[i];
+        let z_prev = if i == 0 { top } else { zs[i - 1] };
         // the floors less than leave_floor below this level stay covered
-        let shadow = ctx.geo.shadow(z - op.leave_floor);
+        let shadow = &shadows[i].0;
         // (without hairline slits: the part's outline can have cracks between its triangles that the offset keeps)
-        let a = opened(&difference(&bound, &offset(&shadow, r + op.leave)), 0.1);
+        let a = opened(&difference(&bound, &offset(shadow, r + op.leave)), 0.1);
         let material = match stock {
             // (with what hangs over the level: stock whose underside is above it but below the level before, which
             // the flutes take with their side as they pass under it. An earlier setup's cut from the other side
             // leaves such a rim: round the phone stand's plinth, 2.7 mm of it, 4 mm wide at the corners)
-            Some(m) => leftover_under(ctx, m, z, z_prev, op.leave),
-            None if z >= lo.z - 1e-6 && z < hi.z - 1e-6 => difference(&rect(lo, hi), &offset(&shadow, op.leave.max(0.0))),
+            Some(m) => leftover_under_shadow(m, shadows[i].1.as_ref().unwrap_or(shadow), z, z_prev, op.leave),
+            None if z >= lo.z - 1e-6 && z < hi.z - 1e-6 => difference(&rect(lo, hi), &offset(shadow, op.leave.max(0.0))),
             None => vec![],
         };
         if shapes_area(&material) < 1e-3 || shapes_area(&intersect(&a, &offset(&material, r - GAP))) < 1e-3 {
-            z_prev = z;
-            continue;
+            return None;
         }
-        any = true;
         // a deep level at the full stepover can take more than the tool's cut area: narrow the stepover there
         let deep = z_prev - z;
-        let level_step = match crate::cam_paths::power_budget(ctx.cam, op, t).map(|b| b.0) {
+        let level_step = match crate::cam_paths::power_budget(cam, op, t).map(|b| b.0) {
             // from the power budget: the stepover whose steady cut takes the target at this depth and feed, within
             // what the tool takes (its whole cut area and width: the corners are held by the feed, not here)
-            Some(target) if deep > 1e-6 => power_step(ctx, t, deep, feed, target, area_max.min(area_power / AREA_SHARE) / deep, widest(t.diameter, deep)),
+            Some(target) if deep > 1e-6 => power_step(cam, t, deep, feed, target, area_max.min(area_power / AREA_SHARE) / deep, widest(t.diameter, deep)),
             _ if deep > 1e-6 => step.min(AREA_SHARE * area_max.min(area_power) / deep).min(WIDTH_SHARE * widest(t.diameter, deep)),
             _ => step,
         };
+        let plan = Planner { r, step: level_step, helix, climb: op.climb }.clear(&a, &material, &vec![]);
+        Some((z, z_prev, level_step, a, plan))
+    });
+    for (z, z_from, level_step, a, plan) in planned.into_iter().flatten() {
+        any = true;
         if op.power_target.is_none() && level_step < step - 1e-3 {
             narrowed = narrowed.min(level_step);
         }
         let slack = stock.map(|m| 2.5 * m.cell).unwrap_or(0.0);
-        let mut lv = Level { pb: &mut *pb, z, z_from: z_prev, r, step: level_step, feed, fast, climb: op.climb, helix, slack, blocking: Default::default(), hop: Some(&hop) };
-        lv.clear(&a, &material, &vec![]);
-        z_prev = z;
+        let mut lv = Level { pb: &mut *pb, z, z_from, r, step: level_step, feed, fast, climb: op.climb, helix, slack, blocking: Default::default(), hop: Some(&hop) };
+        lv.cut(plan, &a);
     }
     if !any {
         tp.warnings.push("nothing to clear".into());
@@ -2588,8 +2639,13 @@ pub(crate) fn leftover(ctx: &Ctx, m: &StockMap, z: f64, leave: f64) -> Shapes {
 /// The same, with the stock that starts above z but below `z_top` (it hangs over the level: a tool at z whose
 /// flutes reach up to `z_top` cuts it too).
 pub(crate) fn leftover_under(ctx: &Ctx, m: &StockMap, z: f64, z_top: f64, leave: f64) -> Shapes {
+    leftover_under_shadow(m, &ctx.geo.shadow(z), z, z_top, leave)
+}
+
+/// `leftover_under` with the part's outline at z (`Geo::shadow(z)`) given.
+fn leftover_under_shadow(m: &StockMap, shadow: &Shapes, z: f64, z_top: f64, leave: f64) -> Shapes {
     let c = m.cell * 1.5;
-    let x = difference(&material_under(m, z, z_top), &offset(&ctx.geo.shadow(z), leave.max(0.0) + c));
+    let x = difference(&material_under(m, z, z_top), &offset(shadow, leave.max(0.0) + c));
     offset(&offset(&x, -c), c)
 }
 
