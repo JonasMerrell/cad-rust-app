@@ -12,6 +12,7 @@ mod cam_build_cache;
 mod assembly;
 mod cam;
 mod cam_3d;
+mod cam_compare;
 mod cam_contour;
 mod cam_engrave;
 mod cam_feed_schedule;
