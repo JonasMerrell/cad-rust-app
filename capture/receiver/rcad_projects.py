@@ -26,6 +26,20 @@ token as the Capture app). Standard library only.
                                             starts a request: {"job", "chat_id"}
     GET  /api/jobs/<job>?after=N            events after N (waits up to 25 s for new ones)
     POST /api/jobs/<job>/stop
+    POST /api/doc/<id>/sync                 commit (when the project commits on save) and sync with GitHub
+    POST /api/doc/<id>/resolve              {"keep": "mine"|"theirs"} after a sync that couldn't combine both sides
+
+    GET  /api/github                        the GitHub account rCAD on netdash is signed in with
+    POST /api/github/login                  start signing in: {"user_code", "verification_uri", "expires_in", "interval"}
+    POST /api/github/login/poll             {"state": "waiting"|"slow_down"|"done", "login"}
+    POST /api/github/logout
+    GET  /api/github/repos                  the account's repositories, rCAD projects first; each with
+                                            "doc" (its document id) when a copy is already on netdash
+    POST /api/github/clone                  {"url"}: clone into the first project folder: {"id"}
+
+GitHub goes through `rcad github` (src/github_cli.rs), the editor's own sign-in and git code, so
+the token stays on netdash and signing in here signs the editor in too. After a phone chat changes
+a document in a git project, `rcad chat` commits and syncs it as the editor does after a save.
 
 Requests run `rcad chat` (src/claude_cli.rs), which uses this computer's Claude Code login, so the
 phone never holds a Claude sign-in or key. Document ids are the path relative to a project folder,
@@ -229,6 +243,8 @@ class Projects:
         self.export_locks = {}
         self.building = {}  # cache key -> start time, for background builds
         self.build_errors = {}  # cache key -> error of a background build that failed
+        self.gh_status = None  # (time, `rcad github status`)
+        self.gh_device = None  # (device code, expiry) of a sign-in under way
 
     @property
     def rcad(self):
@@ -312,6 +328,7 @@ class Projects:
             "modified": int(st.st_mtime),
             "size": st.st_size,
             "git": self._git_root(folder, self.roots[i]) is not None,
+            "remote": self._remote(self._git_root(folder, self.roots[i])),
             "chats": len(self.chat_list(path)),
             "busy": path in self.busy,
         }
@@ -326,6 +343,19 @@ class Projects:
                 break
             d = os.path.dirname(d)
         return None
+
+    @staticmethod
+    def _remote(git_root):
+        """The project's GitHub repository as "owner/name" (its origin), or None."""
+        if not git_root:
+            return None
+        try:
+            with open(os.path.join(git_root, ".git", "config")) as f:
+                cfg = f.read()
+        except OSError:
+            return None
+        m = re.search(r'\[remote "origin"\][^\[]*?^\s*url\s*=\s*(\S+)', cfg, re.M)
+        return short_repo(m.group(1)) if m else None
 
     def list_docs(self):
         docs = [self.summary(i, rel, p) for i, rel, p in self.scan()]
@@ -675,10 +705,125 @@ class Projects:
             threading.Timer(30, lambda: job.done or job.proc.poll() is not None or job.proc.terminate()).start()
         return True
 
+    # ---------------------------------------------------------------- GitHub
+
+    def github(self, args, timeout=90):
+        """Run `rcad github <args>`: (HTTP status, its JSON)."""
+        rcad = self.rcad
+        if not rcad:
+            return 503, {"error": "rcad is not installed on this computer"}
+        try:
+            r = subprocess.run([rcad, "github", *args], capture_output=True, text=True, timeout=timeout,
+                               stdin=subprocess.DEVNULL, cwd=self.roots[0] if os.path.isdir(self.roots[0]) else None)
+        except subprocess.TimeoutExpired:
+            return 504, {"error": "GitHub took too long to answer"}
+        except OSError as e:
+            return 500, {"error": f"could not run rcad: {e}"}
+        line = next((x for x in reversed(r.stdout.splitlines()) if x.startswith("{")), "")
+        try:
+            v = json.loads(line)
+        except ValueError:
+            tail = (r.stderr.strip().splitlines() or [f"rcad github stopped ({r.returncode})"])[-1]
+            return 500, {"error": tail}
+        if r.returncode != 0 and "error" not in v:
+            v["error"] = f"rcad github stopped ({r.returncode})"
+        return (200 if r.returncode == 0 else 400), v
+
+    def github_status(self, fresh=False):
+        with self.lock:
+            hit = self.gh_status
+        if hit and not fresh and time.time() - hit[0] < 60:
+            return 200, hit[1]
+        code, v = self.github(["status"], 30)
+        if code == 200:
+            with self.lock:
+                self.gh_status = (time.time(), v)
+        return code, v
+
+    def github_login(self):
+        code, v = self.github(["login-start"], 30)
+        if code == 200:
+            with self.lock:
+                self.gh_device = (v.pop("device_code", ""), time.time() + float(v.get("expires_in") or 900))
+        return code, v
+
+    def github_poll(self):
+        with self.lock:
+            dev = self.gh_device
+        if not dev or time.time() > dev[1]:
+            return 400, {"error": "the code expired: start again"}
+        code, v = self.github(["login-poll", "--code", dev[0]], 30)
+        if code == 200 and v.get("state") == "done" or code != 200:
+            with self.lock:
+                self.gh_device = None
+                self.gh_status = None
+        return code, v
+
+    def github_logout(self):
+        code, v = self.github(["logout"], 30)
+        with self.lock:
+            self.gh_status = None
+        return code, v
+
+    def github_repos(self):
+        code, v = self.github(["repos"], 90)
+        if code != 200:
+            return code, v
+        here = {}  # "owner/name" (lower case) -> document id of a copy on netdash
+        for i, rel, path in self.scan():
+            r = self._remote(self._git_root(os.path.dirname(path), self.roots[i]))
+            if r:
+                here.setdefault(r.lower(), doc_id(i, rel))
+        for r in v.get("repos") or []:
+            d = here.get(str(r.get("full_name", "")).lower())
+            if d:
+                r["doc"] = d
+        return code, v
+
+    def github_clone(self, url):
+        url = str(url or "").strip()
+        if not re.fullmatch(r"https://[A-Za-z0-9.-]+/[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+?(\.git)?/?", url):
+            return 400, {"error": "give the repository's https address"}
+        root = self.roots[0]
+        os.makedirs(root, exist_ok=True)
+        code, v = self.github(["clone", "--url", url, "--into", root], 300)
+        if code != 200:
+            return code, v
+        doc = v.get("doc") or ""
+        rroot = os.path.realpath(root)
+        if not os.path.realpath(doc).startswith(rroot + os.sep):
+            return 500, {"error": "rcad cloned it somewhere else"}
+        if v.get("empty"):
+            # an empty repository: start the project with an empty document, committed and pushed
+            err = self._run_script(self.rcad, [{"tool": "new_document", "args": {"units": "mm"}},
+                                               {"tool": "save_document", "args": {"path": doc}}], os.path.dirname(doc), 120)
+            if err or not os.path.isfile(doc):
+                return 500, {"error": err or "rcad did not write the document"}
+            self.github(["sync", "--doc", doc, "--message", "Started from the rCAD phone app"], 120)
+        return 200, {"id": doc_id(0, os.path.relpath(os.path.realpath(doc), rroot)), "empty": bool(v.get("empty")),
+                     "synced": v.get("synced")}
+
+    def doc_git(self, did, args):
+        """sync / resolve a document's project: (HTTP status, JSON)."""
+        path = self.resolve(did)
+        if not path:
+            return 404, {"error": "no such document"}
+        with self.lock:
+            running = self.busy.get(path)
+            if running and running in self.jobs and not self.jobs[running].done:
+                return 409, {"error": "Claude is still working on this document"}
+        return self.github([args[0], "--doc", path, *args[1:]], 180)
+
     def _gc(self):
         now = time.time()
         for jid in [j for j, job in self.jobs.items() if job.done and now - (job.finished_at or now) > JOB_KEEP_SECS]:
             del self.jobs[jid]
+
+
+def short_repo(url):
+    """ "owner/name" of a GitHub remote URL (https or ssh), else None."""
+    m = re.match(r"(?:https?://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$", url.strip())
+    return f"{m.group(1)}/{m.group(2)}" if m else None
 
 
 def _param_text(params):
@@ -1378,8 +1523,36 @@ def handle(h, method, p, projects, body=None):
             did, err = projects.new_project(body.get("name"))
             h.send_json(200 if did else 400, {"id": did} if did else {"error": err})
         return True
+    if p[:2] == ["api", "github"]:
+        rest = p[2:]
+        if method == "GET" and rest == []:
+            code, res = projects.github_status(fresh="fresh" in q)
+        elif method == "GET" and rest == ["repos"]:
+            code, res = projects.github_repos()
+        elif method == "POST" and rest == ["login"]:
+            code, res = projects.github_login()
+        elif method == "POST" and rest == ["login", "poll"]:
+            code, res = projects.github_poll()
+        elif method == "POST" and rest == ["logout"]:
+            code, res = projects.github_logout()
+        elif method == "POST" and rest == ["clone"]:
+            code, res = projects.github_clone(body.get("url"))
+        else:
+            return False
+        h.send_json(code, res)
+        return True
     if len(p) >= 3 and p[:2] == ["api", "doc"]:
         did = p[2]
+        if method == "POST" and p[3:] == ["sync"]:
+            h.send_json(*projects.doc_git(did, ["sync", "--message", "Synced from the rCAD phone app"]))
+            return True
+        if method == "POST" and p[3:] == ["resolve"]:
+            keep = body.get("keep")
+            if keep not in ("mine", "theirs"):
+                h.send_json(400, {"error": "keep mine or theirs"})
+            else:
+                h.send_json(*projects.doc_git(did, ["resolve", "--keep", keep]))
+            return True
         if method == "GET" and len(p) == 3:
             d = projects.doc_detail(did)
             h.send_json(200 if d else 404, d or {"error": "no such document"})

@@ -42,6 +42,14 @@ to the same small service the rCAD Capture app uploads photos to.
   editor saves them, so a chat started on the phone continues in rCAD on the computer and the
   other way round. Requests keep running if the phone locks or loses the network; reopen the
   document to pick the reply up again. *Stop* stops a request and keeps what it changed.
+- **GitHub**: the branch button on the document list. It shows the GitHub account rCAD on
+  netdash uses (the editor's own sign-in, else the GitHub CLI's) and lets you sign in with a code
+  on github.com, so the token stays on netdash. It lists the account's repositories, rCAD
+  projects first; tap one to clone it into rCAD Projects on netdash and open it (an empty one
+  becomes a new project). In a project that syncs, every phone chat pulls from GitHub first and
+  afterwards commits Claude's change (its message lists what changed and quotes the request) and
+  pushes it. The document's menu has *Sync with GitHub*, which asks which side to keep when both
+  changed the same thing.
 - **Model**: Opus (plans and hands the work to Sonnet or Haiku, as the editor does), Sonnet or
   Haiku, or whatever the editor on netdash is set to.
 
@@ -91,13 +99,19 @@ All on the receiver's port and token (see `capture/receiver/rcad_projects.py`):
     POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?}  → {"job"}
     GET  /api/jobs/<job>?after=N           events (long poll)
     POST /api/jobs/<job>/stop
+    POST /api/doc/<id>/sync                commit and sync with GitHub
+    POST /api/doc/<id>/resolve {"keep": "mine"|"theirs"}
+    GET  /api/github                       account
+    POST /api/github/login, /login/poll, /logout
+    GET  /api/github/repos                 repositories (with "doc" when netdash has a copy)
+    POST /api/github/clone {"url"}         → {"id"}
 
 `rcad chat --doc part.json --prompt "…"` can be used on its own too; it prints one JSON object
-per line (see `src/claude_cli.rs`).
+per line (see `src/claude_cli.rs`). So can `rcad github status|repos|clone|sync|…`, which prints
+one JSON object (see `src/github_cli.rs`).
 
 ## Not done yet
 
 - The phone reaches netdash only on the home network (port 8765 isn't open on WireGuard).
 - If the document is open in the editor on netdash while Claude changes it from the phone, the
   editor doesn't reload it by itself: reopen it there.
-- A git project isn't committed or pushed after a phone chat; do that from the editor.

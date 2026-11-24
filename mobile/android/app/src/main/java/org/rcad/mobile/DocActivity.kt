@@ -347,11 +347,14 @@ class DocActivity : Activity() {
         m.menu.add(0, 1, 0, "Reload the 3D view")
         m.menu.add(0, 2, 1, "Claude model…")
         m.menu.add(0, 3, 2, "Chats about this document…")
+        val remote = detail?.optString("remote")?.takeIf { it.isNotEmpty() && it != "null" }
+        if (remote != null) m.menu.add(0, 4, 3, "Sync with GitHub ($remote)")
         m.setOnMenuItemClickListener {
             when (it.itemId) {
                 1 -> { load(); reloadViewer() }
                 2 -> pickModel()
                 3 -> { showPane(1, expand = true); pickChat() }
+                4 -> syncGitHub()
             }
             true
         }
@@ -359,6 +362,40 @@ class DocActivity : Activity() {
     }
 
     private fun toast(msg: String) = Toast.makeText(this, msg, Toast.LENGTH_SHORT).show()
+
+    /** Commit what's saved on netdash and pull / push, as the editor's Sync button does. */
+    private fun syncGitHub(keep: String? = null) {
+        toast(if (keep == null) "Syncing with GitHub…" else "Keeping ${if (keep == "mine") "netdash's" else "GitHub's"} version…")
+        Thread {
+            try {
+                val api = Api.connect(prefs)
+                val path = "/api/doc/${Api.enc(docId)}/" + if (keep == null) "sync" else "resolve"
+                val r = api.post(path, if (keep == null) JSONObject() else JSONObject().put("keep", keep), readMs = 200000)
+                runOnUiThread {
+                    val div = r.optJSONObject("diverged")
+                    if (div != null) {
+                        val mine = div.optJSONArray("mine")?.length() ?: 0
+                        val theirs = div.optJSONArray("theirs")?.length() ?: 0
+                        android.app.AlertDialog.Builder(this)
+                            .setTitle("Both sides changed")
+                            .setMessage("netdash has $mine commit${if (mine == 1) "" else "s"} GitHub doesn't, and GitHub has $theirs netdash doesn't, and they can't be combined. Keep which version? The other one stays in the history.")
+                            .setPositiveButton("netdash's") { _, _ -> syncGitHub("mine") }
+                            .setNegativeButton("GitHub's") { _, _ -> syncGitHub("theirs") }
+                            .setNeutralButton("Not now", null)
+                            .show()
+                        return@runOnUiThread
+                    }
+                    val parts = listOfNotNull(r.optString("committed").takeIf { it.isNotEmpty() }?.let { "Committed “$it”" },
+                        r.optString("synced").takeIf { it.isNotEmpty() })
+                    Toast.makeText(this, parts.joinToString(" · ").ifEmpty { "Up to date with GitHub" }, Toast.LENGTH_LONG).show()
+                    load()
+                    reloadViewer()
+                }
+            } catch (e: IOException) {
+                runOnUiThread { Toast.makeText(this, e.message ?: "Could not sync", Toast.LENGTH_LONG).show() }
+            }
+        }.start()
+    }
 
     private fun showWebNote(t: String) {
         webNote.text = t

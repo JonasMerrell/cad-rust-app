@@ -35,6 +35,7 @@ class MainActivity : Activity() {
         val title = Ui.text(this, "rCAD", 19f, Ui.BAR_TEXT, bold = true).apply { layoutParams = LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f) }
         val bar = Ui.topBar(
             this, logo, title,
+            Ui.iconButton(this, "branch", Ui.BAR_TEXT, desc = "GitHub") { startActivity(Intent(this, GitHubActivity::class.java)) },
             Ui.accentButton(this, "New project") { newProjectDialog() },
             Ui.iconButton(this, "more", Ui.BAR_TEXT, desc = "More") { v -> moreMenu(v) },
         ).apply { layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(context, 52)) }
@@ -97,9 +98,14 @@ class MainActivity : Activity() {
     private fun moreMenu(anchor: View) {
         val m = android.widget.PopupMenu(this, anchor)
         m.menu.add(0, 1, 0, "Refresh")
-        m.menu.add(0, 2, 1, "Settings")
+        m.menu.add(0, 3, 1, "Projects on GitHub…")
+        m.menu.add(0, 2, 2, "Settings")
         m.setOnMenuItemClickListener {
-            if (it.itemId == 1) refresh() else settingsDialog()
+            when (it.itemId) {
+                1 -> refresh()
+                3 -> startActivity(Intent(this, GitHubActivity::class.java))
+                else -> settingsDialog()
+            }
             true
         }
         m.show()
@@ -174,7 +180,7 @@ class MainActivity : Activity() {
         val shown = docs.filter { q.isEmpty() || it.optString("name").lowercase().contains(q) || it.optString("project").lowercase().contains(q) }
         if (shown.isEmpty() && docs.isNotEmpty()) list.addView(Ui.text(this, "No document matches.", 14f, Ui.MUTED).apply { setPadding(Ui.dp(context, 14), Ui.dp(context, 14), 0, 0) })
         if (docs.isEmpty() && prefs.paired && !loading) {
-            list.addView(Ui.text(this, "No rCAD documents in netdash's project folders yet. Tap New project to start one, or save a document into rCAD Projects on netdash.", 14f, Ui.MUTED)
+            list.addView(Ui.text(this, "No rCAD documents in netdash's project folders yet. Tap New project to start one, open one from GitHub (the branch button), or save a document into rCAD Projects on netdash.", 14f, Ui.MUTED)
                 .apply { setPadding(Ui.dp(context, 14), Ui.dp(context, 14), Ui.dp(context, 14), 0) })
         }
         for (d in shown) list.addView(docRow(d))
@@ -188,7 +194,8 @@ class MainActivity : Activity() {
             if (project.isNotEmpty() && project != name) add(project)
             add(Ui.ago(d.optLong("modified")))
             if (chats > 0) add("$chats chat${if (chats == 1) "" else "s"}")
-            if (d.optBoolean("git")) add("git")
+            val remote = d.optString("remote").takeIf { it.isNotEmpty() && it != "null" }
+            if (remote != null) add("GitHub $remote") else if (d.optBoolean("git")) add("git")
             if (d.optBoolean("busy")) add("Claude is working")
         }.joinToString(" · ")
         val busy = d.optBoolean("busy")

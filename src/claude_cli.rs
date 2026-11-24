@@ -19,6 +19,7 @@
 //! {"type":"rewind"}                               drop the text since the last "attempt": it is sent again
 //! {"type":"attempt"}
 //! {"type":"saved","path":"…"}                     the document was written with Claude's changes
+//!                                                  (then, in a git project, a notice with what was committed and synced)
 //! {"type":"done","error":null}                    always last
 //! ```
 //!
@@ -113,6 +114,8 @@ pub fn main(args: &[String]) -> i32 {
         }
     };
     let doc = std::fs::canonicalize(&a.doc).unwrap_or(a.doc.clone());
+    // a project on GitHub: bring in what was pushed from elsewhere before Claude starts
+    let pulled = crate::github_cli::pull_first(&doc);
     let ws_text = match std::fs::read_to_string(&doc) {
         Ok(t) => t,
         Err(e) => {
@@ -167,6 +170,9 @@ pub fn main(args: &[String]) -> i32 {
     };
     meta.model = settings.model.clone();
     emit(json!({"type": "chat", "id": meta.id}));
+    if let Some(t) = pulled {
+        emit(json!({"type": "notice", "text": t}));
+    }
 
     let worker = claude::Worker::start(egui::Context::default());
     if a.chat.is_some() {
@@ -254,9 +260,13 @@ pub fn main(args: &[String]) -> i32 {
     }
     // Claude's changes go into the document file (also those made before a stop or an error)
     let mut code = if error.is_some() { 1 } else { 0 };
+    let mut saved = false;
     if let Some(json) = changed.filter(|j| *j != ws_text) {
         match crate::session::write_atomic(&doc, json.as_bytes()) {
-            Ok(()) => emit(json!({"type": "saved", "path": doc.display().to_string()})),
+            Ok(()) => {
+                saved = true;
+                emit(json!({"type": "saved", "path": doc.display().to_string()}))
+            }
             Err(e) => {
                 emit(json!({"type": "notice", "text": format!("Could not save {}: {e}", doc.display())}));
                 code = 1;
@@ -265,6 +275,27 @@ pub fn main(args: &[String]) -> i32 {
     }
     if let Err(e) = claude_chats::save(&doc, &mut meta, &ctx) {
         emit(json!({"type": "notice", "text": format!("Could not save this chat: {e}")}));
+    }
+    if saved {
+        // as the editor does after a save: commit (when the project commits on save), then sync
+        let ask: String = a.prompt.lines().next().unwrap_or("").chars().take(100).collect();
+        let r = crate::github_cli::commit_and_sync(&doc, Some(&format!("From a Claude chat on the rCAD phone app: {ask}")));
+        let mut parts = vec![];
+        if let Some(c) = r["committed"].as_str() {
+            parts.push(format!("Committed “{c}”"));
+        }
+        if let Some(s) = r["synced"].as_str() {
+            parts.push(s.to_string());
+        }
+        if !r["diverged"].is_null() {
+            parts.push("GitHub has other changes to this project that can't be combined with these: sync it from the menu to pick one".into());
+        }
+        if let Some(e) = r["error"].as_str() {
+            parts.push(format!("Could not {}", e.trim_start_matches("could not ")));
+        }
+        if !parts.is_empty() {
+            emit(json!({"type": "notice", "text": parts.join(" · "), "git": r}));
+        }
     }
     emit(json!({"type": "done", "error": error}));
     code

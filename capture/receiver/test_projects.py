@@ -102,6 +102,40 @@ STUB = textwrap.dedent('''\
                 continue
             print(json.dumps({"tool": t, "result": {"ok": True}}))
         sys.exit(0)
+    if a[0] == "github":
+        o = dict(zip(a[2::2], a[3::2]))
+        log = os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "github.log")
+        open(log, "a").write(json.dumps(a[1:]) + "\\n")
+        if a[1] == "status":
+            print(json.dumps({"signed_in": True, "login": "octo", "name": "Octo Cat", "source": "gh"}))
+        elif a[1] == "login-start":
+            print(json.dumps({"user_code": "ABCD-1234", "verification_uri": "https://github.com/login/device",
+                              "device_code": "dev-secret", "interval": 5, "expires_in": 900}))
+        elif a[1] == "login-poll":
+            assert o["--code"] == "dev-secret"
+            print(json.dumps({"state": "done", "login": "octo", "name": "Octo Cat"}))
+        elif a[1] == "repos":
+            print(json.dumps({"repos": [
+                {"full_name": "octo/bracket", "name": "bracket", "private": False, "description": "Made with rCAD",
+                 "clone_url": "https://github.com/octo/bracket.git", "pushed": "2026-11-20T10:00:00Z", "rcad": True},
+                {"full_name": "octo/gearbox", "name": "gearbox", "private": True, "description": "",
+                 "clone_url": "https://github.com/octo/gearbox.git", "pushed": "2026-11-19T10:00:00Z", "rcad": False},
+                {"full_name": "octo/empty", "name": "empty", "private": True, "description": "",
+                 "clone_url": "https://github.com/octo/empty.git", "pushed": "", "rcad": False}]}))
+        elif a[1] == "clone":
+            name = o["--url"].rstrip("/").rsplit("/", 1)[1].removesuffix(".git")
+            d = os.path.join(o["--into"], name)
+            os.makedirs(os.path.join(d, ".git"), exist_ok=True)
+            open(os.path.join(d, ".git", "config"), "w").write('[core]\\n\\tbare = false\\n[remote "origin"]\\n\\turl = %s\\n' % o["--url"])
+            doc = os.path.join(d, name + ".json")
+            if name != "empty":
+                json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Gears", "doc": {}}]}, open(doc, "w"))
+            print(json.dumps({"doc": doc, "empty": name == "empty"}))
+        elif a[1] in ("sync", "resolve"):
+            print(json.dumps({"committed": "Save", "synced": "Pushed 1 commit to octo/" + os.path.basename(os.path.dirname(o["--doc"]))}))
+        elif a[1] == "logout":
+            print(json.dumps({"ok": True, "signed_in": False}))
+        sys.exit(0)
     if a[0] == "chat":
         o = dict(zip(a[1::2], a[2::2]))
         doc, prompt = o["--doc"], open(o["--prompt-file"]).read()
@@ -361,6 +395,39 @@ class ProjectsTest(unittest.TestCase):
         self.assertEqual(evs[-1], {"type": "done", "error": "Stopped"})
         time.sleep(0.2)
         self.assertFalse(self.doc()[0]["busy"])
+
+    def test_github(self):
+        st, res = self.req("GET", "/api/github")
+        self.assertEqual((st, res["login"]), (200, "octo"))
+        st, res = self.req("POST", "/api/github/login", {})
+        self.assertEqual((st, res["user_code"]), (200, "ABCD-1234"))
+        self.assertNotIn("device_code", res)  # stays on netdash
+        st, res = self.req("POST", "/api/github/login/poll", {})
+        self.assertEqual((st, res["state"]), (200, "done"))
+        self.assertEqual(self.req("POST", "/api/github/login/poll", {})[0], 400)  # the code is used up
+        self.assertEqual(self.req("POST", "/api/github/clone", {"url": "file:///etc"})[0], 400)
+        self.assertEqual(self.req("POST", "/api/github/clone", {"url": "https://github.com/octo/../x"})[0], 400)
+        st, res = self.req("POST", "/api/github/clone", {"url": "https://github.com/octo/gearbox.git"})
+        self.assertEqual(st, 200)
+        gear = res["id"]
+        doc = next(d for d in self.doc() if d["id"] == gear)
+        self.assertEqual((doc["name"], doc["remote"], doc["git"]), ("gearbox", "octo/gearbox", True))
+        st, res = self.req("GET", "/api/github/repos")
+        by = {x["full_name"]: x for x in res["repos"]}
+        self.assertEqual(by["octo/gearbox"]["doc"], gear)
+        self.assertNotIn("doc", by["octo/bracket"])
+        # an empty repository gets a new document, committed and pushed
+        st, res = self.req("POST", "/api/github/clone", {"url": "https://github.com/octo/empty.git"})
+        self.assertEqual((st, res["empty"]), (200, True))
+        self.assertTrue(os.path.isfile(os.path.join(self.projects_dir, "empty", "empty.json")))
+        st, res = self.req("POST", f"/api/doc/{gear}/sync", {})
+        self.assertEqual((st, res["synced"]), (200, "Pushed 1 commit to octo/gearbox"))
+        self.assertEqual(self.req("POST", f"/api/doc/{gear}/resolve", {"keep": "both"})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/doc/{gear}/resolve", {"keep": "mine"})[0], 200)
+        calls = [json.loads(x) for x in open(os.path.join(self.tmp, "github.log"))]
+        self.assertIn(["sync", "--doc", os.path.join(os.path.realpath(self.projects_dir), "empty", "empty.json"), "--message",
+                       "Started from the rCAD phone app"], calls)
+        self.assertEqual(self.req("POST", "/api/github/logout", {})[1]["signed_in"], False)
 
     def test_new_project(self):
         st, res = self.req("POST", "/api/projects", {"name": "Hex tray"})
