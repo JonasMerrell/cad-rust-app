@@ -222,10 +222,16 @@ pub fn apply(c: &mut Cam, part: &Part, m: &MachineModel) -> Result<Applied, Stri
     Ok(out)
 }
 
-/// The stations' moving jaws closed: `closings` = (station, width) pairs.
+/// The stations' moving jaws closed: `closings` = (station, width) pairs. A station named more than once (a
+/// job's op 2 and a later setup of the same part in the same station) closes once, on the first width.
 pub fn closed(m: &MachineModel, closings: &[(String, f64)]) -> MachineModel {
     let mut m = m.clone();
+    let mut done: Vec<String> = vec![];
     for (name, width) in closings {
+        if done.iter().any(|d| d.eq_ignore_ascii_case(name)) {
+            continue;
+        }
+        done.push(name.clone());
         let Some(st) = m.vise.iter().find(|s| s.name.eq_ignore_ascii_case(name)).cloned() else { continue };
         let dx = st.moving_face_for(*width) - st.moving_face;
         for mp in &st.moving {
@@ -312,5 +318,8 @@ mod tests {
         assert!((x(&c, 0) - x(&m, 0)).abs() < 1e-6);
         // unknown stations change nothing
         assert_eq!(closed(&m, &[("right".into(), 20.0)]), m);
+        // a station a job names twice (op 2 and the engraving after it in the same station) closes once
+        let once = closed(&m, &[("left".into(), 26.6)]);
+        assert_eq!(closed(&m, &[("left".into(), 26.6), ("Left".into(), 26.6)]), once);
     }
 }
