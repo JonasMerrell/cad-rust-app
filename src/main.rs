@@ -26,6 +26,7 @@ mod cam_post;
 mod cam_probe;
 mod cam_cutting;
 mod cam_sim;
+mod cam_sim_cache;
 mod cam_verify;
 mod cam_web;
 mod cam_stock;

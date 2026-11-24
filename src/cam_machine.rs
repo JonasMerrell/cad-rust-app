@@ -455,7 +455,7 @@ pub fn list() -> Vec<String> {
 }
 
 /// Where a machine is: a library name, or a path to a machine file (scripts, examples).
-fn path_of(name: &str) -> Option<std::path::PathBuf> {
+pub(crate) fn path_of(name: &str) -> Option<std::path::PathBuf> {
     if name.ends_with(".json") || name.contains('/') || name.contains('\\') {
         return Some(std::path::PathBuf::from(name));
     }

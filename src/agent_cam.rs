@@ -304,6 +304,11 @@ impl Session {
         }))
     }
 
+    /// Where finished simulations are kept (`cam_sim_cache`).
+    fn sim_dirs(&self) -> Vec<std::path::PathBuf> {
+        crate::cam_sim_cache::dirs_for(self.path.as_deref().map(std::path::Path::new))
+    }
+
     fn cam_sim(&mut self, ci: usize, resolution: usize) -> R<(Part, Vec<Toolpath>, Sim)> {
         self.cam_sim_left(ci, resolution).map(|(p, t, s, _)| (p, t, s))
     }
@@ -327,7 +332,9 @@ impl Session {
             let placed = std::sync::Arc::new(Sim::place_machine(c, &part, stock, l));
             sim.set_machine(c, &part, placed);
         }
-        sim.run_to(usize::MAX, usize::MAX);
+        // simulated before, in this session or an earlier one: the run kept on disk
+        let disk = crate::cam_sim_cache::key(c, &part, stock, &paths, left.as_ref(), resolution, 0);
+        crate::cam_sim_cache::run(&self.sim_dirs(), disk, &mut sim);
         self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
         Ok((part, paths, sim, left))
     }
@@ -337,9 +344,12 @@ impl Session {
     fn job_sim(&mut self, j: &crate::cam_job::Job, resolution: usize) -> R<(Cam, Part, Vec<Toolpath>, Sim)> {
         use std::hash::{Hash, Hasher};
         let mut h = std::collections::hash_map::DefaultHasher::new();
+        let mut built = true;
         for s in &j.stations {
             let i = self.ws.cams.iter().position(|c| c.name == s.cam.name);
-            (i.and_then(|i| self.cam_cache.get(&i)).map(|b| b.key), crate::cam_verify::toolpath_hash(&s.paths)).hash(&mut h);
+            let b = i.and_then(|i| self.cam_cache.get(&i)).map(|b| b.key);
+            built &= b.is_some();
+            (b, crate::cam_verify::toolpath_hash(&s.paths)).hash(&mut h);
         }
         j.order.hash(&mut h);
         let key = (h.finish(), resolution);
@@ -347,7 +357,9 @@ impl Session {
             return Ok((c.clone(), part.clone(), paths.clone(), sim.clone()));
         }
         let (c, part, paths, mut sim) = j.sim(resolution)?;
-        sim.run_to(usize::MAX, usize::MAX);
+        // on disk only when every station's build is known (they set the stock the job starts from)
+        let disk = built.then(|| crate::cam_sim_cache::key(&c, &part, (DVec3::ZERO, DVec3::ZERO), &paths, None, resolution, key.0)).flatten();
+        crate::cam_sim_cache::run(&self.sim_dirs(), disk, &mut sim);
         self.sim_cache.insert(key, (c.clone(), part.clone(), paths.clone(), sim.clone()));
         Ok((c, part, paths, sim))
     }
@@ -1328,7 +1340,8 @@ impl Session {
                     let placed = std::sync::Arc::new(Sim::place_machine(&c, &part, stock, l));
                     sim.set_machine(&c, &part, placed);
                 }
-                sim.run_to(usize::MAX, usize::MAX);
+                let disk = crate::cam_sim_cache::key(&c, &part, stock, &read, left.as_ref(), res, 0);
+                crate::cam_sim_cache::run(&self.sim_dirs(), disk, &mut sim);
                 let problems = self.sim_problems(ci, &part, &sim);
                 let now = crate::cam_verify::toolpath_hash(&paths);
                 let stamp = crate::cam_verify::read_stamp(&text);

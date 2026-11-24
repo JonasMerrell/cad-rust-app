@@ -891,6 +891,90 @@ impl Sim {
         StockMap { x0: self.x0, y0: self.y0, cell: self.cell, nx: self.nx, ny: self.ny, hi: self.stock.clone(), lo: self.lo.clone() }
     }
 
+    /// A run that has finished, as bytes for the disk cache (`cam_sim_cache`): what it did to the stock and
+    /// what it found. None when it hasn't finished, or records the load samples or each move's cut (the feed
+    /// schedule's runs, which aren't kept).
+    pub fn finished_bytes(&self) -> Option<Vec<u8>> {
+        use crate::cam_sim_cache::Bin;
+        if self.done < self.moves.len() || self.profile.is_some() || self.removed_by_move.is_some() {
+            return None;
+        }
+        let mut w = Vec::with_capacity(self.stock.len() * 34 + 4096);
+        self.nx.put(&mut w);
+        self.ny.put(&mut w);
+        self.moves.len().put(&mut w);
+        [self.x0, self.y0, self.cell].put(&mut w);
+        self.done.put(&mut w);
+        self.pos.put(&mut w);
+        self.events.put(&mut w);
+        self.removed.put(&mut w);
+        self.max_h.put(&mut w);
+        self.loads.put(&mut w);
+        self.air.put(&mut w);
+        self.chip_ops.put(&mut w);
+        self.chatter.put(&mut w);
+        self.time.put(&mut w);
+        let mut voids: Vec<(u32, Vec<(f32, f32)>)> = self.voids.iter().map(|(k, v)| (*k, v.clone())).collect();
+        voids.sort_by_key(|v| v.0);
+        voids.put(&mut w);
+        self.machine.as_ref().map(|m| m.hit_parts.clone()).put(&mut w);
+        for x in self.stock.iter().chain(&self.lo) {
+            x.put(&mut w);
+        }
+        w.extend(self.gouged.iter().map(|g| *g as u8));
+        for c in &self.cuts {
+            c.put(&mut w);
+        }
+        Some(w)
+    }
+
+    /// Take the outcome of a finished run (`finished_bytes`) of this same simulation: this one fresh from
+    /// `new` (and `set_machine`), on the same grid with the same moves. False (and this one untouched) when
+    /// it doesn't fit.
+    pub fn load_finished(&mut self, b: &[u8]) -> bool {
+        use crate::cam_sim_cache::Bin;
+        type Hits = Option<Vec<(usize, Vec<usize>)>>;
+        let r = &mut &b[..];
+        let n = self.nx * self.ny;
+        let head = (|| -> Option<_> {
+            let (nx, ny, moves, origin) = (usize::get(r)?, usize::get(r)?, usize::get(r)?, <[f64; 3]>::get(r)?);
+            if (nx, ny, moves) != (self.nx, self.ny, self.moves.len()) || origin.map(f64::to_bits) != [self.x0, self.y0, self.cell].map(f64::to_bits) {
+                return None;
+            }
+            let done = usize::get(r)?;
+            let pos = DVec3::get(r)?;
+            let events = Vec::<SimEvent>::get(r)?;
+            let removed = f64::get(r)?;
+            let max_h = f32::get(r)?;
+            let loads = Vec::<OpLoad>::get(r)?;
+            let air = Vec::<OpAir>::get(r)?;
+            let chip_ops = Vec::<OpChips>::get(r)?;
+            let chatter = Vec::<OpChatter>::get(r)?;
+            let time = f64::get(r)?;
+            let voids = Vec::<(u32, Vec<(f32, f32)>)>::get(r)?;
+            let hits = Hits::get(r)?;
+            Some((done, pos, events, removed, max_h, loads, air, chip_ops, chatter, time, voids, hits))
+        })();
+        let Some((done, pos, events, removed, max_h, loads, air, chip_ops, chatter, time, voids, hits)) = head else { return false };
+        // the grids: two f32s, a bool and three (u8, f32) per cell
+        if done != self.moves.len() || r.len() != n * (4 + 4 + 1 + 3 * 5) || hits.is_some() != self.machine.is_some() {
+            return false;
+        }
+        let grid = |r: &mut &[u8]| (0..n).map(|_| f32::get(r)).collect::<Option<Vec<f32>>>();
+        let (Some(stock), Some(lo)) = (grid(r), grid(r)) else { return false };
+        let gouged: Vec<bool> = r[..n].iter().map(|g| *g != 0).collect();
+        *r = &r[n..];
+        let Some(cuts) = (0..n).map(|_| <[(u8, f32); 3]>::get(r)).collect::<Option<Vec<_>>>() else { return false };
+        (self.stock, self.lo, self.gouged, self.cuts) = (stock, lo, gouged, cuts);
+        (self.done, self.pos, self.events, self.removed, self.max_h) = (done, pos, events, removed, max_h);
+        (self.loads, self.air, self.chip_ops, self.chatter, self.time) = (loads, air, chip_ops, chatter, time);
+        self.voids = voids.into_iter().collect();
+        if let (Some(m), Some(h)) = (self.machine.as_mut(), hits) {
+            m.hit_parts = h;
+        }
+        true
+    }
+
     pub fn total(&self) -> usize {
         self.moves.len()
     }
