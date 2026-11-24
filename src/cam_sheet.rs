@@ -320,7 +320,7 @@ pub fn new_sim(cam: &Cam, part: &Part, paths: &[Toolpath], left: Option<&crate::
         sim.start_from(m);
     }
     if !cam.machine.model.is_empty() {
-        if let Ok(l) = crate::cam_machine::load(&cam.machine.model) {
+        if let Ok(l) = crate::cam_vise::machine_for(cam) {
             let placed = std::sync::Arc::new(Sim::place_machine(cam, part, stock, l));
             sim.set_machine(cam, part, placed);
         }

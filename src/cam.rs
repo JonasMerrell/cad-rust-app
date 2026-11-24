@@ -1838,6 +1838,13 @@ pub struct Cam {
     /// saved vise location); only the rcnc post writes them.
     #[serde(skip_serializing_if = "Rcnc::is_default")]
     pub rcnc: Rcnc,
+    /// The vise station of the machine model that holds the work (`cam_vise`): its jaws and shims become
+    /// fixtures, it places the work on the table, and the model's moving jaw closes on the work.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub vise: Option<crate::cam_vise::ViseSetup>,
+    /// A job's combined setup: every station's vise closing (station, width), for the machine model.
+    #[serde(skip)]
+    pub job_vise: Vec<(String, f64)>,
     pub tools: Vec<Tool>,
     pub ops: Vec<Operation>,
     pub next_id: u64,
@@ -1848,6 +1855,14 @@ fn is_one_u8(v: &u8) -> bool {
 }
 
 impl Cam {
+    /// The vise stations to close on the work in the machine model: (station, width).
+    pub fn vise_closings(&self) -> Vec<(String, f64)> {
+        if !self.job_vise.is_empty() {
+            return self.job_vise.clone();
+        }
+        self.vise.iter().filter(|v| v.closed_width > 0.0).map(|v| (v.station.clone(), v.closed_width)).collect()
+    }
+
     /// The work offset's number, 1 (G54) to 6 (G59).
     pub fn wcs(&self) -> u8 {
         self.work_offset.clamp(1, 6)
@@ -1898,6 +1913,8 @@ impl Default for Cam {
             probe: Probe::default(),
             post_text: PostText::default(),
             rcnc: Rcnc::default(),
+            vise: None,
+            job_vise: vec![],
             tools: vec![],
             ops: vec![],
             next_id: 1,

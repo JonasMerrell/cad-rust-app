@@ -194,6 +194,7 @@ impl Job {
         }
         let part = Part { tris, circles, lo: plo, hi: phi, rot: DMat3::IDENTITY, sketches: vec![] };
         c.stock.carried = Some([lo.to_array(), hi.to_array()]);
+        c.job_vise = self.stations.iter().flat_map(|s| s.cam.vise_closings()).collect();
         c.job_notes = self
             .stations
             .iter()
@@ -341,7 +342,7 @@ impl Job {
         let map = self.stock_on(sim.x0, sim.y0, sim.cell, sim.nx, sim.ny, stock.0.z);
         sim.start_from(&map);
         if !c.machine.model.is_empty() {
-            let l = crate::cam_machine::load(&c.machine.model)?;
+            let l = crate::cam_vise::machine_for(&c)?;
             let lead = &self.stations[0];
             let placed = crate::cam_machine::Placed::new(l, lead.reference(), DVec3::from(lead.cam.on_table));
             sim.set_machine(&c, &part, std::sync::Arc::new(placed));

@@ -30,6 +30,7 @@ mod cam_sim;
 mod cam_sim_cache;
 mod cam_sim_saves;
 mod cam_verify;
+mod cam_vise;
 mod cam_web;
 mod cam_stock;
 mod cam_ui;

@@ -493,6 +493,41 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
             &[],
             "your own G-code lines",
         ),
+        ("create_cam" | "edit_cam", "vise") => json!({"oneOf": [
+            json!({"type": "null", "description": "not held in a vise station (its jaw and shim fixtures go)"}),
+            obj(
+                json!({
+                    "station": t("string", "the machine model's vise station (cam_machine vise), e.g. left"),
+                    "width": json!({"type": "number", "exclusiveMinimum": 0, "description": "what the jaws close on, mm (default the stock box X for fresh stock, the part's X for a setup that follows)"}),
+                    "shim": json!({"type": "number", "minimum": 0, "description": "thickness of the shim strips under the work, mm"}),
+                    "shims": arr(obj(json!({"name": t("string", "name"), "min": nums(2, "min corner, work X/Y"), "max": nums(2, "max corner, work X/Y")}), &[], "a shim strip"), "the shim strips"),
+                }),
+                &["station"],
+                "the vise station",
+            ),
+        ], "description": "the vise station that holds the work: jaws and shims as fixtures, on_table, fixture clearance, rcnc VISE=, the machine's moving jaw closed on the work"}),
+        ("cam_machine", "vise") => arr(
+            obj(
+                json!({
+                    "name": t("string", "station name, e.g. left"),
+                    "fixed_face": t("number", "machine X of the fixed jaw's face"),
+                    "fixed_side": json!({"type": "number", "enum": [1, -1], "description": "1: the fixed jaw is on the work's +X side; -1: its -X side"}),
+                    "y": t("number", "machine Y of the jaws' middle"),
+                    "ledge_z": t("number", "machine Z of the parallels the work (or its shims) sits on"),
+                    "grip": t("number", "how high the jaws grip above the ledges, mm (4.7)"),
+                    "jaw_length": t("number", "mm (95.5)"),
+                    "jaw_thickness": t("number", "how thick the jaw fixtures are drawn, mm (12.7)"),
+                    "clearance": t("number", "how far over the jaws the tool stays beside them, mm (0.3)"),
+                    "fixed_name": t("string", "what the fixed jaw is called (fixed jaw)"),
+                    "moving": arr(obj(json!({"part": t("string", "a part or assembly name"), "grid": t("number", "moves only in whole steps of this, mm (0: freely)")}), &["part"], "a moving-jaw part"), "parts that move with the moving jaw"),
+                    "moving_face": t("number", "machine X of the moving jaw's face as modelled"),
+                }),
+                &["name"],
+                "a vise station",
+            ),
+            "the vise's stations (replaces the list)",
+        ),
+        ("cam_machine", "move") => json!({"type": "object", "additionalProperties": xyz("[dx, dy, dz]"), "description": "parts moved as modelled: {part or assembly name: [dx, dy, dz]}"}),
         ("create_cam" | "edit_cam", "rcnc") => obj(
             json!({
                 "require_guard": t("boolean", "an (RCNC REQUIRE_GUARD) line: rcnc refuses Cycle Start unless its bog guard (feed hold when the heard spindle speed sags) is armed"),
