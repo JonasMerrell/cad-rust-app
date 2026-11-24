@@ -172,6 +172,10 @@ fn collect(dir: &Path, prefix: &str, history: bool, skip: &Path, out: &mut Vec<(
         if (!history && name == ".git") || name == crate::claude_chats::DIR || name == crate::orca::DIR || t.is_symlink() || e.path() == skip {
             continue;
         }
+        // CAM simulations are large and quick to remake: the built geometry goes along, they don't
+        if t.is_dir() && name == crate::cam_sim_cache::SUB && dir.file_name().is_some_and(|d| d == crate::build_cache::DIR) {
+            continue;
+        }
         let path = format!("{prefix}{name}");
         if t.is_dir() {
             out.push((format!("{path}/"), vec![]));
@@ -312,6 +316,11 @@ mod tests {
         std::fs::write(&doc, Workspace::default().to_json()).unwrap();
         std::fs::create_dir_all(doc.parent().unwrap().join("cam")).unwrap();
         std::fs::write(doc.parent().unwrap().join("cam/op1.tap"), "G0 X0\n".repeat(100)).unwrap();
+        // the built geometry goes along, the CAM simulations don't
+        let cache = doc.parent().unwrap().join(crate::build_cache::DIR);
+        std::fs::create_dir_all(cache.join(crate::cam_sim_cache::SUB)).unwrap();
+        std::fs::write(cache.join("00000000000000aa.json.gz"), b"geometry").unwrap();
+        std::fs::write(cache.join(crate::cam_sim_cache::SUB).join("00000000000000bb.sim.gz"), b"sim").unwrap();
         assert_eq!(folder_of(&doc).as_deref(), doc.parent());
         let git = crate::vcs::version().is_some();
         if git {
@@ -324,6 +333,9 @@ mod tests {
         let got = import(&z, &into).unwrap();
         assert_eq!(got, into.join("Robot- arm").join("Robot- arm.json"));
         assert_eq!(std::fs::read_to_string(into.join("Robot- arm/cam/op1.tap")).unwrap(), "G0 X0\n".repeat(100));
+        let got_cache = into.join("Robot- arm").join(crate::build_cache::DIR);
+        assert!(got_cache.join("00000000000000aa.json.gz").is_file());
+        assert!(!got_cache.join(crate::cam_sim_cache::SUB).exists());
         if git {
             let s = crate::vcs::status(&got).unwrap();
             assert!(!s.changed);
