@@ -303,6 +303,22 @@ impl ChipMap {
         ChipMap { lo, cell, nx, ny, vol: vec![0.0; nx * ny], depth: vec![0.0; nx * ny], at: vec![0.0; nx * ny], clearing }
     }
 
+    /// What changes as the chips pile up and drain (a simulation kept part way, `Sim::state_bytes`): the chips,
+    /// cavity depth and last update time of every cell.
+    pub(crate) fn state(&self) -> [&Vec<f64>; 3] {
+        [&self.vol, &self.depth, &self.at]
+    }
+
+    /// Put back a `state`; false (and nothing changed) when it is for another grid.
+    pub(crate) fn set_state(&mut self, [vol, depth, at]: [Vec<f64>; 3]) -> bool {
+        let n = self.nx * self.ny;
+        if vol.len() != n || depth.len() != n || at.len() != n {
+            return false;
+        }
+        (self.vol, self.depth, self.at) = (vol, depth, at);
+        true
+    }
+
     /// How fast chips leave a cavity `depth` deep for a tool of diameter `d`, share per second.
     fn drain(&self, depth: f64, d: f64, coolant: bool) -> f64 {
         let base = match self.clearing.as_str() {

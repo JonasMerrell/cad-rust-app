@@ -320,7 +320,7 @@ pub fn new_sim(cam: &Cam, part: &Part, paths: &[Toolpath], left: Option<&crate::
         sim.start_from(m);
     }
     if !cam.machine.model.is_empty() {
-        if let Ok(l) = crate::cam_machine::load(&cam.machine.model) {
+        if let Ok(l) = crate::cam_vise::machine_for(cam) {
             let placed = std::sync::Arc::new(Sim::place_machine(cam, part, stock, l));
             sim.set_machine(cam, part, placed);
         }
@@ -688,6 +688,9 @@ svg.tool{{display:block;max-width:90px;height:auto}} td.draw{{width:60px}} td.dr
             format!("{} mm / {}% Ø", fmt_mm(cam_paths::stepdown(op, t)), (cam_paths::stepover(op, t) / t.diameter.max(1e-9) * 100.0).round())
         };
         let mut notes: Vec<String> = vec![];
+        if !op.pause.trim().is_empty() {
+            notes.push(format!("STOPS FIRST: {}", op.pause.trim()));
+        }
         match cam.coolant_for(t, Some(op)) {
             crate::cam::Coolant::Flood => notes.push("flood coolant".into()),
             crate::cam::Coolant::Mist => notes.push("mist coolant".into()),
