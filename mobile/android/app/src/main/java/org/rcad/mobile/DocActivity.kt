@@ -373,6 +373,7 @@ class DocActivity : Activity() {
         TabKind("studio", "studios", "Part Studio", "partStudio"),
         TabKind("assembly", "assemblies", "Assembly", "assembly"),
         TabKind("cam", "cams", "Manufacture", "cam"),
+        TabKind("drawing", "drawings", "Drawing", "drawing"),
     )
     private fun tabKind() = tabKinds.firstOrNull { it.key == kind } ?: tabKinds[0]
     private fun tabName() = names(tabKind().list).getOrNull(index) ?: "${tabKind().label} ${index + 1}"
@@ -693,6 +694,7 @@ class DocActivity : Activity() {
         val a = api ?: return
         showWebNote(when (kind) {
             "cam" -> "Simulating the toolpaths on netdash… (this can take a minute)"
+            "drawing" -> "Drawing the sheet on netdash…"
             else -> "Building the 3D view on netdash… (a big model can take a minute)"
         })
         built = null

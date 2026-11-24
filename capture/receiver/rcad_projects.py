@@ -11,7 +11,8 @@ token as the Capture app). Standard library only.
     GET  /api/doc/<id>/view[?<kind>=N][&page=P][&t=<token>]
                                             a page showing one tab, cached: kind studio (default) or
                                             assembly (export_web), cam (export_cam_simulation; page
-                                            "sheet" the setup sheet)
+                                            "sheet" the setup sheet), drawing (a sheet's SVG; page
+                                            the sheet number)
     GET  /api/doc/<id>/tree[?<kind>=N][&page=P]
                                             what the phone lists beside that page: the feature tree,
                                             an assembly's instances and mates, or (other kinds)
@@ -49,7 +50,7 @@ EXPORT_TIMEOUT = 15 * 60
 # bump when what a cached page holds changes
 VIEW_VERSION = 3
 # tab kinds a page can show, by query parameter, and their list in the workspace file
-TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams"}
+TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings"}
 # feature params worth showing in the tree, in this order
 SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
@@ -278,12 +279,12 @@ class Projects:
             info = {
                 "studios": [s.get("name", f"Part Studio {n + 1}") for n, s in enumerate(studios)],
                 "assemblies": [a.get("name", f"Assembly {n + 1}") for n, a in enumerate(ws.get("assemblies") or [])],
-                "drawings": len(ws.get("drawings") or []),
+                "drawings": _names(ws.get("drawings"), "Drawing"),
                 "trees": [feature_tree(s.get("doc")) for s in studios],
                 "cams": _names(ws.get("cams"), "Setup"),
             }
         else:  # an old single Part Studio document
-            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": 0, "trees": [feature_tree(ws)], "cams": []}
+            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": []}
         self.info_cache[path] = (st.st_mtime_ns, st.st_size, info)
         return info
 
@@ -629,6 +630,22 @@ def page_steps(kind, index, page, out):
                   else {"tool": "export_cam_simulation", "args": {"cam": index, "path": out}})
         return ([{"tool": "cam_info", "args": {"cam": index}}, {"tool": "simulate_cam", "args": {"cam": index}}, export],
                 lambda by, _out: cam_tree(by.get("cam_info") or {}, by.get("simulate_cam") or {}))
+    if kind == "drawing":
+        sheet = int(page) if page.isdigit() and int(page) > 0 else 1
+        svg = out + ".svg"
+
+        def finish(by, out):
+            info = by.get("drawing_info") or {}
+            if os.path.isfile(svg):
+                with open(svg) as f:
+                    body = f.read()
+                os.remove(svg)
+                title = f"{info.get('name') or 'Drawing'} · sheet {sheet}"
+                with open(out, "w") as f:
+                    f.write(SHEET_PAGE.replace("__TITLE__", html_escape(title)).replace("__SVG__", body))
+            return drawing_tree(info, sheet)
+        return ([{"tool": "drawing_info", "args": {"drawing": index}},
+                 {"tool": "export_drawing", "args": {"drawing": index, "path": svg, "format": "svg", "sheet": sheet}}], finish)
     steps = [{"tool": "switch_part_studio", "args": {"index": index}}] if index else []
     steps += [{"tool": "describe", "args": {}}, {"tool": "export_web", "args": {"path": out, "studio": index}}]
     return steps, lambda by, _out: studio_tree(by.get("describe") or by.get("open_document") or {})
@@ -665,6 +682,128 @@ def studio_tree(d):
         "errors": [e for e in d.get("errors") or []],
         "warnings": len(d.get("warnings") or []),
     }
+
+
+def html_escape(t):
+    return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
+
+
+# A drawing sheet on the phone: the SVG fitted to the width, pinch or wheel to zoom, drag to pan,
+# double-tap to switch between fitted and 3x.
+SHEET_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<link rel="icon" href="data:,"><title>__TITLE__</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #e8e9ec; touch-action: none; }
+#sheet { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-shadow: 0 1px 6px rgba(0,0,0,.25); background: #fff; }
+#sheet svg { display: block; width: 100%; height: 100%; }
+#hint { position: fixed; right: 10px; top: 10px; font: 12px system-ui, sans-serif; color: #555; background: rgba(255,255,255,.85);
+  border-radius: 6px; padding: 4px 8px; pointer-events: none; }
+</style></head><body>
+<div id="sheet">__SVG__</div><div id="hint">pinch to zoom · double-tap</div>
+<script>
+const el = document.getElementById('sheet'), svg = el.querySelector('svg');
+const vb = (svg.getAttribute('viewBox') || '0 0 420 297').split(/[ ,]+/).map(Number);
+const W = 1000, H = W * vb[3] / vb[2];
+el.style.width = W + 'px'; el.style.height = H + 'px';
+let s = 1, x = 0, y = 0, fitS = 1;
+function apply() { el.style.transform = `translate(${x}px, ${y}px) scale(${s})`; }
+function fit() {
+  const m = 12, vw = innerWidth - 2 * m, vh = innerHeight - 2 * m;
+  fitS = Math.min(vw / W, vh / H); s = fitS; x = (innerWidth - W * s) / 2; y = (innerHeight - H * s) / 2; apply();
+}
+function zoomAt(px, py, k) {
+  const ns = Math.min(Math.max(s * k, fitS * 0.5), fitS * 20);
+  x = px - (px - x) * ns / s; y = py - (py - y) * ns / s; s = ns; apply();
+}
+const pts = new Map(); let last = null, tapAt = 0, moved = false;
+addEventListener('pointerdown', e => { pts.set(e.pointerId, [e.clientX, e.clientY]); last = null; moved = false; });
+addEventListener('pointermove', e => {
+  if (!pts.has(e.pointerId)) return;
+  pts.set(e.pointerId, [e.clientX, e.clientY]);
+  const p = [...pts.values()];
+  const cx = p.reduce((a, q) => a + q[0], 0) / p.length, cy = p.reduce((a, q) => a + q[1], 0) / p.length;
+  const d = p.length > 1 ? Math.hypot(p[0][0] - p[1][0], p[0][1] - p[1][1]) : 0;
+  if (last && last.n === p.length) {
+    x += cx - last.cx; y += cy - last.cy;
+    if (d && last.d) zoomAt(cx, cy, d / last.d); else apply();
+    if (Math.abs(cx - last.cx) + Math.abs(cy - last.cy) > 2) moved = true;
+  }
+  last = { n: p.length, cx, cy, d };
+});
+function up(e) {
+  pts.delete(e.pointerId); last = null;
+  if (e.type === 'pointerup' && !moved && pts.size === 0) {
+    const now = Date.now();
+    if (now - tapAt < 300) { if (s > fitS * 1.5) fit(); else zoomAt(e.clientX, e.clientY, 3 * fitS / s); tapAt = 0; } else tapAt = now;
+  }
+}
+addEventListener('pointerup', up); addEventListener('pointercancel', up);
+addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY / 300)); }, { passive: false });
+addEventListener('resize', fit);
+fit();
+</script></body></html>
+"""
+
+
+def drawing_tree(info, sheet):
+    """A Drawing tab for the tray: its views, dimensions, notes, GD&T and title block, for one sheet."""
+    sheets = info.get("sheets") if isinstance(info.get("sheets"), int) else 1
+    on = lambda it: (it.get("sheet") or 1) == sheet
+    views = [v for v in info.get("views") or [] if isinstance(v, dict) and on(v)]
+    view_ids = {v.get("id") for v in views}
+    names = {}
+    for v in views:
+        d = str(v.get("dir") or "view")
+        if d.startswith("section"):
+            n = f"Section {v.get('letter') or ''}".strip()
+        elif v.get("detail_of") is not None:
+            n = f"Detail {v.get('letter') or ''}".strip()
+        else:
+            n = d.replace("_", " ").capitalize()
+        names[v.get("id")] = n
+    sections = []
+    warns = [w if isinstance(w, str) else json.dumps(w) for w in info.get("warnings") or []]
+    if warns:
+        sections.append({"title": "Problems", "icon": "warning", "count": str(len(warns)), "error": True,
+                         "rows": [{"name": w, "icon": "warning", "error": True, "wrap": True, "ask": f"In the drawing: {w} Fix it."} for w in warns]})
+    sections.append({"title": "Views", "icon": "view", "count": str(len(views)), "empty": "No views on this sheet.", "rows": [
+        {"name": names[v.get("id")],
+         "sub": " · ".join(x for x in [f"scale {v['scale']:g}:1" if isinstance(v.get("scale"), (int, float)) else "",
+                                       "assembly" if v.get("assembly") is not None else "",
+                                       "hidden lines" if v.get("hidden_lines") else ""] if x),
+         "icon": "view", "ask": f"In the drawing's {names[v.get('id')].lower()} view: "} for v in views]})
+    dims = [d for d in info.get("dimensions") or [] if isinstance(d, dict) and d.get("view") in view_ids]
+    if dims:
+        icon = {"diameter": "dimRadial", "radius": "dimRadial", "angle": "dimAngle"}
+        sections.append({"title": "Dimensions", "icon": "dimension", "count": str(len(dims)), "rows": [
+            {"name": d.get("text") or "", "sub": f"{d.get('kind')} · {names.get(d.get('view'), 'view')} view" + (" · lost its geometry" if d.get("dangling") else ""),
+             "icon": icon.get(d.get("kind"), "dimension"), "error": bool(d.get("dangling")),
+             "ask": f"In the drawing, the dimension {d.get('text')} ({d.get('kind')}): "} for d in dims]})
+    gdt = [g for g in info.get("gdt") or [] if isinstance(g, dict) and on(g)]
+    if gdt:
+        sections.append({"title": "GD&T", "icon": "gdt", "count": str(len(gdt)), "rows": [
+            {"name": f"Datum {g.get('tolerance')}" if g.get("kind") == "datum" else f"{g.get('kind')} {g.get('tolerance') or ''}".strip(),
+             "sub": f"datums {g['datums']}" if g.get("datums") else "", "icon": "datum" if g.get("kind") == "datum" else "gdt",
+             "ask": "In the drawing's GD&T: "} for g in gdt]})
+    notes = [n for n in info.get("notes") or [] if isinstance(n, dict) and on(n)]
+    if notes:
+        sections.append({"title": "Notes", "icon": "note", "count": str(len(notes)), "rows": [
+            {"name": n.get("text") or "", "icon": "note", "wrap": True, "ask": f"In the drawing's note \"{n.get('text')}\": "} for n in notes]})
+    tb = info.get("title_block") if isinstance(info.get("title_block"), dict) else {}
+    labels = [("part", "Part"), ("part_no", "Part number"), ("material", "Material"), ("revision", "Revision"),
+              ("tolerance", "General tolerance"), ("drawn_by", "Drawn by"), ("date", "Date")]
+    rows = [{"name": str(tb[k]), "sub": lab, "icon": "properties", "ask": f"In the drawing's title block, set the {lab.lower()} to "}
+            for k, lab in labels if tb.get(k)]
+    if rows:
+        sections.append({"title": "Title block", "icon": "properties", "count": "", "rows": rows})
+    summary = " · ".join(x for x in [f"{info.get('sheet_size')}" if info.get("sheet_size") else "",
+                                      f"sheet {sheet} of {sheets}", f"{len(dims)} dimension{'s' if len(dims) != 1 else ''}",
+                                      "first-angle" if tb.get("first_angle") else "third-angle" if tb else ""] if x)
+    return {"kind": "drawing", "name": info.get("name"), "summary": summary, "icon": "drawing",
+            "pages": [{"id": "" if n == 1 else str(n), "label": f"Sheet {n}"} for n in range(1, max(1, sheets) + 1)],
+            "sections": sections}
 
 
 CAM_OP_ICONS = {"face": "camFace", "pocket": "camPocket", "contour": "camContour", "drill": "camDrill", "thread": "camThread",
