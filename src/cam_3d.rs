@@ -468,19 +468,30 @@ fn par_map<T: Send, F: Fn(usize, &mut Scratch) -> T + Sync>(n: usize, f: F) -> V
         let mut s = Scratch::default();
         return (0..n).map(|i| f(i, &mut s)).collect();
     }
-    let chunk = n.div_ceil(threads);
-    std::thread::scope(|sc| {
-        let hs: Vec<_> = (0..threads)
-            .map(|k| {
-                let f = &f;
+    // items taken one at a time as threads come free (their costs differ a lot: a waterline level near the top
+    // against one round the whole part), put back in order
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut got: Vec<(usize, T)> = std::thread::scope(|sc| {
+        let hs: Vec<_> = (0..threads.min(n))
+            .map(|_| {
+                let (f, next) = (&f, &next);
                 sc.spawn(move || {
                     let mut s = Scratch::default();
-                    (k * chunk..((k + 1) * chunk).min(n)).map(|i| f(i, &mut s)).collect::<Vec<T>>()
+                    let mut out = vec![];
+                    loop {
+                        let i = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if i >= n {
+                            break out;
+                        }
+                        out.push((i, f(i, &mut s)));
+                    }
                 })
             })
             .collect();
         hs.into_iter().flat_map(|h| h.join().unwrap()).collect()
-    })
+    });
+    got.sort_by_key(|g| g.0);
+    got.into_iter().map(|g| g.1).collect()
 }
 
 // ---------------------------------------------------------------- grids and iso-lines
@@ -946,7 +957,10 @@ pub(crate) fn waterline(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpat
     let g = drop_grid(&fin.d, lo, hi, cell, below);
     let mut all = vec![];
     let mut here = DVec2::new(lo.x, lo.y);
-    for z in levels(top, fin.floor, sd, &[]) {
+    // each level's loops worked out on its own (the levels side by side), then put in order level by level
+    let zs: Vec<f64> = levels(top, fin.floor, sd, &[]).into_iter().collect();
+    let worked: Vec<(Vec<Vec<DVec3>>, Vec<Vec<DVec3>>)> = par_map(zs.len(), |i, s| {
+        let z = zs[i];
         let refine = |pin: DVec2, pout: DVec2, s: &mut Scratch| {
             let (mut a, mut b) = (pin, pout);
             for _ in 0..11 {
@@ -962,13 +976,13 @@ pub(crate) fn waterline(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpat
         let loops = iso(&g, z, Some(&refine));
         let mut closed = vec![];
         let mut open = vec![];
-        let loops: Vec<Vec<DVec2>> = loops.into_iter().filter(|l| l.len() >= 4).collect();
-        let done = par_map(loops.len(), |k, s| {
-            let mut l = tighten(&fin.d, &loops[k], z, below, cell, s);
+        for l in loops.into_iter().filter(|l| l.len() >= 4) {
+            let mut l = tighten(&fin.d, &l, z, below, cell, s);
             if op.climb {
                 l.reverse();
             }
-            l.iter()
+            let pts = l
+                .iter()
                 .map(|p| {
                     if p.is_nan() {
                         return (DVec3::new(p.x, p.y, z), f64::NAN);   // a break: never kept, the runs split there
@@ -976,14 +990,15 @@ pub(crate) fn waterline(ctx: &Ctx, op: &Operation, pb: &mut Pb, tp: &mut Toolpat
                     let (_, a) = fin.d.drop(*p, s);
                     (DVec3::new(p.x, p.y, z), a)
                 })
-                .collect::<Vec<(DVec3, f64)>>()
-        });
-        for pts in done {
+                .collect::<Vec<(DVec3, f64)>>();
             match loop_runs(&fin, pts) {
                 (Some(c), _) => closed.push(c),
                 (None, runs) => open.extend(runs),
             }
         }
+        (closed, open)
+    });
+    for (closed, open) in worked {
         let mut level = order_loops(closed, here);
         // open pieces keep their direction (climb)
         let mut rest = open;
