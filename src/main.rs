@@ -21,6 +21,7 @@ mod cam_machine_ui;
 mod cam_sheet;
 mod cam_template;
 mod cam_tool_import;
+mod cam_part_job;
 mod cam_paths;
 mod cam_post;
 mod cam_probe;
