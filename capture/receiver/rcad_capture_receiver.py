@@ -339,6 +339,13 @@ class Handler(BaseHTTPRequestHandler):
 <body style="font-family:sans-serif;text-align:center;padding:40px 16px;background:#111;color:#eee">
 <h2>rCAD Capture on {html.escape(socket.gethostname())}</h2>{dl}
 <p style="color:#999">Then open the pairing link (or scan its QR code) to connect the app.</p>""")
+        if p == ["favicon.ico"]:
+            # browsers and the app's web view ask for this on their own; answer without a token
+            # (a 401 makes Chromium ask again on every redraw)
+            self.send_response(204)
+            self.send_header("Cache-Control", "max-age=86400")
+            self.end_headers()
+            return
         if p == ["rcad.apk"]:
             return self.send_file(MOBILE_APK_FILE, "application/vnd.android.package-archive", "rcad.apk")
         if p == ["rcad-capture.apk"]:
