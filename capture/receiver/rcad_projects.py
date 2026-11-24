@@ -57,6 +57,8 @@ VIEW_VERSION = 3
 TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
 # kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress
 BACKGROUND_KINDS = {"simulation"}
+# kinds whose pages all come from one rcad run (a Simulation tab's 3D page and its pictures)
+SHARED_BUILD_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
 SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
@@ -436,9 +438,11 @@ class Projects:
         if err:
             return None, err
         os.makedirs(CACHE_DIR, exist_ok=True)
-        key, out, sel = self._page_key(path, kind, index, page)
+        # a Simulation tab's pages (3D and pictures) come from one solve, so they share one build
+        shared = kind in SHARED_BUILD_KINDS
+        key, out, sel = self._page_key(path, kind, index, "" if shared else page)
         if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
-            return out, None
+            return self._companion(out, page) if shared else out, None
         if kind in BACKGROUND_KINDS:
             with self.lock:
                 err = self.build_errors.pop(key, None)
@@ -446,9 +450,17 @@ class Projects:
                     return None, err  # shown once; asking again tries again
                 if key not in self.building:
                     self.building[key] = time.time()
-                    threading.Thread(target=self._build_bg, args=(path, kind, index, page, key, out, sel), daemon=True).start()
+                    threading.Thread(target=self._build_bg, args=(path, kind, index, "" if shared else page, key, out, sel), daemon=True).start()
             return None, "building"
         return self._build(path, kind, index, page, key, out, sel)
+
+    @staticmethod
+    def _companion(out, page):
+        """The page `page` of a shared build: written beside the main one as <key>.<page>.html."""
+        if not page:
+            return out
+        other = out[:-5] + f".{page}.html"
+        return other if os.path.isfile(other) else out
 
     def _build_bg(self, path, kind, index, page, key, out, sel):
         try:
@@ -465,7 +477,7 @@ class Projects:
         path, index, page, err = self._check(did, kind, index, page)
         if err:
             return 0, ""
-        key, out, _ = self._page_key(path, kind, index, page)
+        key, out, _ = self._page_key(path, kind, index, "" if kind in SHARED_BUILD_KINDS else page)
         with self.lock:
             t0 = self.building.get(key)
         lines = [ln.strip() for ln in re.split(r"[\r\n]+", _tail(out[:-5] + ".progress", 600)) if ln.strip()]
@@ -496,12 +508,19 @@ class Projects:
                 return None, err or "rcad wrote no page"
             with open(out[:-5] + ".tree.json", "w") as f:
                 json.dump(tree, f)
+            for n in os.listdir(os.path.dirname(tmp)):
+                # other pages the same run wrote: <tmp>.<page>.html
+                pre = os.path.basename(tmp) + "."
+                if n.startswith(pre) and n.endswith(".html"):
+                    os.replace(os.path.join(os.path.dirname(tmp), n), out[:-5] + "." + n[len(pre):])
             os.replace(tmp, out)
             self._prune_cache(path, sel, out)
         return out, None
 
     def tree(self, did, kind="studio", index=0, page=""):
         """What the phone lists beside the page: see `view`."""
+        if kind in SHARED_BUILD_KINDS:
+            page = ""  # one tree for all the pages of the build
         out, err = self.view(did, kind, index, page)
         if err == "building":
             secs, line = self.progress(did, kind, index, page)
@@ -917,7 +936,8 @@ def sim_steps(index, out, ws):
         pics = [("Stress", {}), ("Displacement", {"field": "displacement"})]
     else:
         pics = [("Stress", {}), ("Displacement", {"field": "displacement"}), ("Safety", {"field": "safety"})]
-    steps = [{"tool": "solve_simulation", "args": {"simulation": index}}]
+    steps = [{"tool": "solve_simulation", "args": {"simulation": index}},
+             {"tool": "export_simulation_web", "args": {"simulation": index, "path": out}}]
     files = []
     for k, (label, extra) in enumerate(pics):
         f = f"{out}.{k}.png"
@@ -936,7 +956,10 @@ def sim_steps(index, out, ws):
             named.append((label, f))
         hist = res.get("history")
         chart = history_chart(hist) if analysis == "transient" and isinstance(hist, list) and len(hist) > 1 else None
-        write_pictures(out, f"{study.get('name') or 'Simulation'} · {analysis}", pictures(named, [chart]))
+        write_pictures(out + ".pictures.html", f"{study.get('name') or 'Simulation'} · {analysis}", pictures(named, [chart]))
+        if not os.path.isfile(out) and os.path.isfile(out + ".pictures.html"):
+            # an rcad without export_simulation_web: the pictures are the page
+            shutil.copyfile(out + ".pictures.html", out)
         return sim_tree(study, res)
     return steps, finish
 
@@ -1215,7 +1238,8 @@ def sim_tree(study, res):
     else:
         head = ["not solved" if not res else ""]
     summary = " · ".join(x for x in [analysis.capitalize(), str(res.get("material") or study.get("material") or "")] + head if x)
-    return {"kind": "simulation", "name": study.get("name"), "summary": summary, "icon": "simulation", "sections": sections}
+    return {"kind": "simulation", "name": study.get("name"), "summary": summary, "icon": "simulation",
+            "pages": [{"id": "", "label": "3D"}, {"id": "pictures", "label": "Pictures"}], "sections": sections}
 
 
 def drawing_tree(info, sheet):

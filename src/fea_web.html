@@ -1,0 +1,250 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<link rel="icon" href="data:,">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>__TITLE__</title>
+<style>
+/* A Simulation tab's result: the part coloured by a field, deformed, with its motion. Written by
+   rCAD (src/fea_web.rs); everything it shows is in this file, three.js comes from cdn.jsdelivr.net. */
+:root { --bg: #202328; --panel: rgba(26, 28, 32, 0.92); --line: #3a3f47; --fg: #e3e7ec; --muted: #9aa4b0; --accent: #2F80ED; }
+html, body { height: 100%; margin: 0; }
+body { background: var(--bg); color: var(--fg); font: 13px/1.4 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif; overflow: hidden; }
+#view { position: fixed; inset: 0; width: 100%; height: 100%; display: block; touch-action: none; outline: none; }
+#top { position: fixed; left: 0; right: 0; top: 0; z-index: 2; display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto; scrollbar-width: none;
+  background: linear-gradient(var(--panel), rgba(26, 28, 32, 0.6)); }
+button { flex: none; font: inherit; color: var(--fg); background: #2a2e35; border: 1px solid var(--line); border-radius: 16px; padding: 5px 12px; cursor: pointer; }
+button.on { color: #fff; background: var(--accent); border-color: var(--accent); }
+#bottom { position: fixed; left: 0; right: 0; bottom: 0; z-index: 2; background: var(--panel); border-top: 1px solid var(--line);
+  padding: 8px 12px max(8px, env(safe-area-inset-bottom, 0px)); display: grid; gap: 6px; }
+.row { display: flex; gap: 10px; align-items: center; }
+.row label { color: var(--muted); white-space: nowrap; }
+input[type=range] { flex: 1; min-width: 0; accent-color: var(--accent); }
+#bar { height: 10px; border-radius: 5px; flex: 1; }
+.num { font-variant-numeric: tabular-nums; white-space: nowrap; }
+#title { color: var(--muted); font-size: 12px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+#readout { position: fixed; left: 10px; top: 52px; z-index: 2; background: var(--panel); border: 1px solid var(--line); border-radius: 8px; padding: 5px 9px; }
+#loading { position: fixed; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; padding: 16px; text-align: center; }
+[hidden] { display: none !important; }
+</style>
+</head>
+<body>
+<canvas id="view" tabindex="0" aria-label="Simulation result: drag to orbit, pinch or scroll to zoom, tap to read a value"></canvas>
+<div id="loading">Loading the result…</div>
+<div id="top"></div>
+<div id="readout" hidden></div>
+<div id="bottom">
+  <div class="row"><span class="num" id="lo"></span><div id="bar"></div><span class="num" id="hi"></span></div>
+  <div class="row" id="timeRow" hidden><button id="play">Play</button><input type="range" id="time" min="0" value="0"><span class="num" id="tlabel"></span></div>
+  <div class="row"><label for="scale">Deformation</label><input type="range" id="scale" min="0" max="3" step="0.05" value="1"><span class="num" id="slabel"></span>
+    <button id="anim" hidden>Animate</button></div>
+  <div id="title"></div>
+</div>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/build/three.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/three@0.147.0/examples/js/controls/OrbitControls.js"></script>
+<script>
+/*__DATA__*/
+</script>
+<script>
+(function () {
+'use strict';
+const $ = id => document.getElementById(id);
+if (!window.THREE || !THREE.OrbitControls) { $('loading').textContent = 'Could not load three.js from cdn.jsdelivr.net. This page needs an internet connection.'; return; }
+const S = window.SIM;
+const bin = atob(window.BLOB64);
+const B = new Uint8Array(bin.length);
+for (let i = 0; i < bin.length; i++) B[i] = bin.charCodeAt(i);
+const f32 = r => new Float32Array(B.buffer, r[0], r[1]);
+const u32 = r => new Uint32Array(B.buffer, r[0], r[1]);
+const i16 = r => new Int16Array(B.buffer, r[0], r[1]);
+const u16 = r => new Uint16Array(B.buffer, r[0], r[1]);
+const sig = v => { if (!isFinite(v)) return '–'; const a = Math.abs(v); return a === 0 ? '0' : a >= 1000 ? v.toFixed(0) : v.toPrecision(3).replace(/\.?0+$/, ''); };
+const hz = f => f >= 1000 ? sig(f / 1000) + ' kHz' : sig(f) + ' Hz';
+const time = t => t < 1e-3 ? sig(t * 1e6) + ' µs' : t < 1 ? sig(t * 1e3) + ' ms' : sig(t) + ' s';
+
+// rCAD's colour scale (src/fea_ui.rs colormap): blue low, red high
+const STOPS = [[0, [0.10, 0.25, 0.95]], [0.25, [0.05, 0.75, 0.95]], [0.5, [0.15, 0.85, 0.25]], [0.75, [0.98, 0.85, 0.10]], [1, [0.92, 0.12, 0.10]]];
+function cmap(t, out, o) {
+  t = Math.min(1, Math.max(0, t));
+  for (let k = 1; k < STOPS.length; k++) {
+    if (t <= STOPS[k][0]) {
+      const a = STOPS[k - 1], b = STOPS[k], f = (t - a[0]) / (b[0] - a[0]);
+      for (let c = 0; c < 3; c++) out[o + c] = a[1][c] + (b[1][c] - a[1][c]) * f;
+      return;
+    }
+  }
+}
+$('bar').style.background = 'linear-gradient(90deg,' + STOPS.map(s => `rgb(${s[1].map(x => Math.round(x * 255)).join(',')}) ${s[0] * 100}%`).join(',') + ')';
+
+// ---------------------------------------------------------------- scene
+const canvas = $('view');
+const renderer = new THREE.WebGLRenderer({ canvas, antialias: true });
+renderer.setPixelRatio(Math.min(2, devicePixelRatio || 1));
+renderer.setClearColor(0x202328);
+const scene = new THREE.Scene();
+scene.add(new THREE.HemisphereLight(0xffffff, 0x404048, 0.75));
+const sun = new THREE.DirectionalLight(0xffffff, 0.55);
+scene.add(sun);
+const camera = new THREE.PerspectiveCamera(35, 1, 0.1, 1e6);
+camera.up.set(0, 0, 1);
+const controls = new THREE.OrbitControls(camera, canvas);
+controls.enableDamping = false;
+
+const base = f32(S.pos), N = base.length / 3;
+const geo = new THREE.BufferGeometry();
+const P = new Float32Array(base);
+const C = new Float32Array(base.length);
+geo.setAttribute('position', new THREE.BufferAttribute(P, 3));
+geo.setAttribute('color', new THREE.BufferAttribute(C, 3));
+geo.setIndex(new THREE.BufferAttribute(u32(S.tris), 1));
+const mesh = new THREE.Mesh(geo, new THREE.MeshLambertMaterial({ vertexColors: true, side: THREE.DoubleSide }));
+scene.add(mesh);
+const ghost = new THREE.LineSegments(new THREE.EdgesGeometry(new THREE.BufferGeometry().copy(geo).setAttribute('position', new THREE.BufferAttribute(new Float32Array(base), 3)), 30),
+  new THREE.LineBasicMaterial({ color: 0x8a93a0, transparent: true, opacity: 0.35 }));
+scene.add(ghost);
+
+const ctr = new THREE.Vector3(...S.center), diag = Math.hypot(...S.size) || 1;
+function fit() {
+  const dir = new THREE.Vector3(1, -1.3, 0.9).normalize();
+  camera.position.copy(ctr).addScaledVector(dir, diag * 2.2);
+  controls.target.copy(ctr);
+  camera.near = diag / 200; camera.far = diag * 50; camera.updateProjectionMatrix();
+  controls.update();
+}
+
+// ---------------------------------------------------------------- what is shown
+let fields = [], field = 0, mode = 0, frame = 0, scale = 1, animate = false, playing = false, phase = 1;
+let disp = null;             // Float32Array of the displacement shown (before scaling), or null
+let vals = new Float32Array(N), lo = 0, hi = 1, rev = false, unit = '';
+const top = $('top');
+function chips(labels, on, pick) {
+  top.innerHTML = '';
+  labels.forEach((l, i) => { const b = document.createElement('button'); b.textContent = l; b.className = i === on ? 'on' : ''; b.onclick = () => pick(i); top.appendChild(b); });
+}
+
+function setField() {
+  if (S.kind === 'static') {
+    const f = fields[field];
+    vals = f.v; lo = f.lo; hi = f.hi; rev = f.rev; unit = f.unit;
+    disp = f32(S.disp);
+  } else if (S.kind === 'modal') {
+    const m = S.modes[mode];
+    disp = f32(m.shape);
+    vals = new Float32Array(N);
+    for (let i = 0; i < N; i++) vals[i] = Math.hypot(disp[3 * i], disp[3 * i + 1], disp[3 * i + 2]);
+    lo = 0; hi = 1; rev = false; unit = 'relative';
+  } else {
+    const F = S.frames, q = i16(F.disp[frame]), ds = F.disp_scale;
+    disp = new Float32Array(q.length);
+    for (let i = 0; i < q.length; i++) disp[i] = q[i] * ds;
+    if (field === 0) {
+      const v = u16(F.vm[frame]), vs = F.vm_scale;
+      vals = new Float32Array(N);
+      for (let i = 0; i < N; i++) vals[i] = v[i] * vs;
+      lo = 0; hi = F.vm_max; unit = 'MPa';
+    } else {
+      vals = new Float32Array(N);
+      for (let i = 0; i < N; i++) vals[i] = Math.hypot(disp[3 * i], disp[3 * i + 1], disp[3 * i + 2]);
+      lo = 0; hi = S.peak_mm; unit = 'mm';
+    }
+    rev = false;
+    $('tlabel').textContent = time(F.times[frame]);
+    $('time').value = frame;
+  }
+  const span = Math.max(1e-30, hi - lo);
+  for (let i = 0; i < N; i++) { const t = (vals[i] - lo) / span; cmap(rev ? 1 - t : t, C, 3 * i); }
+  geo.attributes.color.needsUpdate = true;
+  // the bar runs blue to red; a reversed field (factor of safety) is red where it is low
+  const u = unit ? ' ' + unit : '';
+  $('lo').textContent = rev ? '≥ ' + sig(hi) : sig(lo) + u;
+  $('hi').textContent = rev ? '≤ ' + sig(lo) : sig(hi) + u;
+  shape();
+}
+
+function shape() {
+  const k = S.deform * scale * (S.kind === 'modal' ? phase : 1);
+  for (let i = 0; i < P.length; i++) P[i] = base[i] + (disp ? disp[i] * k : 0);
+  geo.attributes.position.needsUpdate = true;
+  geo.computeVertexNormals();
+  geo.computeBoundingSphere();
+  ghost.visible = scale > 0;
+  $('slabel').textContent = S.kind === 'modal' ? '' : '× ' + sig(S.deform * scale);
+}
+
+function render() {
+  const r = canvas.getBoundingClientRect();
+  if (canvas.width !== Math.round(r.width * renderer.getPixelRatio()) || canvas.height !== Math.round(r.height * renderer.getPixelRatio())) {
+    renderer.setSize(r.width, r.height, false);
+    camera.aspect = r.width / Math.max(1, r.height);
+    camera.updateProjectionMatrix();
+  }
+  sun.position.copy(camera.position);
+  renderer.render(scene, camera);
+}
+
+// ---------------------------------------------------------------- controls
+let t0 = performance.now(), lastStep = 0;
+function tick(now) {
+  if (S.kind === 'modal' && animate) { phase = Math.sin((now - t0) / 1000 * Math.PI * 1.2); shape(); }
+  if (S.kind === 'transient' && playing && now - lastStep > 120) {
+    lastStep = now;
+    frame = (frame + 1) % S.frames.times.length;
+    setField();
+  }
+  render();
+  requestAnimationFrame(tick);
+}
+
+$('scale').oninput = e => { scale = +e.target.value; shape(); };
+if (S.kind === 'static') {
+  fields = S.fields.map(f => ({ name: f.name, unit: f.unit, lo: f.lo, hi: f.hi, rev: f.rev, v: f32(f.data) }));
+  const pickField = i => { field = i; chips(fields.map(f => f.name), field, pickField); setField(); };
+  pickField(0);
+} else if (S.kind === 'modal') {
+  $('anim').hidden = false;
+  $('anim').onclick = () => { animate = !animate; $('anim').classList.toggle('on', animate); if (!animate) { phase = 1; shape(); } };
+  const pickMode = i => { mode = i; chips(S.modes.map(m => 'Mode ' + m.mode + ' · ' + hz(m.freq)), mode, pickMode); setField(); };
+  pickMode(0);
+  animate = true; $('anim').classList.add('on');
+} else {
+  $('timeRow').hidden = false;
+  $('time').max = S.frames.times.length - 1;
+  $('time').oninput = e => { frame = +e.target.value; playing = false; $('play').textContent = 'Play'; setField(); };
+  $('play').onclick = () => { playing = !playing; $('play').textContent = playing ? 'Pause' : 'Play'; };
+  // start at the moment of largest displacement
+  let best = 0, bv = -1;
+  S.frames.disp.forEach((r, k) => { const q = i16(r); let m = 0; for (let i = 0; i < q.length; i++) m = Math.max(m, Math.abs(q[i])); if (m > bv) { bv = m; best = k; } });
+  frame = best;
+  const pickField = i => { field = i; chips(['Stress', 'Displacement'], field, pickField); setField(); };
+  pickField(0);
+}
+$('title').textContent = document.title + ' · ' + S.note;
+
+// tap the part to read the value there
+const ray = new THREE.Raycaster(), ptr = new THREE.Vector2();
+let down = null;
+canvas.addEventListener('pointerdown', e => { down = [e.clientX, e.clientY]; });
+canvas.addEventListener('pointerup', e => {
+  if (!down || Math.hypot(e.clientX - down[0], e.clientY - down[1]) > 6) return;
+  const r = canvas.getBoundingClientRect();
+  ptr.set((e.clientX - r.left) / r.width * 2 - 1, -(e.clientY - r.top) / r.height * 2 + 1);
+  ray.setFromCamera(ptr, camera);
+  const hit = ray.intersectObject(mesh)[0];
+  const out = $('readout');
+  if (!hit) { out.hidden = true; return; }
+  const f = hit.face, p = hit.point;
+  let best = f.a, bd = Infinity;
+  for (const i of [f.a, f.b, f.c]) { const d = Math.hypot(P[3 * i] - p.x, P[3 * i + 1] - p.y, P[3 * i + 2] - p.z); if (d < bd) { bd = d; best = i; } }
+  const at = `X${sig(base[3 * best])} Y${sig(base[3 * best + 1])} Z${sig(base[3 * best + 2])}`;
+  out.textContent = `${sig(vals[best])}${unit ? ' ' + unit : ''} at ${at}`;
+  out.hidden = false;
+});
+
+fit();
+$('loading').hidden = true;
+requestAnimationFrame(tick);
+})();
+</script>
+</body>
+</html>

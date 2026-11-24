@@ -616,7 +616,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         }
         ("insert_standard_part", "length") => json!({"type": "number", "exclusiveMinimum": 0, "description": "length, mm, for screws, pins, shafts, motors and extrusions"}),
         ("export_setup_sheet", "path") => out_path("the .html setup sheet"),
-        ("export_cam_simulation", "path") => out_path("the .html page"),
+        ("export_cam_simulation" | "export_simulation_web", "path") => out_path("the .html page"),
         ("export_cam_simulation", "resolution") => json!({"type": "integer", "minimum": 50, "maximum": 2000, "description": "cells along the longer stock side (default 500)"}),
         ("export_gcode", "path") => out_path("the G-code file"),
         ("export_gcode", "allow_problems") => t("boolean", "write the program even though its simulation finds problems, as <name>.UNSAFE.<ext> with an UNSAFE header (never to run)"),
