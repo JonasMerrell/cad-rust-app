@@ -307,6 +307,9 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
         o.line(&format!("O{:04} {}", cam.program % 10000, comment(&cam.name)));
     }
     o.line(&comment(&format!("{} - made by rCAD", cam.name)));
+    if cam.post == "rcnc" {
+        rcnc_header(&mut o, cam);
+    }
     o.line(&comment(&format!("work zero: {}", work_zero.unwrap_or_else(|| cam.origin.label().to_lowercase()))));
     if multi {
         o.line(&comment(&format!("{} stations, each in its own work offset", st.len())));
@@ -485,7 +488,10 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
                     let probes = || cam.ops.iter().filter(|o| !o.suppressed && o.kind == OpKind::Probe).filter_map(|o| o.probing.as_ref());
                     let jaw = probes().find(|p| p.jaw_x != 0.0);
                     let size = probes().find_map(|p| p.find_size);
-                    find_stock(&mut o, p, jaw, size, lo, hi, origin, !cam.probe.z_reference.trim().is_empty());
+                    let vise = vise_request(cam, lo, hi, origin);
+                    // rcnc takes the saved vise location or a touched jaw, not both: the vise wins
+                    let jaw = if vise.is_some() { None } else { jaw };
+                    find_stock(&mut o, p, jaw, size, lo, hi, origin, !cam.probe.z_reference.trim().is_empty(), vise);
                     found_stock[si] = true;
                 }
                 continue;
@@ -519,6 +525,10 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
             // (rcnc waits for its own spin-up time after M3, so no dwell on top)
             if cam.machine.spin_up > 0.0 && cam.post != "rcnc" {
                 o.line(&dwell(d, cam.machine.spin_up));
+            }
+            // rcnc: a few seconds in air at the new speed, where its bog guard learns the no-load speed
+            if cam.post == "rcnc" && cam.rcnc.speed_dwell() > 0.0 {
+                o.line(&dwell(d, cam.rcnc.speed_dwell()));
             }
         }
         let want = cam.coolant_for(tool, op);
@@ -726,11 +736,46 @@ fn rcnc_bores(cam: &Cam, paths: &[Toolpath], tp: &Toolpath, r: f64, origin: DVec
     Some((text, found.iter().map(|f| f.0).collect()))
 }
 
+/// rcnc: the lines under the title: the stock it is for, the bog guard, the sound recording.
+fn rcnc_header(o: &mut Out, cam: &Cam) {
+    let r = &cam.rcnc;
+    if !r.stock_note.trim().is_empty() {
+        o.line(&comment(&format!("STOCK {}", r.stock_note.trim())));
+    }
+    if r.require_guard {
+        o.line(&comment("RCNC REQUIRE_GUARD: the bog guard [Settings -> Listening, feed hold on] must be armed: rcnc refuses Cycle Start without it"));
+    }
+    if r.record_audio {
+        o.line(&comment("RCNC RECORD_AUDIO: rcnc saves the run's sound beside this file as .wav"));
+    }
+}
+
+/// rcnc: Find stock from the vise location rcnc saved (` VISE=1` / ` VISE=-1`, with ` JAWAT=` the work X of the
+/// fixed jaw's face when that isn't the stock's side), for a setup with `rcnc.vise`. `lo`, `hi`: the stock box.
+fn vise_request(cam: &Cam, lo: DVec3, hi: DVec3, origin: DVec3) -> Option<String> {
+    let side = cam.rcnc.vise_side()?;
+    let (lo, hi) = (lo - origin, hi - origin);
+    let mid = (lo.x + hi.x) / 2.0;
+    let stock_face = if side > 0 { hi.x } else { lo.x };
+    // the fixed jaw: the nearest fixture on its side of the stock, beside it in Y and Z (not a shim under it)
+    let beside = |f: &&crate::cam::Fixture| f.max[1] > lo.y && f.min[1] < hi.y && f.max[2] > lo.z && f.min[2] < hi.z;
+    let face = cam.rcnc.jaw_at.or_else(|| {
+        let near = cam.fixtures.iter().filter(beside);
+        if side > 0 {
+            near.filter(|f| f.min[0] >= mid).map(|f| f.min[0]).min_by(|a, b| a.total_cmp(b))
+        } else {
+            near.filter(|f| f.max[0] <= mid).map(|f| f.max[0]).max_by(|a, b| a.total_cmp(b))
+        }
+    });
+    let jaw_at = face.filter(|x| (x - stock_face).abs() > 0.005).map(|x| format!(" JAWAT={}", num(x))).unwrap_or_default();
+    Some(format!(" VISE={side}{jaw_at}"))
+}
+
 /// rcnc: ask for its Find stock wizard (the touch probe is loaded already): the operator jogs over the middle
 /// of the stock, rcnc probes its top and four sides, checks its size and sets the work zero so the stock's
 /// top centre reads its place in this setup. Every tool measured after it is zeroed on the probed top.
 #[allow(clippy::too_many_arguments)]
-fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::ProbeOp>, find_size: Option<[f64; 2]>, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool) {
+fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::ProbeOp>, find_size: Option<[f64; 2]>, lo: DVec3, hi: DVec3, origin: DVec3, keep_z: bool, vise: Option<String>) {
     let mut size = hi - lo;
     if let Some([x, y]) = find_size {
         size = DVec3::new(x, y, size.z);
@@ -739,7 +784,7 @@ fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::Pro
     o.line(&comment("rcnc Find stock: jog the probe over the middle of the stock, a few mm above it, and press Continue"));
     o.line(&comment(&format!("Find stock touches the sides {} below the top: measure sawn stock there, its ends may not be square", num(p.depth))));
     o.line(&comment(&format!(
-        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}{}",
+        "RCNC FIND_STOCK SIZE={},{},{} AT={},{},{} TOL={} DEPTH={}{}{}{}",
         num(size.x),
         num(size.y),
         num(size.z),
@@ -755,7 +800,8 @@ fn find_stock(o: &mut Out, p: &crate::cam::ProbeOp, jaw: Option<&crate::cam::Pro
             num(j.jaw_z),
             j.jaw_at.map(|x| format!(" JAWAT={}", num(x))).unwrap_or_default()
         ))
-        .unwrap_or_default()
+        .unwrap_or_default(),
+        vise.unwrap_or_default()
     )));
     o.forget();
 }
