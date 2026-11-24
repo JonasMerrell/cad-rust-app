@@ -14,7 +14,9 @@ token as the Capture app). Standard library only.
                                             "sheet" the setup sheet), drawing (a sheet's SVG; page
                                             the sheet number), simulation (solved in the background:
                                             a "solving" page that reloads itself until the result
-                                            pictures are ready)
+                                            pictures are ready), pcb (board top and bottom,
+                                            schematic and circuit waveforms; page "3d" the board
+                                            in 3D)
     GET  /api/doc/<id>/tree[?<kind>=N][&page=P]
                                             what the phone lists beside that page: the feature tree,
                                             an assembly's instances and mates, or (other kinds)
@@ -52,7 +54,7 @@ EXPORT_TIMEOUT = 15 * 60
 # bump when what a cached page holds changes
 VIEW_VERSION = 3
 # tab kinds a page can show, by query parameter, and their list in the workspace file
-TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations"}
+TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
 # kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress
 BACKGROUND_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
@@ -289,9 +291,10 @@ class Projects:
                 "trees": [feature_tree(s.get("doc")) for s in studios],
                 "cams": _names(ws.get("cams"), "Setup"),
                 "simulations": _names(ws.get("simulations"), "Simulation"),
+                "pcbs": _names(ws.get("pcbs"), "PCB"),
             }
         else:  # an old single Part Studio document
-            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": [], "simulations": []}
+            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": [], "simulations": [], "pcbs": []}
         self.info_cache[path] = (st.st_mtime_ns, st.st_size, info)
         return info
 
@@ -708,6 +711,8 @@ def page_steps(kind, index, page, out, ws=None):
                 lambda by, _out: cam_tree(by.get("cam_info") or {}, by.get("simulate_cam") or {}))
     if kind == "simulation":
         return sim_steps(index, out, ws or {})
+    if kind == "pcb":
+        return pcb_steps(index, page, out, ws or {})
     if kind == "drawing":
         sheet = int(page) if page.isdigit() and int(page) > 0 else 1
         svg = out + ".svg"
@@ -922,25 +927,16 @@ def sim_steps(index, out, ws):
     def finish(by, out):
         res = by.get("solve_simulation") or {}
         modes = {m.get("mode"): m for m in res.get("modes") or [] if isinstance(m, dict)}
-        shown = []
+        named = []
         for label, f in files:
-            if not os.path.isfile(f):
-                continue
-            with open(f, "rb") as fh:
-                data = base64.b64encode(fh.read()).decode()
-            os.remove(f)
             if label.startswith("mode"):
                 k = int(label[4:])
                 hz = (modes.get(k) or {}).get("frequency_hz")
                 label = f"Mode {k}" + (f" · {_hz(hz)}" if hz else "")
-            shown.append({"label": label, "src": "data:image/png;base64," + data})
+            named.append((label, f))
         hist = res.get("history")
-        if analysis == "transient" and isinstance(hist, list) and len(hist) > 1:
-            shown.append(history_chart(hist))
-        if shown:
-            title = f"{study.get('name') or 'Simulation'} · {analysis}"
-            with open(out, "w") as fh:
-                fh.write(SIM_PAGE.replace("__TITLE__", html_escape(title)).replace("__PICS__", json.dumps(shown).replace("</", "<\\/")))
+        chart = history_chart(hist) if analysis == "transient" and isinstance(hist, list) and len(hist) > 1 else None
+        write_pictures(out, f"{study.get('name') or 'Simulation'} · {analysis}", pictures(named, [chart]))
         return sim_tree(study, res)
     return steps, finish
 
@@ -971,6 +967,160 @@ def history_chart(hist):
            f'{grid}<polyline points="{pts}" fill="none" stroke="#2F80ED" stroke-width="2.5"/>'
            f'<text x="{(w + l) / 2}" y="{h - 14}" text-anchor="middle">time ({unit})</text></svg>')
     return {"label": "Over time", "svg": svg, "w": w, "h": h}
+
+
+def pictures(files, extra=()):
+    """[{label, src}] for the pictures page from (label, png path) pairs that exist (each removed)."""
+    shown = []
+    for label, f in files:
+        if os.path.isfile(f):
+            with open(f, "rb") as fh:
+                shown.append({"label": label, "src": "data:image/png;base64," + base64.b64encode(fh.read()).decode()})
+            os.remove(f)
+    return shown + [e for e in extra if e]
+
+
+def write_pictures(out, title, shown):
+    if shown:
+        with open(out, "w") as fh:
+            fh.write(SIM_PAGE.replace("__TITLE__", html_escape(title)).replace("__PICS__", json.dumps(shown).replace("</", "<\\/")))
+
+
+def pcb_steps(index, page, out, ws):
+    """A PCB tab: the board (top and bottom copper), the schematic and, when the board has a circuit
+    simulation set up, its probes' waveforms; page "3d" is the board with its parts in 3D (pcb_3d,
+    not saved). The tray lists unrouted connections, probe results, parts and nets."""
+    pcbs = ws.get("pcbs") or []
+    pcb = pcbs[index] if index < len(pcbs) and isinstance(pcbs[index], dict) else {}
+    sim = pcb.get("sim") if isinstance(pcb.get("sim"), dict) else {}
+    steps = [{"tool": "pcb_info", "args": {"pcb": index}}]
+    csv = out + ".csv"
+    if sim.get("probes"):
+        steps.append({"tool": "simulate_pcb", "args": {"pcb": index, "csv": csv}})
+    files = []
+    if page == "3d":
+        steps += [{"tool": "pcb_3d", "args": {"pcb": index}}, {"tool": "export_web", "args": {"path": out}}]
+    else:
+        for k, (label, extra) in enumerate([("Top", {}), ("Bottom", {"layer": "bottom"}), ("Schematic", {"view": "schematic"})]):
+            f = f"{out}.{k}.png"
+            files.append((label, f))
+            steps.append({"tool": "render_pcb", "args": dict({"pcb": index, "path": f, "width": 1400}, **extra)})
+
+    def finish(by, out):
+        info = by.get("pcb_info") or {}
+        res = by.get("simulate_pcb") or {}
+        chart = waves_chart(csv) if os.path.isfile(csv) else None
+        if os.path.isfile(csv):
+            os.remove(csv)
+        if page != "3d":
+            write_pictures(out, f"{info.get('name') or 'PCB'}", pictures(files, [chart]))
+        return pcb_tree(info, res)
+    return steps, finish
+
+
+def waves_chart(csv):
+    """The circuit simulation's probes over time, one strip each, from simulate_pcb's CSV."""
+    try:
+        with open(csv) as f:
+            head = f.readline().strip().split(",")
+            rows = [[float(x) for x in ln.split(",")] for ln in f if ln.strip()]
+    except (OSError, ValueError):
+        return None
+    if len(head) < 2 or len(rows) < 2:
+        return None
+    n = len(head) - 1
+    w, strip, l, r, t = 900, 170, 80, 20, 20
+    h = t + n * strip + 40
+    t1 = rows[-1][0] or 1
+    unit, k = ("ms", 1e3) if t1 < 1 else ("s", 1)
+    sx = lambda v: l + (w - l - r) * v / t1
+    colours = ["#2F80ED", "#F2994A", "#27AE60", "#EB5757", "#9B51E0", "#56CCF2"]
+    body = ""
+    for i in range(n):
+        ys = [row[i + 1] for row in rows]
+        lo, hi = min(ys), max(ys)
+        if hi - lo < 1e-12:
+            hi = lo + 1
+        top = t + i * strip
+        sy = lambda v, top=top, lo=lo, hi=hi: top + 22 + (strip - 44) * (1 - (v - lo) / (hi - lo))
+        pts = " ".join(f"{sx(row[0]):.1f},{sy(row[i + 1]):.1f}" for row in rows)
+        body += (f'<text x="{l}" y="{top + 14}" font-size="15">{html_escape(head[i + 1])}</text>'
+                 f'<line x1="{l}" x2="{w - r}" y1="{sy(lo):.1f}" y2="{sy(lo):.1f}" stroke="#3a3f47"/>'
+                 f'<line x1="{l}" x2="{w - r}" y1="{sy(hi):.1f}" y2="{sy(hi):.1f}" stroke="#3a3f47"/>'
+                 f'<text x="{l - 8}" y="{sy(hi) + 4:.1f}" text-anchor="end">{hi:.3g}</text>'
+                 f'<text x="{l - 8}" y="{sy(lo) + 4:.1f}" text-anchor="end">{lo:.3g}</text>'
+                 f'<polyline points="{pts}" fill="none" stroke="{colours[i % len(colours)]}" stroke-width="2"/>')
+    for j in range(5):
+        tv = t1 * j / 4
+        body += f'<text x="{sx(tv):.1f}" y="{h - 22}" text-anchor="middle">{tv * k:.3g}</text>'
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" font-family="system-ui,sans-serif" font-size="13" fill="#c9ced6">'
+           f'<rect width="{w}" height="{h}" fill="#202328"/>{body}<text x="{(w + l) / 2}" y="{h - 4}" text-anchor="middle">time ({unit})</text></svg>')
+    return {"label": "Circuit", "svg": svg, "w": w, "h": h}
+
+
+def _eng(v, unit):
+    if not isinstance(v, (int, float)):
+        return "?"
+    a = abs(v)
+    for f, p in ((1e6, "M"), (1e3, "k"), (1, ""), (1e-3, "m"), (1e-6, "µ"), (1e-9, "n")):
+        if a >= f:
+            return f"{v / f:.3g} {p}{unit}"
+    return f"0 {unit}" if a < 1e-12 else f"{v:.3g} {unit}"
+
+
+def _xy_span(a, b):
+    ok = lambda p: isinstance(p, list) and len(p) == 2 and all(isinstance(v, (int, float)) for v in p)
+    return f"from X{a[0]:g} Y{a[1]:g} to X{b[0]:g} Y{b[1]:g}" if ok(a) and ok(b) else ""
+
+
+def pcb_tree(info, res):
+    sections = []
+    airs = [a for a in info.get("airwires") or [] if isinstance(a, dict)]
+    unrouted = info.get("unrouted") if isinstance(info.get("unrouted"), int) else len(airs)
+    if unrouted:
+        rows = [{"name": f"{a.get('net') or 'net'} not routed", "sub": _xy_span(a.get("from"), a.get("to")),
+                 "icon": "pcbRoute", "error": True, "ask": f"Route the net {a.get('net')} on the PCB."} for a in airs[:30]]
+        if not rows:
+            rows = [{"name": f"{unrouted} connection(s) not routed", "icon": "pcbRoute", "error": True, "ask": "Route the PCB's unrouted connections."}]
+        sections.append({"title": "Unrouted", "icon": "warning", "count": str(unrouted), "error": True, "rows": rows})
+    probes = res.get("probes") if isinstance(res.get("probes"), dict) else {}
+    if probes or res.get("error"):
+        rows = []
+        if res.get("error"):
+            rows.append({"name": str(res["error"]), "icon": "warning", "error": True, "wrap": True, "ask": f"The circuit simulation fails: {res['error']} Fix it."})
+        for name, pr in probes.items():
+            if not isinstance(pr, dict):
+                continue
+            u = pr.get("unit") or ""
+            bits = [f"{_eng(pr.get('min'), u)} to {_eng(pr.get('max'), u)}" if "min" in pr else "",
+                    _eng(pr["frequency"], "Hz") if isinstance(pr.get("frequency"), (int, float)) else "",
+                    f"duty {pr['duty'] * 100:.0f} %" if isinstance(pr.get("duty"), (int, float)) else ""]
+            rows.append({"name": f"{name} average {_eng(pr.get('average'), u)}" if "average" in pr else f"{name} {_eng(pr.get('value'), u)}",
+                         "sub": " · ".join(b for b in bits if b), "icon": "pcbSim", "ask": f"In the circuit, the probe {name}: "})
+        for note in res.get("notes") or []:
+            if isinstance(note, str):
+                rows.append({"name": note, "icon": "note", "wrap": True, "ask": f"About the circuit simulation: {note} "})
+        sections.append({"title": "Circuit", "icon": "pcbSim", "count": res.get("analysis") or "", "rows": rows})
+    parts = [p for p in info.get("parts") or [] if isinstance(p, dict)]
+    sections.append({"title": "Parts", "icon": "pcbPlace", "count": str(len(parts)), "empty": "No parts yet.", "rows": [
+        {"name": f"{p.get('reference')} {p.get('value') or ''}".strip(),
+         "sub": " · ".join(x for x in [p.get("footprint") or "", (p.get("bom") or {}).get("mpn") or "",
+                                       "bottom" if p.get("side") == "bottom" else "", "not fitted" if p.get("fitted") is False else ""] if x),
+         "icon": "pcb", "dim": p.get("fitted") is False, "ask": f"On the PCB, {p.get('reference')} ({p.get('value')}): "} for p in parts]})
+    nets = [n for n in info.get("nets") or [] if isinstance(n, dict)]
+    lengths = {x.get("net"): x.get("length") for x in info.get("lengths") or [] if isinstance(x, dict)}
+    if nets:
+        sections.append({"title": "Nets", "icon": "pcbWire", "count": str(len(nets)), "rows": [
+            {"name": n.get("name") or "", "sub": " · ".join(x for x in [", ".join(n.get("pins") or [])[:80],
+                                                                        f"{lengths[n.get('name')]:.1f} mm" if isinstance(lengths.get(n.get("name")), (int, float)) else ""] if x),
+             "icon": "pcbWire", "ask": f"On the PCB, the net {n.get('name')}: "} for n in nets]})
+    b = info.get("board") if isinstance(info.get("board"), dict) else {}
+    size = b.get("size") if isinstance(b.get("size"), list) and len(b.get("size")) == 2 else None
+    summary = " · ".join(x for x in [f"{size[0]:g} × {size[1]:g} mm" if size else "", f"{b['layers']} layers" if b.get("layers") else "",
+                                      f"{len(parts)} parts", f"{b['tracks']} tracks" if b.get("tracks") else "",
+                                      f"{unrouted} unrouted" if unrouted else "all routed" if parts else ""] if x)
+    return {"kind": "pcb", "name": info.get("name"), "summary": summary, "icon": "pcb",
+            "pages": [{"id": "", "label": "Board"}, {"id": "3d", "label": "3D"}], "sections": sections}
 
 
 def _at(p):

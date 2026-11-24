@@ -375,6 +375,7 @@ class DocActivity : Activity() {
         TabKind("cam", "cams", "Manufacture", "cam"),
         TabKind("drawing", "drawings", "Drawing", "drawing"),
         TabKind("simulation", "simulations", "Simulation", "simulation"),
+        TabKind("pcb", "pcbs", "PCB", "pcb"),
     )
     private fun tabKind() = tabKinds.firstOrNull { it.key == kind } ?: tabKinds[0]
     private fun tabName() = names(tabKind().list).getOrNull(index) ?: "${tabKind().label} ${index + 1}"
@@ -704,6 +705,7 @@ class DocActivity : Activity() {
             "cam" -> "Simulating the toolpaths on netdash… (this can take a minute)"
             "drawing" -> "Drawing the sheet on netdash…"
             "simulation" -> "Opening the simulation on netdash…"
+            "pcb" -> if (page == "3d") "Building the board in 3D on netdash…" else "Drawing the board on netdash…"
             else -> "Building the 3D view on netdash… (a big model can take a minute)"
         })
         built = null

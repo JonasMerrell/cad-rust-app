@@ -61,6 +61,20 @@ STUB = textwrap.dedent('''\
             elif t == "render_simulation":
                 png = b"\\x89PNG\\r\\n\\x1a\\n" + b"\\x00\\x00\\x00\\rIHDR" + (900).to_bytes(4, "big") + (700).to_bytes(4, "big")
                 open(args["path"], "wb").write(png)
+            elif t == "render_pcb":
+                png = b"\\x89PNG\\r\\n\\x1a\\n" + b"\\x00\\x00\\x00\\rIHDR" + (1400).to_bytes(4, "big") + (1000).to_bytes(4, "big")
+                open(args["path"], "wb").write(png)
+            elif t == "pcb_info":
+                print(json.dumps({"tool": t, "result": {"name": "Blinker", "unrouted": 1, "board": {"size": [40, 30], "layers": 2, "tracks": 97},
+                    "airwires": [{"net": "OUT", "from": [1, 2], "to": [3, 4.5]}],
+                    "parts": [{"reference": "U1", "value": "NE555", "footprint": "SOIC-8", "bom": {"mpn": "C46749"}, "side": "top", "fitted": True}],
+                    "nets": [{"name": "OUT", "pins": ["U1.3", "R3.1"]}], "lengths": [{"net": "OUT", "length": 19.06}]}}))
+                continue
+            elif t == "simulate_pcb":
+                open(args["csv"], "w").write("time_s,V(OUT) V\\n0,0\\n0.1,3.2\\n0.2,0\\n")
+                print(json.dumps({"tool": t, "result": {"analysis": "tran", "probes": {"V(OUT)": {"average": 1.945, "min": 0, "max": 3.267,
+                    "frequency": 6.759, "duty": 0.5153, "unit": "V"}}, "notes": []}}))
+                continue
             elif t == "export_drawing":
                 open(args["path"], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297"><text>sheet %d</text></svg>' % args["sheet"])
             elif t == "drawing_info":
@@ -136,7 +150,8 @@ class ProjectsTest(unittest.TestCase):
                        "drawings": [{"name": "Plate"}],
                        "simulations": [{"name": "Beam", "analysis": "static", "material": "Steel",
                                         "supports": [{"name": "Fixed 1", "kind": "fixed", "faces": [{}]}],
-                                        "loads": [{"name": "Force 1", "kind": "force", "value": 100, "faces": [{}]}]}]}, f, indent=2)
+                                        "loads": [{"name": "Force 1", "kind": "force", "value": 100, "faces": [{}]}]}],
+                       "pcbs": [{"name": "Blinker", "sim": {"probes": ["OUT"]}}]}, f, indent=2)
         with open(os.path.join(self.projects_dir, "Bracket", "notes.json"), "w") as f:
             f.write('{"not": "a document"}')
         stub = os.path.join(self.tmp, "rcad")
@@ -276,6 +291,25 @@ class ProjectsTest(unittest.TestCase):
         self.assertTrue(sec["Results"]["rows"][0]["error"])
         self.assertEqual([r["name"] for r in sec["Supports and loads"]["rows"]], ["Fixed 1", "Force 1"])
         self.assertEqual(sec["Supports and loads"]["rows"][1]["sub"], "force · 100 N")
+
+    def test_pcb_tab(self):
+        did = self.doc()[0]["id"]
+        self.assertEqual(self.req("GET", f"/api/doc/{did}")[1]["pcbs"], ["Blinker"])
+        st, page = self.req("GET", f"/api/doc/{did}/view?pcb=0", raw=True)
+        self.assertEqual(st, 200)
+        for label in ("Top", "Bottom", "Schematic", "Circuit"):
+            self.assertIn(f'"label": "{label}"', page)
+        self.assertIn("V(OUT) V", page)
+        st, page = self.req("GET", f"/api/doc/{did}/view?pcb=0&page=3d", raw=True)
+        self.assertIn("<html>", page)  # the stub's export_web page
+        st, t = self.req("GET", f"/api/doc/{did}/tree?pcb=0")
+        self.assertEqual(t["summary"], "40 × 30 mm · 2 layers · 1 parts · 97 tracks · 1 unrouted")
+        sec = {s["title"]: s for s in t["sections"]}
+        self.assertEqual(sec["Unrouted"]["rows"][0]["sub"], "from X1 Y2 to X3 Y4.5")
+        self.assertEqual(sec["Circuit"]["rows"][0]["name"], "V(OUT) average 1.95 V")
+        self.assertEqual(sec["Circuit"]["rows"][0]["sub"], "0 V to 3.27 V · 6.76 Hz · duty 52 %")
+        self.assertEqual((sec["Parts"]["rows"][0]["name"], sec["Parts"]["rows"][0]["sub"]), ("U1 NE555", "SOIC-8 · C46749"))
+        self.assertEqual(sec["Nets"]["rows"][0]["sub"], "U1.3, R3.1 · 19.1 mm")
 
     def test_ids_stay_inside_the_project_folders(self):
         outside = os.path.join(self.tmp, "secret.json")
