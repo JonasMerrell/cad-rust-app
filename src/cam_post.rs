@@ -218,8 +218,7 @@ pub struct Station<'a> {
 /// loaded tool cuts wherever a station's next toolpath uses it before the next tool goes in (the tool of the
 /// earliest station that has toolpaths left). Tools are matched by number.
 pub fn job_order(tools: &[Vec<Option<u32>>]) -> Vec<(usize, usize)> {
-    let mut next = vec![0usize; tools.len()];
-    let mut out = vec![];
+    // past the empty toolpaths
     let skip = |next: &mut Vec<usize>| {
         for (s, t) in tools.iter().enumerate() {
             while next[s] < t.len() && t[next[s]].is_none() {
@@ -227,18 +226,67 @@ pub fn job_order(tools: &[Vec<Option<u32>>]) -> Vec<(usize, usize)> {
             }
         }
     };
-    loop {
-        skip(&mut next);
-        let Some(first) = (0..tools.len()).find(|s| next[*s] < tools[*s].len()) else { break };
-        let cur = tools[first][next[first]];
+    // load `cur`: every station runs its toolpaths with it, as far as they go in its own order
+    let advance = |next: &mut Vec<usize>, cur: Option<u32>, out: &mut Option<&mut Vec<(usize, usize)>>| {
         for s in 0..tools.len() {
             while next[s] < tools[s].len() && (tools[s][next[s]] == cur || tools[s][next[s]].is_none()) {
                 if tools[s][next[s]].is_some() {
-                    out.push((s, next[s]));
+                    if let Some(o) = out.as_mut() {
+                        o.push((s, next[s]));
+                    }
                 }
                 next[s] += 1;
             }
         }
+    };
+    // the tools the stations could go on with: each one's next toolpath's tool, in station order
+    let heads = |next: &Vec<usize>| -> Vec<Option<u32>> {
+        let mut h = vec![];
+        for s in 0..tools.len() {
+            if next[s] < tools[s].len() && !h.contains(&tools[s][next[s]]) {
+                h.push(tools[s][next[s]]);
+            }
+        }
+        h
+    };
+    // the fewest tool loads that finish every station from `next` (a station's toolpaths keep their order; the
+    // greedy "the first station's next tool" can load a tool twice: op 1's chamfer mill before op 2's ball and
+    // again after it)
+    fn fewest(next: &Vec<usize>, memo: &mut std::collections::HashMap<Vec<usize>, usize>, heads: &dyn Fn(&Vec<usize>) -> Vec<Option<u32>>,
+              advance: &dyn Fn(&mut Vec<usize>, Option<u32>)) -> usize {
+        if let Some(c) = memo.get(next) {
+            return *c;
+        }
+        let h = heads(next);
+        let c = if h.is_empty() {
+            0
+        } else {
+            h.iter().map(|t| {
+                let mut n = next.clone();
+                advance(&mut n, *t);
+                1 + fewest(&n, memo, heads, advance)
+            }).min().unwrap()
+        };
+        memo.insert(next.clone(), c);
+        c
+    }
+    let mut next = vec![0usize; tools.len()];
+    skip(&mut next);
+    let mut memo = std::collections::HashMap::new();
+    let adv = |n: &mut Vec<usize>, t: Option<u32>| advance(n, t, &mut None);
+    let mut out = vec![];
+    loop {
+        let h = heads(&next);
+        if h.is_empty() {
+            break;
+        }
+        // the first (in station order) of the tools that lead to the fewest loads
+        let best = h.iter().copied().min_by_key(|t| {
+            let mut n = next.clone();
+            adv(&mut n, *t);
+            fewest(&n, &mut memo, &heads, &adv)
+        }).unwrap();
+        advance(&mut next, best, &mut Some(&mut out));
     }
     out
 }

@@ -64,6 +64,7 @@ pub struct SimEvent {
     pub what: String,
 }
 
+#[derive(Clone)]
 struct Cutter {
     radius: f64,
     /// Height of the cutting surface above the tip by distance from the axis, every LUT_STEP mm.
@@ -226,6 +227,7 @@ pub struct Blocks {
     pub gaps: std::collections::HashMap<usize, Vec<(f64, f64)>>,
 }
 
+#[derive(Clone)]
 pub struct Sim {
     pub x0: f64,
     pub y0: f64,
@@ -298,6 +300,9 @@ pub struct Sim {
     /// surface (NEG_INFINITY: none) and the gaps between there and `part` (under overhangs).
     part_lo: Vec<f32>,
     part_gaps: std::collections::HashMap<u32, Vec<(f32, f32)>>,
+    /// When set, material removed by each move (mm³, by move index) and the deepest cut it took (mm): which
+    /// feed moves cut nothing (`cam_feed_schedule::link_feeds`).
+    pub removed_by_move: Option<Vec<(f32, f32)>>,
 }
 
 /// How much of [a, b] lies inside the column [lo, hi] once the gaps (sorted, disjoint) are taken out.
@@ -559,6 +564,7 @@ pub fn allowed_depth(d: f64, width: f64) -> f64 {
 }
 
 /// The machine model placed for the simulation, and each toolpath's tool as points for checking it.
+#[derive(Clone)]
 pub struct SimMachine {
     pub placed: std::sync::Arc<crate::cam_machine::Placed>,
     fixtures: Vec<(String, DVec3, DVec3)>,
@@ -627,6 +633,7 @@ impl Sim {
             voids: Default::default(),
             part_lo: vec![],
             part_gaps: Default::default(),
+            removed_by_move: None,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -963,6 +970,13 @@ impl Sim {
             // wall the grid shows a little inside it)
             let rising = to.z > from.z && (to - from).truncate().length() < 1e-9;
             let (removed, deepest) = self.stamp(ci, op, step, p, rapid && !rising, k % check_every == 0 || k == n);
+            if self.removed_by_move.as_ref().is_some_and(|r| step < r.len()) {
+                // material within two cells of the tool's side, at or above its tip: as good as touching
+                let near = if removed > 0.0 { 1.0 } else { self.near_material(ci, p, 2.0 * self.cell + 0.05) };
+                let r = &mut self.removed_by_move.as_mut().unwrap()[step];
+                r.0 += removed;
+                r.1 = r.1.max(deepest).max(near);
+            }
             // plunges and steep ramps down cut with the tool's end: the load check is about sideways cuts
             // (a climb up a steep face cuts with the side: its travel is along the face)
             let (dxy, dz) = ((to - from).truncate().length() / n as f64, (to.z - from.z) / n as f64);
@@ -1581,6 +1595,29 @@ impl Sim {
     /// The cutting model's view of cutter `ci`: the tool, its spindle speed, whether it finishes.
     pub fn cutter_model(&self, ci: usize) -> Option<(crate::cam_cutting::ToolGeom, f64, bool)> {
         self.cutters.get(ci).map(|c| (c.geom, c.rpm, c.finishing))
+    }
+
+    /// 1 when stock stands at or above the tool tip within `slack` mm outside cutter `ci`'s radius at `p`, else 0
+    /// (a link that close may take a cut on another grid).
+    fn near_material(&self, ci: usize, p: DVec3, slack: f64) -> f32 {
+        let c = &self.cutters[ci];
+        let (ci0, cj0) = self.cell_of(p);
+        let r = c.radius + slack;
+        let n = (r / self.cell).ceil() as i32 + 1;
+        let tip = p.z as f32 + 0.02;
+        for j in (cj0 - n).max(0)..=(cj0 + n).min(self.ny as i32 - 1) {
+            let dy = self.y0 + j as f64 * self.cell - p.y;
+            for i in (ci0 - n).max(0)..=(ci0 + n).min(self.nx as i32 - 1) {
+                let dx = self.x0 + i as f64 * self.cell - p.x;
+                if dx * dx + dy * dy <= r * r {
+                    let s = self.stock[(j * self.nx as i32 + i) as usize];
+                    if s != EMPTY && s > tip {
+                        return 1.0;
+                    }
+                }
+            }
+        }
+        0.0
     }
 
     /// The material and the machine's limits the load check uses.
