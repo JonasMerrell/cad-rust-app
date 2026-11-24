@@ -394,6 +394,8 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
     let mut travel = false;
     let mut spindle_rpm: Option<f64> = None;
     let mut coolant = Coolant::Off;
+    // the operations whose pause is written (station, operation id)
+    let mut paused: Vec<(usize, u64)> = vec![];
     for &(si, pi) in &order {
         let Some(tp) = st[si].paths.get(pi) else { continue };
         if tp.moves.is_empty() {
@@ -417,6 +419,26 @@ pub fn gcode_job(st: &[Station], order: Option<Vec<(usize, usize)>>) -> String {
             travel = true;
         }
         let op = cam.op(tp.op);
+        // an operator stop before the operation (its first toolpath)
+        if let Some(msg) = op.map(|o| o.pause.trim()).filter(|m| !m.is_empty()) {
+            if !paused.contains(&(si, tp.op)) {
+                paused.push((si, tp.op));
+                o.line("");
+                o.line(&comment(&format!("PAUSE before {}: delete down to END PAUSE to skip it", op.map(|o| o.name.as_str()).unwrap_or("the next operation"))));
+                if cur_tool.is_some() {
+                    o.top(d, safe_w);
+                }
+                // off whatever the program thinks: the operator reaches in
+                o.line("M5");
+                o.line("M9");
+                spindle_rpm = None;
+                coolant = Coolant::Off;
+                o.line(&message(d, &format!("{} [spindle and coolant are off], then press Cycle Start", msg.trim_end_matches(['.', ';']))));
+                o.line("M0");
+                o.line(&comment("END PAUSE"));
+                o.forget();
+            }
+        }
         o.line("");
         o.line(&comment(&format!("{} - {}", op.map(|o| o.name.as_str()).unwrap_or("operation"), op.map(|o| o.kind.label()).unwrap_or(""))));
         if cur_tool != Some(tool.number) {

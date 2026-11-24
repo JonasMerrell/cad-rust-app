@@ -1612,6 +1612,10 @@ fn op_params(app: &mut App, ui: &mut Ui, id: u64) {
         ui.text_edit_singleline(&mut o.name);
     });
     row(ui, "Tool", |ui| tool_combo(ui, &snapshot, o.kind, &mut o.tool));
+    row(ui, "Pause before", |ui| {
+        ui.add(egui::TextEdit::singleline(&mut o.pause).hint_text("no stop").desired_width(220.0))
+            .on_hover_text("Stop before this operation with this message for the operator (spindle and coolant off, M0), e.g. to blow chips out before a finish or before probing bores");
+    });
     if snapshot.tools.iter().all(|t| !o.kind.accepts(t.kind)) {
         ui.label(RichText::new("No suitable tool yet: add one from the library.").color(theme::error_soft()).size(12.0));
     }

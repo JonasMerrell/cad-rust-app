@@ -3550,6 +3550,45 @@ mod tests {
     }
 
     #[test]
+    fn gcode_pause_before_an_operation() {
+        let part = plate();
+        let (mut c, t) = setup();
+        c.add_op(OpKind::Face, t);
+        let fin = c.add_op(OpKind::Contour, t);
+        c.ops.iter_mut().find(|o| o.id == fin).unwrap().pause = "Blow the chips out of the slots".into();
+        let paths = generate(&c, &part);
+        let (origin, top) = {
+            let ctx = Ctx::new(&c, &part);
+            (ctx.origin, ctx.stock.1.z)
+        };
+        for post in ["mach3", "rcnc", "linuxcnc", "grbl"] {
+            c.post = post.into();
+            let g = crate::cam_post::gcode(&c, &paths, origin, top + c.clearance);
+            let l: Vec<&str> = g.lines().collect();
+            let p = l.iter().position(|x| x.starts_with("(PAUSE before")).expect(&g);
+            let op = l.iter().position(|x| x.ends_with(" - Contour)")).unwrap();
+            assert!(p < op, "{post}: before the operation's comment: {g}");
+            let block = &l[p..op];
+            let m0 = block.iter().position(|x| *x == "M0").expect(&g);
+            assert!(block[m0 - 1].contains("Blow the chips out of the slots [spindle and coolant are off], then press Cycle Start"), "{post}: the message right before M0: {g}");
+            assert!(block[..m0].contains(&"M5") && block[..m0].contains(&"M9"), "{post}: {g}");
+            if post != "grbl" {
+                assert!(block[1] == "G53 G0 Z0", "{post}: up first: {g}");
+            }
+            // the spindle and coolant come back for the operation (one tool: no tool change in between)
+            let rest = &l[op..];
+            let s = rest.iter().position(|x| x.starts_with('S') && x.ends_with(" M3")).expect(&g);
+            let first_move = rest.iter().position(|x| x.starts_with("G1") || x.starts_with("G0 X") || x.starts_with("G0 Y")).unwrap();
+            assert!(s < first_move && rest[..first_move].contains(&"M8"), "{post}: {g}");
+            assert_eq!(g.matches("PAUSE before").count(), 1);
+        }
+        // the operations are the same either way: the pause is in the post only
+        let mut q = c.clone();
+        q.ops.iter_mut().for_each(|o| o.pause.clear());
+        assert_eq!(crate::cam_verify::toolpath_hash(&paths), crate::cam_verify::toolpath_hash(&generate(&q, &part)));
+    }
+
+    #[test]
     fn gcode_probing_and_custom_text() {
         let part = plate();
         let (mut c, t) = setup();
