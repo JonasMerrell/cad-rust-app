@@ -672,6 +672,7 @@ impl App {
     pub fn new_document(&mut self) {
         let units = self.doc.units;
         self.kernel.cache_dirs = crate::build_cache::dirs_for(None);
+        crate::cam_sim_saves::set_doc(None);
         self.load_workspace(crate::workspace::Workspace::default());
         self.doc.units = units;
         self.path = None;
@@ -895,6 +896,7 @@ impl App {
             Ok(ws) => {
                 // Part Studios built before (and unchanged since) are read back, not rebuilt
                 self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(&p));
+                crate::cam_sim_saves::set_doc(Some(&p));
                 self.load_workspace(ws);
                 crate::home::touch(self, &p);
                 self.path = Some(p);
@@ -927,6 +929,7 @@ impl App {
         match json.and_then(|j| crate::session::write_atomic(&p, j.as_bytes()).map_err(|e| e.to_string())) {
             Ok(()) => {
                 self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(&p));
+                crate::cam_sim_saves::set_doc(Some(&p));
                 crate::build_cache::saved(self, &p);
                 let committed = crate::vcs_ui::after_save(self, &p);
                 let secs = if committed.is_empty() { 2 } else { 4 };
