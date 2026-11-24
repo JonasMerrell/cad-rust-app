@@ -234,7 +234,31 @@ impl Session {
         };
         let c = &self.ws.cams[ci];
         let part = Part::from_input(&input, c);
-        let (paths, after) = cam_paths::generate_with_stock(c, &part, stock.as_ref());
+        // built before, in an earlier session: the same setups machining the same parts from the same stock
+        let disk = {
+            use std::hash::{Hash, Hasher};
+            let mut h = crate::cam_build_cache::Fnv::default();
+            for &k in chain.iter().chain(std::iter::once(&ci)) {
+                let mut ck = self.ws.cams[k].clone();
+                if k != ci {
+                    ck.stock.carried = None;
+                }
+                k.hash(&mut h);
+                serde_json::to_string(&ck).unwrap_or_default().hash(&mut h);
+                inputs.get(&k).unwrap_or(&input).hash_into(&mut h);
+            }
+            crate::cam_build_cache::hash_stock(&mut h, stock.as_ref());
+            h.finish()
+        };
+        let dirs = crate::cam_build_cache::dirs_for(self.path.as_deref().map(std::path::Path::new));
+        let (paths, after) = match crate::cam_build_cache::load(&dirs, disk) {
+            Some(kept) => kept,
+            None => {
+                let (paths, after) = cam_paths::generate_with_stock(c, &part, stock.as_ref());
+                crate::cam_build_cache::store(&dirs, disk, &paths, &after);
+                (paths, after)
+            }
+        };
         let carried = chain.iter().chain(std::iter::once(&ci)).map(|&k| (k, self.ws.cams[k].stock.carried)).collect();
         self.cam_cache.insert(ci, super::CamBuild { key, part: part.clone(), paths: paths.clone(), stock: stock.clone(), after, carried });
         Ok((part, paths, stock))

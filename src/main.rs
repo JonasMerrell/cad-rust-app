@@ -8,6 +8,7 @@ mod asm_anim;
 mod asm_anim_ui;
 mod asm_ui;
 mod build_cache;
+mod cam_build_cache;
 mod assembly;
 mod cam;
 mod cam_3d;
