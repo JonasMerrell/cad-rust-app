@@ -373,10 +373,23 @@ impl Session {
         Ok(i)
     }
 
-    fn sim_solve(&mut self, si: usize) -> R<(Study, Outcome)> {
+    fn sim_solve(&mut self, si: usize) -> R<(Study, std::sync::Arc<Outcome>)> {
         self.sync();
         let s = self.ws.sims[si].clone();
         self.ensure_built(s.studio)?;
+        // the same study on the same Part Studio solved before in this session: the same result
+        let key = {
+            use std::hash::{Hash, Hasher};
+            let mut h = std::collections::hash_map::DefaultHasher::new();
+            serde_json::to_string(&s).unwrap_or_default().hash(&mut h);
+            self.studio_doc(s.studio).map(|d| serde_json::to_string(d).unwrap_or_default()).hash(&mut h);
+            h.finish()
+        };
+        if let Some((k, st, o)) = &self.fea_cache {
+            if *k == key {
+                return Ok((st.clone(), o.clone()));
+            }
+        }
         let input = fea::input(self.bodies(s.studio), self.studio_doc(s.studio), &s.bodies);
         if input.tris.is_empty() {
             return Err(format!("Part Studio {} has no parts to analyse", s.studio));
@@ -397,7 +410,8 @@ impl Session {
         // the chat's Stop button ends a long solve
         let cancel = self.cancel.clone();
         let stopped = || cancel.as_ref().is_some_and(|c| c.load(std::sync::atomic::Ordering::Relaxed));
-        let o = fea::run(&st, &input, None, &progress, &stopped)?;
+        let o = std::sync::Arc::new(fea::run(&st, &input, None, &progress, &stopped)?);
+        self.fea_cache = Some((key, st.clone(), o.clone()));
         Ok((st, o))
     }
 

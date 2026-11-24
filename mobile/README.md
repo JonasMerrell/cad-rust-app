@@ -24,6 +24,11 @@ to the same small service the rCAD Capture app uploads photos to.
 - **Drawing tabs**: each sheet as vector graphics (`export_drawing` SVG): pinch to zoom, drag to
   pan, double-tap to zoom in or back out; chips switch sheets. The tray lists the sheet's views,
   dimensions, GD&T, notes and the title block.
+- **Simulation tabs** (FEA): netdash solves in the background while the phone shows how far it is
+  (a transient solve can take minutes), then shows rCAD's colour-map pictures: stress,
+  displacement and factor of safety for a static study, each mode for a modal one, stress,
+  displacement and the response over time for a transient one. The tray lists the results,
+  supports and loads, material and mesh. Results are cached until the document changes.
 - **Claude**: a chat under the viewer. Requests run on netdash as `rcad chat`, which is the
   editor's chat panel without the window: the same tools and instructions, signed in through
   Claude Code with your own Claude plan. Claude edits the document file, and the viewer reloads
@@ -73,8 +78,8 @@ All on the receiver's port and token (see `capture/receiver/rcad_projects.py`):
     GET  /api/projects                     documents
     POST /api/projects {"name"}            new project
     GET  /api/doc/<id>                     tabs, saved chats, running request
-    GET  /api/doc/<id>/view?studio=N|assembly=N|cam=N|drawing=N[&page=P]&t=<token>
-    GET  /api/doc/<id>/tree?studio=N|assembly=N|cam=N|drawing=N   feature tree, variables, parts / instances, mates /
+    GET  /api/doc/<id>/view?studio=N|assembly=N|cam=N|drawing=N|simulation=N[&page=P]&t=<token>
+    GET  /api/doc/<id>/tree?studio=N|assembly=N|cam=N|drawing=N|simulation=N   feature tree, variables, parts / instances, mates /
                                                     for other tabs: summary, pages and sections of rows
     GET  /api/doc/<id>/chats/<chat>
     POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?}  → {"job"}

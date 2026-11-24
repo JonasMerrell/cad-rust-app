@@ -12,7 +12,9 @@ token as the Capture app). Standard library only.
                                             a page showing one tab, cached: kind studio (default) or
                                             assembly (export_web), cam (export_cam_simulation; page
                                             "sheet" the setup sheet), drawing (a sheet's SVG; page
-                                            the sheet number)
+                                            the sheet number), simulation (solved in the background:
+                                            a "solving" page that reloads itself until the result
+                                            pictures are ready)
     GET  /api/doc/<id>/tree[?<kind>=N][&page=P]
                                             what the phone lists beside that page: the feature tree,
                                             an assembly's instances and mates, or (other kinds)
@@ -50,7 +52,9 @@ EXPORT_TIMEOUT = 15 * 60
 # bump when what a cached page holds changes
 VIEW_VERSION = 3
 # tab kinds a page can show, by query parameter, and their list in the workspace file
-TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings"}
+TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations"}
+# kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress
+BACKGROUND_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
 SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
@@ -219,6 +223,8 @@ class Projects:
         self.lock = threading.Lock()
         self.info_cache = {}  # path -> (mtime, size, info)
         self.export_locks = {}
+        self.building = {}  # cache key -> start time, for background builds
+        self.build_errors = {}  # cache key -> error of a background build that failed
 
     @property
     def rcad(self):
@@ -282,9 +288,10 @@ class Projects:
                 "drawings": _names(ws.get("drawings"), "Drawing"),
                 "trees": [feature_tree(s.get("doc")) for s in studios],
                 "cams": _names(ws.get("cams"), "Setup"),
+                "simulations": _names(ws.get("simulations"), "Simulation"),
             }
         else:  # an old single Part Studio document
-            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": []}
+            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": [], "simulations": []}
         self.info_cache[path] = (st.st_mtime_ns, st.st_size, info)
         return info
 
@@ -353,14 +360,20 @@ class Projects:
 
     # ---------------------------------------------------------------- viewer
 
-    def _run_script(self, rcad, steps, cwd, timeout, results=None):
-        """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result."""
+    def _run_script(self, rcad, steps, cwd, timeout, results=None, stderr_path=None):
+        """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result.
+        With `stderr_path`, rcad's progress lines go to that file as they come."""
         fd, sp = tempfile.mkstemp(suffix=".json", prefix="rcad-mobile-")
         with os.fdopen(fd, "w") as f:
             json.dump(steps, f)
         try:
             # no --stop-on-error: a document whose features fail still opens and exports
-            r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+            if stderr_path:
+                with open(stderr_path, "w") as ef:
+                    r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout)
+                r.stderr = _tail(stderr_path, 2000)
+            else:
+                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
         except subprocess.TimeoutExpired:
             return "rcad took too long"
         except OSError as e:
@@ -386,41 +399,91 @@ class Projects:
                 return r.stderr.strip()[-400:] or f"rcad failed ({r.returncode})"
         return None
 
-    def view(self, did, kind="studio", index=0, page=""):
-        """Path of the page showing one tab of a document (made with rCAD when the document changed),
-        or (None, error). The same run writes what the phone lists beside it (see `tree`)."""
-        path = self.resolve(did)
-        if not path:
-            return None, "no such document"
-        if kind not in TAB_KINDS:
-            return None, f"can't show a {kind} tab"
-        rcad = self.rcad
-        if not rcad:
-            return None, "rcad is not installed on this computer"
-        index = max(0, index or 0)
-        have = (self.info(path) or {}).get(TAB_KINDS[kind])
-        if isinstance(have, list) and index >= len(have) and not (kind == "studio" and index == 0):
-            return None, "no such tab"
-        page = re.sub(r"[^a-z0-9]", "", page or "")[:16]
+    def _page_key(self, path, kind, index, page):
+        """The cache key and page path for one tab of a document as it is now."""
         st = os.stat(path)
         sel = f"{kind}{index}{'-' + page if page else ''}"
         try:  # a new rcad build can change the page (it is compiled in), so it is part of the key
-            built = os.stat(rcad).st_mtime_ns
+            built = os.stat(self.rcad).st_mtime_ns
         except OSError:
             built = 0
         key = hashlib.sha256(f"{path}\0{st.st_mtime_ns}\0{st.st_size}\0{sel}\0{VIEW_VERSION}\0{built}".encode()).hexdigest()[:24]
+        return key, os.path.join(CACHE_DIR, f"{key}.html"), sel
+
+    def _check(self, did, kind, index, page):
+        """(path, index, page, error) for a tab request."""
+        path = self.resolve(did)
+        if not path:
+            return None, 0, "", "no such document"
+        if kind not in TAB_KINDS:
+            return None, 0, "", f"can't show a {kind} tab"
+        if not self.rcad:
+            return None, 0, "", "rcad is not installed on this computer"
+        index = max(0, index or 0)
+        have = (self.info(path) or {}).get(TAB_KINDS[kind])
+        if isinstance(have, list) and index >= len(have) and not (kind == "studio" and index == 0):
+            return None, 0, "", "no such tab"
+        return path, index, re.sub(r"[^a-z0-9]", "", page or "")[:16], None
+
+    def view(self, did, kind="studio", index=0, page=""):
+        """Path of the page showing one tab of a document (made with rCAD when the document changed),
+        or (None, error). The same run writes what the phone lists beside it (see `tree`). For a
+        kind in BACKGROUND_KINDS the error is "building" while rCAD works on it (see `progress`)."""
+        path, index, page, err = self._check(did, kind, index, page)
+        if err:
+            return None, err
         os.makedirs(CACHE_DIR, exist_ok=True)
-        out = os.path.join(CACHE_DIR, f"{key}.html")
+        key, out, sel = self._page_key(path, kind, index, page)
+        if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
+            return out, None
+        if kind in BACKGROUND_KINDS:
+            with self.lock:
+                err = self.build_errors.pop(key, None)
+                if err:
+                    return None, err  # shown once; asking again tries again
+                if key not in self.building:
+                    self.building[key] = time.time()
+                    threading.Thread(target=self._build_bg, args=(path, kind, index, page, key, out, sel), daemon=True).start()
+            return None, "building"
+        return self._build(path, kind, index, page, key, out, sel)
+
+    def _build_bg(self, path, kind, index, page, key, out, sel):
+        try:
+            _, err = self._build(path, kind, index, page, key, out, sel, stderr_path=out[:-5] + ".progress")
+        except Exception as e:  # keep the receiver up whatever happens
+            err = f"{type(e).__name__}: {e}"
+        with self.lock:
+            self.building.pop(key, None)
+            if err:
+                self.build_errors[key] = err
+
+    def progress(self, did, kind="studio", index=0, page=""):
+        """For a page being built in the background: (seconds so far, rCAD's last progress line)."""
+        path, index, page, err = self._check(did, kind, index, page)
+        if err:
+            return 0, ""
+        key, out, _ = self._page_key(path, kind, index, page)
+        with self.lock:
+            t0 = self.building.get(key)
+        lines = [ln.strip() for ln in re.split(r"[\r\n]+", _tail(out[:-5] + ".progress", 600)) if ln.strip()]
+        return (time.time() - t0 if t0 else 0), (lines[-1] if lines else "")
+
+    def _build(self, path, kind, index, page, key, out, sel, stderr_path=None):
         with self.lock:
             lk = self.export_locks.setdefault(key, threading.Lock())
         with lk:
             if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
                 return out, None
+            try:
+                with open(path) as f:
+                    ws = json.load(f)
+            except (OSError, ValueError):
+                ws = {}
             tmp = out + ".tmp.html"
-            steps, finish = page_steps(kind, index, page, tmp)
+            steps, finish = page_steps(kind, index, page, tmp, ws if isinstance(ws, dict) else {})
             steps.insert(0, {"tool": "open_document", "args": {"path": path}})
             results = []
-            err = self._run_script(rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT, results)
+            err = self._run_script(self.rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT, results, stderr_path)
             by = {}
             for v in results:
                 if isinstance(v.get("result"), dict):
@@ -437,6 +500,9 @@ class Projects:
     def tree(self, did, kind="studio", index=0, page=""):
         """What the phone lists beside the page: see `view`."""
         out, err = self.view(did, kind, index, page)
+        if err == "building":
+            secs, line = self.progress(did, kind, index, page)
+            return {"kind": kind, "building": True, "seconds": int(secs), "progress": line}, None
         if not out:
             return None, err
         try:
@@ -618,7 +684,17 @@ def _mins(secs):
     return f"{secs // 60} min {secs % 60:02d} s" if secs >= 60 else f"{secs} s"
 
 
-def page_steps(kind, index, page, out):
+def _tail(path, n):
+    try:
+        with open(path, "rb") as f:
+            f.seek(0, 2)
+            f.seek(max(0, f.tell() - n))
+            return f.read().decode("utf-8", "replace")
+    except OSError:
+        return ""
+
+
+def page_steps(kind, index, page, out, ws=None):
     """The rcad run steps that write the page for one tab to `out`, and a function that turns their
     results (by tool name) into what the phone lists beside it."""
     if kind == "assembly":
@@ -630,6 +706,8 @@ def page_steps(kind, index, page, out):
                   else {"tool": "export_cam_simulation", "args": {"cam": index, "path": out}})
         return ([{"tool": "cam_info", "args": {"cam": index}}, {"tool": "simulate_cam", "args": {"cam": index}}, export],
                 lambda by, _out: cam_tree(by.get("cam_info") or {}, by.get("simulate_cam") or {}))
+    if kind == "simulation":
+        return sim_steps(index, out, ws or {})
     if kind == "drawing":
         sheet = int(page) if page.isdigit() and int(page) > 0 else 1
         svg = out + ".svg"
@@ -688,37 +766,24 @@ def html_escape(t):
     return t.replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;")
 
 
-# A drawing sheet on the phone: the SVG fitted to the width, pinch or wheel to zoom, drag to pan,
-# double-tap to switch between fitted and 3x.
-SHEET_PAGE = """<!doctype html>
-<html lang="en"><head><meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
-<link rel="icon" href="data:,"><title>__TITLE__</title>
-<style>
-html, body { margin: 0; height: 100%; overflow: hidden; background: #e8e9ec; touch-action: none; }
-#sheet { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-shadow: 0 1px 6px rgba(0,0,0,.25); background: #fff; }
-#sheet svg { display: block; width: 100%; height: 100%; }
-#hint { position: fixed; right: 10px; top: 10px; font: 12px system-ui, sans-serif; color: #555; background: rgba(255,255,255,.85);
-  border-radius: 6px; padding: 4px 8px; pointer-events: none; }
-</style></head><body>
-<div id="sheet">__SVG__</div><div id="hint">pinch to zoom · double-tap</div>
-<script>
-const el = document.getElementById('sheet'), svg = el.querySelector('svg');
-const vb = (svg.getAttribute('viewBox') || '0 0 420 297').split(/[ ,]+/).map(Number);
-const W = 1000, H = W * vb[3] / vb[2];
-el.style.width = W + 'px'; el.style.height = H + 'px';
-let s = 1, x = 0, y = 0, fitS = 1;
+# Pinch or wheel to zoom, drag to pan, double-tap to switch between fitted and 3x, for #sheet
+# (a sheet or a picture); the page calls setSize(width, height) with its natural size.
+ZOOM_JS = """
+const el = document.getElementById('sheet');
+let W = 1000, H = 700, s = 1, x = 0, y = 0, fitS = 1;
+const TOP = (document.getElementById('bar') || { offsetHeight: 0 }).offsetHeight;
 function apply() { el.style.transform = `translate(${x}px, ${y}px) scale(${s})`; }
 function fit() {
-  const m = 12, vw = innerWidth - 2 * m, vh = innerHeight - 2 * m;
-  fitS = Math.min(vw / W, vh / H); s = fitS; x = (innerWidth - W * s) / 2; y = (innerHeight - H * s) / 2; apply();
+  const m = 12, vw = innerWidth - 2 * m, vh = innerHeight - TOP - 2 * m;
+  fitS = Math.min(vw / W, vh / H); s = fitS; x = (innerWidth - W * s) / 2; y = TOP + (innerHeight - TOP - H * s) / 2; apply();
 }
+function setSize(w, h) { W = w; H = h; el.style.width = W + 'px'; el.style.height = H + 'px'; fit(); }
 function zoomAt(px, py, k) {
   const ns = Math.min(Math.max(s * k, fitS * 0.5), fitS * 20);
   x = px - (px - x) * ns / s; y = py - (py - y) * ns / s; s = ns; apply();
 }
 const pts = new Map(); let last = null, tapAt = 0, moved = false;
-addEventListener('pointerdown', e => { pts.set(e.pointerId, [e.clientX, e.clientY]); last = null; moved = false; });
+addEventListener('pointerdown', e => { if (e.target.closest('button')) return; pts.set(e.pointerId, [e.clientX, e.clientY]); last = null; moved = false; });
 addEventListener('pointermove', e => {
   if (!pts.has(e.pointerId)) return;
   pts.set(e.pointerId, [e.clientX, e.clientY]);
@@ -733,6 +798,7 @@ addEventListener('pointermove', e => {
   last = { n: p.length, cx, cy, d };
 });
 function up(e) {
+  if (!pts.has(e.pointerId)) return;
   pts.delete(e.pointerId); last = null;
   if (e.type === 'pointerup' && !moved && pts.size === 0) {
     const now = Date.now();
@@ -742,9 +808,264 @@ function up(e) {
 addEventListener('pointerup', up); addEventListener('pointercancel', up);
 addEventListener('wheel', e => { e.preventDefault(); zoomAt(e.clientX, e.clientY, Math.exp(-e.deltaY / 300)); }, { passive: false });
 addEventListener('resize', fit);
-fit();
+"""
+
+# A drawing sheet on the phone: the SVG fitted to the screen, zoomable.
+SHEET_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<link rel="icon" href="data:,"><title>__TITLE__</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #e8e9ec; touch-action: none; }
+#sheet { position: absolute; left: 0; top: 0; transform-origin: 0 0; box-shadow: 0 1px 6px rgba(0,0,0,.25); background: #fff; }
+#sheet svg { display: block; width: 100%; height: 100%; }
+#hint { position: fixed; right: 10px; top: 10px; font: 12px system-ui, sans-serif; color: #555; background: rgba(255,255,255,.85);
+  border-radius: 6px; padding: 4px 8px; pointer-events: none; }
+</style></head><body>
+<div id="sheet">__SVG__</div><div id="hint">pinch to zoom · double-tap</div>
+<script>
+""" + ZOOM_JS + """
+const vb = (el.querySelector('svg').getAttribute('viewBox') || '0 0 420 297').split(/[ ,]+/).map(Number);
+setSize(1000, 1000 * vb[3] / vb[2]);
 </script></body></html>
 """
+
+# FEA results on the phone: rCAD's colour-map pictures (each with its own scale and caption),
+# a button per picture, zoomable. __PICS__ is a JSON list of {label, src}.
+SIM_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no">
+<link rel="icon" href="data:,"><title>__TITLE__</title>
+<style>
+html, body { margin: 0; height: 100%; overflow: hidden; background: #202328; touch-action: none; font: 13px system-ui, sans-serif; }
+#bar { position: fixed; left: 0; right: 0; top: 0; z-index: 2; display: flex; gap: 6px; padding: 8px 10px; overflow-x: auto;
+  background: #1a1c20; scrollbar-width: none; }
+#bar button { flex: none; font: inherit; color: #c9ced6; background: #2a2e35; border: 1px solid #3a3f47; border-radius: 16px; padding: 5px 12px; }
+#bar button.on { color: #fff; background: #2F80ED; border-color: #2F80ED; }
+#sheet { position: absolute; left: 0; top: 0; transform-origin: 0 0; }
+#sheet img, #sheet svg { display: block; width: 100%; height: 100%; }
+</style></head><body>
+<div id="bar"></div><div id="sheet"></div>
+<script>
+const PICS = __PICS__;
+""" + ZOOM_JS + """
+const bar = document.getElementById('bar');
+function show(i) {
+  [...bar.children].forEach((b, k) => b.classList.toggle('on', k === i));
+  const p = PICS[i];
+  if (p.svg) { el.innerHTML = p.svg; setSize(p.w, p.h); return; }
+  const img = new Image();
+  img.onload = () => { el.innerHTML = ''; el.appendChild(img); setSize(img.naturalWidth, img.naturalHeight); };
+  img.src = p.src;
+}
+PICS.forEach((p, i) => { const b = document.createElement('button'); b.textContent = p.label; b.onclick = () => show(i); bar.appendChild(b); });
+if (PICS.length < 2) bar.style.display = 'none';
+show(0);
+</script></body></html>
+"""
+
+# Shown while a page is built in the background: reloads itself until the result is there.
+BUILDING_PAGE = """<!doctype html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<link rel="icon" href="data:,"><title>Working…</title>
+<style>
+html, body { margin: 0; height: 100%; background: #e8e9ec; color: #444; font: 15px system-ui, sans-serif; }
+body { display: grid; place-items: center; text-align: center; padding: 0 24px; box-sizing: border-box; }
+.t { font-size: 13px; color: #777; margin-top: 6px; }
+.bar { width: 180px; height: 4px; margin: 14px auto 0; border-radius: 2px; background: #d3d6db; overflow: hidden; }
+.bar div { width: 40%; height: 100%; background: #2F80ED; animation: go 1.4s ease-in-out infinite; }
+@keyframes go { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
+</style></head><body>
+<div><div>__WHAT__</div><div class="t">__PROGRESS__</div><div class="bar"><div></div></div></div>
+<script>setTimeout(() => location.reload(), 3000);</script>
+</body></html>
+"""
+
+
+def building_page(kind, secs, line):
+    what = {"simulation": "Solving the simulation on netdash…"}.get(kind, "Working on netdash…")
+    m, sec = divmod(int(secs), 60)
+    prog = (html_escape(line) + " · " if line else "") + f"{m}:{sec:02d}"
+    return BUILDING_PAGE.replace("__WHAT__", what).replace("__PROGRESS__", prog)
+
+
+def _png_size(path):
+    try:
+        with open(path, "rb") as f:
+            head = f.read(24)
+        return int.from_bytes(head[16:20], "big"), int.from_bytes(head[20:24], "big")
+    except OSError:
+        return 0, 0
+
+
+def sim_steps(index, out, ws):
+    """Solve a Simulation tab and render its results: static stress, displacement and factor of
+    safety; modal each mode (up to 6); transient stress and displacement plus the response over time."""
+    sims = ws.get("simulations") or []
+    study = sims[index] if index < len(sims) and isinstance(sims[index], dict) else {}
+    analysis = study.get("analysis") or "static"
+    if analysis == "modal":
+        n = study.get("modes") if isinstance(study.get("modes"), int) else 6
+        pics = [(f"mode{k}", {"mode": k}) for k in range(1, max(1, min(n, 6)) + 1)]
+    elif analysis == "transient":
+        pics = [("Stress", {}), ("Displacement", {"field": "displacement"})]
+    else:
+        pics = [("Stress", {}), ("Displacement", {"field": "displacement"}), ("Safety", {"field": "safety"})]
+    steps = [{"tool": "solve_simulation", "args": {"simulation": index}}]
+    files = []
+    for k, (label, extra) in enumerate(pics):
+        f = f"{out}.{k}.png"
+        files.append((label, f))
+        steps.append({"tool": "render_simulation", "args": dict({"simulation": index, "path": f, "height": 900}, **extra)})
+
+    def finish(by, out):
+        res = by.get("solve_simulation") or {}
+        modes = {m.get("mode"): m for m in res.get("modes") or [] if isinstance(m, dict)}
+        shown = []
+        for label, f in files:
+            if not os.path.isfile(f):
+                continue
+            with open(f, "rb") as fh:
+                data = base64.b64encode(fh.read()).decode()
+            os.remove(f)
+            if label.startswith("mode"):
+                k = int(label[4:])
+                hz = (modes.get(k) or {}).get("frequency_hz")
+                label = f"Mode {k}" + (f" · {_hz(hz)}" if hz else "")
+            shown.append({"label": label, "src": "data:image/png;base64," + data})
+        hist = res.get("history")
+        if analysis == "transient" and isinstance(hist, list) and len(hist) > 1:
+            shown.append(history_chart(hist))
+        if shown:
+            title = f"{study.get('name') or 'Simulation'} · {analysis}"
+            with open(out, "w") as fh:
+                fh.write(SIM_PAGE.replace("__TITLE__", html_escape(title)).replace("__PICS__", json.dumps(shown).replace("</", "<\\/")))
+        return sim_tree(study, res)
+    return steps, finish
+
+
+def _hz(f):
+    return f"{f / 1000:.3g} kHz" if f >= 1000 else f"{f:.3g} Hz"
+
+
+def history_chart(hist):
+    """The transient response (displacement over time) as an SVG picture for the results page."""
+    w, h, l, r, t, b = 900, 560, 70, 20, 40, 60
+    ts = [p[0] for p in hist if isinstance(p, list) and len(p) == 2]
+    ys = [p[1] for p in hist if isinstance(p, list) and len(p) == 2]
+    t1, y1 = (max(ts) or 1), (max(ys) or 1)
+    sx = lambda v: l + (w - l - r) * v / t1
+    sy = lambda v: h - b - (h - t - b) * v / y1
+    pts = " ".join(f"{sx(a):.1f},{sy(c):.1f}" for a, c in zip(ts, ys))
+    unit, k = ("ms", 1e3) if t1 < 1 else ("s", 1)
+    grid = ""
+    for i in range(5):
+        gv = y1 * i / 4
+        grid += (f'<line x1="{l}" x2="{w - r}" y1="{sy(gv):.1f}" y2="{sy(gv):.1f}" stroke="#3a3f47"/>'
+                 f'<text x="{l - 8}" y="{sy(gv) + 4:.1f}" text-anchor="end">{gv:.3g}</text>')
+        tv = t1 * i / 4
+        grid += f'<text x="{sx(tv):.1f}" y="{h - b + 20}" text-anchor="middle">{tv * k:.3g}</text>'
+    svg = (f'<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 {w} {h}" font-family="system-ui,sans-serif" font-size="14" fill="#c9ced6">'
+           f'<rect width="{w}" height="{h}" fill="#202328"/><text x="{l}" y="24" font-size="16">Peak displacement over time (mm)</text>'
+           f'{grid}<polyline points="{pts}" fill="none" stroke="#2F80ED" stroke-width="2.5"/>'
+           f'<text x="{(w + l) / 2}" y="{h - 14}" text-anchor="middle">time ({unit})</text></svg>')
+    return {"label": "Over time", "svg": svg, "w": w, "h": h}
+
+
+def _at(p):
+    return f"at X{p[0]:g} Y{p[1]:g} Z{p[2]:g}" if isinstance(p, list) and len(p) == 3 else ""
+
+
+def sim_tree(study, res):
+    """A Simulation tab for the tray: the results, the modes, the supports and loads, material and mesh."""
+    analysis = res.get("analysis") or study.get("analysis") or "static"
+    rows = []
+    ask = "In the simulation's results: "
+    if analysis == "static":
+        fos = res.get("factor_of_safety")
+        if isinstance(fos, (int, float)):
+            rows.append({"name": f"Factor of safety {fos:.3g}", "sub": "yield / max stress" + (" · below 1.5" if fos < 1.5 else ""),
+                         "icon": "warning" if fos < 1.5 else "check", "error": fos < 1.5, "ask": "Make the part stronger: the factor of safety is only %.3g. " % fos if fos < 1.5 else ask})
+        for key, label, unit, at in (("max_von_mises_mpa", "Max von Mises stress", "MPa", "max_stress_at"),
+                                     ("max_displacement_mm", "Max displacement", "mm", "max_displacement_at"),
+                                     ("max_principal_mpa", "Max principal stress", "MPa", "max_principal_at"),
+                                     ("min_principal_mpa", "Min principal stress", "MPa", "min_principal_at")):
+            if isinstance(res.get(key), (int, float)):
+                rows.append({"name": f"{label} {res[key]:.4g} {unit}", "sub": _at(res.get(at)), "icon": "feaResults", "ask": ask})
+        for rc in res.get("reactions") or []:
+            if isinstance(rc, dict):
+                rows.append({"name": f"Reaction at {rc.get('support')}: {rc.get('magnitude_n', 0):.4g} N", "icon": "feaFixed", "ask": ask})
+    elif analysis == "transient":
+        for key, label, unit, when in (("peak_von_mises_mpa", "Peak von Mises stress", "MPa", "peak_stress_at_s"),
+                                       ("peak_displacement_mm", "Peak displacement", "mm", "peak_at_s"),
+                                       ("final_displacement_mm", "Displacement at the end", "mm", None)):
+            if isinstance(res.get(key), (int, float)):
+                t = res.get(when) if when else None
+                rows.append({"name": f"{label} {res[key]:.4g} {unit}", "sub": f"at {t * 1000:.3g} ms" if isinstance(t, (int, float)) else "",
+                             "icon": "feaResults", "ask": ask})
+        if isinstance(res.get("lowest_frequency_hz"), (int, float)):
+            rows.append({"name": f"Lowest natural frequency {_hz(res['lowest_frequency_hz'])}", "icon": "feaResults", "ask": ask})
+    sections = []
+    errs = [w for w in res.get("warnings") or [] if isinstance(w, str)]
+    if res.get("error"):
+        errs.insert(0, str(res["error"]))
+    if errs:
+        sections.append({"title": "Notes", "icon": "note", "count": str(len(errs)),
+                         "rows": [{"name": w, "icon": "note", "wrap": True, "ask": f"About the simulation: {w} "} for w in errs]})
+    if rows:
+        sections.append({"title": "Results", "icon": "feaResults", "count": "", "rows": rows})
+    modes = [m for m in res.get("modes") or [] if isinstance(m, dict)]
+    if modes:
+        sections.append({"title": "Modes", "icon": "feaResults", "count": str(len(modes)), "rows": [
+            {"name": f"Mode {m.get('mode')} · {_hz(m.get('frequency_hz') or 0)}",
+             "sub": " · ".join(x for x in [f"60 dB decay {m['decay_60db_s']:.3g} s" if isinstance(m.get("decay_60db_s"), (int, float)) else "",
+                                           "mass X/Y/Z " + "/".join(f"{v * 100:.0f}" for v in m["mass_participation_xyz"]) + " %"
+                                           if isinstance(m.get("mass_participation_xyz"), list) else ""] if x),
+             "icon": "feaResults", "ask": f"About mode {m.get('mode')} ({_hz(m.get('frequency_hz') or 0)}): "} for m in modes]})
+    icons = {"fixed": "feaFixed", "roller": "feaRoller", "force": "feaForce", "pressure": "feaPressure", "gravity": "feaGravity"}
+    setup = []
+    for sp in study.get("supports") or []:
+        if isinstance(sp, dict):
+            setup.append({"name": sp.get("name") or sp.get("kind"), "sub": f"{sp.get('kind')} · {len(sp.get('faces') or [])} face(s)",
+                          "icon": icons.get(sp.get("kind"), "feaFixed"), "ask": f"In the support \"{sp.get('name')}\": "})
+    for ld in study.get("loads") or []:
+        if isinstance(ld, dict):
+            unit = {"force": "N", "pressure": "MPa", "gravity": "g"}.get(ld.get("kind"), "")
+            val = ld.get("value")
+            setup.append({"name": ld.get("name") or ld.get("kind"),
+                          "sub": " · ".join(x for x in [str(ld.get("kind")), f"{val:g} {unit}".strip() if isinstance(val, (int, float)) else "",
+                                                        "normal to the face" if ld.get("normal") else ""] if x),
+                          "icon": icons.get(ld.get("kind"), "feaForce"), "ask": f"In the load \"{ld.get('name')}\": "})
+    if setup:
+        sections.append({"title": "Supports and loads", "icon": "feaForce", "count": str(len(setup)), "rows": setup})
+    mat = res.get("material_props") if isinstance(res.get("material_props"), dict) else {}
+    mesh = res.get("mesh") if isinstance(res.get("mesh"), dict) else {}
+    info = []
+    if res.get("material") or study.get("material"):
+        info.append({"name": str(res.get("material") or study.get("material")),
+                     "sub": " · ".join(x for x in [f"E {mat['E_mpa'] / 1000:.4g} GPa" if mat.get("E_mpa") else "",
+                                                   f"yield {mat['yield_mpa']:g} MPa" if mat.get("yield_mpa") else "",
+                                                   f"{res['mass_kg'] * 1000:.4g} g" if isinstance(res.get("mass_kg"), (int, float)) else ""] if x),
+                     "icon": "properties", "ask": "Change the simulation's material to "})
+    if mesh:
+        info.append({"name": f"{mesh.get('elements', 0):,} elements · {mesh.get('nodes', 0):,} nodes",
+                     "sub": f"{mesh.get('element') or 'mesh'} · {mesh.get('element_size_mm', 0):g} mm", "icon": "feaMesh",
+                     "ask": "Change the simulation's mesh: "})
+    if info:
+        sections.append({"title": "Material and mesh", "icon": "feaMesh", "count": "", "rows": info})
+    if analysis == "static" and isinstance(res.get("max_von_mises_mpa"), (int, float)):
+        head = [f"max {res['max_von_mises_mpa']:.3g} MPa",
+                f"safety {res['factor_of_safety']:.3g}" if isinstance(res.get("factor_of_safety"), (int, float)) else "",
+                f"{res['max_displacement_mm']:.3g} mm" if isinstance(res.get("max_displacement_mm"), (int, float)) else ""]
+    elif modes:
+        head = [f"{len(modes)} modes from {_hz(modes[0].get('frequency_hz') or 0)}"]
+    elif analysis == "transient" and isinstance(res.get("peak_von_mises_mpa"), (int, float)):
+        head = [f"peak {res['peak_von_mises_mpa']:.3g} MPa", f"{res.get('peak_displacement_mm', 0):.3g} mm"]
+    else:
+        head = ["not solved" if not res else ""]
+    summary = " · ".join(x for x in [analysis.capitalize(), str(res.get("material") or study.get("material") or "")] + head if x)
+    return {"kind": "simulation", "name": study.get("name"), "summary": summary, "icon": "simulation", "sections": sections}
 
 
 def drawing_tree(info, sheet):
@@ -893,6 +1214,10 @@ def handle(h, method, p, projects, body=None):
         page = (q.get("page") or [""])[0]
         if method == "GET" and p[3:] == ["view"]:
             out, err = projects.view(did, kind, index, page)
+            if err == "building":
+                secs, line = projects.progress(did, kind, index, page)
+                h.send_html(200, building_page(kind, secs, line))
+                return True
             if not out:
                 h.send_json(404 if err in ("no such document", "no such tab") else 500, {"error": err})
                 return True

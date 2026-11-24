@@ -374,6 +374,7 @@ class DocActivity : Activity() {
         TabKind("assembly", "assemblies", "Assembly", "assembly"),
         TabKind("cam", "cams", "Manufacture", "cam"),
         TabKind("drawing", "drawings", "Drawing", "drawing"),
+        TabKind("simulation", "simulations", "Simulation", "simulation"),
     )
     private fun tabKind() = tabKinds.firstOrNull { it.key == kind } ?: tabKinds[0]
     private fun tabName() = names(tabKind().list).getOrNull(index) ?: "${tabKind().label} ${index + 1}"
@@ -469,6 +470,13 @@ class DocActivity : Activity() {
      * (setup sheet, schematic, …) and sections of rows; tapping a row asks Claude about it.
      */
     private fun sectionsTree(t: JSONObject) {
+        if (t.optBoolean("building")) {
+            // a long job on netdash (an FEA solve): the page reloads itself, and with it this note
+            val secs = t.optInt("seconds")
+            val prog = t.optString("progress")
+            tree.addView(note("Working on it on netdash… ${secs / 60}:${"%02d".format(secs % 60)}" + if (prog.isNotEmpty()) "\n$prog" else ""))
+            return
+        }
         val summary = t.optString("summary")
         if (summary.isNotEmpty()) tree.addView(Ui.text(this, summary, 13f, Ui.MUTED).apply {
             setPadding(Ui.dp(context, 14), 0, Ui.dp(context, 14), Ui.dp(context, 8))
@@ -695,6 +703,7 @@ class DocActivity : Activity() {
         showWebNote(when (kind) {
             "cam" -> "Simulating the toolpaths on netdash… (this can take a minute)"
             "drawing" -> "Drawing the sheet on netdash…"
+            "simulation" -> "Opening the simulation on netdash…"
             else -> "Building the 3D view on netdash… (a big model can take a minute)"
         })
         built = null

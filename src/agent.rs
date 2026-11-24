@@ -69,6 +69,9 @@ pub struct Session {
     /// Finished stock simulations of built setups and jobs, by their build keys and resolution: the pictures,
     /// simulate_cam and the export gate of the same toolpaths share one run instead of each simulating.
     pub(crate) sim_cache: HashMap<(u64, usize), (crate::cam::Cam, crate::cam_paths::Part, Vec<crate::cam_paths::Toolpath>, crate::cam_sim::Sim)>,
+    /// The last FEA solve, keyed by its study and the Part Studio it analyses: render_simulation after
+    /// solve_simulation (one picture per field or mode) reuses it instead of meshing and solving again.
+    pub(crate) fea_cache: Option<(u64, crate::fea::Study, std::sync::Arc<crate::fea::Outcome>)>,
     /// Build-cache keys (`build_cache`) of the Part Studios as they were opened or last saved: their built
     /// geometry is kept on disk, so the next session that opens the same document reads it back instead of
     /// rebuilding. Studios changed since are built as usual and not kept (as in the editor).
@@ -107,6 +110,7 @@ impl Session {
             crashed: false,
             cam_cache: HashMap::new(),
             sim_cache: HashMap::new(),
+            fea_cache: None,
             saved_keys: Default::default(),
         }
     }
