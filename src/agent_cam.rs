@@ -767,6 +767,26 @@ impl Session {
                 let ci = self.cam_idx(a)?;
                 self.cam_info(ci)?
             }
+            "compare_gcode" => {
+                let read = |k: &str| -> R<crate::cam_compare::Program> {
+                    let path = self.input_path(super::str_arg(a, k)?.as_str());
+                    let text = std::fs::read_to_string(&path).map_err(|e| format!("{path}: {e}"))?;
+                    crate::cam_compare::read(&text).map_err(|e| format!("{path}: {e}"))
+                };
+                let (pa, pb) = (read("a")?, read("b")?);
+                let tol = a.get("tolerance").and_then(|v| v.as_f64()).unwrap_or(0.01);
+                if !(tol > 0.0) {
+                    return Err("tolerance must be above 0".into());
+                }
+                let mut v = crate::cam_compare::compare(&pa, &pb, tol);
+                // the full lists only when asked: a job's cycle has hundreds of control lines
+                if !a.get("all").and_then(|v| v.as_bool()).unwrap_or(false) {
+                    if let Some(ops) = v["operations"].as_array_mut() {
+                        ops.retain(|o| o["verdict"] != "identical");
+                    }
+                }
+                v
+            }
             "import_cutlog" => {
                 let ci = self.cam_idx(a)?;
                 let path = self.input_path(a.get("path").and_then(|p| p.as_str()).ok_or("give path (a .cutlog.json rcnc wrote)")?);
@@ -1423,6 +1443,7 @@ pub fn tools() -> Vec<Value> {
         json!({"name": "export_cam_simulation", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save the setup's simulation as a self-contained HTML page (path ending .html; three.js comes from a CDN) that plays the toolpaths back in a web browser: the stock being cut (coloured by operation, gouges red), the tool and holder, the toolpath, fixtures, the finished part and the machine model moving with the axes, with play/pause, speed, a time line with the operations and problems, and stepping move by move. It runs the simulation, so it takes a moment. resolution: cells along the longer stock side (default 500, as in the app).", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
         json!({"name": "export_setup_sheet", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Save a setup sheet for the machine operator as a self-contained HTML page (path ending .html): stock size and position, work zero, part orientation, fixtures, pictures of the part on the machine (iso with the vise from the machine model, top and front with the stock sizes), the tools with to-scale drawings (number, size, holder, speeds and feeds), the operations in order (tool, Z range, stepdown/stepover, time, warnings) each with a picture of its toolpath on the simulated stock, and the simulation result with any problems found. It runs the simulation, so it takes a moment.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}}), &["cam", "path"])}),
         json!({"name": "export_gcode", "description": "For a setup that leads a job (create_cam with), the whole job: every station in one run/program/page/sheet, results per station; stations [names] keeps only those (e.g. op 1 alone for the first cycle). Write the G-code of a Manufacture tab (post: grbl, linuxcnc, fanuc, mach3; default the tab's). It simulates the exact toolpaths it posts first and refuses (an error, nothing written) when the simulation finds any problem: a rapid into stock, a gouge, a shank, holder or fixture hit, an overload. A clean program gets a \"(SIM OK: 0 problems ..., hash ...)\" line under its title. allow_problems: true writes it anyway, only to look at, as <name>.UNSAFE.<ext> with an UNSAFE header. Reports line count, cycle time, toolpath warnings and the simulation result.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "post": {"type": "string"}, "allow_problems": {"type": "boolean"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
+        json!({"name": "compare_gcode", "description": "Compare two G-code programs (a and b, files) operation by operation: e.g. a re-post against the program that was cut. Operations are read from their (name - Kind) comments and paired by work offset (station) and name, then the rest by station, tool and kind (renamed: true). For each: verdict (identical, same path with moves or feeds differing, path differs, different tool, only in a / b), tool, rpm, moves, feed and rapid lengths, minutes at the programmed feeds, retracts, the feeds whose lengths differ, and how far each one's cutting path strays from the other's (a_from_b, b_from_a with where, capped at 20 x tolerance, and the share within tolerance). The control lines (tool changes, S/M words, dwells, stops, (MSG,...) and (RCNC ...) lines such as FIND_STOCK, FIND_BORES, Z_REFERENCE, REQUIRE_GUARD) are compared as sequences per station and listed where they differ, with the operation they sit in; header comments (tools with stick-outs, stations, setup notes) likewise. same is true when every operation is identical and no control line differs. tolerance (mm, default 0.01); all: true also lists the identical operations.", "inputSchema": obj(json!({"a": {"type": "string"}, "b": {"type": "string"}, "tolerance": {"type": "number"}, "all": {"type": "boolean"}}), &["a", "b"])}),
         json!({"name": "verify_gcode", "description": "For a setup that leads a job (create_cam with), the job's program: each station's stretch (by its G54…G59) read back with that station's setup and simulated together; stations [names] for a program posted with only some. Check a G-code file against a Manufacture tab: read its moves back (as posted or edited since: pauses, dwells, tool changes), simulate them on the setup's stock and list the problems, and check its SIM OK stamp (whether it was posted clean, and whether its toolpath hash matches what the setup makes now). ok is true only for a stamped clean program whose moves simulate without problems.", "inputSchema": obj(json!({"cam": {"type": "integer"}, "stations": {"type": "array"}, "path": {"type": "string"}, "resolution": {"type": "integer"}}), &["cam", "path"])}),
     ]
 }
