@@ -52,6 +52,11 @@ class ReceiverTest(unittest.TestCase):
         r2.read()
         self.assertEqual(r2.status, 401)
 
+    def test_favicon_needs_no_token(self):
+        # a 401 here made the app's web view ask again on every redraw
+        status, _ = self.req("GET", "/favicon.ico", token=None)
+        self.assertEqual(status, 204)
+
     def test_flow(self):
         self.assertEqual(self.req("GET", "/api/ping", token="bad")[0], 401)
         self.assertEqual(self.req("GET", "/api/ping")[0], 200)

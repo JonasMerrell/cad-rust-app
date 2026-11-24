@@ -251,7 +251,10 @@ class DocActivity : Activity() {
         @Suppress("UNCHECKED_CAST")
         sheetBehavior = BottomSheetBehavior.from(sheet)
         sheetBehavior.addBottomSheetCallback(object : BottomSheetBehavior.BottomSheetCallback() {
-            override fun onStateChanged(v: View, newState: Int) = fitStage()
+            override fun onStateChanged(v: View, newState: Int) {
+                lastFit = -1 // settling at the same height still has to apply the final size
+                fitStage()
+            }
             override fun onSlide(v: View, offset: Float) = fitStage()
         })
         root.addOnLayoutChangeListener { _, _, _, _, _, _, _, _, _ -> fitStage() }
@@ -288,6 +291,7 @@ class DocActivity : Activity() {
      * chat's input row sits on screen at every height).
      */
     private var lastFit = -1
+    private var lastStagePad = -1
     private fun fitStage() {
         val h = root.height
         if (h == 0) return
@@ -295,7 +299,22 @@ class DocActivity : Activity() {
         if (top == lastFit) return
         lastFit = top
         // the stage starts under the 52 dp top bar; keep at least 80 dp of it so the WebView never collapses
-        stage.setPadding(0, 0, 0, (h - top).coerceAtMost(h - Ui.dp(this, 52 + 80)).coerceAtLeast(0))
+        val pad = (h - top).coerceAtMost(h - Ui.dp(this, 52 + 80)).coerceAtLeast(0)
+        val state = sheetBehavior.state
+        val moving = state == BottomSheetBehavior.STATE_DRAGGING || state == BottomSheetBehavior.STATE_SETTLING
+        if (moving && lastStagePad >= 0) {
+            // Resizing the WebView reallocates the viewer's WebGL canvas, and doing that on every
+            // frame of a drag makes the model flicker and jump. While the tray moves, slide the
+            // view up instead so the model stays centred over the visible part (going down, the
+            // view already fills the space that opens up); resize once it settles.
+            web.translationY = ((lastStagePad - pad) / 2f).coerceAtMost(0f)
+        } else {
+            web.translationY = 0f
+            if (pad != lastStagePad) {
+                lastStagePad = pad
+                stage.setPadding(0, 0, 0, pad)
+            }
+        }
         // the sheet is as tall as the screen; pad off the part that is below the bottom edge
         sheet.setPadding(0, 0, 0, (sheet.height - (h - top)).coerceAtLeast(0))
     }
