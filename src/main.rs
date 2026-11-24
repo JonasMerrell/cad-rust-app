@@ -8,6 +8,7 @@ mod asm_anim;
 mod asm_anim_ui;
 mod asm_ui;
 mod build_cache;
+mod cam_build_cache;
 mod assembly;
 mod cam;
 mod cam_3d;
@@ -22,12 +23,16 @@ mod cam_machine_ui;
 mod cam_sheet;
 mod cam_template;
 mod cam_tool_import;
+mod cam_part_job;
 mod cam_paths;
 mod cam_post;
 mod cam_probe;
 mod cam_cutting;
 mod cam_sim;
+mod cam_sim_cache;
+mod cam_sim_saves;
 mod cam_verify;
+mod cam_vise;
 mod cam_web;
 mod cam_stock;
 mod cam_ui;
@@ -149,6 +154,8 @@ fn main() -> eframe::Result {
     match args.get(1).map(|s| s.as_str()) {
         Some("mcp") => {
             agent::mcp_main();
+            // simulation states still being written (`cam_sim_saves`)
+            cam_sim_saves::flush(std::time::Duration::from_secs(120));
             return Ok(());
         }
         Some("run") => {
@@ -162,7 +169,10 @@ fn main() -> eframe::Result {
                 eprintln!("unknown option {path}\nusage: {prog} run [--stop-on-error] script.json");
                 std::process::exit(2);
             }
-            std::process::exit(agent::run_script(path, stop));
+            let code = agent::run_script(path, stop);
+            // simulation states still being written (`cam_sim_saves`)
+            cam_sim_saves::flush(std::time::Duration::from_secs(120));
+            std::process::exit(code);
         }
         Some("chat") => {
             opencascade_sys::extra::ex_messages_to_stderr();
