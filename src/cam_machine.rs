@@ -866,6 +866,8 @@ pub struct Work<'a> {
     pub lo: &'a [f32],
     pub part: &'a [f32],
     pub max_h: f32,
+    /// A height no stock bottom (`lo`) is under: the least of them, or lower.
+    pub floor: f32,
     pub fixtures: &'a [(String, DVec3, DVec3)],
 }
 
@@ -894,7 +896,7 @@ impl Work<'_> {
     }
 
     fn bounds(&self) -> (DVec3, DVec3) {
-        let mut lo = DVec3::new(self.x0, self.y0, self.lo.iter().copied().fold(f32::INFINITY, f32::min) as f64);
+        let mut lo = DVec3::new(self.x0, self.y0, self.floor as f64);
         let mut hi = DVec3::new(self.x0 + self.nx as f64 * self.cell, self.y0 + self.ny as f64 * self.cell, self.max_h as f64);
         for (_, a, b) in self.fixtures {
             lo = lo.min(*a);
@@ -1263,7 +1265,7 @@ mod tests {
         let top = vec![0.0f32; nx * ny];
         let lo = vec![-40.0f32; nx * ny];
         let part = vec![f32::NEG_INFINITY; nx * ny];
-        let work = Work { x0: -50.0, y0: -40.0, cell: 1.0, nx, ny, top: &top, lo: &lo, part: &part, max_h: 0.0, fixtures: &[] };
+        let work = Work { x0: -50.0, y0: -40.0, cell: 1.0, nx, ny, top: &top, lo: &lo, part: &part, max_h: 0.0, floor: -40.0, fixtures: &[] };
         let tool = tool_points(&[(3.0, 0.0), (3.0, 12.0)], 30.0, 1.0);
         // a 30 mm tool cutting 2 mm into the stock: the nose is 28 mm above it
         assert!(p.check(DVec3::new(0.0, 0.0, -2.0), 30.0, &tool, &work).is_empty());
