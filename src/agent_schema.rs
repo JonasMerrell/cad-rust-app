@@ -574,6 +574,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("cam_op", "rpm") => t("number", "this operation's spindle speed instead of the tool's"),
         ("cam_op", "feed") => t("number", "this operation's cutting feed, mm/min, instead of the tool's"),
         ("cam_op", "plunge_feed") => t("number", "this operation's plunge feed, mm/min, instead of the tool's"),
+        ("cam_op", "pause") => t("string", "a stop for the operator before this operation, with this message (e.g. \"Blow the chips out of the two carrier bores\"): the tool goes up, spindle and coolant off, the message, M0; the operation starts them again (empty: none). Before a probe's Find bores, say \"bore\" in it: rcnc then skips the stop when its probe tool change already had the bores cleaned"),
         ("cam_op", "spring_pass") => t("boolean", "contour: the last lap once more at the same size; bore: rough by helix 0.1 inside, then a full lap at the final radius at full depth and a spring lap"),
         ("cam_op", "feed_schedule") => t("boolean", "roughing ops (adaptive, pocket, clear, face, contour with leave > 0): after the toolpath is made, simulate it and set each cutting move's feed so the spindle runs at the target power (power_target, else the setup's feed_target, else 60% of the power the spindle has at the tool's speed: 671 W at 9000 on the DMC2; never over power_cap, default the spindle's caution: 850 W at 9000), faster where the tool is lightly engaged (up to feed_max_scale × the feed and the machine's max_feed), slower a tool radius before walls and corners (down to 0.3 × the feed or a 0.02 mm chip), force, bend, stress and chip kept within limits; long moves are split so the feed can change along them; finishing ops keep their feed. null = the setup's feed_schedule. The op's warnings and the setup sheet report time and peak / mean power before and after"),
         ("cam_op", "feed_max_scale") => t("number", "feed_schedule: the most a move's feed may be raised, × the programmed feed (default 2; never past the machine's max_feed)"),
@@ -745,6 +746,7 @@ pub(super) fn complete(tools: &mut [Value]) {
                 ("power_target", "number"),
                 ("power_cap", "number"),
                 ("build", "boolean"),
+                ("pause", "string"),
             ],
             _ => &[],
         };

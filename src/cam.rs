@@ -1078,6 +1078,11 @@ pub struct Operation {
     /// Probe: what to touch and which work zero axes to set.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub probing: Option<ProbeOp>,
+    /// A stop for the operator before this operation, with this message (e.g. "Blow the chips out of the two
+    /// carrier bores"): the tool goes up, spindle and coolant go off, the message shows, M0; the operation then
+    /// starts the spindle and coolant again as after a tool change (and the rcnc post's dwell in air). Empty: none.
+    #[serde(skip_serializing_if = "String::is_empty")]
+    pub pause: String,
 }
 
 /// What a probing operation finds.
@@ -1223,6 +1228,7 @@ impl Default for Operation {
             feed_schedule: None,
             feed_max_scale: None,
             probing: None,
+            pause: String::new(),
         }
     }
 }
