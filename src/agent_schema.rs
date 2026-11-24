@@ -622,6 +622,12 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("export_gcode", "allow_problems") => t("boolean", "write the program even though its simulation finds problems, as <name>.UNSAFE.<ext> with an UNSAFE header (never to run)"),
         ("export_gcode" | "verify_gcode", "resolution") => json!({"type": "integer", "minimum": 50, "maximum": 2000, "description": "simulation cells along the longer stock side (default 500)"}),
         ("verify_gcode", "path") => t("string", "the G-code file to check"),
+        ("verify_gcode", "programs") => json!({"type": "array", "minItems": 1, "description": "several programs to check in one call (instead of cam and path), simulated side by side", "items": {"type": "object", "required": ["cam", "path"], "additionalProperties": false, "properties": {
+            "cam": t("integer", "the Manufacture tab (a job's lead setup for a job's program)"),
+            "path": t("string", "the G-code file to check"),
+            "stations": json!({"type": "array", "items": {"type": "string"}, "description": "for a job's lead setup: only these of the job's setups (names)"}),
+            "resolution": json!({"type": "integer", "minimum": 50, "maximum": 2000, "description": "simulation cells along the longer stock side (default: the call's, else 500)"}),
+        }}}),
         ("create_simulation" | "edit_simulation", "material") => en(&fea_materials(), "material for every part (\"\" = each part's own)"),
         ("create_simulation" | "edit_simulation", "mesh_size") => json!({"type": ["number", "null"], "exclusiveMinimum": 0, "description": "element size, mm (null = auto)"}),
         ("create_simulation" | "edit_simulation", "mode") => en(&["simple", "advanced"], "simple: supports and loads; advanced: crackh3d's BCs and solver (static)"),
