@@ -43,7 +43,11 @@ class DocActivity : Activity() {
     /** The feature tree the viewer page was built from (/tree): errors, parts, an assembly's instances and mates. */
     private var built: JSONObject? = null
 
-    private var assembly: Int? = null
+    /** The tab shown: its kind ("studio", "assembly", "cam", as the receiver names them), index and page. */
+    private var kind = "studio"
+    private var index = 0
+    private var page = ""
+    /** The Part Studio Claude works in (the last one shown). */
     private var studio: Int = 0
     private var chatId: String? = null
     private var jobId: String? = null
@@ -87,6 +91,14 @@ class DocActivity : Activity() {
         prefs = Prefs(this)
         docId = intent.getStringExtra("doc") ?: run { finish(); return }
         chatId = prefs.chatFor(docId)
+        prefs.tabFor(docId)?.split(":", limit = 3)?.let { t ->
+            if (t.size == 3 && tabKinds.any { it.key == t[0] }) {
+                kind = t[0]
+                index = t[1].toIntOrNull() ?: 0
+                page = t[2]
+                if (kind == "studio") studio = index
+            }
+        }
         val name = intent.getStringExtra("name") ?: "Document"
         pane = savedInstanceState?.getInt("pane") ?: if (prefs.lastPane == 1) 1 else 0
 
@@ -355,15 +367,23 @@ class DocActivity : Activity() {
 
     // ---------------------------------------------------------------- feature tree
 
-    private fun tabName() = assembly?.let { names("assemblies").getOrNull(it) } ?: names("studios").getOrNull(studio) ?: "Part Studio 1"
+    /** Tab kinds the phone can show: query name, the document's list of names, label, icon. */
+    private class TabKind(val key: String, val list: String, val label: String, val icon: String)
+    private val tabKinds = listOf(
+        TabKind("studio", "studios", "Part Studio", "partStudio"),
+        TabKind("assembly", "assemblies", "Assembly", "assembly"),
+        TabKind("cam", "cams", "Manufacture", "cam"),
+    )
+    private fun tabKind() = tabKinds.firstOrNull { it.key == kind } ?: tabKinds[0]
+    private fun tabName() = names(tabKind().list).getOrNull(index) ?: "${tabKind().label} ${index + 1}"
+    private fun tabCount() = tabKinds.sumOf { names(it.list).size }
 
     /** The tray's Features tab: which tab is shown, the Part Studio's features with the rollback bar, and its variables. */
     private fun buildTree() {
         tree.removeAllViews()
         val studios = names("studios")
-        val asms = names("assemblies")
-        val showing = Ui.sectionRow(this, if (assembly != null) "assembly" else "partStudio", if (assembly != null) "Assembly" else "Part Studio",
-            Ui.text(this, if (studios.size + asms.size > 1) "${studios.size + asms.size} tabs" else "", 12.5f, Ui.MUTED)).apply {
+        val showing = Ui.sectionRow(this, tabKind().icon, tabKind().label,
+            Ui.text(this, if (tabCount() > 1) "${tabCount()} tabs" else "", 12.5f, Ui.MUTED)).apply {
             (layoutParams as LinearLayout.LayoutParams).topMargin = 0
         }
         tree.addView(showing)
@@ -374,12 +394,13 @@ class DocActivity : Activity() {
         })
 
         val b = built
-        if (assembly != null) {
-            if (b != null && b.optString("kind") == "assembly") assemblyTree(b)
-            else tree.addView(note("Loading the assembly…"))
+        if (kind != "studio") {
+            if (b == null || b.optString("kind") != kind) tree.addView(note("Loading the ${tabKind().label.lowercase()} tab…"))
+            else if (kind == "assembly") assemblyTree(b)
+            else sectionsTree(b)
             return
         }
-        val t = detail?.optJSONArray("trees")?.optJSONObject(studio)
+        val t = detail?.optJSONArray("trees")?.optJSONObject(index)
         // errors from the build, by feature id
         val errors = HashMap<Int, String>()
         if (b != null) for (f in objs(b.optJSONArray("features"))) if (f.has("error")) errors[f.optInt("id")] = f.optString("error")
@@ -389,7 +410,6 @@ class DocActivity : Activity() {
         }
         val feats = t?.optJSONArray("features")
         val n = feats?.length() ?: 0
-        val studioName = studios.getOrNull(studio) ?: "Part Studio"
         tree.addView(Ui.sectionRow(this, "features", "Features",
             Ui.text(this, if (errors.isNotEmpty()) "${errors.size} failing" else "$n", 12.5f, if (errors.isNotEmpty()) Ui.ERR else Ui.MUTED)))
         if (t == null) {
@@ -422,8 +442,8 @@ class DocActivity : Activity() {
 
     private fun loadBuiltTree() {
         val a = api ?: return
-        val sel = if (assembly != null) "assembly=$assembly" else "studio=$studio"
-        val want = assembly to studio
+        val sel = selection()
+        val want = sel
         Thread {
             val t = try {
                 a.get("/api/doc/${Api.enc(docId)}/tree?$sel", readMs = 16 * 60 * 1000)
@@ -431,7 +451,7 @@ class DocActivity : Activity() {
                 null
             }
             runOnUiThread {
-                if (t != null && want == (assembly to studio)) {
+                if (t != null && want == selection()) {
                     built = t
                     buildTree()
                 }
@@ -440,6 +460,54 @@ class DocActivity : Activity() {
     }
 
     private fun objs(a: org.json.JSONArray?): List<JSONObject> = (0 until (a?.length() ?: 0)).mapNotNull { a!!.optJSONObject(it) }
+
+    private fun selection() = "$kind=$index" + if (page.isNotEmpty()) "&page=${Api.enc(page)}" else ""
+
+    /**
+     * Any other tab kind (Manufacture, …): the receiver sends a summary, the tab's other pages
+     * (setup sheet, schematic, …) and sections of rows; tapping a row asks Claude about it.
+     */
+    private fun sectionsTree(t: JSONObject) {
+        val summary = t.optString("summary")
+        if (summary.isNotEmpty()) tree.addView(Ui.text(this, summary, 13f, Ui.MUTED).apply {
+            setPadding(Ui.dp(context, 14), 0, Ui.dp(context, 14), Ui.dp(context, 8))
+        })
+        val pages = objs(t.optJSONArray("pages"))
+        if (pages.size > 1) {
+            val row = Ui.row(this).apply { setPadding(Ui.dp(context, 12), 0, Ui.dp(context, 12), Ui.dp(context, 10)) }
+            for (pg in pages) {
+                val id = pg.optString("id")
+                val chip = Ui.barTab(this, pg.optString("label")) {
+                    if (page != id) {
+                        page = id
+                        reloadViewer()
+                    }
+                }
+                chip.setTextColor(if (id == page) Ui.ACCENT else Ui.MUTED)
+                chip.background = Ui.rounded(if (id == page) 0x1A2F80ED else 0x0A000000, Ui.dp(this, 14).toFloat(),
+                    if (id == page) Ui.ACCENT else Ui.LINE, Ui.dp(this, 1))
+                row.addView(chip, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(this, 32)).apply { marginEnd = Ui.dp(this@DocActivity, 8) })
+            }
+            tree.addView(row)
+        }
+        for (sec in objs(t.optJSONArray("sections"))) {
+            val err = sec.optBoolean("error")
+            tree.addView(Ui.sectionRow(this, sec.optString("icon", "features"), sec.optString("title"),
+                Ui.text(this, sec.optString("count"), 12.5f, if (err) Ui.ERR else Ui.MUTED)))
+            val rows = objs(sec.optJSONArray("rows"))
+            if (rows.isEmpty() && sec.optString("empty").isNotEmpty()) tree.addView(note(sec.optString("empty")))
+            for (r in rows) {
+                val ask = r.optString("ask")
+                val icon = r.optString("icon", "features").let { if (IconPaths.all.containsKey(it)) it else "features" }
+                val v = treeRow(icon, r.optString("name"), r.optString("sub"), dim = r.optBoolean("dim"), strike = false, hidden = false,
+                    error = r.optBoolean("error")) {
+                    if (ask.isNotEmpty()) askAbout(ask) else askAbout("About \"${r.optString("name")}\": ")
+                }
+                if (r.optBoolean("wrap")) ((v as LinearLayout).getChildAt(1) as LinearLayout).getChildAt(0).let { (it as TextView).isSingleLine = false; it.maxLines = 4 }
+                tree.addView(v)
+            }
+        }
+    }
 
     /** An assembly's instances and mates, from the built tree. */
     private fun assemblyTree(t: JSONObject) {
@@ -589,6 +657,10 @@ class DocActivity : Activity() {
                 val d = a.get("/api/doc/${Api.enc(docId)}")
                 runOnUiThread {
                     detail = d
+                    if (first && names(tabKind().list).size <= index && !(kind == "studio" && index == 0)) {
+                        // the remembered tab is gone (deleted on the computer, say)
+                        kind = "studio"; index = 0; page = ""; studio = 0
+                    }
                     buildTree()
                     if (first) {
                         reloadViewer()
@@ -619,25 +691,26 @@ class DocActivity : Activity() {
 
     private fun reloadViewer() {
         val a = api ?: return
-        showWebNote("Building the 3D view on netdash… (a big model can take a minute)")
+        showWebNote(when (kind) {
+            "cam" -> "Simulating the toolpaths on netdash… (this can take a minute)"
+            else -> "Building the 3D view on netdash… (a big model can take a minute)"
+        })
         built = null
+        prefs.setTabFor(docId, "$kind:$index:$page")
         buildTree()
         // app mode: the page drops its own side panel for a "Model" button and takes the app's colours
-        web.loadUrl(a.viewUrl(docId, assembly, studio) + "&app=1")
+        web.loadUrl(a.viewUrl(docId, selection()) + "&app=1")
     }
 
     private fun pickTab() {
-        val studios = names("studios")
-        val asms = names("assemblies")
-        val labels = studios.map { "Part Studio: $it" } + asms.map { "Assembly: $it" }
-        if (labels.isEmpty()) return
-        AlertDialog.Builder(this).setTitle("Show").setItems(labels.toTypedArray()) { _, i ->
-            if (i < studios.size) {
-                studio = i
-                assembly = null
-            } else {
-                assembly = i - studios.size
-            }
+        val tabs = tabKinds.flatMap { k -> names(k.list).mapIndexed { i, n -> Triple(k, i, "${k.label}: $n") } }
+        if (tabs.isEmpty()) return
+        AlertDialog.Builder(this).setTitle("Show").setItems(tabs.map { it.third }.toTypedArray()) { _, i ->
+            val (k, n, _) = tabs[i]
+            kind = k.key
+            index = n
+            page = ""
+            if (kind == "studio") studio = n
             buildTree()
             reloadViewer()
         }.show()
