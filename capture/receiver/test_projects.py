@@ -50,6 +50,16 @@ STUB = textwrap.dedent('''\
                 continue
             elif t in ("export_cam_simulation", "export_setup_sheet"):
                 open(args["path"], "w").write("<html>%s %s</html>" % (t, json.dumps(args)))
+            elif t == "export_drawing":
+                open(args["path"], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297"><text>sheet %d</text></svg>' % args["sheet"])
+            elif t == "drawing_info":
+                print(json.dumps({"tool": t, "result": {"name": "Plate", "sheets": 2, "sheet_size": "A3", "warnings": [],
+                    "views": [{"id": 1, "dir": "front", "scale": 2, "sheet": 1}, {"id": 2, "dir": "section:front", "letter": "A", "scale": 2, "sheet": 1},
+                              {"id": 3, "dir": "iso", "assembly": 0, "scale": 1, "sheet": 2}],
+                    "dimensions": [{"view": 1, "kind": "horizontal", "text": "60"}, {"view": 3, "kind": "diameter", "text": "8"}],
+                    "notes": [{"text": "Break sharp edges", "sheet": 1}], "gdt": [],
+                    "title_block": {"part": "Plate", "material": "AlMg3", "first_angle": False}}}))
+                continue
             elif t == "cam_info":
                 print(json.dumps({"tool": t, "result": {"name": "Plate", "cycle_time_s": 970, "post": "mach3", "errors": [],
                     "tools": [{"id": 1, "number": 3, "description": "6 mm flat end mill", "rpm": 12000, "feed": 800}],
@@ -111,7 +121,8 @@ class ProjectsTest(unittest.TestCase):
         os.makedirs(os.path.join(self.projects_dir, "Bracket", ".rcad-cache"))
         with open(os.path.join(self.projects_dir, "Bracket", "bracket.json"), "w") as f:
             json.dump({"format": "cad-rust-app/workspace-1", "studios": [{"name": "Body", "doc": BODY}],
-                       "assemblies": [{"name": "Arm"}], "cams": [{"name": "Plate"}]}, f, indent=2)
+                       "assemblies": [{"name": "Arm"}], "cams": [{"name": "Plate"}],
+                       "drawings": [{"name": "Plate"}]}, f, indent=2)
         with open(os.path.join(self.projects_dir, "Bracket", "notes.json"), "w") as f:
             f.write('{"not": "a document"}')
         stub = os.path.join(self.tmp, "rcad")
@@ -205,6 +216,26 @@ class ProjectsTest(unittest.TestCase):
         ops = sec["Operations"]["rows"]
         self.assertEqual((ops[0]["sub"], ops[0]["icon"], ops[1]["error"]), ("T3 · 6 mm flat end mill · 59 s", "camPocket", True))
         self.assertEqual(self.req("GET", f"/api/doc/{did}/view?cam=5")[0], 404)
+
+    def test_drawing_tab(self):
+        did = self.doc()[0]["id"]
+        self.assertEqual(self.req("GET", f"/api/doc/{did}")[1]["drawings"], ["Plate"])
+        st, page = self.req("GET", f"/api/doc/{did}/view?drawing=0", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn("<text>sheet 1</text>", page)
+        self.assertIn("Plate · sheet 1", page)
+        st, page = self.req("GET", f"/api/doc/{did}/view?drawing=0&page=2", raw=True)
+        self.assertIn("<text>sheet 2</text>", page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0")
+        self.assertEqual(t["summary"], "A3 · sheet 1 of 2 · 1 dimension · third-angle")
+        self.assertEqual([(p["id"], p["label"]) for p in t["pages"]], [("", "Sheet 1"), ("2", "Sheet 2")])
+        sec = {s["title"]: s for s in t["sections"]}
+        self.assertEqual([r["name"] for r in sec["Views"]["rows"]], ["Front", "Section A"])
+        self.assertEqual([r["name"] for r in sec["Dimensions"]["rows"]], ["60"])
+        self.assertEqual(sec["Title block"]["rows"][1], {"name": "AlMg3", "sub": "Material", "icon": "properties",
+                                                         "ask": "In the drawing's title block, set the material to "})
+        st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0&page=2")
+        self.assertEqual([r["name"] for r in {s["title"]: s for s in t["sections"]}["Views"]["rows"]], ["Iso"])
 
     def test_ids_stay_inside_the_project_folders(self):
         outside = os.path.join(self.tmp, "secret.json")
