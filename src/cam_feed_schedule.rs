@@ -342,6 +342,7 @@ fn profile(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, paths: &[Toolpat
         sim.start_from(m);
     }
     sim.profile = Some(vec![]);
+    crate::cam_sim_saves::keep_ops(&mut sim, cam, paths, 0);
     sim.run_to(usize::MAX, usize::MAX);
     let geoms = (0..paths.len()).map(|i| sim.cutter_model(i)).collect();
     (sim.profile.take().unwrap_or_default(), (sim.cut_model(), geoms, sim.cell))
@@ -607,6 +608,7 @@ pub fn link_feeds(cam: &Cam, part: &Part, stock_in: Option<&StockMap>, mut paths
         }
         sim.profile = Some(vec![]);
         sim.removed_by_move = Some(vec![(0.0, 0.0); sim.total()]);
+        crate::cam_sim_saves::keep_ops(&mut sim, cam, paths, 0);
         sim.run_to(usize::MAX, usize::MAX);
         let removed = sim.removed_by_move.take().unwrap_or_default();
         let prof = sim.profile.take().unwrap_or_default();
