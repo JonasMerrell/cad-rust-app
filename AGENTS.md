@@ -105,7 +105,7 @@ shown the same way: import it, then export the page.
 
     rcad run show.json
 
-For machining work the matching pages are `export_cam_simulation` (toolpath
+For a Simulation tab the matching page is `export_simulation_web`. For machining work the matching pages are `export_cam_simulation` (toolpath
 playback) and `export_setup_sheet`.
 
 ## Tools
@@ -158,6 +158,7 @@ playback) and `export_setup_sheet`.
 | `compare_gcode` | two G-code files side by side, operation by operation (paired by work offset and name): identical, same path with other moves or feeds, or how far the cutting paths stray from each other and where; plus the tool changes, speeds, dwells, stops, messages and `(RCNC …)` probing lines that differ, and the header (tools, stick-outs, stations). For checking a re-post against the program that was cut |
 | `create_simulation` / `edit_simulation` | Simulation tabs: linear elastic static, modal or transient analysis with a material (or each part's own, bonded where parts touch), `loss_factors`, element size, Fixed/Roller supports and Force/Pressure/Gravity loads on face refs (`at` and `radius` for a small impact patch); with no supports, modal and transient are free-free |
 | `solve_simulation` / `render_simulation` | mesh and solve: max stress, deflection, factor of safety, reactions; natural frequencies, each mode's loss factor and 60 dB decay time; peak response over time; colour-map PNG on the deformed shape. Progress goes to stderr. Support and load faces are checked when the simulation is created or edited |
+| `export_simulation_web` | save a Simulation tab's result as a self-contained HTML page: the part coloured by stress, displacement or factor of safety with a deformation slider, mode shapes swinging, a transient response playing over time, tap to read a value |
 | `create_pcb` / `pcb_edit` | PCB tabs: a schematic and a two-layer board (size or outline, thickness, mask colour, design rules); `pcb_edit` also places parts (`at`, `rot`, `side`), adds schematic wires and labels, mounting holes and copper pours, clears routing and lays parts out (`auto_place`) |
 | `pcb_add_parts` / `pcb_connect` | parts from the symbol library with their footprints; nets by pin (`{"GND": ["U1.1", "C1.2"]}`, pins by number or by name), drawn as wire stubs with labels and power/ground ports |
 | `pcb_route` / `check_pcb` | the autorouter (two layers, vias) or tracks and vias by hand; the design rule check |

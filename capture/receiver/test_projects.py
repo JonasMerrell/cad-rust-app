@@ -58,6 +58,8 @@ STUB = textwrap.dedent('''\
                     "reactions": [{"support": "Fixed 1", "magnitude_n": 100}], "material_props": {"E_mpa": 200000, "yield_mpa": 250},
                     "mesh": {"elements": 9024, "nodes": 15041, "element": "10-node tetrahedron", "element_size_mm": 2.5}}}))
                 continue
+            elif t == "export_simulation_web":
+                open(args["path"], "w").write("<html>3D result</html>")
             elif t == "render_simulation":
                 png = b"\\x89PNG\\r\\n\\x1a\\n" + b"\\x00\\x00\\x00\\rIHDR" + (900).to_bytes(4, "big") + (700).to_bytes(4, "big")
                 open(args["path"], "wb").write(png)
@@ -281,11 +283,17 @@ class ProjectsTest(unittest.TestCase):
             if "Solving" not in page:
                 break
             time.sleep(0.2)
+        self.assertEqual(page, "<html>3D result</html>")
+        # the pictures come from the same solve: no new build
+        st, page = self.req("GET", f"/api/doc/{did}/view?simulation=0&page=pictures", raw=True)
         self.assertIn('"label": "Stress"', page)
         self.assertIn('"label": "Safety"', page)
         self.assertIn("data:image/png;base64,", page)
         st, t = self.req("GET", f"/api/doc/{did}/tree?simulation=0")
         self.assertEqual(t["summary"], "Static · Steel · max 62.1 MPa · safety 1.2 · 0.201 mm")
+        self.assertEqual([p["label"] for p in t["pages"]], ["3D", "Pictures"])
+        st, t2 = self.req("GET", f"/api/doc/{did}/tree?simulation=0&page=pictures")
+        self.assertEqual(t2, t)
         sec = {s["title"]: s for s in t["sections"]}
         self.assertEqual(sec["Results"]["rows"][0]["name"], "Factor of safety 1.2")
         self.assertTrue(sec["Results"]["rows"][0]["error"])

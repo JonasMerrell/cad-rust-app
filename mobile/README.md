@@ -25,9 +25,11 @@ to the same small service the rCAD Capture app uploads photos to.
   pan, double-tap to zoom in or back out; chips switch sheets. The tray lists the sheet's views,
   dimensions, GD&T, notes and the title block.
 - **Simulation tabs** (FEA): netdash solves in the background while the phone shows how far it is
-  (a transient solve can take minutes), then shows rCAD's colour-map pictures: stress,
-  displacement and factor of safety for a static study, each mode for a modal one, stress,
-  displacement and the response over time for a transient one. The tray lists the results,
+  (a transient solve can take minutes), then shows the result in 3D (`export_simulation_web`): the
+  part coloured by stress, displacement or factor of safety with a deformation slider, each mode
+  swinging for a modal study, the response playing over time for a transient one, and tap to read
+  a value. A Pictures chip shows rCAD's colour-map pictures from the same solve (and the response
+  over time as a chart). The tray lists the results,
   supports and loads, material and mesh. Results are cached until the document changes.
 - **PCB tabs**: the board's top and bottom copper, the schematic and, when the board has a circuit
   simulation set up, its probes' waveforms; a 3D chip shows the board with its parts in 3D

@@ -55,6 +55,7 @@ mod fea_mesh;
 mod fea_print;
 mod fea_solve;
 mod fea_ui;
+mod fea_web;
 mod circuit;
 mod circuit_mcu;
 mod circuit_mech;
