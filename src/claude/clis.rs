@@ -1,5 +1,6 @@
-//! The chat panel through the Gemini CLI or the Codex CLI instead of Claude: each runs on this
-//! computer with its own sign-in (a Google account with a Gemini plan, or a ChatGPT plan), and
+//! The chat panel through the Gemini CLI, the Codex CLI or the Antigravity CLI instead of Claude:
+//! each runs on this computer with its own sign-in (a Google account with a Gemini plan, a
+//! ChatGPT plan, or a Google account for Antigravity), and
 //! reaches the open document through `rcad mcp --bridge-from-env` and this worker, the same way
 //! the Claude Code mode does.
 //!
@@ -10,6 +11,11 @@
 //!   finds its saved conversations again.
 //! - Codex: a profile, `rcad.config.toml` in the Codex home folder (`~/.codex`), with the cad MCP
 //!   server, rCAD's instructions, a read-only sandbox, no shell and no web search.
+//! - Antigravity (`agy`): a run folder (`agy-run/`) with `.agents/mcp_config.json` (the cad MCP
+//!   server) and `AGENTS.md` (rCAD's instructions); the permissions go per run on the command
+//!   line (`--settings`): the cad tools allowed, commands, file reads and writes and web pages
+//!   denied, and the default mode (not auto, which approves commands by itself headless). Its
+//!   built-in web search has no rule and stays.
 //!
 //! The bridge address and token go to the MCP server through the environment, never through a
 //! file or the command line.
@@ -20,6 +26,7 @@ use super::*;
 pub enum Cli {
     Gemini,
     Codex,
+    Antigravity,
 }
 
 /// What a line of a CLI's JSON output says.
@@ -39,6 +46,7 @@ impl Cli {
         match auth {
             Auth::Gemini => Some(Cli::Gemini),
             Auth::Codex => Some(Cli::Codex),
+            Auth::Antigravity => Some(Cli::Antigravity),
             _ => None,
         }
     }
@@ -47,6 +55,7 @@ impl Cli {
         match self {
             Cli::Gemini => "Gemini CLI",
             Cli::Codex => "Codex",
+            Cli::Antigravity => "Antigravity CLI",
         }
     }
 
@@ -54,6 +63,7 @@ impl Cli {
         match self {
             Cli::Gemini => "gemini",
             Cli::Codex => "codex",
+            Cli::Antigravity => "agy",
         }
     }
 
@@ -62,6 +72,7 @@ impl Cli {
         match self {
             Cli::Gemini => "GEMINI_CLI_PATH",
             Cli::Codex => "CODEX_PATH",
+            Cli::Antigravity => "AGY_PATH",
         }
     }
 
@@ -71,6 +82,7 @@ impl Cli {
         match self {
             Cli::Gemini => "gemini:",
             Cli::Codex => "codex:",
+            Cli::Antigravity => "agy:",
         }
     }
 
@@ -78,6 +90,7 @@ impl Cli {
         let how = match self {
             Cli::Gemini => "npm install -g @google/gemini-cli, then run gemini once to sign in with your Google account",
             Cli::Codex => "npm install -g @openai/codex, then run codex login to sign in with ChatGPT",
+            Cli::Antigravity => "curl -fsSL https://antigravity.google/cli/install.sh | bash, then run agy once to sign in with your Google account",
         };
         format!("The {} is not installed or not on PATH ({how}; or set {} to its full path)", self.label(), self.path_env())
     }
@@ -85,7 +98,7 @@ impl Cli {
 
 /// Which program a saved conversation id belongs to: None for Claude Code.
 pub(super) fn session_cli(id: &str) -> Option<Cli> {
-    [Cli::Gemini, Cli::Codex].into_iter().find(|c| id.starts_with(c.prefix()))
+    [Cli::Gemini, Cli::Codex, Cli::Antigravity].into_iter().find(|c| id.starts_with(c.prefix()))
 }
 
 /// The program, by its path variable or on PATH. On Windows npm installs these as `.cmd` scripts,
@@ -139,7 +152,7 @@ pub fn version(cli: Cli) -> Result<String, String> {
             .filter(|s| !s.is_empty())
             .map(|s| format!(" · {s}"))
             .unwrap_or_default(),
-        Cli::Gemini => String::new(),
+        Cli::Gemini | Cli::Antigravity => String::new(),
     };
     Ok(format!("Found {} {v}{signed_in}", cli.label()))
 }
@@ -182,6 +195,11 @@ pub(super) fn has_session(cli: Cli, id: &str) -> bool {
             }
             walk(&root, id, 0)
         }
+        // ~/.gemini/antigravity-cli/conversations/<id>.db
+        Cli::Antigravity => {
+            let Some(dir) = home().map(|h| h.join(".gemini").join("antigravity-cli").join("conversations")) else { return true };
+            !dir.is_dir() || dir.join(format!("{id}.db")).is_file()
+        }
     }
 }
 
@@ -217,6 +235,31 @@ fn gemini_folder(exe: &std::path::Path) -> Result<PathBuf, String> {
     write(dir.join("GEMINI.md"), &instructions())?;
     write(dir.join("policy.toml"), policy)?;
     Ok(dir)
+}
+
+/// The run folder for the Antigravity CLI, with the cad MCP server and rCAD's instructions.
+fn agy_folder(exe: &std::path::Path) -> Result<PathBuf, String> {
+    let base = settings_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).ok_or("no config folder (HOME is not set)")?;
+    let dir = base.join("agy-run");
+    std::fs::create_dir_all(dir.join(".agents")).map_err(|e| format!("could not make {}: {e}", dir.display()))?;
+    // the server inherits agy's environment, which has the bridge's address and token
+    let mcp = json!({"mcpServers": {"cad": {"command": exe, "args": ["mcp", "--bridge-from-env"], "timeoutSeconds": 900}}});
+    let write = |p: PathBuf, t: &str| write_private(&p, t).map_err(|e| format!("could not write {}: {e}", p.display()));
+    write(dir.join(".agents").join("mcp_config.json"), &serde_json::to_string_pretty(&mcp).unwrap_or_default())?;
+    write(dir.join("AGENTS.md"), &instructions())?;
+    Ok(dir)
+}
+
+/// The Antigravity CLI's settings for one run: only the cad tools, and the default mode.
+fn agy_settings() -> String {
+    json!({
+        "agentMode": "",
+        "permissions": {
+            "allow": ["mcp(cad/*)"],
+            "deny": ["command(*)", "unsandboxed(*)", "read_file(*)", "write_file(*)", "read_url(*)", "execute_url(*)", "download_url(*)"],
+        },
+    })
+    .to_string()
 }
 
 /// Codex's `rcad` profile, written each run (the rCAD program may have moved).
@@ -292,8 +335,33 @@ pub(super) fn args(cli: Cli, folder: &std::path::Path, settings: &Settings, sess
             }
             a.push("-".into());
         }
+        Cli::Antigravity => {
+            // the request comes in on stdin as one stream-json message (see `stdin_text`)
+            a.extend(["--input-format", "stream-json", "--output-format", "stream-json"].map(String::from));
+            a.extend(["--settings".into(), agy_settings()]);
+            // its model ids carry their effort (gemini-4-neon-high); --effort only goes with the
+            // default model (agy refuses both)
+            if !model.is_empty() {
+                a.extend(["--model".into(), model]);
+            } else if matches!(settings.effort.as_str(), "low" | "medium" | "high" | "xhigh" | "max") {
+                a.extend(["--effort".into(), settings.effort.clone()]);
+            }
+            if let Some(id) = session {
+                a.extend(["--conversation".into(), id.into()]);
+            }
+            // print mode with its prompt empty: the prompt is the stdin message
+            a.push("-p=".into());
+        }
     }
     a
+}
+
+/// What goes in on stdin: the request as it is, or (Antigravity) as one stream-json message.
+fn stdin_text(cli: Cli, prompt: &str) -> String {
+    match cli {
+        Cli::Antigravity => format!("{}\n", json!({"event": "user", "message": {"content": prompt}})),
+        _ => prompt.to_string(),
+    }
 }
 
 /// Read one line of the program's JSON output.
@@ -352,6 +420,30 @@ pub(super) fn parse(cli: Cli, v: &Value) -> Vec<CliEvent> {
             }
             _ => {}
         },
+        // init, step_update (user_input, agent_response with text_delta, tool, checkpoint), result
+        Cli::Antigravity => match v["event"].as_str().unwrap_or("") {
+            "init" if !s("conversation_id").is_empty() => out.push(CliEvent::Session(s("conversation_id"))),
+            "step_update" => {
+                let st = &v["step_update"];
+                let delta = st["text_delta"].as_str().unwrap_or("");
+                match st["step_type"].as_str().unwrap_or("") {
+                    "agent_response" if !delta.is_empty() => out.push(CliEvent::Text(delta.to_string())),
+                    "thinking" | "planner_response" if !delta.is_empty() => out.push(CliEvent::Thinking(delta.to_string())),
+                    // its own tools refused by the settings: say so, Claude-style
+                    "tool" if st["state"] == "DONE" && st["tool_info"]["error"]["message"].is_string() && st["tool_info"]["name"] != "call_mcp_tool" => {
+                        out.push(CliEvent::Notice(format!("Antigravity: {} refused ({})", st["tool_info"]["name"].as_str().unwrap_or("a tool"), st["tool_info"]["error"]["message"].as_str().unwrap_or(""))));
+                    }
+                    _ => {}
+                }
+            }
+            "result" => {
+                let r = &v["result"];
+                let ok = r["status"].as_str().is_some_and(|st| st == "SUCCESS");
+                let why = r["error"]["message"].as_str().or(r["error"].as_str()).or(r["status"].as_str()).unwrap_or("unknown error");
+                out.push(CliEvent::Finished((!ok).then(|| format!("Antigravity: {why}"))));
+            }
+            _ => {}
+        },
     }
     out
 }
@@ -376,6 +468,7 @@ impl Chat {
         let private = settings_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).filter(|d| std::fs::create_dir_all(d).is_ok()).ok_or("no config folder (HOME is not set)")?;
         let folder = match cli {
             Cli::Gemini => gemini_folder(&exe)?,
+            Cli::Antigravity => agy_folder(&exe)?,
             Cli::Codex => {
                 codex_profile(&exe)?;
                 let d = private.join("codex-run");
@@ -396,8 +489,8 @@ impl Chat {
                     picture.push(p);
                 }
             }
-            Cli::Gemini if !images.is_empty() => {
-                send(FromWorker::Notice("The Gemini CLI can't be sent pictures, so it gets this request as text only.".into()));
+            Cli::Gemini | Cli::Antigravity if !images.is_empty() => {
+                send(FromWorker::Notice(format!("The {} can't be sent pictures, so it gets this request as text only.", cli.label())));
                 prompt.push_str("\n\n(The user sent pictures with this request, a pencil drawing on the part or photos; they couldn't be passed on. Faces under pencil strokes are listed in the editor block.)");
             }
             _ => {}
@@ -412,6 +505,7 @@ impl Chat {
         cmd.current_dir(&folder).stdin(std::process::Stdio::piped()).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| if e.kind() == std::io::ErrorKind::NotFound { cli.install_hint() } else { format!("could not start the {}: {e}", cli.label()) })?;
         if let Some(mut input) = child.stdin.take() {
+            let prompt = stdin_text(cli, &prompt);
             std::thread::spawn(move || {
                 use std::io::Write;
                 let _ = input.write_all(prompt.as_bytes());
@@ -588,6 +682,46 @@ mod tests {
         assert!(a.windows(2).any(|w| w == ["--allowed-mcp-server-names", "cad"]));
         assert!(a.windows(2).any(|w| w == ["--resume", "fa67"]));
         assert!(!a.iter().any(|x| x == "--model"), "no model: the CLI's own choice");
+    }
+
+    #[test]
+    fn antigravity_stream_json_gives_the_conversation_text_and_end() {
+        let out = r#"{"event":"init","conversation_id":"c195","init":{"cwd":"/r","tools":["call_mcp_tool"],"permission_mode":"request-review"}}
+{"event":"step_update","step_update":{"conversation_id":"c195","step_index":0,"state":"DONE","step_type":"user_input"}}
+{"event":"step_update","step_update":{"conversation_id":"c195","step_index":2,"state":"DONE","step_type":"tool","tool_name":"call_mcp_tool","tool_info":{"name":"call_mcp_tool","parameters":{"ServerName":"cad","ToolName":"describe"},"output":"{}"}}}
+{"event":"step_update","step_update":{"conversation_id":"c195","step_index":3,"state":"ACTIVE","step_type":"agent_response","text_delta":"A plate "}}
+{"event":"step_update","step_update":{"conversation_id":"c195","step_index":3,"state":"DONE","step_type":"agent_response","text_delta":"with a hole.\n"}}
+{"event":"step_update","step_update":{"conversation_id":"c195","step_index":4,"state":"DONE","step_type":"tool","tool_info":{"name":"run_command","error":{"type":"denied","message":"Matches user-configured deny rule"}}}}
+{"event":"result","result":{"conversation_id":"c195","status":"SUCCESS","response":"A plate with a hole.\n","num_turns":1}}"#;
+        assert_eq!(
+            lines(Cli::Antigravity, out),
+            vec![
+                CliEvent::Session("c195".into()),
+                CliEvent::Text("A plate ".into()),
+                CliEvent::Text("with a hole.\n".into()),
+                CliEvent::Notice("Antigravity: run_command refused (Matches user-configured deny rule)".into()),
+                CliEvent::Finished(None),
+            ]
+        );
+        let failed = r#"{"event":"result","result":{"conversation_id":"c195","status":"ERROR","error":{"message":"authentication required"}}}"#;
+        assert_eq!(lines(Cli::Antigravity, failed), vec![CliEvent::Finished(Some("Antigravity: authentication required".into()))]);
+    }
+
+    #[test]
+    fn antigravity_reads_the_request_from_stdin_with_only_the_cad_tools() {
+        let s = Settings { auth: Auth::Antigravity, antigravity_model: "gemini-3.8-flash-medium".into(), effort: "high".into(), ..Settings::default() };
+        let a = args(Cli::Antigravity, std::path::Path::new("/r"), &s, Some("c195"), &[]);
+        assert_eq!(a[..4], ["--input-format", "stream-json", "--output-format", "stream-json"]);
+        let set: Value = serde_json::from_str(&a[5]).unwrap();
+        assert_eq!(set["agentMode"], "");
+        assert_eq!(set["permissions"]["allow"], json!(["mcp(cad/*)"]));
+        assert!(set["permissions"]["deny"].as_array().unwrap().contains(&json!("command(*)")));
+        assert_eq!(a[6..], ["--model", "gemini-3.8-flash-medium", "--conversation", "c195", "-p="]);
+        let a = args(Cli::Antigravity, std::path::Path::new("/r"), &Settings { auth: Auth::Antigravity, effort: "high".into(), ..Settings::default() }, None, &[]);
+        assert_eq!(a[6..], ["--effort", "high", "-p="]);
+        let line: Value = serde_json::from_str(stdin_text(Cli::Antigravity, "make a \"box\"").trim()).unwrap();
+        assert_eq!(line, json!({"event": "user", "message": {"content": "make a \"box\""}}));
+        assert_eq!(session_cli("agy:c195"), Some(Cli::Antigravity));
     }
 
     #[test]

@@ -884,16 +884,20 @@ class DocActivity : Activity() {
         "opus" -> "Opus"
         "sonnet" -> "Sonnet"
         "haiku" -> "Haiku"
+        "agy-neon" -> "Gemini Neon"
+        "agy-flash" -> "Gemini Flash"
         else -> "Model"
     }
 
     private fun pickModel() {
-        val keys = listOf("", "opus", "sonnet", "haiku")
-        val labels = arrayOf("As set in rCAD on netdash", "Opus (plans, hands work to Sonnet/Haiku)", "Sonnet", "Haiku (quickest)")
-        AlertDialog.Builder(this).setTitle("Claude model").setSingleChoiceItems(labels, keys.indexOf(prefs.model).coerceAtLeast(0)) { d, i ->
+        val keys = listOf("", "opus", "sonnet", "haiku", "agy-neon", "agy-flash")
+        val labels = arrayOf("As set in rCAD on netdash", "Opus (plans, hands work to Sonnet/Haiku)", "Sonnet", "Haiku (quickest)",
+            "Gemini 4 Neon, through Antigravity (your Google account; no pictures)", "Gemini 3.8 Flash, through Antigravity (quick; no pictures)")
+        AlertDialog.Builder(this).setTitle("Model").setSingleChoiceItems(labels, keys.indexOf(prefs.model).coerceAtLeast(0)) { d, i ->
             prefs.model = keys[i]
             modelBtn.text = modelLabel()
             d.dismiss()
+            if (keys[i].startsWith("agy") && attachments.isNotEmpty()) toast("Gemini through Antigravity can't see pictures: they won't reach it")
         }.show()
     }
 
@@ -919,7 +923,8 @@ class DocActivity : Activity() {
         resetStream()
         chatBtn.text = (id?.let { cid -> chats().firstOrNull { it.optString("id") == cid }?.optString("title") } ?: "New chat")
         if (id == null) {
-            notice("Claude runs on netdash with your Claude Code sign-in, and edits this document there. The chat is saved with the document, so you can carry on in rCAD on the computer too.", false)
+            notice(if (prefs.model.startsWith("agy")) "Gemini runs on netdash through Google's Antigravity CLI with your Google account, and edits this document there with rCAD's tools. It can't see photos or drawings. The chat is saved with the document, so you can carry on in rCAD on the computer too."
+                else "Claude runs on netdash with your Claude Code sign-in, and edits this document there. The chat is saved with the document, so you can carry on in rCAD on the computer too.", false)
             return
         }
         val a = api ?: return

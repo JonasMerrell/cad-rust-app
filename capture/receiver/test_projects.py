@@ -163,7 +163,7 @@ STUB = textwrap.dedent('''\
         sys.exit(0)
     if a[0] == "chat":
         imgs = [a[i + 1] for i, x in enumerate(a) if x == "--image"]
-        json.dump({"images": imgs, "sizes": [os.path.getsize(p) for p in imgs]},
+        json.dump({"images": imgs, "sizes": [os.path.getsize(p) for p in imgs], "argv": a},
                   open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "chat-args.json"), "w"))
         a = [x for i, x in enumerate(a) if x != "--image" and (i == 0 or a[i - 1] != "--image")]
         o = dict(zip(a[1::2], a[2::2]))
@@ -534,6 +534,19 @@ class ProjectsTest(unittest.TestCase):
         # the photos are removed once the request is done
         time.sleep(0.2)
         self.assertFalse(any(os.path.exists(p) for p in args["images"]))
+
+    def test_antigravity_choice(self):
+        did = self.doc()[0]["id"]
+        st, res = self.req("POST", f"/api/doc/{did}/chat", {"text": "make it", "model": "agy-flash"})
+        self.wait_job(res["job"])
+        args = json.load(open(os.path.join(self.tmp, "chat-args.json")))["argv"]
+        self.assertEqual(args[args.index("--auth") + 1], "antigravity")
+        self.assertEqual(args[args.index("--model") + 1], "gemini-3.8-flash-medium")
+        st, res = self.req("POST", f"/api/doc/{did}/chat", {"text": "again", "model": "haiku"})
+        self.wait_job(res["job"])
+        args = json.load(open(os.path.join(self.tmp, "chat-args.json")))["argv"]
+        self.assertNotIn("--auth", args)
+        self.assertEqual(args[args.index("--model") + 1], "claude-haiku-5-5")
 
     def test_new_project(self):
         st, res = self.req("POST", "/api/projects", {"name": "Hex tray"})
