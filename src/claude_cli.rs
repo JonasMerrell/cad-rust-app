@@ -36,7 +36,7 @@ use crate::claude::{self, Auth, FromWorker, ToWorker};
 use crate::claude_chats::{self, Line};
 
 const USAGE: &str =
-    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] [--image picture.png|photo.jpg]… (--prompt TEXT | --prompt-file F)";
+    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console|gemini|codex] [--model M] [--effort E] [--no-delegate] [--image picture.png|photo.jpg]… (--prompt TEXT | --prompt-file F)";
 
 struct Args {
     doc: PathBuf,
@@ -72,6 +72,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     "claude-code" | "claude_code" => Auth::ClaudeCode,
                     "api-key" | "api_key" | "api" => Auth::ApiKey,
                     "console" => Auth::Console,
+                    // the Gemini or Codex CLI on this computer, with its own sign-in
+                    "gemini" => Auth::Gemini,
+                    "codex" => Auth::Codex,
                     o => return Err(format!("unknown --auth {o}")),
                 })
             }
@@ -136,7 +139,12 @@ pub fn main(args: &[String]) -> i32 {
     // the phone has no sign-in of its own: by default the computer's Claude Code login does the work
     settings.auth = a.auth.unwrap_or(Auth::ClaudeCode);
     if let Some(m) = &a.model {
-        settings.model = m.clone();
+        // --model is the model of the backend in use (empty: the CLI's own default)
+        match settings.auth {
+            Auth::Gemini => settings.gemini_model = m.clone(),
+            Auth::Codex => settings.codex_model = m.clone(),
+            _ => settings.model = m.clone(),
+        }
     }
     if let Some(e) = &a.effort {
         settings.effort = e.clone();

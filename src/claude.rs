@@ -1487,12 +1487,25 @@ mod tests {
 
     #[test]
     fn a_picture_goes_to_claude_code_as_a_stream_json_user_message() {
-        let m = super::cc_user_message("what is this?", &[1, 2, 3]);
+        let m = super::cc_user_message("what is this?", &[vec![1, 2, 3]]);
         assert_eq!(m["type"], "user");
         let c = m["message"]["content"].as_array().unwrap();
         assert_eq!(c[0]["type"], "image");
         assert_eq!(c[0]["source"]["data"], "AQID");
+        assert_eq!(c[0]["source"]["media_type"], "image/png");
         assert_eq!(c[1]["text"], "what is this?");
+    }
+
+    #[test]
+    fn photos_go_as_jpeg_and_several_at_once() {
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0, 0];
+        let m = super::cc_user_message("make this", &[jpeg.clone(), vec![0x89, b'P', b'N', b'G']]);
+        let c = m["message"]["content"].as_array().unwrap();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0]["source"]["media_type"], "image/jpeg");
+        assert_eq!(c[1]["source"]["media_type"], "image/png");
+        assert_eq!(c[2]["text"], "make this");
+        assert_eq!(super::image_type(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp");
     }
 
     #[test]
