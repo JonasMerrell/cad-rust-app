@@ -47,6 +47,7 @@ base64url-encoded, prefixed by the folder's index.
 """
 
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -69,7 +70,7 @@ EXPORT_TIMEOUT = 15 * 60
 # (it is stored in rCAD's build cache as soon as it is built, so it is slow only once)
 BACKGROUND_TIMEOUT = 60 * 60
 # bump when what a cached page holds changes
-VIEW_VERSION = 4
+VIEW_VERSION = 5
 # tab kinds a page can show, by query parameter, and their list in the workspace file
 TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
 # kinds whose page can take minutes (an FEA solve, a big assembly opened the first time): built in the
@@ -81,6 +82,11 @@ QUICK_WAIT = 8
 SHARED_BUILD_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
 SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
+# a phone's web view chokes on millions of triangles (a big assembly's page was 120 MB): 3D pages
+# are thinned to about this many (export_web max_triangles; sharp edges stay)
+PHONE_TRIANGLES = 750_000
+# pages at least this big go out gzipped (a big assembly's page is half the size)
+GZIP_MIN = 64 * 1024
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -405,6 +411,9 @@ class Projects:
     def _run_script(self, rcad, steps, cwd, timeout, results=None, stderr_path=None):
         """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result.
         With `stderr_path`, rcad's progress lines go to that file as they come."""
+        # rCAD's kernel gives up on one Part Studio after 10 minutes unless told otherwise: let a
+        # long build (a big STEP import) run as long as the whole run may
+        env = dict(os.environ, RCAD_KERNEL_TIMEOUT=str(int(timeout)))
         fd, sp = tempfile.mkstemp(suffix=".json", prefix="rcad-mobile-")
         with os.fdopen(fd, "w") as f:
             json.dump(steps, f)
@@ -412,10 +421,10 @@ class Projects:
             # no --stop-on-error: a document whose features fail still opens and exports
             if stderr_path:
                 with open(stderr_path, "w") as ef:
-                    r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout)
+                    r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout, env=env)
                 r.stderr = _tail(stderr_path, 2000)
             else:
-                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             return "rcad took too long"
         except OSError as e:
@@ -500,6 +509,30 @@ class Projects:
                     return self._companion(out, page) if shared else out, None
             return None, "building"
         return self._build(path, kind, index, page, key, out, sel)
+
+    def gzipped(self, out):
+        """A gzip copy of a cached page beside it (made once; a big assembly's page halves), or None
+        when it isn't worth it or can't be made."""
+        gz = out + ".gz"
+        try:
+            if os.path.getsize(out) < GZIP_MIN:
+                return None
+            if os.path.isfile(gz) and os.path.getmtime(gz) >= os.path.getmtime(out):
+                return gz
+        except OSError:
+            return None
+        with self.lock:
+            lk = self.export_locks.setdefault(gz, threading.Lock())
+        with lk:
+            if not (os.path.isfile(gz) and os.path.getmtime(gz) >= os.path.getmtime(out)):
+                tmp = gz + ".tmp"
+                try:
+                    with open(out, "rb") as src, gzip.open(tmp, "wb", compresslevel=6) as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    os.replace(tmp, gz)
+                except OSError:
+                    return None
+        return gz
 
     @staticmethod
     def _companion(out, page):
@@ -889,7 +922,7 @@ def page_steps(kind, index, page, out, ws=None):
     results (by tool name) into what the phone lists beside it."""
     if kind == "assembly":
         return ([{"tool": "assembly_info", "args": {"assembly": index}},
-                 {"tool": "export_web", "args": {"path": out, "assembly": index}}],
+                 {"tool": "export_web", "args": {"path": out, "assembly": index, "max_triangles": PHONE_TRIANGLES}}],
                 lambda by, _out: assembly_tree(by.get("assembly_info") or {}))
     if kind == "cam":
         export = ({"tool": "export_setup_sheet", "args": {"cam": index, "path": out}} if page == "sheet"
@@ -917,7 +950,7 @@ def page_steps(kind, index, page, out, ws=None):
         return ([{"tool": "drawing_info", "args": {"drawing": index}},
                  {"tool": "export_drawing", "args": {"drawing": index, "path": svg, "format": "svg", "sheet": sheet}}], finish)
     steps = [{"tool": "switch_part_studio", "args": {"index": index}}] if index else []
-    steps += [{"tool": "describe", "args": {}}, {"tool": "export_web", "args": {"path": out, "studio": index}}]
+    steps += [{"tool": "describe", "args": {}}, {"tool": "export_web", "args": {"path": out, "studio": index, "max_triangles": PHONE_TRIANGLES}}]
     return steps, lambda by, _out: studio_tree(by.get("describe") or by.get("open_document") or {})
 
 
@@ -1197,7 +1230,7 @@ def pcb_steps(index, page, out, ws):
         steps.append({"tool": "simulate_pcb", "args": {"pcb": index, "csv": csv}})
     files = []
     if page == "3d":
-        steps += [{"tool": "pcb_3d", "args": {"pcb": index}}, {"tool": "export_web", "args": {"path": out}}]
+        steps += [{"tool": "pcb_3d", "args": {"pcb": index}}, {"tool": "export_web", "args": {"path": out, "max_triangles": PHONE_TRIANGLES}}]
     else:
         for k, (label, extra) in enumerate([("Top", {}), ("Bottom", {"layer": "bottom"}), ("Schematic", {"view": "schematic"})]):
             f = f"{out}.{k}.png"
@@ -1598,7 +1631,11 @@ def handle(h, method, p, projects, body=None):
             if not out:
                 h.send_json(404 if err in ("no such document", "no such tab") else 500, {"error": err})
                 return True
-            h.send_file(out, "text/html; charset=utf-8")
+            gz = projects.gzipped(out) if "gzip" in (h.headers.get("Accept-Encoding") or "") else None
+            if gz:
+                h.send_file(gz, "text/html; charset=utf-8", encoding="gzip")
+            else:
+                h.send_file(out, "text/html; charset=utf-8")
             return True
         if method == "GET" and p[3:] == ["tree"]:
             t, err = projects.tree(did, kind, index, page)

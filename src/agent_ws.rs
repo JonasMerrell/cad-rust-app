@@ -1054,10 +1054,23 @@ impl Session {
                         (s, m, vec![])
                     }
                 };
+                let mut meshes = meshes;
+                let full: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
+                let thinned = match a.get("max_triangles").and_then(|v| v.as_u64()) {
+                    Some(max) if (max as usize) < full => {
+                        crate::web_export::thin(&mut meshes, (max as usize).max(1000));
+                        Some(full)
+                    }
+                    _ => None,
+                };
                 let joints = scene.nodes.iter().filter(|n| n.joint.is_some()).count();
                 super::make_parent(&path.to_string_lossy())?;
                 let w = crate::web_export::write(&scene, &meshes, &path, inline).map_err(|e| format!("can't write {}: {e}", path.display()))?;
-                json!({"exported": path, "bytes": w.bytes, "parts": scene.parts.len(), "meshes": w.meshes, "triangles": w.triangles, "joints": joints, "notes": notes})
+                let mut r = json!({"exported": path, "bytes": w.bytes, "parts": scene.parts.len(), "meshes": w.meshes, "triangles": w.triangles, "joints": joints, "notes": notes});
+                if let Some(full) = thinned {
+                    r["thinned_from_triangles"] = json!(full);
+                }
+                r
             }
             "render_assembly" => {
                 let ai = asm_idx(a, self)?;

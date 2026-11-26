@@ -156,9 +156,9 @@ class DocActivity : Activity() {
                     loadBuiltTree()
                     if (kind == "studio" || kind == "assembly" || kind == "cam" || (kind == "simulation" && page != "pictures") || (kind == "pcb" && page == "3d")) {
                         // a 3D page: its first frame hides the note; if it never comes (the page shows
-                        // its own error), stop covering it soon
+                        // its own error), stop covering it after a while
                         val gen = timing.gen
-                        web.postDelayed({ if (gen == timing.gen && timing.loading && !timing.building) pageReady(fallback = true) }, 4000)
+                        web.postDelayed({ if (gen == timing.gen && timing.loading && !timing.building) pageReady(fallback = true) }, 15000)
                     } else {
                         pageReady()
                     }

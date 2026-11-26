@@ -434,6 +434,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("assembly_group", "name") => t("string", "group name (default Group N)"),
         ("assembly_info", "interference") => t("boolean", "also list overlapping instances with their overlap volume"),
         ("export_web", "inline") => t("boolean", "one self-contained page (default true); false writes .json and .bin beside it"),
+        ("export_web", "max_triangles") => json!({"type": "integer", "minimum": 1000, "description": "thin the meshes to about this many triangles in all (curved and imported detail first; sharp edges stay), for phones and big assemblies"}),
         ("export_web", "assembly") => json!({"type": "integer", "minimum": 0, "description": "the assembly to show (default: the parts of a Part Studio)"}),
         ("render_assembly", "fit_box") => json!({"type": "array", "items": {"type": "array", "items": {"type": "number"}, "minItems": 3, "maxItems": 3}, "minItems": 2, "maxItems": 2, "description": "[[x, y, z], [x, y, z]] mm: frame this box instead of the whole assembly (a close-up)"}),
         ("render_assembly", "explode") => json!({"type": "number", "minimum": 0, "maximum": 1, "description": "0..1 through the explode steps"}),

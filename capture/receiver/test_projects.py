@@ -334,6 +334,23 @@ class ProjectsTest(unittest.TestCase):
         st, t = self.req("GET", f"/api/doc/{did}/tree?assembly=0")
         self.assertEqual(t["instances"][0]["name"], "Body <1>")
 
+    def test_pages_go_out_gzipped(self):
+        import gzip as gz
+        old = rp.GZIP_MIN
+        rp.GZIP_MIN = 0
+        self.addCleanup(setattr, rp, "GZIP_MIN", old)
+        did = self.doc()[0]["id"]
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("GET", f"/api/doc/{did}/view?studio=0&t=tok", headers={"Accept-Encoding": "gzip, deflate"})
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+        self.assertIn(b"<html>Body", gz.decompress(body))
+        # a client that doesn't take gzip gets the page as it is
+        st, page = self.req("GET", f"/api/doc/{did}/view?studio=0", raw=True)
+        self.assertTrue(page.startswith("<html>Body"))
+
     def test_simulation_tab_solves_in_the_background(self):
         self.quick_wait(0)
         did = self.doc()[0]["id"]

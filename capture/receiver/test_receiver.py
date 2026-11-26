@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 
@@ -63,7 +64,12 @@ class ReceiverTest(unittest.TestCase):
         try:
             self.req("GET", "/api/ping?t=tok&x=1", token=None)
             self.req("GET", "/api/ping")
-            log = sys.stderr.getvalue()
+            # the line is written just after the response goes out
+            for _ in range(50):
+                log = sys.stderr.getvalue()
+                if log.count("\n") >= 2:
+                    break
+                time.sleep(0.02)
         finally:
             sys.stderr = old
         self.assertNotIn("tok", log)

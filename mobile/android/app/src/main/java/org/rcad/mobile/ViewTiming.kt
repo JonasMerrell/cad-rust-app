@@ -50,6 +50,13 @@ class ViewTiming {
                 lines += "${secs(n.optLong("response"))}  netdash finished sending (${kb(n.optLong("size"))})"
                 lines += "${secs(n.optLong("dom"))}  page parsed and its scripts run"
             }
+            val markNames = mapOf("rcad-decoded" to "model data decoded", "rcad-built" to "3D scene built", "rcad-ready" to "page set up, first frame next")
+            p.optJSONArray("marks")?.let { r ->
+                for (i in 0 until r.length()) {
+                    val e = r.getJSONArray(i)
+                    lines += "${secs(e.optLong(1))}  ${markNames[e.optString(0)] ?: e.optString(0)}"
+                }
+            }
             p.optJSONArray("res")?.let { r ->
                 for (i in 0 until r.length()) {
                     val e = r.getJSONArray(i)
@@ -69,6 +76,7 @@ class ViewTiming {
         /** Run in the page: navigation and resource timing, in ms from the request's start. */
         const val JS = """(function(){var n=performance.getEntriesByType('navigation')[0]||{};
 return JSON.stringify({nav:{response:Math.round(n.responseEnd||0),dom:Math.round(n.domContentLoadedEventEnd||0),size:n.transferSize||n.encodedBodySize||0},
+marks:performance.getEntriesByType('mark').map(function(e){return [e.name,Math.round(e.startTime)];}),
 res:performance.getEntriesByType('resource').map(function(e){return [e.name.split('?')[0].split('/').pop(),Math.round(e.startTime),Math.round(e.duration),e.transferSize||0];})});})()"""
     }
 }

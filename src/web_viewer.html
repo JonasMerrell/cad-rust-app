@@ -182,6 +182,7 @@ try {
     const bin = atob(window.BLOB64);
     B = new Uint8Array(bin.length);
     for (let i = 0; i < bin.length; i++) B[i] = bin.charCodeAt(i);
+    performance.mark('rcad-decoded');
   } else {
     S = await (await fetch(window.SCENE_URL)).json();
     B = new Uint8Array(await (await fetch(window.BLOB_URL)).arrayBuffer());
@@ -898,6 +899,7 @@ function frame(now) {
   requestAnimationFrame(frame);
 }
 
+performance.mark('rcad-built');
 update();
 items.forEach(it => box.expandByObject(it.mesh));
 syncRows();
@@ -910,6 +912,7 @@ applyLayers();
 background();
 resize();
 fit(VIEWS.iso);
+performance.mark('rcad-ready');
 loading.remove();
 requestAnimationFrame(frame);
 // the rCAD phone app hides its loading note once the first frame is on screen

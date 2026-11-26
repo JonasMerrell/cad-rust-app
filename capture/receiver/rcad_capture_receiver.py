@@ -300,7 +300,7 @@ class Handler(BaseHTTPRequestHandler):
         path = urllib.parse.urlparse(self.path).path
         return [urllib.parse.unquote(p) for p in path.strip("/").split("/") if p]
 
-    def send_file(self, path, ctype, name=None):
+    def send_file(self, path, ctype, name=None, encoding=None):
         try:
             f = open(path, "rb")
         except OSError:
@@ -310,6 +310,9 @@ class Handler(BaseHTTPRequestHandler):
             self.send_response(200)
             self.send_header("Content-Type", ctype)
             self.send_header("Content-Length", str(size))
+            if encoding:
+                self.send_header("Content-Encoding", encoding)
+                self.send_header("Vary", "Accept-Encoding")
             if name:
                 self.send_header("Content-Disposition", f'attachment; filename="{name}"')
             self.end_headers()
