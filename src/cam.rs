@@ -1403,6 +1403,10 @@ pub struct Machine {
     /// give the motor more voltage there: 1 in theory; the DMC2 (H100 at F004 = 150: rated 9000, 1118 W): 0.76.
     #[serde(default)]
     pub spindle_above_rated: f64,
+    /// The most a chamfer cut may take in one pass, mm (chamfer mills, V-bits and spot drills in chamfer and
+    /// deburr ops): the chamfer's width as the op gives it, the cone's depth into the material times the tan of
+    /// its half angle. More is a problem in the simulation. 0 = no check. The DMC2: 0.75.
+    pub max_chamfer_cut: f64,
 }
 
 impl Default for Machine {
@@ -1430,6 +1434,7 @@ impl Default for Machine {
             spindle_low_rpm: 0.0,
             spindle_low_torque: 0.0,
             spindle_above_rated: 0.0,
+            max_chamfer_cut: 0.75,
         }
     }
 }

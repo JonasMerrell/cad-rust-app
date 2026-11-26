@@ -308,7 +308,7 @@ pub fn page(c: &Cam, part: &Part, paths: &[Toolpath], mut sim: Sim) -> Result<St
         .map(|e| {
             let t = if e.step == 0 { 0.0 } else { ends.get(e.step - 1).copied().unwrap_or(total_t) };
             let t1 = ends.get(e.step).copied().unwrap_or(total_t);
-            json!({"kind": format!("{:?}", e.kind).to_lowercase(), "what": if e.what.is_empty() { e.kind.label().to_string() } else { e.what.clone() }, "op": names(e.op), "at": e.at, "depth": e.depth, "t": t, "t1": t1})
+            json!({"kind": e.kind.key(), "what": if e.what.is_empty() { e.kind.label().to_string() } else { e.what.clone() }, "op": names(e.op), "at": e.at, "depth": e.depth, "t": t, "t1": t1})
         })
         .collect();
 

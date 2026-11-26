@@ -3353,6 +3353,8 @@ mod tests {
         assert!((total - 140.0).abs() < 1e-6, "{total}");
         assert_eq!(edges.len(), 1);
         let mut c = Cam::default();
+        // stock cut to the part: an edge break through the default 1 mm of stock over it takes too much in one pass
+        (c.stock.side, c.stock.top) = (0.0, 0.0);
         let t = tool(&mut c, ToolKind::Chamfer, 6.0);
         let id = c.add_op(OpKind::Deburr, t);
         let (s, paths) = sim(&c, &part);

@@ -1178,6 +1178,16 @@ fn setup_ui(app: &mut App, ui: &mut Ui, page: Page) {
             ui.add(limit_value(&mut c.machine.rapid_z, " mm/min")).on_hover_text("Z rapid rate for cycle times; not set: same as Rapid X/Y");
         });
         num(ui, "Spin-up wait", &mut c.machine.spin_up, " s", 0.0..=60.0, 0.5);
+        row(ui, "Max chamfer cut", |ui| {
+            ui.add(
+                egui::DragValue::new(&mut c.machine.max_chamfer_cut)
+                    .range(0.0..=20.0)
+                    .speed(0.01)
+                    .max_decimals(2)
+                    .custom_formatter(|x, _| if x == 0.0 { "no check".into() } else { format!("{} mm", cam::fmt_mm(x)) }),
+            )
+            .on_hover_text("The widest chamfer a chamfer mill, V-bit or spot drill may take in one pass; the simulation flags a pass that takes more. 0: no check");
+        });
         coolant_combo(ui, "cam-setup-coolant", &mut c.coolant, "auto (flood on metal)");
         ui.checkbox(&mut c.machine.tool_changer, "Automatic tool changer").on_hover_text("Without one the program stops (M0) with a message for you to change tools");
         ui.checkbox(&mut c.arcs, "Arcs in the G-code (G2/G3)").on_hover_text("Write arcs where the toolpath runs along circles: shorter files and smoother motion than many short lines");

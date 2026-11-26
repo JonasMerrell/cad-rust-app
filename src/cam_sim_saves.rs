@@ -25,7 +25,7 @@ use crate::cam_sim::Sim;
 use crate::cam_sim_cache::Fnv;
 
 /// Bump when the simulator's state or results change in a way the app version doesn't capture.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 /// The folder inside a build-cache folder.
 pub const SUB: &str = "cam-ops";
 const EXT: &str = "state.gz";

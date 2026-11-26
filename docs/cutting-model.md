@@ -68,6 +68,13 @@ heaviest point. Above 85%: caution; above 100%: an Overload problem. Generated t
 The older geometric rule (allowed depth for the width engaged, cross-section ≤ 0.4 D² carbide / 0.24 D² HSS)
 is still reported as `geometric`.
 
+Chamfer cuts are checked by size, not by the model above: in chamfer and deburr ops (and a chamfer mill in
+any op but drilling and engraving) each tool position's deepest cut along the tool axis, times the tan of the
+cone's half angle, is the chamfer width that pass takes (for a 90° chamfer mill the depth itself; on a fresh
+square edge the op's own `chamfer`). Wider than the machine's `max_chamfer_cut` (default 0.75 mm, the DMC2's
+limit; 0 turns the check off) is a `chamfer_overload` problem, one per operation, at its biggest cut. It blocks
+`export_gcode` like any other problem; take the chamfer in passes, or rough the edge first.
+
 Also per operation: the share of feed time cutting nothing (air) or next to nothing (under 5% of its own
 step-down × stepover), and machined part surface left more than 0.1 mm proud (roughing no finishing pass
 followed).

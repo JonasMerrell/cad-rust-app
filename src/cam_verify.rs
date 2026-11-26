@@ -112,7 +112,14 @@ pub fn read_stamp(text: &str) -> Option<(bool, Option<u64>)> {
 /// (its `(name - Kind)` comment) and tool (`T<n> M6`). `G53` moves (machine Z) go to `safe` (setup Z).
 /// Arcs (G2/G3, centre from I/J relative to the start, XY plane) become short lines.
 pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Toolpath>, String> {
+    parse_lines(text, cam, origin, safe).map(|r| r.0)
+}
+
+/// `parse`, and the line (from 1) each move was read from, the moves of all toolpaths in order: a simulation of
+/// them has a problem at move `step` on line `lines[step]`.
+pub fn parse_lines(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<(Vec<Toolpath>, Vec<usize>), String> {
     let mut paths: Vec<Toolpath> = vec![];
+    let mut lines: Vec<Vec<usize>> = vec![];
     let mut pos = DVec3::new(0.0, 0.0, safe - origin.z);
     let (mut motion, mut feed, mut tool, mut op) = (0u8, 1000.0f64, 0u64, 0u64);
     let mut cur = |paths: &mut Vec<Toolpath>, op: u64, tool: u64| -> usize {
@@ -193,6 +200,8 @@ pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Tool
                 if tool != 0 {
                     let k = cur(&mut paths, op, tool);
                     paths[k].moves.push(Move::Rapid((pos + origin).to_array()));
+                    lines.resize(paths.len(), vec![]);
+                    lines[k].push(n + 1);
                 }
             }
             continue;
@@ -214,6 +223,8 @@ pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Tool
             continue;
         }
         let k = cur(&mut paths, op, tool);
+        lines.resize(paths.len(), vec![]);
+        let before = paths[k].moves.len();
         match motion {
             0 => paths[k].moves.push(Move::Rapid((to + origin).to_array())),
             1 => paths[k].moves.push(Move::Feed((to + origin).to_array(), feed)),
@@ -243,13 +254,15 @@ pub fn parse(text: &str, cam: &Cam, origin: DVec3, safe: f64) -> Result<Vec<Tool
                 }
             }
         }
+        let added = paths[k].moves.len() - before;
+        lines[k].extend(std::iter::repeat_n(n + 1, added));
         pos = to;
     }
     // a move read with no tool would simulate nothing: refuse rather than call the program clean
     if let Some(p) = paths.iter().find(|p| p.tool == 0 && p.moves.iter().any(|m| matches!(m, Move::Feed(..)))) {
         return Err(format!("can't tell which tool cuts in '{}': no T<n> M6 or (load T<n>) before its moves", cam.op(p.op).map(|o| o.name.as_str()).unwrap_or("the program")));
     }
-    Ok(paths)
+    Ok((paths, lines.concat()))
 }
 
 #[cfg(test)]
