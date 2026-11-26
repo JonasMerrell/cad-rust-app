@@ -69,6 +69,7 @@ label.chk { display: inline-flex; gap: 6px; align-items: center; cursor: pointer
 #views button { background: color-mix(in srgb, var(--panel) 90%, transparent); }
 #hint { position: absolute; left: 12px; bottom: max(12px, env(safe-area-inset-bottom, 0px)); color: var(--muted); font-size: 12px; pointer-events: none; max-width: 60%; }
 #loading { position: absolute; inset: 0; display: grid; place-items: center; color: var(--muted); font-size: 14px; }
+.pin3d { position: absolute; font: 12px var(--ui); color: #3a2a00; background: #f59e0b; padding: 2px 7px; border-radius: 9px 9px 9px 2px; max-width: 150px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; transform: translate(0, -100%); box-shadow: 0 1px 3px #0005; cursor: pointer; }
 .label3d { position: absolute; font: 11px var(--ui); color: var(--accent); background: color-mix(in srgb, var(--panel) 80%, transparent); padding: 1px 5px; border-radius: 4px; pointer-events: none; white-space: nowrap; transform: translate(-50%, -130%); }
 #drawer { display: none; }
 @media (max-width: 760px) {
@@ -591,6 +592,41 @@ function treeRows(parent, depth) {
 }
 treeRows(null, 0);
 
+// ---------------------------------------------------------------- the rCAD phone app
+// The app (window.RcadApp, an Android bridge) drives these: tap to place a note, notes as pins,
+// a snapshot and the parts under its pencil strokes. A page opened elsewhere never uses them.
+let appPins = [];
+const appApi = window.rcadApp = {
+  mode: null,
+  setMode(m) { appApi.mode = m || null; },
+  // [{id, text, at: [x, y, z]}] in the model's coordinates (a Part Studio's page)
+  pins(list) {
+    for (const p of appPins) { p.el.remove(); labels.splice(labels.indexOf(p), 1); }
+    appPins = (list || []).map(n => {
+      const el = document.createElement('div');
+      el.className = 'pin3d'; el.textContent = n.text;
+      el.addEventListener('click', ev => { ev.stopPropagation(); if (window.RcadApp && RcadApp.note) RcadApp.note(n.id); });
+      stageEl.appendChild(el);
+      const l = { el, obj: scene, at: new THREE.Vector3(n.at[0], n.at[1], n.at[2]) };
+      labels.push(l);
+      return l;
+    });
+    dirty = true;
+  },
+  // (drawn again on the next frame: reading the canvas leaves it blank until then)
+  snapshot() { renderer.render(scene, camera); const url = canvas.toDataURL('image/jpeg', 0.88); dirty = true; return url; },
+  // the names of the parts under these points ([[x, y]] in CSS px of the page)
+  partsAt(pts) {
+    const r = canvas.getBoundingClientRect(), names = [];
+    for (const [x, y] of pts || []) {
+      const h = pick({ clientX: r.left + x, clientY: r.top + y });
+      const n = h && h.object.userData.item.name;
+      if (n && !names.includes(n)) names.push(n);
+    }
+    return JSON.stringify(names);
+  },
+};
+
 // ---------------------------------------------------------------- picking, selection, dragging
 const ray = new THREE.Raycaster();
 const ndc = new THREE.Vector2();
@@ -670,6 +706,15 @@ canvas.addEventListener('pointermove', ev => {
 canvas.addEventListener('pointerup', ev => {
   const click = downAt && Math.hypot(ev.clientX - downAt.x, ev.clientY - downAt.y) < 4;
   if (drag) { controls.enabled = true; if (click) select(drag.item); drag = null; return; }
+  if (click && ev.button === 0 && appApi.mode === 'note') {
+    // the phone app is placing a note: report the point and the face's outward normal
+    const h = pick(ev);
+    if (h && window.RcadApp) {
+      const n = h.face ? h.face.normal.clone().transformDirection(h.object.matrixWorld) : new THREE.Vector3(0, 0, 1);
+      RcadApp.picked(JSON.stringify({ at: h.point.toArray(), normal: n.toArray(), part: h.object.userData.item.name }));
+    }
+    return;
+  }
   if (click && ev.button === 0) { const h = pick(ev); select(h ? h.object.userData.item : null); }
 });
 canvas.addEventListener('keydown', ev => {

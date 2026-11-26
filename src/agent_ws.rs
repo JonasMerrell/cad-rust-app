@@ -1037,6 +1037,66 @@ impl Session {
                 self.sync();
                 self.asm_info(ai, a.get("interference").and_then(|v| v.as_bool()).unwrap_or(false))?
             }
+            "note" => {
+                // notes pinned to faces: Claude sees them with every request (describe lists them)
+                let studio = a.get("studio").and_then(|v| v.as_u64()).map(|s| s as usize).unwrap_or(self.cur);
+                if studio >= self.ws.studios.len().max(1) {
+                    return Err(format!("no Part Studio {studio}"));
+                }
+                let action = a.get("action").and_then(|v| v.as_str()).unwrap_or("add");
+                let text = a.get("text").and_then(|v| v.as_str()).map(|t| t.trim().to_string()).unwrap_or_default();
+                let xyz = |k: &str| -> Option<[f64; 3]> {
+                    let v: Vec<f64> = a.get(k)?.as_array()?.iter().filter_map(|x| x.as_f64()).collect();
+                    (v.len() == 3).then(|| [v[0], v[1], v[2]])
+                };
+                self.sync();
+                let face = if action == "add" {
+                    let at = xyz("at").ok_or("give at: [x, y, z], a point on a face")?;
+                    self.ensure_built(studio)?;
+                    // the face under the point, so the pin follows it when a rebuild moves it
+                    let p = DVec3::from(at);
+                    let hit = self.bodies(studio).iter().find_map(|b| {
+                        b.indices.chunks(3).enumerate().find_map(|(ti, tri)| {
+                            let v = |i: u32| DVec3::new(b.positions[3 * i as usize] as f64, b.positions[3 * i as usize + 1] as f64, b.positions[3 * i as usize + 2] as f64);
+                            (crate::kernel::point_triangle_distance(p, v(tri[0]), v(tri[1]), v(tri[2])) < 1e-3 * (1.0 + p.length())).then(|| b.faces[b.tri_face[ti] as usize].name.clone())
+                        })
+                    });
+                    Some((at, crate::doc::TopoName(hit.flatten().into_iter().collect())))
+                } else {
+                    None
+                };
+                let doc = if studio == self.cur { &mut self.doc } else { &mut self.ws.studios[studio].doc };
+                let out = match (action, face) {
+                    ("add", Some((at, face))) => {
+                        if text.is_empty() {
+                            return Err("give the note's text".into());
+                        }
+                        let normal = xyz("normal").unwrap_or([0.0, 0.0, 1.0]);
+                        let id = doc.notes.iter().map(|n| n.id).max().unwrap_or(0) + 1;
+                        doc.notes.push(crate::doc::Note { id, text, at, normal, face });
+                        json!({"added": id})
+                    }
+                    ("edit", _) | ("delete", _) => {
+                        let id = a.get("id").and_then(|v| v.as_u64()).ok_or("give the note's id")?;
+                        let i = doc.notes.iter().position(|n| n.id == id).ok_or_else(|| format!("no note {id}"))?;
+                        if action == "delete" || text.is_empty() {
+                            doc.notes.remove(i);
+                            json!({"deleted": id})
+                        } else {
+                            doc.notes[i].text = text;
+                            json!({"edited": id})
+                        }
+                    }
+                    _ => return Err("action is add, edit or delete".into()),
+                };
+                let list: Vec<Value> = doc.notes.iter().map(|n| json!({"id": n.id, "text": n.text, "at": n.at})).collect();
+                if studio == self.cur {
+                    self.sync();
+                }
+                let mut out = out;
+                out["notes"] = json!(list);
+                out
+            }
             "export_web" => {
                 let path = std::path::PathBuf::from(super::str_arg(a, "path")?);
                 let inline = a.get("inline").and_then(|v| v.as_bool()).unwrap_or(true);
