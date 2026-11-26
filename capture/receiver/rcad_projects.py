@@ -47,6 +47,7 @@ base64url-encoded, prefixed by the folder's index.
 """
 
 import base64
+import gzip
 import hashlib
 import json
 import os
@@ -65,16 +66,27 @@ MAX_DEPTH = 4
 CACHE_DIR = os.path.expanduser("~/.cache/rcad-mobile")
 JOB_KEEP_SECS = 3600
 EXPORT_TIMEOUT = 15 * 60
+# a background build has no request waiting on it: give a first import of a big STEP file time
+# (it is stored in rCAD's build cache as soon as it is built, so it is slow only once)
+BACKGROUND_TIMEOUT = 60 * 60
 # bump when what a cached page holds changes
-VIEW_VERSION = 3
+VIEW_VERSION = 5
 # tab kinds a page can show, by query parameter, and their list in the workspace file
 TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
-# kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress
-BACKGROUND_KINDS = {"simulation"}
+# kinds whose page can take minutes (an FEA solve, a big assembly opened the first time): built in the
+# background while the phone shows progress. A request waits QUICK_WAIT seconds first, so a page that
+# builds quickly comes back as it is.
+BACKGROUND_KINDS = {"simulation", "assembly", "studio"}
+QUICK_WAIT = 8
 # kinds whose pages all come from one rcad run (a Simulation tab's 3D page and its pictures)
 SHARED_BUILD_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
 SHOWN_PARAMS = ("depth", "radius", "distance", "thickness", "angle", "count", "count2", "offset", "pitch", "height", "end", "op")
+# a phone's web view chokes on millions of triangles (a big assembly's page was 120 MB): 3D pages
+# are thinned to about this many (export_web max_triangles; sharp edges stay)
+PHONE_TRIANGLES = 750_000
+# pages at least this big go out gzipped (a big assembly's page is half the size)
+GZIP_MIN = 64 * 1024
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
@@ -242,6 +254,7 @@ class Projects:
         self.info_cache = {}  # path -> (mtime, size, info)
         self.export_locks = {}
         self.building = {}  # cache key -> start time, for background builds
+        self.build_done = {}  # cache key -> Event set when its background build ends
         self.build_errors = {}  # cache key -> error of a background build that failed
         self.gh_status = None  # (time, `rcad github status`)
         self.gh_device = None  # (device code, expiry) of a sign-in under way
@@ -398,6 +411,9 @@ class Projects:
     def _run_script(self, rcad, steps, cwd, timeout, results=None, stderr_path=None):
         """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result.
         With `stderr_path`, rcad's progress lines go to that file as they come."""
+        # rCAD's kernel gives up on one Part Studio after 10 minutes unless told otherwise: let a
+        # long build (a big STEP import) run as long as the whole run may
+        env = dict(os.environ, RCAD_KERNEL_TIMEOUT=str(int(timeout)))
         fd, sp = tempfile.mkstemp(suffix=".json", prefix="rcad-mobile-")
         with os.fdopen(fd, "w") as f:
             json.dump(steps, f)
@@ -405,10 +421,10 @@ class Projects:
             # no --stop-on-error: a document whose features fail still opens and exports
             if stderr_path:
                 with open(stderr_path, "w") as ef:
-                    r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout)
+                    r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout, env=env)
                 r.stderr = _tail(stderr_path, 2000)
             else:
-                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout)
+                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             return "rcad took too long"
         except OSError as e:
@@ -480,9 +496,43 @@ class Projects:
                     return None, err  # shown once; asking again tries again
                 if key not in self.building:
                     self.building[key] = time.time()
+                    self.build_done[key] = threading.Event()
                     threading.Thread(target=self._build_bg, args=(path, kind, index, "" if shared else page, key, out, sel), daemon=True).start()
+                done = self.build_done.get(key)
+            # most pages build in a second or two: wait for those rather than show the progress page
+            if done and done.wait(max(0.0, QUICK_WAIT - (time.time() - self.building.get(key, time.time())))):
+                with self.lock:
+                    err = self.build_errors.pop(key, None)
+                if err:
+                    return None, err
+                if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
+                    return self._companion(out, page) if shared else out, None
             return None, "building"
         return self._build(path, kind, index, page, key, out, sel)
+
+    def gzipped(self, out):
+        """A gzip copy of a cached page beside it (made once; a big assembly's page halves), or None
+        when it isn't worth it or can't be made."""
+        gz = out + ".gz"
+        try:
+            if os.path.getsize(out) < GZIP_MIN:
+                return None
+            if os.path.isfile(gz) and os.path.getmtime(gz) >= os.path.getmtime(out):
+                return gz
+        except OSError:
+            return None
+        with self.lock:
+            lk = self.export_locks.setdefault(gz, threading.Lock())
+        with lk:
+            if not (os.path.isfile(gz) and os.path.getmtime(gz) >= os.path.getmtime(out)):
+                tmp = gz + ".tmp"
+                try:
+                    with open(out, "rb") as src, gzip.open(tmp, "wb", compresslevel=6) as dst:
+                        shutil.copyfileobj(src, dst, 1 << 20)
+                    os.replace(tmp, gz)
+                except OSError:
+                    return None
+        return gz
 
     @staticmethod
     def _companion(out, page):
@@ -494,13 +544,16 @@ class Projects:
 
     def _build_bg(self, path, kind, index, page, key, out, sel):
         try:
-            _, err = self._build(path, kind, index, page, key, out, sel, stderr_path=out[:-5] + ".progress")
+            _, err = self._build(path, kind, index, page, key, out, sel, stderr_path=out[:-5] + ".progress", timeout=BACKGROUND_TIMEOUT)
         except Exception as e:  # keep the receiver up whatever happens
             err = f"{type(e).__name__}: {e}"
         with self.lock:
             self.building.pop(key, None)
             if err:
                 self.build_errors[key] = err
+            done = self.build_done.pop(key, None)
+        if done:
+            done.set()
 
     def progress(self, did, kind="studio", index=0, page=""):
         """For a page being built in the background: (seconds so far, rCAD's last progress line)."""
@@ -511,9 +564,12 @@ class Projects:
         with self.lock:
             t0 = self.building.get(key)
         lines = [ln.strip() for ln in re.split(r"[\r\n]+", _tail(out[:-5] + ".progress", 600)) if ln.strip()]
+        if kind != "simulation":
+            # rCAD's own progress lines, not the modelling kernel's messages
+            lines = [ln for ln in lines if ln.startswith("Building ")]
         return (time.time() - t0 if t0 else 0), (lines[-1] if lines else "")
 
-    def _build(self, path, kind, index, page, key, out, sel, stderr_path=None):
+    def _build(self, path, kind, index, page, key, out, sel, stderr_path=None, timeout=EXPORT_TIMEOUT):
         with self.lock:
             lk = self.export_locks.setdefault(key, threading.Lock())
         with lk:
@@ -528,7 +584,7 @@ class Projects:
             steps, finish = page_steps(kind, index, page, tmp, ws if isinstance(ws, dict) else {})
             steps.insert(0, {"tool": "open_document", "args": {"path": path}})
             results = []
-            err = self._run_script(self.rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT, results, stderr_path)
+            err = self._run_script(self.rcad, steps, os.path.dirname(path), timeout, results, stderr_path)
             by = {}
             for v in results:
                 if isinstance(v.get("result"), dict):
@@ -866,7 +922,7 @@ def page_steps(kind, index, page, out, ws=None):
     results (by tool name) into what the phone lists beside it."""
     if kind == "assembly":
         return ([{"tool": "assembly_info", "args": {"assembly": index}},
-                 {"tool": "export_web", "args": {"path": out, "assembly": index}}],
+                 {"tool": "export_web", "args": {"path": out, "assembly": index, "max_triangles": PHONE_TRIANGLES}}],
                 lambda by, _out: assembly_tree(by.get("assembly_info") or {}))
     if kind == "cam":
         export = ({"tool": "export_setup_sheet", "args": {"cam": index, "path": out}} if page == "sheet"
@@ -894,7 +950,7 @@ def page_steps(kind, index, page, out, ws=None):
         return ([{"tool": "drawing_info", "args": {"drawing": index}},
                  {"tool": "export_drawing", "args": {"drawing": index, "path": svg, "format": "svg", "sheet": sheet}}], finish)
     steps = [{"tool": "switch_part_studio", "args": {"index": index}}] if index else []
-    steps += [{"tool": "describe", "args": {}}, {"tool": "export_web", "args": {"path": out, "studio": index}}]
+    steps += [{"tool": "describe", "args": {}}, {"tool": "export_web", "args": {"path": out, "studio": index, "max_triangles": PHONE_TRIANGLES}}]
     return steps, lambda by, _out: studio_tree(by.get("describe") or by.get("open_document") or {})
 
 
@@ -1047,13 +1103,20 @@ body { display: grid; place-items: center; text-align: center; padding: 0 24px; 
 @keyframes go { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 </style></head><body>
 <div><div>__WHAT__</div><div class="t">__PROGRESS__</div><div class="bar"><div></div></div></div>
-<script>setTimeout(() => location.reload(), 3000);</script>
+<script>
+// the rCAD phone app: this is netdash still working, not the page loading
+if (window.RcadApp && RcadApp.building) RcadApp.building();
+setTimeout(() => location.reload(), 3000);
+</script>
 </body></html>
 """
 
 
 def building_page(kind, secs, line):
-    what = {"simulation": "Solving the simulation on netdash…"}.get(kind, "Working on netdash…")
+    what = {"simulation": "Solving the simulation on netdash…", "assembly": "Building the assembly on netdash…",
+            "studio": "Building the Part Studio on netdash…"}.get(kind, "Working on netdash…")
+    if kind in ("assembly", "studio") and secs > 20:
+        what += "<div class=t>The first time takes longest: every Part Studio it uses is built and kept for next time.</div>"
     m, sec = divmod(int(secs), 60)
     prog = (html_escape(line) + " · " if line else "") + f"{m}:{sec:02d}"
     return BUILDING_PAGE.replace("__WHAT__", what).replace("__PROGRESS__", prog)
@@ -1167,7 +1230,7 @@ def pcb_steps(index, page, out, ws):
         steps.append({"tool": "simulate_pcb", "args": {"pcb": index, "csv": csv}})
     files = []
     if page == "3d":
-        steps += [{"tool": "pcb_3d", "args": {"pcb": index}}, {"tool": "export_web", "args": {"path": out}}]
+        steps += [{"tool": "pcb_3d", "args": {"pcb": index}}, {"tool": "export_web", "args": {"path": out, "max_triangles": PHONE_TRIANGLES}}]
     else:
         for k, (label, extra) in enumerate([("Top", {}), ("Bottom", {"layer": "bottom"}), ("Schematic", {"view": "schematic"})]):
             f = f"{out}.{k}.png"
@@ -1568,7 +1631,11 @@ def handle(h, method, p, projects, body=None):
             if not out:
                 h.send_json(404 if err in ("no such document", "no such tab") else 500, {"error": err})
                 return True
-            h.send_file(out, "text/html; charset=utf-8")
+            gz = projects.gzipped(out) if "gzip" in (h.headers.get("Accept-Encoding") or "") else None
+            if gz:
+                h.send_file(gz, "text/html; charset=utf-8", encoding="gzip")
+            else:
+                h.send_file(out, "text/html; charset=utf-8")
             return True
         if method == "GET" and p[3:] == ["tree"]:
             t, err = projects.tree(did, kind, index, page)

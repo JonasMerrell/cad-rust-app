@@ -518,6 +518,9 @@ fn fingerprint(doc: &Document, id: FeatId) -> Option<u64> {
 impl KernelClient {
     fn wait_for<T>(&mut self, mut pick: impl FnMut(Outcome) -> Option<T>) -> Result<T, String> {
         let start = std::time::Instant::now();
+        // RCAD_KERNEL_TIMEOUT (seconds): the phone app's background builds allow longer, for a first
+        // import of a big STEP file
+        let limit = std::env::var("RCAD_KERNEL_TIMEOUT").ok().and_then(|v| v.trim().parse::<u64>().ok()).filter(|&v| v > 0).unwrap_or(600);
         loop {
             for o in self.poll() {
                 if let Some(t) = pick(o) {
@@ -527,7 +530,7 @@ impl KernelClient {
             if self.state == KernelState::Error {
                 return Err("the modelling kernel keeps crashing".into());
             }
-            if start.elapsed() > std::time::Duration::from_secs(600) {
+            if start.elapsed() > std::time::Duration::from_secs(limit) {
                 return Err("the kernel timed out".into());
             }
             std::thread::sleep(std::time::Duration::from_millis(3));

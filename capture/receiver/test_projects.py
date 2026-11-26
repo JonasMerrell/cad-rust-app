@@ -36,6 +36,10 @@ STUB = textwrap.dedent('''\
             elif t == "save_document":
                 json.dump(doc, open(args["path"], "w"), indent=2)
             elif t == "export_web":
+                if "assembly" in args and os.environ.get("STUB_SLOW_EXPORT"):
+                    sys.stderr.write("Message_Alert: some kernel chatter\\n")
+                    sys.stderr.write("Building Part Studio \u201cBody\u201d (1 of 2)\\n"); sys.stderr.flush()
+                    time.sleep(float(os.environ["STUB_SLOW_EXPORT"]))
                 open(args["path"], "w").write("<html>%s %s</html>" % (doc["studios"][0]["name"], json.dumps(args)))
             elif t == "describe":
                 print(json.dumps({"tool": t, "result": {"units": "mm", "parts": [{"name": "Part 1", "volume_mm3": 12.0}],
@@ -302,7 +306,53 @@ class ProjectsTest(unittest.TestCase):
         st, t = self.req("GET", f"/api/doc/{did}/tree?drawing=0&page=2")
         self.assertEqual([r["name"] for r in {s["title"]: s for s in t["sections"]}["Views"]["rows"]], ["Iso"])
 
+    def quick_wait(self, secs):
+        old = rp.QUICK_WAIT
+        rp.QUICK_WAIT = secs
+        self.addCleanup(setattr, rp, "QUICK_WAIT", old)
+
+    def test_big_assembly_builds_in_the_background(self):
+        # a page that builds quickly comes straight back (test_list_and_view); a slow one shows progress
+        self.quick_wait(0.5)
+        os.environ["STUB_SLOW_EXPORT"] = "2"
+        self.addCleanup(os.environ.pop, "STUB_SLOW_EXPORT", None)
+        did = self.doc()[0]["id"]
+        st, page = self.req("GET", f"/api/doc/{did}/view?assembly=0&app=1", raw=True)
+        self.assertEqual(st, 200)
+        self.assertIn("Building the assembly on netdash", page)
+        self.assertIn("RcadApp.building()", page)
+        time.sleep(0.5)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?assembly=0")
+        self.assertEqual((t["kind"], t["building"]), ("assembly", True))
+        self.assertEqual(t["progress"], "Building Part Studio \u201cBody\u201d (1 of 2)")  # not the kernel's chatter
+        for _ in range(50):
+            st, page = self.req("GET", f"/api/doc/{did}/view?assembly=0&app=1", raw=True)
+            if "Building the assembly" not in page:
+                break
+            time.sleep(0.2)
+        self.assertIn('"assembly": 0', page)
+        st, t = self.req("GET", f"/api/doc/{did}/tree?assembly=0")
+        self.assertEqual(t["instances"][0]["name"], "Body <1>")
+
+    def test_pages_go_out_gzipped(self):
+        import gzip as gz
+        old = rp.GZIP_MIN
+        rp.GZIP_MIN = 0
+        self.addCleanup(setattr, rp, "GZIP_MIN", old)
+        did = self.doc()[0]["id"]
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        c.request("GET", f"/api/doc/{did}/view?studio=0&t=tok", headers={"Accept-Encoding": "gzip, deflate"})
+        r = c.getresponse()
+        body = r.read()
+        c.close()
+        self.assertEqual(r.getheader("Content-Encoding"), "gzip")
+        self.assertIn(b"<html>Body", gz.decompress(body))
+        # a client that doesn't take gzip gets the page as it is
+        st, page = self.req("GET", f"/api/doc/{did}/view?studio=0", raw=True)
+        self.assertTrue(page.startswith("<html>Body"))
+
     def test_simulation_tab_solves_in_the_background(self):
+        self.quick_wait(0)
         did = self.doc()[0]["id"]
         self.assertEqual(self.req("GET", f"/api/doc/{did}")[1]["simulations"], ["Beam"])
         # the first ask starts the solve and gets a page that reloads itself

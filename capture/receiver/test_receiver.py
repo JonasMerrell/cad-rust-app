@@ -6,6 +6,7 @@ import os
 import sys
 import tempfile
 import threading
+import time
 import unittest
 from http.server import ThreadingHTTPServer
 
@@ -56,6 +57,24 @@ class ReceiverTest(unittest.TestCase):
         # a 401 here made the app's web view ask again on every redraw
         status, _ = self.req("GET", "/favicon.ico", token=None)
         self.assertEqual(status, 204)
+
+    def test_log_has_durations_and_no_token(self):
+        import io
+        old, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            self.req("GET", "/api/ping?t=tok&x=1", token=None)
+            self.req("GET", "/api/ping")
+            # the line is written just after the response goes out
+            for _ in range(50):
+                log = sys.stderr.getvalue()
+                if log.count("\n") >= 2:
+                    break
+                time.sleep(0.02)
+        finally:
+            sys.stderr = old
+        self.assertNotIn("tok", log)
+        self.assertIn("t=…&x=1", log)
+        self.assertRegex(log, r'"GET /api/ping HTTP/1.1" 200 - \d+ ms')
 
     def test_flow(self):
         self.assertEqual(self.req("GET", "/api/ping", token="bad")[0], 401)

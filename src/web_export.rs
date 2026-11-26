@@ -10,6 +10,7 @@
 use std::collections::HashMap;
 
 use base64::Engine;
+use glam::DVec3;
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 
@@ -397,6 +398,72 @@ pub struct Written {
     pub triangles: usize,
 }
 
+/// Thin the meshes to about `max_triangles` in all (for a phone, which can't take millions): each mesh
+/// over a few dozen triangles keeps the same share of its own, by quadric edge collapse. rCAD's meshes
+/// are split at face boundaries and the simplifier keeps open edges where they are, so sharp edges and
+/// the shading across them stay; curved faces (fillets, threads, imported detail) lose the most. Edge
+/// lines are thinned alike. Returns the triangles left.
+pub fn thin(meshes: &mut [Mesh], max_triangles: usize) -> usize {
+    let total: usize = meshes.iter().map(|m| m.indices.len() / 3).sum();
+    if total <= max_triangles || total == 0 {
+        return total;
+    }
+    let ratio = max_triangles as f64 / total as f64;
+    let stride = (1.0 / ratio).ceil().clamp(1.0, 8.0) as usize;
+    let threads = std::thread::available_parallelism().map(|n| n.get()).unwrap_or(2).clamp(1, 8);
+    let chunk = meshes.len().div_ceil(threads).max(1);
+    std::thread::scope(|sc| {
+        for part in meshes.chunks_mut(chunk) {
+            sc.spawn(move || {
+                for m in part {
+                    let n = m.indices.len() / 3;
+                    if n > 48 {
+                        let target = ((n as f64 * ratio) as usize).max(24);
+                        let pm = crate::photo_mesh::Mesh {
+                            v: m.positions.chunks(3).map(|p| DVec3::new(p[0] as f64, p[1] as f64, p[2] as f64)).collect(),
+                            t: m.indices.chunks(3).map(|t| [t[0], t[1], t[2]]).collect(),
+                        };
+                        let d = crate::photo_mesh::decimate(&pm, target);
+                        m.positions = d.v.iter().flat_map(|p| [p.x as f32, p.y as f32, p.z as f32]).collect();
+                        m.indices = d.t.iter().flatten().copied().collect();
+                    }
+                    if stride > 1 {
+                        m.edges = thin_edges(&m.edges, stride);
+                    }
+                }
+            });
+        }
+    });
+    meshes.iter().map(|m| m.indices.len() / 3).sum()
+}
+
+/// Edge segments (pairs of points) chained end to start: keep every `stride`-th point of each chain
+/// and its ends.
+fn thin_edges(e: &[f32], stride: usize) -> Vec<f32> {
+    let seg: Vec<[f32; 6]> = e.chunks_exact(6).map(|c| [c[0], c[1], c[2], c[3], c[4], c[5]]).collect();
+    let mut out = Vec::with_capacity(e.len() / stride + 12);
+    let mut i = 0;
+    while i < seg.len() {
+        // the chain from segment i
+        let mut j = i;
+        while j + 1 < seg.len() && seg[j][3..6] == seg[j + 1][0..3] {
+            j += 1;
+        }
+        let mut pts: Vec<[f32; 3]> = vec![[seg[i][0], seg[i][1], seg[i][2]]];
+        for k in i..=j {
+            if (k - i + 1) % stride == 0 || k == j {
+                pts.push([seg[k][3], seg[k][4], seg[k][5]]);
+            }
+        }
+        for w in pts.windows(2) {
+            out.extend_from_slice(&w[0]);
+            out.extend_from_slice(&w[1]);
+        }
+        i = j + 1;
+    }
+    out
+}
+
 /// Write the page to `path` (.html). `inline`: one self-contained file; otherwise `<stem>.json` and `<stem>.bin`
 /// beside it, which the page fetches (so it has to be served, not opened from disk).
 pub fn write(scene: &Scene, meshes: &[Mesh], path: &std::path::Path, inline: bool) -> Result<Written, String> {
@@ -432,6 +499,49 @@ fn html_escape(s: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    /// A bumpy n × n grid (one face, as a curved CAD face is meshed) with a chained edge along one side.
+    fn grid(n: u32) -> Mesh {
+        let mut positions = vec![];
+        for j in 0..=n {
+            for i in 0..=n {
+                let (x, y) = (i as f32, j as f32);
+                positions.extend_from_slice(&[x, y, (x * 0.3).sin() * (y * 0.2).cos()]);
+            }
+        }
+        let id = |i: u32, j: u32| j * (n + 1) + i;
+        let mut indices = vec![];
+        for j in 0..n {
+            for i in 0..n {
+                indices.extend_from_slice(&[id(i, j), id(i + 1, j), id(i + 1, j + 1), id(i, j), id(i + 1, j + 1), id(i, j + 1)]);
+            }
+        }
+        let edges = (0..n).flat_map(|i| [i as f32, 0.0, 0.0, i as f32 + 1.0, 0.0, 0.0]).collect();
+        Mesh { positions, indices, edges }
+    }
+
+    #[test]
+    fn thins_to_the_budget() {
+        let mut m = vec![grid(60), grid(60), cube()];
+        let before: usize = m.iter().map(|m| m.indices.len() / 3).sum();
+        let cube_tris = m[2].indices.len();
+        assert_eq!(before, 2 * 7200 + cube_tris / 3);
+        let after = thin(&mut m, 3000);
+        assert!(after <= 3600 && after >= 1000, "{after}");
+        // the cube is too small to touch; the grids kept their outline
+        assert_eq!(m[2].indices.len(), cube_tris);
+        let xs: Vec<f32> = m[0].positions.chunks(3).map(|p| p[0]).collect();
+        let (lo, hi) = xs.iter().fold((f32::MAX, f32::MIN), |(a, b), &x| (a.min(x), b.max(x)));
+        assert!(lo.abs() < 0.05 && (hi - 60.0).abs() < 0.05, "{lo} {hi}");
+        // the 60-segment edge chain keeps its ends, with fewer points
+        let e = &m[0].edges;
+        assert!(e.len() < 60 * 6 && e.len() >= 6);
+        assert_eq!((e[0], e[e.len() - 3]), (0.0, 60.0));
+        // under the budget: nothing changes
+        let mut small = vec![grid(10)];
+        assert_eq!(thin(&mut small, 1_000_000), 200);
+        assert_eq!(small[0].edges.len(), 60);
+    }
 
     fn cube() -> Mesh {
         let positions = vec![0., 0., 0., 10., 0., 0., 10., 10., 0., 0., 10., 0.];

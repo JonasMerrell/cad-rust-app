@@ -53,6 +53,12 @@ to the same small service the rCAD Capture app uploads photos to.
 - **Model**: Opus (plans and hands the work to Sonnet or Haiku, as the editor does), Sonnet or
   Haiku, or whatever the editor on netdash is set to.
 
+The viewer pages load three.js 0.147.0 and its OrbitControls from cdn.jsdelivr.net. The app ships
+the same two files (`app/src/main/assets/three/`, MIT licence in `LICENSE.txt` there) and hands
+them to its web view itself, so the viewer doesn't wait for the internet or need it. The menu's
+*How long the view took* shows where the time went the last time a tab was opened (netdash, the
+scripts, the first frame); the same goes to logcat under `rcad-view`.
+
 ## Setup on netdash
 
 1. Build rCAD (`cargo build --release`) or unpack a release, so `rcad` is on the PATH, at

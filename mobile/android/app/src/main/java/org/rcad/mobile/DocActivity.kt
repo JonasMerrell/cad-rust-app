@@ -11,6 +11,8 @@ import android.view.Gravity
 import android.view.View
 import android.view.ViewGroup
 import android.view.inputmethod.InputMethodManager
+import android.util.Log
+import android.webkit.JavascriptInterface
 import android.webkit.WebResourceRequest
 import android.webkit.WebResourceResponse
 import android.webkit.WebView
@@ -59,6 +61,8 @@ class DocActivity : Activity() {
     private lateinit var stage: FrameLayout
     private lateinit var web: WebView
     private lateinit var webNote: TextView
+    /** Where the time went the last time the viewer loaded a page, for the menu and logcat. */
+    private val timing = ViewTiming()
     private lateinit var progressCard: LinearLayout
     private lateinit var progressText: TextView
     private lateinit var sheet: LinearLayout
@@ -121,12 +125,43 @@ class DocActivity : Activity() {
             settings.loadWithOverviewMode = true
             settings.useWideViewPort = true
             setBackgroundColor(Ui.SCENE)
+            // the 3D pages say when they have drawn their first frame (window.RcadApp.ready())
+            addJavascriptInterface(object {
+                @JavascriptInterface
+                fun ready() = runOnUiThread { pageReady() }
+
+                /** netdash's "still building" page (it reloads itself until the real page is ready) */
+                @JavascriptInterface
+                fun building() = runOnUiThread {
+                    timing.mark("netdash building")
+                    timing.building = true
+                    webNote.visibility = View.GONE
+                }
+            }, "RcadApp")
             webViewClient = object : WebViewClient() {
+                override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
+                    Bundled.response(this@DocActivity, request?.url?.toString())
+
+                override fun onPageCommitVisible(view: WebView?, url: String?) {
+                    if (url?.startsWith("http") != true) return
+                    timing.mark("html")
+                    // netdash's part is done: what's left is the phone loading and drawing the page
+                    if (webNote.visibility == View.VISIBLE && timing.loading) webNote.text = "Loading the view…"
+                }
+
                 override fun onPageFinished(view: WebView?, url: String?) {
                     if (url?.startsWith("http") != true) return
-                    webNote.visibility = View.GONE
+                    timing.mark("loaded")
                     // the page is built and cached now, so the tree it was built from comes quickly
                     loadBuiltTree()
+                    if (kind == "studio" || kind == "assembly" || kind == "cam" || (kind == "simulation" && page != "pictures") || (kind == "pcb" && page == "3d")) {
+                        // a 3D page: its first frame hides the note; if it never comes (the page shows
+                        // its own error), stop covering it after a while
+                        val gen = timing.gen
+                        web.postDelayed({ if (gen == timing.gen && timing.loading && !timing.building) pageReady(fallback = true) }, 15000)
+                    } else {
+                        pageReady()
+                    }
                 }
 
                 override fun onReceivedHttpError(view: WebView?, request: WebResourceRequest?, error: WebResourceResponse?) {
@@ -347,6 +382,7 @@ class DocActivity : Activity() {
         m.menu.add(0, 1, 0, "Reload the 3D view")
         m.menu.add(0, 2, 1, "Claude model…")
         m.menu.add(0, 3, 2, "Chats about this document…")
+        m.menu.add(0, 5, 4, "How long the view took")
         val remote = detail?.optString("remote")?.takeIf { it.isNotEmpty() && it != "null" }
         if (remote != null) m.menu.add(0, 4, 3, "Sync with GitHub ($remote)")
         m.setOnMenuItemClickListener {
@@ -355,6 +391,7 @@ class DocActivity : Activity() {
                 2 -> pickModel()
                 3 -> { showPane(1, expand = true); pickChat() }
                 4 -> syncGitHub()
+                5 -> AlertDialog.Builder(this).setTitle("Loading the view").setMessage(timing.report()).setPositiveButton("OK", null).show()
             }
             true
         }
@@ -436,7 +473,7 @@ class DocActivity : Activity() {
         val b = built
         if (kind != "studio") {
             if (b == null || b.optString("kind") != kind) tree.addView(note("Loading the ${tabKind().label.lowercase()} tab…"))
-            else if (kind == "assembly") assemblyTree(b)
+            else if (kind == "assembly" && !b.optBoolean("building")) assemblyTree(b)
             else sectionsTree(b)
             return
         }
@@ -736,6 +773,21 @@ class DocActivity : Activity() {
         return (0 until arr.length()).map { arr.optString(it) }
     }
 
+    /** The page is showing (its first 3D frame, or it finished loading): drop the note, log the times. */
+    private fun pageReady(fallback: Boolean = false) {
+        if (!timing.loading) return
+        timing.mark(if (fallback) "no first frame" else "first frame")
+        timing.loading = false
+        webNote.visibility = View.GONE
+        val gen = timing.gen
+        // the browser's own view of the page and the files it loaded
+        web.evaluateJavascript(ViewTiming.JS) { json ->
+            if (gen != timing.gen) return@evaluateJavascript
+            timing.page = json
+            Log.i("rcad-view", timing.report())
+        }
+    }
+
     private fun reloadViewer() {
         val a = api ?: return
         showWebNote(when (kind) {
@@ -743,8 +795,9 @@ class DocActivity : Activity() {
             "drawing" -> "Drawing the sheet on netdash…"
             "simulation" -> "Opening the simulation on netdash…"
             "pcb" -> if (page == "3d") "Building the board in 3D on netdash…" else "Drawing the board on netdash…"
-            else -> "Building the 3D view on netdash… (a big model can take a minute)"
+            else -> "Getting the 3D view from netdash…"
         })
+        timing.start(selection())
         built = null
         prefs.setTabFor(docId, "$kind:$index:$page")
         buildTree()
