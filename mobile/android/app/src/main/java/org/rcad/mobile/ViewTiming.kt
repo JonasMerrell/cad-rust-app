@@ -15,6 +15,8 @@ class ViewTiming {
     var gen = 0
         private set
     var loading = false
+    /** netdash showed its progress page: it's building the page, not the phone loading it */
+    var building = false
     /** The browser's Navigation and Resource Timing, as JSON from [JS]. */
     var page: String? = null
 
@@ -25,6 +27,7 @@ class ViewTiming {
         marks.clear()
         page = null
         loading = true
+        building = false
     }
 
     fun mark(step: String) {
@@ -35,7 +38,8 @@ class ViewTiming {
         if (t0 == 0L) return "Nothing loaded yet."
         val lines = mutableListOf("$what")
         val names = mapOf("html" to "page arrived from netdash", "loaded" to "page and scripts loaded", "first frame" to "first 3D frame drawn",
-            "no first frame" to "gave up waiting for a first frame")
+            "no first frame" to "gave up waiting for a first frame",
+            "netdash building" to "netdash started building it (progress page)")
         marks.forEach { (k, v) -> lines += "${secs(v)}  ${names[k] ?: k}" }
         try {
             // evaluateJavascript hands back the returned string JSON-quoted

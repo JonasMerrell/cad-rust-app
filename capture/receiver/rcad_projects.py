@@ -65,12 +65,18 @@ MAX_DEPTH = 4
 CACHE_DIR = os.path.expanduser("~/.cache/rcad-mobile")
 JOB_KEEP_SECS = 3600
 EXPORT_TIMEOUT = 15 * 60
+# a background build has no request waiting on it: give a first import of a big STEP file time
+# (it is stored in rCAD's build cache as soon as it is built, so it is slow only once)
+BACKGROUND_TIMEOUT = 60 * 60
 # bump when what a cached page holds changes
 VIEW_VERSION = 4
 # tab kinds a page can show, by query parameter, and their list in the workspace file
 TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
-# kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress
-BACKGROUND_KINDS = {"simulation"}
+# kinds whose page can take minutes (an FEA solve, a big assembly opened the first time): built in the
+# background while the phone shows progress. A request waits QUICK_WAIT seconds first, so a page that
+# builds quickly comes back as it is.
+BACKGROUND_KINDS = {"simulation", "assembly", "studio"}
+QUICK_WAIT = 8
 # kinds whose pages all come from one rcad run (a Simulation tab's 3D page and its pictures)
 SHARED_BUILD_KINDS = {"simulation"}
 # feature params worth showing in the tree, in this order
@@ -242,6 +248,7 @@ class Projects:
         self.info_cache = {}  # path -> (mtime, size, info)
         self.export_locks = {}
         self.building = {}  # cache key -> start time, for background builds
+        self.build_done = {}  # cache key -> Event set when its background build ends
         self.build_errors = {}  # cache key -> error of a background build that failed
         self.gh_status = None  # (time, `rcad github status`)
         self.gh_device = None  # (device code, expiry) of a sign-in under way
@@ -480,7 +487,17 @@ class Projects:
                     return None, err  # shown once; asking again tries again
                 if key not in self.building:
                     self.building[key] = time.time()
+                    self.build_done[key] = threading.Event()
                     threading.Thread(target=self._build_bg, args=(path, kind, index, "" if shared else page, key, out, sel), daemon=True).start()
+                done = self.build_done.get(key)
+            # most pages build in a second or two: wait for those rather than show the progress page
+            if done and done.wait(max(0.0, QUICK_WAIT - (time.time() - self.building.get(key, time.time())))):
+                with self.lock:
+                    err = self.build_errors.pop(key, None)
+                if err:
+                    return None, err
+                if os.path.isfile(out) and os.path.isfile(out[:-5] + ".tree.json"):
+                    return self._companion(out, page) if shared else out, None
             return None, "building"
         return self._build(path, kind, index, page, key, out, sel)
 
@@ -494,13 +511,16 @@ class Projects:
 
     def _build_bg(self, path, kind, index, page, key, out, sel):
         try:
-            _, err = self._build(path, kind, index, page, key, out, sel, stderr_path=out[:-5] + ".progress")
+            _, err = self._build(path, kind, index, page, key, out, sel, stderr_path=out[:-5] + ".progress", timeout=BACKGROUND_TIMEOUT)
         except Exception as e:  # keep the receiver up whatever happens
             err = f"{type(e).__name__}: {e}"
         with self.lock:
             self.building.pop(key, None)
             if err:
                 self.build_errors[key] = err
+            done = self.build_done.pop(key, None)
+        if done:
+            done.set()
 
     def progress(self, did, kind="studio", index=0, page=""):
         """For a page being built in the background: (seconds so far, rCAD's last progress line)."""
@@ -511,9 +531,12 @@ class Projects:
         with self.lock:
             t0 = self.building.get(key)
         lines = [ln.strip() for ln in re.split(r"[\r\n]+", _tail(out[:-5] + ".progress", 600)) if ln.strip()]
+        if kind != "simulation":
+            # rCAD's own progress lines, not the modelling kernel's messages
+            lines = [ln for ln in lines if ln.startswith("Building ")]
         return (time.time() - t0 if t0 else 0), (lines[-1] if lines else "")
 
-    def _build(self, path, kind, index, page, key, out, sel, stderr_path=None):
+    def _build(self, path, kind, index, page, key, out, sel, stderr_path=None, timeout=EXPORT_TIMEOUT):
         with self.lock:
             lk = self.export_locks.setdefault(key, threading.Lock())
         with lk:
@@ -528,7 +551,7 @@ class Projects:
             steps, finish = page_steps(kind, index, page, tmp, ws if isinstance(ws, dict) else {})
             steps.insert(0, {"tool": "open_document", "args": {"path": path}})
             results = []
-            err = self._run_script(self.rcad, steps, os.path.dirname(path), EXPORT_TIMEOUT, results, stderr_path)
+            err = self._run_script(self.rcad, steps, os.path.dirname(path), timeout, results, stderr_path)
             by = {}
             for v in results:
                 if isinstance(v.get("result"), dict):
@@ -1047,13 +1070,20 @@ body { display: grid; place-items: center; text-align: center; padding: 0 24px; 
 @keyframes go { from { transform: translateX(-100%); } to { transform: translateX(250%); } }
 </style></head><body>
 <div><div>__WHAT__</div><div class="t">__PROGRESS__</div><div class="bar"><div></div></div></div>
-<script>setTimeout(() => location.reload(), 3000);</script>
+<script>
+// the rCAD phone app: this is netdash still working, not the page loading
+if (window.RcadApp && RcadApp.building) RcadApp.building();
+setTimeout(() => location.reload(), 3000);
+</script>
 </body></html>
 """
 
 
 def building_page(kind, secs, line):
-    what = {"simulation": "Solving the simulation on netdash…"}.get(kind, "Working on netdash…")
+    what = {"simulation": "Solving the simulation on netdash…", "assembly": "Building the assembly on netdash…",
+            "studio": "Building the Part Studio on netdash…"}.get(kind, "Working on netdash…")
+    if kind in ("assembly", "studio") and secs > 20:
+        what += "<div class=t>The first time takes longest: every Part Studio it uses is built and kept for next time.</div>"
     m, sec = divmod(int(secs), 60)
     prog = (html_escape(line) + " · " if line else "") + f"{m}:{sec:02d}"
     return BUILDING_PAGE.replace("__WHAT__", what).replace("__PROGRESS__", prog)

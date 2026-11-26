@@ -129,6 +129,14 @@ class DocActivity : Activity() {
             addJavascriptInterface(object {
                 @JavascriptInterface
                 fun ready() = runOnUiThread { pageReady() }
+
+                /** netdash's "still building" page (it reloads itself until the real page is ready) */
+                @JavascriptInterface
+                fun building() = runOnUiThread {
+                    timing.mark("netdash building")
+                    timing.building = true
+                    webNote.visibility = View.GONE
+                }
             }, "RcadApp")
             webViewClient = object : WebViewClient() {
                 override fun shouldInterceptRequest(view: WebView?, request: WebResourceRequest?): WebResourceResponse? =
@@ -150,7 +158,7 @@ class DocActivity : Activity() {
                         // a 3D page: its first frame hides the note; if it never comes (the page shows
                         // its own error), stop covering it soon
                         val gen = timing.gen
-                        web.postDelayed({ if (gen == timing.gen && timing.loading) pageReady(fallback = true) }, 4000)
+                        web.postDelayed({ if (gen == timing.gen && timing.loading && !timing.building) pageReady(fallback = true) }, 4000)
                     } else {
                         pageReady()
                     }
@@ -465,7 +473,7 @@ class DocActivity : Activity() {
         val b = built
         if (kind != "studio") {
             if (b == null || b.optString("kind") != kind) tree.addView(note("Loading the ${tabKind().label.lowercase()} tab…"))
-            else if (kind == "assembly") assemblyTree(b)
+            else if (kind == "assembly" && !b.optBoolean("building")) assemblyTree(b)
             else sectionsTree(b)
             return
         }
