@@ -66,7 +66,7 @@ CACHE_DIR = os.path.expanduser("~/.cache/rcad-mobile")
 JOB_KEEP_SECS = 3600
 EXPORT_TIMEOUT = 15 * 60
 # bump when what a cached page holds changes
-VIEW_VERSION = 3
+VIEW_VERSION = 4
 # tab kinds a page can show, by query parameter, and their list in the workspace file
 TAB_KINDS = {"studio": "studios", "assembly": "assemblies", "cam": "cams", "drawing": "drawings", "simulation": "simulations", "pcb": "pcbs"}
 # kinds whose page can take minutes (an FEA solve): built in the background while the phone shows progress

@@ -244,6 +244,8 @@ canvas.addEventListener('pointerup', e => {
 fit();
 $('loading').hidden = true;
 requestAnimationFrame(tick);
+// the rCAD phone app hides its loading note once the first frame is on screen
+requestAnimationFrame(() => requestAnimationFrame(() => { if (window.RcadApp) RcadApp.ready(); }));
 })();
 </script>
 </body>

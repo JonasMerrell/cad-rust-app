@@ -226,7 +226,30 @@ class Handler(BaseHTTPRequestHandler):
     app: App = None  # set by serve()
 
     def log_message(self, fmt, *args):
-        sys.stderr.write("%s %s\n" % (self.address_string(), fmt % args))
+        # the viewer passes the token in the query (?t=…): keep it out of the journal
+        sys.stderr.write("%s %s\n" % (self.address_string(), re.sub(r"([?&]t=)[^&\s\"]+", r"\1…", fmt % args)))
+
+    def log_request(self, code="-", size="-"):
+        # logged once the response is sent, with how long it took (see handle_one_request)
+        self._logged = (code, size)
+
+    def parse_request(self):
+        # the request line is in: time from here (not from waiting on a kept-alive connection)
+        self._t0 = time.monotonic()
+        return super().parse_request()
+
+    def handle_one_request(self):
+        self._t0, self._logged = time.monotonic(), None
+        try:
+            super().handle_one_request()
+        except (ConnectionResetError, BrokenPipeError):
+            # the phone dropped a connection (an idle keep-alive one, or it gave up on a page): nothing to report
+            self.close_connection = True
+            return
+        if self._logged:
+            code, size = self._logged
+            code = getattr(code, "value", code)
+            self.log_message('"%s" %s %s %d ms', self.requestline, code, size, (time.monotonic() - self._t0) * 1000)
 
     # -- helpers
     def send_json(self, code, obj):

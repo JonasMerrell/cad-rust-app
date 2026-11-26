@@ -912,6 +912,8 @@ resize();
 fit(VIEWS.iso);
 loading.remove();
 requestAnimationFrame(frame);
+// the rCAD phone app hides its loading note once the first frame is on screen
+requestAnimationFrame(() => requestAnimationFrame(() => { if (window.RcadApp) RcadApp.ready(); }));
 })();
 </script>
 </body>

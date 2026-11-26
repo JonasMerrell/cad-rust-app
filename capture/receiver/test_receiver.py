@@ -57,6 +57,19 @@ class ReceiverTest(unittest.TestCase):
         status, _ = self.req("GET", "/favicon.ico", token=None)
         self.assertEqual(status, 204)
 
+    def test_log_has_durations_and_no_token(self):
+        import io
+        old, sys.stderr = sys.stderr, io.StringIO()
+        try:
+            self.req("GET", "/api/ping?t=tok&x=1", token=None)
+            self.req("GET", "/api/ping")
+            log = sys.stderr.getvalue()
+        finally:
+            sys.stderr = old
+        self.assertNotIn("tok", log)
+        self.assertIn("t=…&x=1", log)
+        self.assertRegex(log, r'"GET /api/ping HTTP/1.1" 200 - \d+ ms')
+
     def test_flow(self):
         self.assertEqual(self.req("GET", "/api/ping", token="bad")[0], 401)
         self.assertEqual(self.req("GET", "/api/ping")[0], 200)
