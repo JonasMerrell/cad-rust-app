@@ -3926,6 +3926,8 @@ mod tests {
         // below the chamfer, as for a wall, cut the dish all round: the cone (45°) is steeper than the dish
         let part = dished();
         let mut c = Cam::default();
+        // stock cut to the part, as on the gauge (a chamfer pass through the default 1 mm over it is too much)
+        (c.stock.side, c.stock.top) = (0.0, 0.0);
         let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap());
         let id = c.add_op(OpKind::Chamfer, t);
         let op = c.op_mut(id).unwrap();
@@ -3976,6 +3978,69 @@ mod tests {
         c.op_mut(id).unwrap().chamfer = 2.0;
         let tp = generate(&c, &part).remove(0);
         assert!(entry(&tp).z >= part.hi.z + 1.0 - 1e-6, "{:?} {:?}", entry(&tp), tp.warnings);
+    }
+
+    /// The plate with stock cut to it and a 90° chamfer mill chamfering its outline `w` mm wide in one pass, and
+    /// the simulation's chamfer problems.
+    fn one_pass_chamfer(w: f64, limit: Option<f64>) -> (Cam, Part, u64, Vec<Toolpath>, Vec<crate::cam_sim::SimEvent>) {
+        let part = plate();
+        let mut c = Cam::default();
+        (c.stock.side, c.stock.top, c.stock.bottom) = (0.0, 0.0, 0.0);
+        c.post = "mach3".into();
+        if let Some(l) = limit {
+            c.machine.max_chamfer_cut = l;
+        }
+        let t = c.add_tool(crate::cam::presets().into_iter().find(|t| t.kind == ToolKind::Chamfer && t.diameter == 6.0).unwrap());
+        let id = c.add_op(OpKind::Chamfer, t);
+        let op = c.op_mut(id).unwrap();
+        op.chamfer = w;
+        op.side = Side::Outside;
+        let paths = generate(&c, &part);
+        assert!(paths[0].moves.len() > 4, "{:?}", paths[0].warnings);
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock_box(&c, &part), &paths, 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        let others: Vec<_> = sim.events.iter().filter(|e| e.kind != crate::cam_sim::EventKind::ChamferOverload).collect();
+        assert!(others.is_empty(), "{others:?}");
+        (c, part, id, paths, sim.events)
+    }
+
+    #[test]
+    fn a_chamfer_within_the_limit_is_fine() {
+        assert_eq!(crate::cam::Machine::default().max_chamfer_cut, 0.75);
+        for w in [0.3, 0.5, 0.7] {
+            let (.., events) = one_pass_chamfer(w, None);
+            assert!(events.is_empty(), "{w}: {events:?}");
+        }
+    }
+
+    #[test]
+    fn a_chamfer_too_big_for_one_pass_is_a_problem() {
+        // a 2 mm chamfer in one pass: one problem for the op, at its biggest cut, which is the chamfer's width
+        let (c, part, id, paths, events) = one_pass_chamfer(2.0, None);
+        assert_eq!(events.len(), 1, "{events:?}");
+        let e = &events[0];
+        assert_eq!((e.kind, e.op), (crate::cam_sim::EventKind::ChamferOverload, id));
+        assert!(e.depth > 1.8 && e.depth < 2.1, "{e:?}");
+        assert!(e.what.contains("0.75 mm"), "{e:?}");
+        // on the plate's outline, the tip below the chamfer's bottom
+        let at = DVec3::from(e.at);
+        let edge = (at.x.min(60.0 - at.x)).min(at.y.min(40.0 - at.y));
+        assert!(edge.abs() < 3.0 && at.z < 10.0 - 2.0 && at.z > 10.0 - 3.5, "{at}");
+        // as verify_gcode reads the posted program back: the problem is on the line that makes that move
+        let origin = work_origin(&c, &part);
+        let g = crate::cam_post::gcode(&c, &paths, origin, part.hi.z + c.clearance);
+        let (read, lines) = crate::cam_verify::parse_lines(&g, &c, origin, part.hi.z + c.clearance + 25.0).unwrap();
+        assert_eq!(lines.len(), read.iter().map(|p| p.moves.len()).sum::<usize>());
+        let mut sim = crate::cam_sim::Sim::new(&c, &part, stock_box(&c, &part), &read, 400);
+        sim.run_to(usize::MAX, usize::MAX);
+        let e = sim.events.iter().find(|e| e.kind == crate::cam_sim::EventKind::ChamferOverload).expect("found in the program too");
+        let line = g.lines().nth(lines[e.step] - 1).unwrap();
+        assert!(line.starts_with("G1") || line.starts_with("X") || line.starts_with("Y") || line.starts_with("G2") || line.starts_with("G3"), "{line}");
+        // a machine that takes more: fine; no check at all: fine
+        assert!(one_pass_chamfer(2.0, Some(2.5)).4.is_empty());
+        assert!(one_pass_chamfer(2.0, Some(0.0)).4.is_empty());
+        // and a limit set lower catches a chamfer the default lets through
+        assert_eq!(one_pass_chamfer(0.5, Some(0.3)).4.len(), 1);
     }
 
     #[test]

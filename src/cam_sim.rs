@@ -31,9 +31,28 @@ pub enum EventKind {
     /// The cutter took a cut too wide for how deep it is (or too deep for how wide): more load than
     /// the tool takes, as at a corner where a single contour meets a lump of stock.
     Overload,
+    /// A chamfer mill, V-bit or spot drill took a wider chamfer in one pass than the machine's
+    /// `max_chamfer_cut` (one problem per operation, at its biggest cut).
+    ChamferOverload,
 }
 
 impl EventKind {
+    /// The name the tools' results give it (as the serde name: `chamfer_overload`).
+    pub fn key(self) -> &'static str {
+        match self {
+            EventKind::Rapid => "rapid",
+            EventKind::Shank => "shank",
+            EventKind::Holder => "holder",
+            EventKind::Gouge => "gouge",
+            EventKind::Fixture => "fixture",
+            EventKind::Machine => "machine",
+            EventKind::Travel => "travel",
+            EventKind::Probe => "probe",
+            EventKind::Overload => "overload",
+            EventKind::ChamferOverload => "chamfer_overload",
+        }
+    }
+
     pub fn label(self) -> &'static str {
         match self {
             EventKind::Rapid => "rapid move into stock",
@@ -45,6 +64,7 @@ impl EventKind {
             EventKind::Travel => "beyond the machine's travel",
             EventKind::Probe => "probe runs into the work",
             EventKind::Overload => "tool overloaded: the cut is too wide for its depth",
+            EventKind::ChamferOverload => "chamfer cut too big for one pass",
         }
     }
 }
@@ -121,9 +141,34 @@ struct Cutter {
     /// The operation's own cut cross-section (step-down × stepover, mm²): a feed move taking under 5% of it
     /// is next to nothing.
     nominal: f64,
+    /// A chamfering cutter (see `chamfer_check`): the most chamfer one pass may take (mm) and what turns
+    /// a depth along the axis into a chamfer width (the tan of the cone's half angle).
+    chamfer_cut: Option<(f64, f64)>,
 }
 
 pub const LUT_STEP: f64 = 0.002;
+
+/// How far over `max_chamfer_cut` a pass may read before it counts (the stock map's rounding).
+const CHAMFER_SLACK: f64 = 0.01;
+/// Tool positions apart that cuts of a cell still count as one pass (see `Sim::pass`).
+const PASS_GAP: u32 = 3;
+
+/// Whether `tool` in `op` cuts chamfers, so the simulation checks how much each pass takes (see
+/// `Machine::max_chamfer_cut`): every tool in a chamfer or deburr op, and a chamfer mill in any op but
+/// drilling and engraving (which go as deep as asked on purpose). The limit, and the factor that turns a cut's
+/// depth along the tool axis into the width of the chamfer it takes (tan of a cone's half angle; 1 for
+/// anything else, as a ball's edge break).
+fn chamfer_check(cam: &Cam, op: Option<&crate::cam::Operation>, tool: &Tool) -> Option<(f64, f64)> {
+    let limit = cam.machine.max_chamfer_cut;
+    let kind = op?.kind;
+    let chamfering = matches!(kind, OpKind::Chamfer | OpKind::Deburr) || (tool.kind == ToolKind::Chamfer && !matches!(kind, OpKind::Drill | OpKind::Trace | OpKind::VCarve | OpKind::Probe));
+    if !chamfering || !(limit > 0.0) {
+        return None;
+    }
+    let cone = matches!(tool.kind, ToolKind::Chamfer | ToolKind::Engrave | ToolKind::SpotDrill | ToolKind::CenterDrill) && tool.angle > 0.0;
+    let k = if cone { (tool.angle.clamp(10.0, 170.0) / 2.0).to_radians().tan() } else { 1.0 };
+    Some((limit, k))
+}
 
 /// The tool's height above its tip at `rho`, between the table's steps. Taking the step below instead (as
 /// the simulation did) puts a steep flank too low: a 2.24° tapered ball rises 25.6 mm per mm out there, so
@@ -228,7 +273,7 @@ impl Cutter {
         let lut_floor = lut_floor(&lut);
         let holder_reach = holder.iter().map(|h| h.0.abs().max(h.1.abs())).max().unwrap_or(0);
         let holder_low = holder.iter().map(|h| h.2).fold(f32::INFINITY, f32::min);
-        Cutter { radius: r, lut, lut_floor, head, upper, flank, chamfer_band: None, shank_r: neck, shank_z: flutes as f32, holder, holder_reach, holder_low, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail).then(|| (2.0 * r, area_limit(if undercut { 2.0 * neck } else { 2.0 * r }, &t.material))), nominal: 1.0, geom: crate::cam_cutting::tool_geom(t), rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default() }
+        Cutter { radius: r, lut, lut_floor, head, upper, flank, chamfer_band: None, shank_r: neck, shank_z: flutes as f32, holder, holder_reach, holder_low, undercut, allowance, near_edge: None, body, stickout: stick, holder_len: crate::cam_machine::holder_length(t), probe: t.kind == ToolKind::Probe, load_d: matches!(t.kind, ToolKind::Flat | ToolKind::Bull | ToolKind::Ball | ToolKind::TaperedBall | ToolKind::Slot | ToolKind::Dovetail).then(|| (2.0 * r, area_limit(if undercut { 2.0 * neck } else { 2.0 * r }, &t.material))), nominal: 1.0, geom: crate::cam_cutting::tool_geom(t), rpm: 0.0, finishing: false, coolant: false, mode: crate::cam_cutting::Mode { k: 1.0, hz: 1.0, zeta: 0.03 }, climb: true, stable: Default::default(), chamfer_cut: None }
     }
 }
 
@@ -350,6 +395,14 @@ pub struct Sim {
     /// Where the run keeps its state at the start of each toolpath on disk, and picks it up from again
     /// (`cam_sim_saves::Saves`, set by `cam_sim_saves::keep_ops`).
     pub(crate) saves: Option<Box<crate::cam_sim_saves::Saves>>,
+    /// For the chamfer check: the pass cutting each cell (the tool position it last cut it at, 0 = none) and how
+    /// high the material was when that pass started on it, for the toolpath `pass_of`; the tool positions so far
+    /// and the most one pass took, at the last position. Started afresh with each toolpath (so a run picked up
+    /// at a toolpath's start needs none of it).
+    pass: Vec<(u32, f32)>,
+    pass_of: Option<usize>,
+    pass_n: u32,
+    pass_cut: f32,
 }
 
 /// Cells per side of a `Bounds` block.
@@ -806,6 +859,10 @@ impl Sim {
             removed_by_move: None,
             bounds: Bounds::default(),
             saves: None,
+            pass: vec![],
+            pass_of: None,
+            pass_n: 0,
+            pass_cut: 0.0,
             fixtures: crate::cam_paths::fixture_boxes(cam, part, crate::cam_paths::work_origin(cam, part)).into_iter().map(|f| (f.1, f.2)).collect(),
         };
         // part height map: highest upward surface over each cell centre
@@ -934,6 +991,7 @@ impl Sim {
             let rise = width * tool.dovetail_angle().to_radians().tan();
             cutter.chamfer_band = Some(((g - 0.05) as f32, (g + rise + 0.05) as f32, (width + 0.05) as f32));
         }
+        cutter.chamfer_cut = chamfer_check(cam, op, tool);
         if let Some(o) = op.filter(|o| matches!(o.kind, OpKind::Chamfer | OpKind::Deburr)) {
             cutter.near_edge = Some(std::sync::Arc::new(self.near_edges(o.chamfer.max(0.05))));
         }
@@ -1438,6 +1496,13 @@ impl Sim {
             if !rapid && !self.cutters[ci].probe {
                 self.air_sample(ci, op, removed, dxy.hypot(dz));
             }
+            if let (false, Some((limit, k))) = (rapid, self.cutters[ci].chamfer_cut) {
+                let w = self.pass_cut as f64 * k;
+                if w > limit + CHAMFER_SLACK {
+                    let what = format!("chamfer cut wider than the {} mm one pass may take: take it in passes", crate::cam::fmt_mm(limit));
+                    self.event_what(EventKind::ChamferOverload, op, step, p, w, what);
+                }
+            }
             if !rapid && dxy >= 2.0 * -dz {
                 self.load_sample(ci, op, step, p, removed, deepest, dxy.hypot(dz));
             }
@@ -1561,6 +1626,15 @@ impl Sim {
     }
 
     fn event_what(&mut self, kind: EventKind, op: u64, step: usize, at: DVec3, depth: f64, what: String) {
+        // a chamfer taken in one pass is one problem per operation, where it cuts the most
+        if kind == EventKind::ChamferOverload {
+            if let Some(e) = self.events.iter_mut().find(|e| e.kind == kind && e.op == op) {
+                if depth > e.depth {
+                    (e.depth, e.step, e.at) = (depth, step, at.to_array());
+                }
+                return;
+            }
+        }
         // the same machine crash over and over in one operation is one problem (at its first move)
         if matches!(kind, EventKind::Machine | EventKind::Travel) {
             if let Some(e) = self.events.iter_mut().find(|e| e.kind == kind && e.op == op && e.what == what) {
@@ -1749,6 +1823,18 @@ impl Sim {
         let mut deepest = 0.0f32;
         let mut gouge = 0.0f32;
         let c = &self.cutters[ci];
+        // the chamfer check: a cell cut by tool positions no more than a few apart is cut by one pass, as the tool
+        // slides along an edge taking a little more of each cell at every position
+        let passes = c.chamfer_cut.is_some() && !rapid;
+        self.pass_cut = 0.0;
+        if passes {
+            if self.pass_of != Some(ci) || self.pass.len() != self.stock.len() {
+                self.pass.clear();
+                self.pass.resize(self.stock.len(), (0, 0.0));
+                (self.pass_of, self.pass_n) = (Some(ci), 0);
+            }
+            self.pass_n += 1;
+        }
         if !c.lut.is_empty() {
             let n = (c.radius / self.cell).ceil() as i32 + 1;
             let r2 = c.radius * c.radius;
@@ -1800,6 +1886,12 @@ impl Sim {
                         removed += cut * area;
                         if !c.probe || rho <= probe_inner {
                             deepest = deepest.max(cut);
+                        }
+                        if passes {
+                            let (last, from) = self.pass[k];
+                            let from = if last > 0 && self.pass_n - last <= PASS_GAP { from } else { s };
+                            self.pass[k] = (self.pass_n, from);
+                            self.pass_cut = self.pass_cut.max(from - z.max(floor));
                         }
                         // cut right through the column: nothing left over this cell
                         self.stock[k] = if top_z <= floor { EMPTY } else { top_z };
@@ -2237,6 +2329,14 @@ impl Sim {
 mod tests {
     use super::*;
     use crate::cam::ToolKind;
+
+    #[test]
+    fn event_keys_are_their_serde_names() {
+        use EventKind::*;
+        for k in [Rapid, Shank, Holder, Gouge, Fixture, Machine, Travel, Probe, Overload, ChamferOverload] {
+            assert_eq!(serde_json::to_value(k).unwrap(), serde_json::json!(k.key()));
+        }
+    }
 
     /// The blocks the cell loops skip change nothing: the same cuts with every block looked at (as before the
     /// bounds) leave the same stock, bit for bit, and find the same problems, loads and air. A flat end mill

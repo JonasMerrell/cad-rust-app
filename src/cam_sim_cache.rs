@@ -22,7 +22,7 @@ use crate::cam_sim::Sim;
 use crate::cam_stock::StockMap;
 
 /// Bump when the simulator's results change in a way the app version doesn't capture.
-const FORMAT: u32 = 1;
+const FORMAT: u32 = 2;
 /// The folder inside a build-cache folder.
 pub const SUB: &str = "cam-sim";
 const EXT: &str = "sim.gz";
@@ -382,6 +382,7 @@ impl Bin for crate::cam_sim::EventKind {
             Travel => 6,
             Probe => 7,
             Overload => 8,
+            ChamferOverload => 9,
         };
         k.put(w)
     }
@@ -397,6 +398,7 @@ impl Bin for crate::cam_sim::EventKind {
             6 => Travel,
             7 => Probe,
             8 => Overload,
+            9 => ChamferOverload,
             _ => return None,
         })
     }
