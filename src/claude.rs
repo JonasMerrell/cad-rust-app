@@ -390,8 +390,9 @@ pub enum ToWorker {
         ws: String,
         studio: usize,
         settings: Settings,
-        /// A picture to go with the request (a PNG of the user's pencil drawing).
-        image: Option<Vec<u8>>,
+        /// Pictures to go with the request: the user's pencil drawing (PNG), photos sent from the
+        /// phone (JPEG).
+        images: Vec<Vec<u8>>,
     },
     /// Forget the conversation.
     Reset,
@@ -464,9 +465,9 @@ impl Worker {
                             chat.planned = planned;
                             chat.recap = recap;
                         }
-                        ToWorker::Turn { text, context, ws, studio, settings, image } => {
+                        ToWorker::Turn { text, context, ws, studio, settings, images } => {
                             st.store(false, Ordering::Relaxed);
-                            let error = chat.turn(&text, &context, &ws, studio, &settings, image.as_deref(), &st, &send).err();
+                            let error = chat.turn(&text, &context, &ws, studio, &settings, &images, &st, &send).err();
                             send(FromWorker::State { messages: chat.messages.clone(), cc_session: chat.cc_session.clone(), planned: chat.planned });
                             send(FromWorker::Done { error });
                         }
@@ -608,7 +609,7 @@ impl Chat {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, image: Option<&[u8]>, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn turn(&mut self, text: &str, context: &str, ws: &str, studio: usize, settings: &Settings, images: &[Vec<u8>], stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let cli = Cli::of(settings.auth);
         // Claude Code, Gemini and Codex keep the conversation themselves, by id
         let by_id = settings.auth == Auth::ClaudeCode || cli.is_some();
@@ -662,7 +663,7 @@ impl Chat {
             }
             send(e)
         };
-        let r = self.turn_with(&prompt, cred, cli, image, settings, stop, send);
+        let r = self.turn_with(&prompt, cred, cli, images, settings, stop, send);
         let reply = said.into_inner();
         let mut recap = self.recap.take().unwrap_or_default();
         recap.push_str(&format!("User: {}\n", text.trim()));
@@ -683,14 +684,14 @@ impl Chat {
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn turn_with(&mut self, prompt: &str, cred: Option<Cred>, cli: Option<Cli>, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn turn_with(&mut self, prompt: &str, cred: Option<Cred>, cli: Option<Cli>, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         if let Some(cli) = cli {
-            return self.cli_turn(cli, prompt, image, settings, stop, send);
+            return self.cli_turn(cli, prompt, images, settings, stop, send);
         }
-        let Some(cred) = cred else { return self.claude_code_turn(prompt, image, settings, stop, send) };
+        let Some(cred) = cred else { return self.claude_code_turn(prompt, images, settings, stop, send) };
         prune_images(&mut self.messages);
         let user = json!({"type": "text", "text": prompt});
-        let picture = image.map(image_block);
+        let picture: Vec<Value> = images.iter().map(|b| image_block(b)).collect();
         // after a stopped turn the history already ends with the user's side
         let mut mark = Mark { len: self.messages.len(), merged: None };
         match self.messages.last_mut() {
@@ -1260,14 +1261,30 @@ pub fn claude_code_has_session(id: &str) -> bool {
     dirs.filter_map(|d| d.ok()).any(|d| d.path().join(&file).is_file())
 }
 
-/// A PNG as a Messages API image block.
-fn image_block(png: &[u8]) -> Value {
-    json!({"type": "image", "source": {"type": "base64", "media_type": "image/png", "data": base64::engine::general_purpose::STANDARD.encode(png)}})
+/// The media type of a picture by its first bytes: PNG (the pencil's drawings, renders), JPEG
+/// (photos from the phone), WebP or GIF.
+pub fn image_type(b: &[u8]) -> &'static str {
+    if b.starts_with(&[0xff, 0xd8, 0xff]) {
+        "image/jpeg"
+    } else if b.len() > 12 && &b[0..4] == b"RIFF" && &b[8..12] == b"WEBP" {
+        "image/webp"
+    } else if b.starts_with(b"GIF8") {
+        "image/gif"
+    } else {
+        "image/png"
+    }
 }
 
-/// A request with a picture, as a line of Claude Code's `--input-format stream-json`.
-fn cc_user_message(prompt: &str, png: &[u8]) -> Value {
-    json!({"type": "user", "message": {"role": "user", "content": [image_block(png), {"type": "text", "text": prompt}]}})
+/// A picture as a Messages API image block.
+fn image_block(b: &[u8]) -> Value {
+    json!({"type": "image", "source": {"type": "base64", "media_type": image_type(b), "data": base64::engine::general_purpose::STANDARD.encode(b)}})
+}
+
+/// A request with pictures, as a line of Claude Code's `--input-format stream-json`.
+fn cc_user_message(prompt: &str, images: &[Vec<u8>]) -> Value {
+    let mut content: Vec<Value> = images.iter().map(|b| image_block(b)).collect();
+    content.push(json!({"type": "text", "text": prompt}));
+    json!({"type": "user", "message": {"role": "user", "content": content}})
 }
 
 /// `claude --version`, to check Claude Code is installed.
@@ -1286,26 +1303,26 @@ pub fn claude_code_version() -> Result<String, String> {
 impl Chat {
     /// One request through the Claude Code CLI (`claude -p`), which reaches the open document
     /// through `rcad mcp --bridge` and this worker. Follow-ups resume the same conversation.
-    fn claude_code_turn(&mut self, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn claude_code_turn(&mut self, prompt: &str, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let bridge = match self.bridge.take() {
             Some(b) => b,
             None => Bridge::start()?,
         };
-        let r = self.claude_code_run(&bridge, prompt, image, settings, stop, send);
+        let r = self.claude_code_run(&bridge, prompt, images, settings, stop, send);
         self.bridge = Some(bridge);
         r
     }
 
-    fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn claude_code_run(&mut self, bridge: &Bridge, prompt: &str, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         // calls left from a run that was stopped must not run now
         bridge.refuse_pending();
-        let r = self.claude_code_child(bridge, prompt, image, settings, stop, send);
+        let r = self.claude_code_child(bridge, prompt, images, settings, stop, send);
         bridge.refuse_pending();
         r
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn claude_code_child(&mut self, bridge: &Bridge, prompt: &str, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let (addr, token) = (&bridge.addr, &bridge.token);
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         // the token goes in the server's environment, through a config file only the user can read,
@@ -1323,7 +1340,7 @@ impl Chat {
         let (builtin, allowed) = if delegates { ("Agent", "mcp__cad,Agent") } else { ("", "mcp__cad") };
         // a picture can't go on the command line: the request goes in on stdin as a stream-json
         // user message then
-        if image.is_some() {
+        if !images.is_empty() {
             cmd.args(["-p", "--input-format", "stream-json"]);
         } else {
             cmd.args(["-p", prompt]);
@@ -1340,7 +1357,7 @@ impl Chat {
         if let Some(id) = &self.cc_session {
             cmd.args(["--resume", id]);
         }
-        let stdin = if image.is_some() { std::process::Stdio::piped() } else { std::process::Stdio::null() };
+        let stdin = if !images.is_empty() { std::process::Stdio::piped() } else { std::process::Stdio::null() };
         cmd.current_dir(&dir).stdin(stdin).stdout(std::process::Stdio::piped()).stderr(std::process::Stdio::piped());
         let mut child = cmd.spawn().map_err(|e| {
             if e.kind() == std::io::ErrorKind::NotFound {
@@ -1349,8 +1366,8 @@ impl Chat {
                 format!("could not start Claude Code: {e}")
             }
         })?;
-        if let (Some(png), Some(mut input)) = (image, child.stdin.take()) {
-            let msg = cc_user_message(prompt, png);
+        if let (false, Some(mut input)) = (images.is_empty(), child.stdin.take()) {
+            let msg = cc_user_message(prompt, images);
             std::thread::spawn(move || {
                 use std::io::Write;
                 let _ = writeln!(input, "{msg}");
@@ -1470,12 +1487,25 @@ mod tests {
 
     #[test]
     fn a_picture_goes_to_claude_code_as_a_stream_json_user_message() {
-        let m = super::cc_user_message("what is this?", &[1, 2, 3]);
+        let m = super::cc_user_message("what is this?", &[vec![1, 2, 3]]);
         assert_eq!(m["type"], "user");
         let c = m["message"]["content"].as_array().unwrap();
         assert_eq!(c[0]["type"], "image");
         assert_eq!(c[0]["source"]["data"], "AQID");
+        assert_eq!(c[0]["source"]["media_type"], "image/png");
         assert_eq!(c[1]["text"], "what is this?");
+    }
+
+    #[test]
+    fn photos_go_as_jpeg_and_several_at_once() {
+        let jpeg = vec![0xff, 0xd8, 0xff, 0xe0, 0, 0];
+        let m = super::cc_user_message("make this", &[jpeg.clone(), vec![0x89, b'P', b'N', b'G']]);
+        let c = m["message"]["content"].as_array().unwrap();
+        assert_eq!(c.len(), 3);
+        assert_eq!(c[0]["source"]["media_type"], "image/jpeg");
+        assert_eq!(c[1]["source"]["media_type"], "image/png");
+        assert_eq!(c[2]["text"], "make this");
+        assert_eq!(super::image_type(b"RIFF\0\0\0\0WEBPVP8 "), "image/webp");
     }
 
     #[test]

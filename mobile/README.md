@@ -42,6 +42,13 @@ to the same small service the rCAD Capture app uploads photos to.
   editor saves them, so a chat started on the phone continues in rCAD on the computer and the
   other way round. Requests keep running if the phone locks or loses the network; reopen the
   document to pick the reply up again. *Stop* stops a request and keeps what it changed.
+- **Photos and the pencil**: the camera button by the chat box adds photos (camera or gallery,
+  up to six, scaled to 1600 px) or a drawing to the next request; Claude gets them as pictures
+  with a note that they're reference photos. The pencil button over the view draws on the model;
+  *Add to chat* sends the view with the strokes and names the parts under them.
+- **Notes**: the note button over a Part Studio pins a note where you tap; notes show as pins on
+  the model and in the tray, tap one to change or delete it. They are saved with the document
+  (rCAD's `note` tool), so the editor shows them and Claude sees them with every request.
 - **GitHub**: the branch button on the document list. It shows the GitHub account rCAD on
   netdash uses (the editor's own sign-in, else the GitHub CLI's) and lets you sign in with a code
   on github.com, so the token stays on netdash. It lists the account's repositories, rCAD
@@ -102,9 +109,10 @@ All on the receiver's port and token (see `capture/receiver/rcad_projects.py`):
     GET  /api/doc/<id>/tree?studio=N|assembly=N|cam=N|drawing=N|simulation=N|pcb=N   feature tree, variables, parts / instances, mates /
                                                     for other tabs: summary, pages and sections of rows
     GET  /api/doc/<id>/chats/<chat>
-    POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?}  → {"job"}
+    POST /api/doc/<id>/chat {"text", "chat_id"?, "studio"?, "model"?, "effort"?, "images"?: [base64 JPEG/PNG]}  → {"job"}
     GET  /api/jobs/<job>?after=N           events (long poll)
     POST /api/jobs/<job>/stop
+    POST /api/doc/<id>/note {"action": "add"|"edit"|"delete", "studio", "at", "normal", "text", "id"}
     POST /api/doc/<id>/sync                commit and sync with GitHub
     POST /api/doc/<id>/resolve {"keep": "mine"|"theirs"}
     GET  /api/github                       account

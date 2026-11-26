@@ -681,13 +681,16 @@ fn send(app: &mut App, ctx: &egui::Context) {
     c.confirm_revert = false;
     c.checkpointed.clear();
     c.busy = true;
-    let image = sketch.map(|sk| {
-        c.entries.push(Entry::Sketch(sk.tex));
-        sk.png
-    });
+    let images: Vec<Vec<u8>> = sketch
+        .map(|sk| {
+            c.entries.push(Entry::Sketch(sk.tex));
+            sk.png
+        })
+        .into_iter()
+        .collect();
     c.entries.push(Entry::User(text.clone()));
     c.scroll_to_end = true;
-    let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone(), image });
+    let _ = worker.tx.send(ToWorker::Turn { text, context, ws, studio, settings: c.settings.clone(), images });
 }
 
 /// What Claude is told about the editor with each request.

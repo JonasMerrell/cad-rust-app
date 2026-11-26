@@ -88,6 +88,9 @@ PHONE_TRIANGLES = 750_000
 # pages at least this big go out gzipped (a big assembly's page is half the size)
 GZIP_MIN = 64 * 1024
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
+# photos with a chat request: how many, and how big each may be (the app sends ~1600 px JPEGs)
+MAX_IMAGES = 6
+MAX_IMAGE_BYTES = 8 << 20
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
 
 
@@ -323,9 +326,11 @@ class Projects:
                 "cams": _names(ws.get("cams"), "Setup"),
                 "simulations": _names(ws.get("simulations"), "Simulation"),
                 "pcbs": _names(ws.get("pcbs"), "PCB"),
+                "notes": [_notes((s.get("doc") or {}).get("notes")) for s in studios],
             }
         else:  # an old single Part Studio document
-            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": [], "simulations": [], "pcbs": []}
+            info = {"studios": ["Part Studio 1"], "assemblies": [], "drawings": [], "trees": [feature_tree(ws)], "cams": [], "simulations": [], "pcbs": [],
+                    "notes": [_notes(ws.get("notes"))]}
         self.info_cache[path] = (st.st_mtime_ns, st.st_size, info)
         return info
 
@@ -681,6 +686,20 @@ class Projects:
         cid = body.get("chat_id")
         if cid is not None and not re.fullmatch(r"[A-Za-z0-9_-]{1,64}", str(cid)):
             return 400, {"error": "bad chat id"}
+        images = body.get("images") or []
+        if not isinstance(images, list) or len(images) > MAX_IMAGES:
+            return 400, {"error": f"send at most {MAX_IMAGES} pictures"}
+        pics = []
+        for b in images:
+            try:
+                raw = base64.b64decode(str(b), validate=True)
+            except ValueError:
+                return 400, {"error": "a picture isn't base64"}
+            if len(raw) > MAX_IMAGE_BYTES:
+                return 400, {"error": "a picture is too big"}
+            if not (raw.startswith(b"\xff\xd8\xff") or raw.startswith(b"\x89PNG\r\n\x1a\n")):
+                return 400, {"error": "pictures go as JPEG or PNG"}
+            pics.append(raw)
         with self.lock:
             running = self.busy.get(path)
             if running and running in self.jobs and not self.jobs[running].done:
@@ -689,6 +708,13 @@ class Projects:
             with os.fdopen(fd, "w") as f:
                 f.write(text)
             cmd = [rcad, "chat", "--doc", path, "--prompt-file", pf]
+            files = [pf]
+            for k, raw in enumerate(pics):
+                ifd, ip = tempfile.mkstemp(suffix=".jpg" if raw[:2] == b"\xff\xd8" else ".png", prefix=f"rcad-photo-{k}-")
+                with os.fdopen(ifd, "wb") as f:
+                    f.write(raw)
+                files.append(ip)
+                cmd += ["--image", ip]
             if cid:
                 cmd += ["--chat", str(cid)]
             if isinstance(body.get("studio"), int) and body["studio"] >= 0:
@@ -704,19 +730,20 @@ class Projects:
                 proc = subprocess.Popen(cmd, cwd=os.path.dirname(path), stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         stderr=subprocess.PIPE, text=True, bufsize=1)
             except OSError as e:
-                os.unlink(pf)
+                for f in files:
+                    os.unlink(f)
                 return 500, {"error": f"could not start rcad: {e}"}
             jid = secrets.token_hex(8)
             job = Job(jid, path, proc, cid, text)
             self.jobs[jid] = job
             self.busy[path] = jid
             self._gc()
-        threading.Thread(target=self._pump, args=(job, pf), daemon=True).start()
+        threading.Thread(target=self._pump, args=(job, files), daemon=True).start()
         # the chat id is the first line rcad prints: wait for it briefly so the phone knows it
         evs, _, _ = job.since(0, 5)
         return 200, {"job": jid, "chat_id": job.chat_id}
 
-    def _pump(self, job, prompt_file):
+    def _pump(self, job, temp_files):
         err_lines = []
         t = threading.Thread(target=lambda: err_lines.extend(job.proc.stderr.read().splitlines()[-20:]), daemon=True)
         t.start()
@@ -739,10 +766,11 @@ class Projects:
                 error = f"rcad chat stopped ({code})" + (f": {tail}" if tail else "")
             job.finish(error)
         finally:
-            try:
-                os.unlink(prompt_file)
-            except OSError:
-                pass
+            for f in temp_files:
+                try:
+                    os.unlink(f)
+                except OSError:
+                    pass
             with self.lock:
                 if self.busy.get(job.doc) == job.id:
                     del self.busy[job.doc]
@@ -760,6 +788,54 @@ class Projects:
             # Claude Code may take a moment to wind down; make sure it ends
             threading.Timer(30, lambda: job.done or job.proc.poll() is not None or job.proc.terminate()).start()
         return True
+
+    # ---------------------------------------------------------------- notes
+
+    def note(self, did, body):
+        """Add, edit or delete a note pinned to a Part Studio (rCAD's note tool, then the document
+        is saved): (HTTP status, {"notes": [...]})."""
+        path = self.resolve(did)
+        if not path:
+            return 404, {"error": "no such document"}
+        action = body.get("action") or "add"
+        if action not in ("add", "edit", "delete"):
+            return 400, {"error": "action is add, edit or delete"}
+        args = {"action": action, "studio": body.get("studio") if isinstance(body.get("studio"), int) else 0}
+        if action == "add":
+            at, normal = body.get("at"), body.get("normal") or [0, 0, 1]
+            if not (isinstance(at, list) and len(at) == 3 and all(isinstance(v, (int, float)) for v in at)):
+                return 400, {"error": "give at: [x, y, z]"}
+            args["at"], args["normal"] = at, normal
+        else:
+            if not isinstance(body.get("id"), int):
+                return 400, {"error": "give the note's id"}
+            args["id"] = body["id"]
+        text = str(body.get("text") or "").strip()[:2000]
+        if action == "add" and not text:
+            return 400, {"error": "write the note"}
+        args["text"] = text
+        with self.lock:
+            running = self.busy.get(path)
+            if running and running in self.jobs and not self.jobs[running].done:
+                return 409, {"error": "Claude is working on this document: add the note when it's done"}
+            lk = self.export_locks.setdefault("note:" + path, threading.Lock())
+        rcad = self.rcad
+        if not rcad:
+            return 503, {"error": "rcad is not installed on this computer"}
+        with lk:
+            results = []
+            err = self._run_script(rcad, [{"tool": "open_document", "args": {"path": path}}, {"tool": "note", "args": args},
+                                          {"tool": "save_document", "args": {"path": path}}], os.path.dirname(path), 300, results)
+            step = next((r for r in results if r.get("tool") == "note"), {})
+            res = step.get("result")
+            if not isinstance(res, dict):
+                return (400 if step.get("error") else 500), {"error": step.get("error") or err or "rcad didn't change the note"}
+            if err:
+                return 500, {"error": f"the note was made but not saved: {err}"}
+        # a project that commits on save gets the note committed (and synced) as the editor would
+        if self._git_root(os.path.dirname(path), self.roots[int(did.split("-", 1)[0])]):
+            threading.Thread(target=self.github, args=(["sync", "--doc", path, "--message", "A note from the rCAD phone app"], 180), daemon=True).start()
+        return 200, res
 
     # ---------------------------------------------------------------- GitHub
 
@@ -880,6 +956,15 @@ def short_repo(url):
     """ "owner/name" of a GitHub remote URL (https or ssh), else None."""
     m = re.match(r"(?:https?://(?:[^@/]+@)?github\.com/|git@github\.com:|ssh://git@github\.com/)([^/]+)/([^/]+?)(?:\.git)?/?$", url.strip())
     return f"{m.group(1)}/{m.group(2)}" if m else None
+
+
+def _notes(notes):
+    """A Part Studio's notes as the phone shows them: id, text and the pinned point."""
+    out = []
+    for n in notes or []:
+        if isinstance(n, dict) and isinstance(n.get("at"), list) and len(n["at"]) == 3:
+            out.append({"id": n.get("id"), "text": str(n.get("text") or ""), "at": n["at"]})
+    return out
 
 
 def _param_text(params):
@@ -1606,6 +1691,9 @@ def handle(h, method, p, projects, body=None):
         return True
     if len(p) >= 3 and p[:2] == ["api", "doc"]:
         did = p[2]
+        if method == "POST" and p[3:] == ["note"]:
+            h.send_json(*projects.note(did, body))
+            return True
         if method == "POST" and p[3:] == ["sync"]:
             h.send_json(*projects.doc_git(did, ["sync", "--message", "Synced from the rCAD phone app"]))
             return True

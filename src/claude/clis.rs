@@ -257,7 +257,7 @@ fn codex_effort(effort: &str) -> &str {
 
 /// The command line for one request. `session` is the conversation to resume (without its
 /// prefix); the request itself goes in on stdin.
-pub(super) fn args(cli: Cli, folder: &std::path::Path, settings: &Settings, session: Option<&str>, image: Option<&std::path::Path>) -> Vec<String> {
+pub(super) fn args(cli: Cli, folder: &std::path::Path, settings: &Settings, session: Option<&str>, images: &[std::path::PathBuf]) -> Vec<String> {
     let mut a: Vec<String> = vec![];
     let model = settings.cli_model(cli).trim().to_string();
     match cli {
@@ -283,7 +283,7 @@ pub(super) fn args(cli: Cli, folder: &std::path::Path, settings: &Settings, sess
                 a.extend(["--model".into(), model]);
             }
             a.extend(["-c".into(), format!("model_reasoning_effort={}", codex_effort(&settings.effort))]);
-            if let Some(p) = image {
+            for p in images {
                 a.push(format!("--image={}", p.to_string_lossy()));
             }
             a.push("--".into());
@@ -358,20 +358,20 @@ pub(super) fn parse(cli: Cli, v: &Value) -> Vec<CliEvent> {
 
 impl Chat {
     /// One request through the Gemini CLI or Codex. Follow-ups resume the same conversation.
-    pub(super) fn cli_turn(&mut self, cli: Cli, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    pub(super) fn cli_turn(&mut self, cli: Cli, prompt: &str, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let bridge = match self.bridge.take() {
             Some(b) => b,
             None => Bridge::start()?,
         };
         bridge.refuse_pending();
-        let r = self.cli_child(cli, &bridge, prompt, image, settings, stop, send);
+        let r = self.cli_child(cli, &bridge, prompt, images, settings, stop, send);
         bridge.refuse_pending();
         self.bridge = Some(bridge);
         r
     }
 
     #[allow(clippy::too_many_arguments)]
-    fn cli_child(&mut self, cli: Cli, bridge: &Bridge, prompt: &str, image: Option<&[u8]>, settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
+    fn cli_child(&mut self, cli: Cli, bridge: &Bridge, prompt: &str, images: &[Vec<u8>], settings: &Settings, stop: &AtomicBool, send: &dyn Fn(FromWorker)) -> Result<(), String> {
         let exe = std::env::current_exe().map_err(|e| e.to_string())?;
         let private = settings_path().and_then(|p| p.parent().map(|d| d.to_path_buf())).filter(|d| std::fs::create_dir_all(d).is_ok()).ok_or("no config folder (HOME is not set)")?;
         let folder = match cli {
@@ -385,22 +385,25 @@ impl Chat {
         };
         let session = self.cc_session.as_deref().and_then(|id| id.strip_prefix(cli.prefix())).map(String::from);
         let mut prompt = prompt.to_string();
-        // a picture goes as a file Codex attaches; the Gemini CLI has no way to take one headless
-        let picture = match (cli, image) {
-            (Cli::Codex, Some(png)) => {
-                let p = folder.join(format!("drawing-{}.png", std::process::id()));
-                write_private_bytes(&p, png).map_err(|e| format!("could not save the drawing for Codex: {e}"))?;
-                Some(p)
+        // pictures go as files Codex attaches; the Gemini CLI has no way to take one headless
+        let mut picture: Vec<std::path::PathBuf> = vec![];
+        match cli {
+            Cli::Codex => {
+                for (k, b) in images.iter().enumerate() {
+                    let ext = if crate::claude::image_type(b) == "image/jpeg" { "jpg" } else { "png" };
+                    let p = folder.join(format!("picture-{}-{k}.{ext}", std::process::id()));
+                    write_private_bytes(&p, b).map_err(|e| format!("could not save a picture for Codex: {e}"))?;
+                    picture.push(p);
+                }
             }
-            (Cli::Gemini, Some(_)) => {
-                send(FromWorker::Notice("The Gemini CLI can't be sent pictures, so it gets the faces under your pencil strokes as text only.".into()));
-                prompt.push_str("\n\n(The user drew on the part in pencil; the picture couldn't be sent, but the faces under the strokes are listed in the editor block.)");
-                None
+            Cli::Gemini if !images.is_empty() => {
+                send(FromWorker::Notice("The Gemini CLI can't be sent pictures, so it gets this request as text only.".into()));
+                prompt.push_str("\n\n(The user sent pictures with this request, a pencil drawing on the part or photos; they couldn't be passed on. Faces under pencil strokes are listed in the editor block.)");
             }
-            _ => None,
-        };
+            _ => {}
+        }
         let mut cmd = command(cli);
-        cmd.args(args(cli, &folder, settings, session.as_deref(), picture.as_deref()));
+        cmd.args(args(cli, &folder, settings, session.as_deref(), &picture));
         cmd.env(crate::agent::BRIDGE_TOKEN_ENV, &bridge.token).env(crate::agent::BRIDGE_ADDR_ENV, &bridge.addr);
         if cli == Cli::Gemini {
             // the run folder is rCAD's own, so its settings (the cad server) apply
@@ -468,7 +471,7 @@ impl Chat {
                 Err(std::sync::mpsc::RecvTimeoutError::Timeout) => {}
             }
         };
-        if let Some(p) = &picture {
+        for p in &picture {
             let _ = std::fs::remove_file(p);
         }
         result?;
@@ -571,16 +574,16 @@ mod tests {
     #[test]
     fn codex_resumes_with_the_id_after_the_options_and_reads_stdin() {
         let s = Settings { auth: Auth::Codex, codex_model: "gpt-5.5".into(), effort: "max".into(), ..Settings::default() };
-        let a = args(Cli::Codex, std::path::Path::new("/r"), &s, Some("abc-1"), Some(std::path::Path::new("/r/d.png")));
+        let a = args(Cli::Codex, std::path::Path::new("/r"), &s, Some("abc-1"), &[std::path::PathBuf::from("/r/d.png")]);
         assert_eq!(a, ["--profile", "rcad", "exec", "resume", "--json", "--skip-git-repo-check", "--model", "gpt-5.5", "-c", "model_reasoning_effort=xhigh", "--image=/r/d.png", "--", "abc-1", "-"]);
-        let a = args(Cli::Codex, std::path::Path::new("/r"), &Settings { auth: Auth::Codex, ..Settings::default() }, None, None);
+        let a = args(Cli::Codex, std::path::Path::new("/r"), &Settings { auth: Auth::Codex, ..Settings::default() }, None, &[]);
         assert_eq!(a, ["--profile", "rcad", "exec", "--json", "--skip-git-repo-check", "-c", "model_reasoning_effort=high", "--", "-"]);
     }
 
     #[test]
     fn gemini_runs_headless_with_only_the_cad_server() {
         let s = Settings { auth: Auth::Gemini, ..Settings::default() };
-        let a = args(Cli::Gemini, std::path::Path::new("/r"), &s, Some("fa67"), None);
+        let a = args(Cli::Gemini, std::path::Path::new("/r"), &s, Some("fa67"), &[]);
         assert_eq!(a[..2], ["-p", ""]);
         assert!(a.windows(2).any(|w| w == ["--allowed-mcp-server-names", "cad"]));
         assert!(a.windows(2).any(|w| w == ["--resume", "fa67"]));

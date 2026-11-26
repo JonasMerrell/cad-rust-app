@@ -36,7 +36,7 @@ use crate::claude::{self, Auth, FromWorker, ToWorker};
 use crate::claude_chats::{self, Line};
 
 const USAGE: &str =
-    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console] [--model M] [--effort E] [--no-delegate] [--image drawing.png] (--prompt TEXT | --prompt-file F)";
+    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console|gemini|codex] [--model M] [--effort E] [--no-delegate] [--image picture.png|photo.jpg]… (--prompt TEXT | --prompt-file F)";
 
 struct Args {
     doc: PathBuf,
@@ -48,12 +48,13 @@ struct Args {
     effort: Option<String>,
     no_delegate: bool,
     /// A picture sent with the request (a pencil drawing, a photo), PNG.
-    image: Option<Vec<u8>>,
+    /// Pictures for the request (repeat --image): photos from the phone, a drawing.
+    images: Vec<Vec<u8>>,
 }
 
 fn parse(args: &[String]) -> Result<Args, String> {
     let (mut doc, mut chat, mut studio, mut prompt, mut auth, mut model, mut effort, mut no_delegate) = (None, None, 0, None, None, None, None, false);
-    let mut image = None;
+    let mut images = vec![];
     let mut it = args.iter();
     while let Some(a) = it.next() {
         let mut val = || it.next().cloned().ok_or_else(|| format!("{a} needs a value"));
@@ -71,6 +72,9 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     "claude-code" | "claude_code" => Auth::ClaudeCode,
                     "api-key" | "api_key" | "api" => Auth::ApiKey,
                     "console" => Auth::Console,
+                    // the Gemini or Codex CLI on this computer, with its own sign-in
+                    "gemini" => Auth::Gemini,
+                    "codex" => Auth::Codex,
                     o => return Err(format!("unknown --auth {o}")),
                 })
             }
@@ -79,14 +83,14 @@ fn parse(args: &[String]) -> Result<Args, String> {
             "--no-delegate" => no_delegate = true,
             "--image" => {
                 let p = val()?;
-                image = Some(std::fs::read(&p).map_err(|e| format!("can't read {p}: {e}"))?);
+                images.push(std::fs::read(&p).map_err(|e| format!("can't read {p}: {e}"))?);
             }
             o => return Err(format!("unknown option {o}")),
         }
     }
     let doc = doc.ok_or("give --doc")?;
     let prompt = prompt.map(|p| p.trim().to_string()).filter(|p| !p.is_empty()).ok_or("give --prompt or --prompt-file")?;
-    Ok(Args { doc, chat, studio, prompt, auth, model, effort, no_delegate, image })
+    Ok(Args { doc, chat, studio, prompt, auth, model, effort, no_delegate, images })
 }
 
 fn emit(v: Value) {
@@ -135,7 +139,12 @@ pub fn main(args: &[String]) -> i32 {
     // the phone has no sign-in of its own: by default the computer's Claude Code login does the work
     settings.auth = a.auth.unwrap_or(Auth::ClaudeCode);
     if let Some(m) = &a.model {
-        settings.model = m.clone();
+        // --model is the model of the backend in use (empty: the CLI's own default)
+        match settings.auth {
+            Auth::Gemini => settings.gemini_model = m.clone(),
+            Auth::Codex => settings.codex_model = m.clone(),
+            _ => settings.model = m.clone(),
+        }
     }
     if let Some(e) = &a.effort {
         settings.effort = e.clone();
@@ -188,8 +197,18 @@ pub fn main(args: &[String]) -> i32 {
             }
         }
     });
-    meta.lines.push(Line::User { text: a.prompt.clone() });
-    let _ = worker.tx.send(ToWorker::Turn { text: a.prompt.clone(), context: context(&doc, &ws, studio), ws: ws_text.clone(), studio, settings, image: a.image.clone() });
+    // the saved chat (and the editor's panel) says photos came with the request
+    let n = a.images.len();
+    let shown = if n == 0 { a.prompt.clone() } else { format!("{}\n[{n} photo{} attached]", a.prompt, if n == 1 { "" } else { "s" }) };
+    meta.lines.push(Line::User { text: shown });
+    let mut ctx_text = context(&doc, &ws, studio);
+    if n > 0 {
+        ctx_text.push_str(&format!(
+            "\nThe user attached {n} photo{} from their phone (shown with the request) as reference: use them for shapes, proportions and features. Sizes in a photo are only a guide unless the user gives dimensions or a known reference is in the shot.",
+            if n == 1 { "" } else { "s" }
+        ));
+    }
+    let _ = worker.tx.send(ToWorker::Turn { text: a.prompt.clone(), context: ctx_text, ws: ws_text.clone(), studio, settings, images: a.images.clone() });
 
     let mut changed: Option<String> = None;
     // where the request now being sent started, to drop its text when it is sent again

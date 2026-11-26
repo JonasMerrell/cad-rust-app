@@ -27,6 +27,7 @@ import android.widget.Toast
 import androidx.coordinatorlayout.widget.CoordinatorLayout
 import androidx.core.widget.NestedScrollView
 import com.google.android.material.bottomsheet.BottomSheetBehavior
+import org.json.JSONArray
 import org.json.JSONObject
 import java.io.IOException
 
@@ -61,6 +62,17 @@ class DocActivity : Activity() {
     private lateinit var stage: FrameLayout
     private lateinit var web: WebView
     private lateinit var webNote: TextView
+    private lateinit var pencil: PencilView
+    /** Over the view while drawing or placing a note: what to do, and its buttons. */
+    private lateinit var modeBar: LinearLayout
+    private lateinit var modeText: TextView
+    private lateinit var tools: LinearLayout
+    private lateinit var attachScroll: android.widget.HorizontalScrollView
+    private lateinit var attachStrip: LinearLayout
+    /** Photos and drawings for the next chat request. */
+    private val attachments = mutableListOf<Attachment>()
+    private var cameraFile: java.io.File? = null
+    private var placingNote = false
     /** Where the time went the last time the viewer loaded a page, for the menu and logcat. */
     private val timing = ViewTiming()
     private lateinit var progressCard: LinearLayout
@@ -130,6 +142,14 @@ class DocActivity : Activity() {
                 @JavascriptInterface
                 fun ready() = runOnUiThread { pageReady() }
 
+                /** a tap on the model while placing a note: {at, normal, part} */
+                @JavascriptInterface
+                fun picked(json: String) = runOnUiThread { notePicked(json) }
+
+                /** a tap on a note's pin */
+                @JavascriptInterface
+                fun note(id: Int) = runOnUiThread { editNote(id) }
+
                 /** netdash's "still building" page (it reloads itself until the real page is ready) */
                 @JavascriptInterface
                 fun building() = runOnUiThread {
@@ -194,9 +214,36 @@ class DocActivity : Activity() {
             }, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, Ui.dp(context, 6)).apply { topMargin = Ui.dp(context, 6) })
             setOnClickListener { showPane(1, expand = true) }
         }
+        pencil = PencilView(this).apply { visibility = View.GONE }
+        modeText = Ui.text(this, "", 14f, Ui.BAR_TEXT)
+        modeBar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            background = Ui.rounded(Ui.BAR, Ui.dp(context, 8).toFloat())
+            setPadding(Ui.dp(context, 12), Ui.dp(context, 4), Ui.dp(context, 4), Ui.dp(context, 4))
+            visibility = View.GONE
+        }
+        tools = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            fun tool(icon: String, desc: String, go: () -> Unit) = Ui.iconButton(context, icon, Ui.TEXT, size = 44, desc = desc) { go() }.apply {
+                background = Ui.pressable(Ui.rounded(0xF2FFFFFF.toInt(), Ui.dp(context, 22).toFloat(), 0x22000000, Ui.dp(context, 1)))
+                elevation = Ui.dp(context, 2).toFloat()
+                layoutParams = LinearLayout.LayoutParams(Ui.dp(context, 44), Ui.dp(context, 44)).apply { bottomMargin = Ui.dp(context, 10) }
+            }
+            addView(tool("pencil", "Draw on the model for Claude") { startPencil() })
+            addView(tool("note", "Pin a note to the model") { startPlacingNote() })
+        }
         stage = FrameLayout(this).apply {
             setBackgroundColor(Ui.SCENE)
             addView(web, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(pencil, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
+            addView(tools, FrameLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.END or Gravity.CENTER_VERTICAL).apply {
+                marginEnd = Ui.dp(context, 10)
+            })
+            addView(modeBar, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.TOP).apply {
+                val m = Ui.dp(context, 8)
+                setMargins(m, m, m, m)
+            })
             addView(webNote, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT))
             addView(progressCard, FrameLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT, Gravity.BOTTOM).apply {
                 val m = Ui.dp(context, 10)
@@ -242,9 +289,18 @@ class DocActivity : Activity() {
             setOnClickListener { sheetBehavior.state = BottomSheetBehavior.STATE_EXPANDED }
         }
         send = Ui.accentButton(this, "Send") { if (jobId != null) stopJob() else sendPrompt() }
-        val inputRow = Ui.row(this).apply {
-            setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 10))
+        val attach = Ui.iconButton(this, "photo", Ui.MUTED, size = 42, desc = "Add photos or a drawing") { v -> attachMenu(v) }
+        attachStrip = LinearLayout(this).apply { orientation = LinearLayout.HORIZONTAL; setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), 0) }
+        attachScroll = android.widget.HorizontalScrollView(this).apply {
+            isHorizontalScrollBarEnabled = false
             setBackgroundColor(Ui.SHEET)
+            visibility = View.GONE
+            addView(attachStrip)
+        }
+        val inputRow = Ui.row(this).apply {
+            setPadding(Ui.dp(context, 4), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 10))
+            setBackgroundColor(Ui.SHEET)
+            addView(attach)
             addView(input, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
             addView(send, LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(context, 42)).apply { marginStart = Ui.dp(context, 8) })
         }
@@ -255,6 +311,7 @@ class DocActivity : Activity() {
             addView(Ui.divider(context))
             addView(msgScroll, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, 0, 1f))
             addView(Ui.divider(context))
+            addView(attachScroll)
             addView(inputRow)
         }
 
@@ -502,6 +559,7 @@ class DocActivity : Activity() {
             tree.addView(featureRow(f, rolledBack = i >= rb, error = errors[f.optInt("id")]))
         }
 
+        notesSection()
         if (b != null) partsSection(b)
 
         val vars = t.optJSONArray("variables")
@@ -779,6 +837,7 @@ class DocActivity : Activity() {
         timing.mark(if (fallback) "no first frame" else "first frame")
         timing.loading = false
         webNote.visibility = View.GONE
+        pushPins()
         val gen = timing.gen
         // the browser's own view of the page and the files it loaded
         web.evaluateJavascript(ViewTiming.JS) { json ->
@@ -895,21 +954,30 @@ class DocActivity : Activity() {
     // ---------------------------------------------------------------- a request
 
     private fun sendPrompt() {
-        val text = input.text.toString().trim()
-        if (text.isEmpty()) return
+        var text = input.text.toString().trim()
+        if (text.isEmpty()) {
+            if (attachments.isNotEmpty()) toast("Say what Claude should do with the pictures")
+            return
+        }
         val a = api ?: run { load(); toast("Connecting to netdash…"); return }
         input.setText("")
         (getSystemService(INPUT_METHOD_SERVICE) as InputMethodManager).hideSoftInputFromWindow(input.windowToken, 0)
-        userBubble(text)
+        val sent = attachments.toList()
+        attachments.clear()
+        showAttachments()
+        val parts = sent.filter { it.drawing }.flatMap { it.parts }.distinct()
+        if (parts.isNotEmpty()) text += "\n\n(My pencil strokes are on: ${parts.joinToString(", ")}.)"
+        userBubble(text, sent.map { it.thumb })
         resetStream()
         setBusy(true, null)
         val body = JSONObject().put("text", text)
+        if (sent.isNotEmpty()) body.put("images", JSONArray(sent.map { android.util.Base64.encodeToString(it.jpeg, android.util.Base64.NO_WRAP) }))
         chatId?.let { body.put("chat_id", it) }
         body.put("studio", studio)
         if (prefs.model.isNotEmpty()) body.put("model", prefs.model)
         Thread {
             try {
-                val res = a.post("/api/doc/${Api.enc(docId)}/chat", body)
+                val res = a.post("/api/doc/${Api.enc(docId)}/chat", body, readMs = 90000)
                 val jid = res.getString("job")
                 runOnUiThread {
                     if (!res.isNull("chat_id")) setChat(res.optString("chat_id"))
@@ -1101,12 +1169,18 @@ class DocActivity : Activity() {
 
     private fun lp(top: Int = 6) = LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.WRAP_CONTENT).apply { topMargin = Ui.dp(this@DocActivity, top) }
 
-    private fun userBubble(t: String) {
+    private fun userBubble(t: String, pictures: List<android.graphics.Bitmap> = emptyList()) {
         msgs.addView(Ui.text(this, t, 15f).apply {
             background = Ui.rounded(Ui.USER_BUBBLE, Ui.dp(context, 8).toFloat())
             setPadding(Ui.dp(context, 12), Ui.dp(context, 8), Ui.dp(context, 12), Ui.dp(context, 8))
             setTextIsSelectable(true)
         }, lp(10))
+        if (pictures.isNotEmpty()) msgs.addView(LinearLayout(this).apply {
+            for (b in pictures) addView(ImageView(context).apply {
+                setImageBitmap(b)
+                scaleType = ImageView.ScaleType.CENTER_CROP
+            }, LinearLayout.LayoutParams(Ui.dp(this@DocActivity, 64), Ui.dp(this@DocActivity, 64)).apply { marginEnd = Ui.dp(this@DocActivity, 6) })
+        }, lp(4))
     }
 
     private fun assistantText(t: String): TextView {
@@ -1149,5 +1223,236 @@ class DocActivity : Activity() {
 
     private fun notice(t: String, error: Boolean) {
         msgs.addView(Ui.text(this, t, 12.5f, if (error) Ui.ERR else Ui.MUTED), lp())
+    }
+    // ---------------------------------------------------------------- photos, pencil, notes
+
+    private fun attachMenu(anchor: View) {
+        val m = android.widget.PopupMenu(this, anchor)
+        m.menu.add(0, 1, 0, "Take a photo")
+        m.menu.add(0, 2, 1, "Choose photos")
+        m.menu.add(0, 3, 2, "Draw on the model")
+        m.setOnMenuItemClickListener {
+            when (it.itemId) {
+                1 -> takePhoto()
+                2 -> startActivityForResult(android.content.Intent(android.content.Intent.ACTION_GET_CONTENT).setType("image/*")
+                    .addCategory(android.content.Intent.CATEGORY_OPENABLE).putExtra(android.content.Intent.EXTRA_ALLOW_MULTIPLE, true), REQ_PICK)
+                3 -> startPencil()
+            }
+            true
+        }
+        m.show()
+    }
+
+    private fun takePhoto() {
+        val dir = java.io.File(cacheDir, "photos").apply { mkdirs() }
+        dir.listFiles()?.filter { System.currentTimeMillis() - it.lastModified() > 86_400_000 }?.forEach { it.delete() }
+        val f = java.io.File(dir, "camera-${System.currentTimeMillis()}.jpg")
+        cameraFile = f
+        val uri = androidx.core.content.FileProvider.getUriForFile(this, "$packageName.files", f)
+        val i = android.content.Intent(android.provider.MediaStore.ACTION_IMAGE_CAPTURE).putExtra(android.provider.MediaStore.EXTRA_OUTPUT, uri)
+            .addFlags(android.content.Intent.FLAG_GRANT_WRITE_URI_PERMISSION or android.content.Intent.FLAG_GRANT_READ_URI_PERMISSION)
+        try {
+            startActivityForResult(i, REQ_CAMERA)
+        } catch (e: android.content.ActivityNotFoundException) {
+            toast("No camera app")
+        }
+    }
+
+    @Deprecated("startActivityForResult is enough here")
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: android.content.Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        if (resultCode != RESULT_OK) return
+        val uris = when (requestCode) {
+            REQ_CAMERA -> listOfNotNull(cameraFile?.takeIf { it.length() > 0 }?.let { android.net.Uri.fromFile(it) })
+            REQ_PICK -> data?.clipData?.let { c -> (0 until c.itemCount).map { c.getItemAt(it).uri } } ?: listOfNotNull(data?.data)
+            else -> return
+        }
+        if (uris.isEmpty()) return
+        toast("Adding ${uris.size} photo${if (uris.size == 1) "" else "s"}…")
+        Thread {
+            val got = uris.mapNotNull { u ->
+                val jpeg = Photos.load(this, u)
+                jpeg?.let { j -> Photos.thumb(j, Ui.dp(this, 120))?.let { Attachment(j, it, drawing = false) } }
+            }
+            runOnUiThread {
+                if (got.size < uris.size) toast("Couldn't read ${uris.size - got.size} of them")
+                addAttachments(got)
+            }
+        }.start()
+    }
+
+    private fun addAttachments(list: List<Attachment>) {
+        val room = MAX_ATTACH - attachments.size
+        if (list.size > room) toast("At most $MAX_ATTACH pictures per request")
+        attachments += list.take(room.coerceAtLeast(0))
+        showAttachments()
+        showPane(1, expand = true)
+    }
+
+    private fun showAttachments() {
+        attachStrip.removeAllViews()
+        for (a in attachments.toList()) {
+            attachStrip.addView(android.widget.FrameLayout(this).apply {
+                addView(ImageView(context).apply {
+                    setImageBitmap(a.thumb)
+                    scaleType = ImageView.ScaleType.CENTER_CROP
+                    background = Ui.rounded(Ui.SECTION, Ui.dp(context, 6).toFloat())
+                    clipToOutline = true
+                }, FrameLayout.LayoutParams(Ui.dp(context, 60), Ui.dp(context, 60)))
+                // tap to take it off again
+                addView(ImageView(context).apply {
+                    setImageDrawable(Icon(context, "close", Ui.BAR_TEXT, 14))
+                    background = Ui.rounded(0xCC000000.toInt(), Ui.dp(context, 9).toFloat())
+                    scaleType = ImageView.ScaleType.CENTER
+                }, FrameLayout.LayoutParams(Ui.dp(context, 18), Ui.dp(context, 18), Gravity.TOP or Gravity.END).apply { setMargins(0, Ui.dp(context, 3), Ui.dp(context, 3), 0) })
+                contentDescription = if (a.drawing) "Drawing (tap to remove)" else "Photo (tap to remove)"
+                setOnClickListener { attachments.remove(a); showAttachments() }
+            }, LinearLayout.LayoutParams(Ui.dp(this, 60), Ui.dp(this, 60)).apply { marginEnd = Ui.dp(this@DocActivity, 8) })
+        }
+        attachScroll.visibility = if (attachments.isEmpty()) View.GONE else View.VISIBLE
+        input.hint = if (attachments.isEmpty()) "Ask Claude to design or change something" else "Say what to do with the picture${if (attachments.size == 1) "" else "s"}"
+    }
+
+    private fun showMode(text: String, vararg buttons: Pair<String, () -> Unit>) {
+        modeText.text = text
+        modeBar.removeAllViews()
+        modeBar.addView(modeText, LinearLayout.LayoutParams(0, ViewGroup.LayoutParams.WRAP_CONTENT, 1f))
+        for ((label, go) in buttons) modeBar.addView(Ui.barTab(this, label) { go() }.apply {
+            setTextColor(Ui.ACCENT_ON_BAR)
+            layoutParams = LinearLayout.LayoutParams(ViewGroup.LayoutParams.WRAP_CONTENT, Ui.dp(this@DocActivity, 40))
+        })
+        modeBar.visibility = View.VISIBLE
+        tools.visibility = View.GONE
+    }
+
+    private fun endMode() {
+        modeBar.visibility = View.GONE
+        tools.visibility = View.VISIBLE
+        pencil.visibility = View.GONE
+        pencil.clear()
+        if (placingNote) {
+            placingNote = false
+            web.evaluateJavascript("window.rcadApp && rcadApp.setMode(null)", null)
+        }
+    }
+
+    /** The pencil: draw over the view, then the view and the strokes go to Claude as a picture. */
+    private fun startPencil() {
+        if (placingNote) endMode()
+        pencil.clear()
+        pencil.visibility = View.VISIBLE
+        sheetBehavior.state = BottomSheetBehavior.STATE_COLLAPSED
+        showMode("Draw on the model", "Clear" to { pencil.clear() }, "Cancel" to { endMode() }, "Add to chat" to { attachDrawing() })
+    }
+
+    private fun attachDrawing() {
+        if (pencil.strokes.isEmpty()) return toast("Draw something first")
+        val density = resources.displayMetrics.density
+        val pts = JSONArray(pencil.samples().map { (x, y) -> JSONArray(listOf((x / density).toDouble(), (y / density).toDouble())) })
+        web.evaluateJavascript("(window.rcadApp && rcadApp.snapshot()) || ''") { shot ->
+            val url = try { JSONArray("[$shot]").optString(0) } catch (e: Exception) { "" }
+            val bmp = url.substringAfter("base64,", "").takeIf { it.isNotEmpty() }?.let {
+                val b = android.util.Base64.decode(it, android.util.Base64.DEFAULT)
+                android.graphics.BitmapFactory.decodeByteArray(b, 0, b.size)
+            } ?: android.graphics.Bitmap.createBitmap(web.width.coerceAtLeast(1), web.height.coerceAtLeast(1), android.graphics.Bitmap.Config.ARGB_8888).also {
+                // a page without the snapshot hook (a drawing sheet, pictures): draw the web view itself
+                web.draw(android.graphics.Canvas(it))
+            }
+            val drawn = pencil.onto(bmp, bmp.width.toFloat() / pencil.width.coerceAtLeast(1))
+            web.evaluateJavascript("(window.rcadApp && rcadApp.partsAt($pts)) || '[]'") { res ->
+                val parts = try {
+                    val arr = JSONArray(JSONArray("[$res]").optString(0, "[]"))
+                    (0 until arr.length()).map { arr.optString(it) }
+                } catch (e: Exception) { emptyList() }
+                val jpeg = Photos.jpeg(Photos.fit(drawn, 1600))
+                endMode()
+                addAttachments(listOfNotNull(Photos.thumb(jpeg, Ui.dp(this, 120))?.let { Attachment(jpeg, it, drawing = true, parts = parts) }))
+                toast(if (parts.isEmpty()) "Drawing added: say what it shows" else "Drawing added (on ${parts.joinToString(", ")})")
+            }
+        }
+    }
+
+    // notes: pinned to faces of a Part Studio, saved with the document; Claude sees them
+
+    private fun notes(): JSONArray? = if (kind == "studio") detail?.optJSONArray("notes")?.optJSONArray(index) else null
+
+    private fun pushPins() {
+        val n = notes() ?: JSONArray()
+        web.evaluateJavascript("window.rcadApp && rcadApp.pins($n)", null)
+    }
+
+    private fun notesSection() {
+        val n = notes() ?: JSONArray()
+        tree.addView(Ui.sectionRow(this, "note", "Notes", Ui.text(this, if (n.length() > 0) "${n.length()}" else "", 12.5f, Ui.MUTED)))
+        for (i in 0 until n.length()) {
+            val o = n.getJSONObject(i)
+            tree.addView(treeRow("note", o.optString("text"), "", dim = false, strike = false, hidden = false) { editNote(o.optInt("id")) })
+        }
+        tree.addView(treeRow("plus", "Pin a note to the model", "Tap where it goes", dim = true, strike = false, hidden = false) { startPlacingNote() })
+    }
+
+    private fun startPlacingNote() {
+        if (kind != "studio") return toast("Notes go on a Part Studio's faces: open one first")
+        if (pencil.visibility == View.VISIBLE) endMode()
+        placingNote = true
+        web.evaluateJavascript("window.rcadApp && rcadApp.setMode('note')", null)
+        sheetBehavior.state = BottomSheetBehavior.STATE_COLLAPSED
+        showMode("Tap the model where the note goes", "Cancel" to { endMode() })
+    }
+
+    private fun notePicked(json: String) {
+        if (!placingNote) return
+        endMode()
+        val hit = try { JSONObject(json) } catch (e: Exception) { return }
+        val field = EditText(this).apply { hint = "What should be done here?"; minLines = 2 }
+        AlertDialog.Builder(this)
+            .setTitle("Note on ${hit.optString("part").ifEmpty { "the model" }}")
+            .setView(Ui.column(this, 20, field))
+            .setPositiveButton("Save") { _, _ ->
+                val t = field.text.toString().trim()
+                if (t.isNotEmpty()) postNote(JSONObject().put("action", "add").put("studio", index).put("at", hit.optJSONArray("at")).put("normal", hit.optJSONArray("normal")).put("text", t))
+            }
+            .setNegativeButton("Cancel", null)
+            .show()
+        field.requestFocus()
+    }
+
+    private fun editNote(id: Int) {
+        val n = notes() ?: return
+        val o = (0 until n.length()).map { n.getJSONObject(it) }.firstOrNull { it.optInt("id") == id } ?: return
+        val field = EditText(this).apply { setText(o.optString("text")); minLines = 2 }
+        AlertDialog.Builder(this)
+            .setTitle("Note")
+            .setView(Ui.column(this, 20, field))
+            .setPositiveButton("Save") { _, _ -> postNote(JSONObject().put("action", "edit").put("studio", index).put("id", id).put("text", field.text.toString().trim())) }
+            .setNeutralButton("Delete") { _, _ -> postNote(JSONObject().put("action", "delete").put("studio", index).put("id", id)) }
+            .setNegativeButton("Ask Claude") { _, _ -> askAbout("About the note \"${o.optString("text")}\": ") }
+            .show()
+    }
+
+    private fun postNote(body: JSONObject) {
+        val a = api ?: return
+        val studioAt = index
+        Thread {
+            try {
+                val res = a.post("/api/doc/${Api.enc(docId)}/note", body, readMs = 320000)
+                runOnUiThread {
+                    // the document's notes as saved, without waiting for a reload
+                    val all = detail?.optJSONArray("notes")
+                    if (all != null && studioAt < all.length()) all.put(studioAt, res.optJSONArray("notes") ?: JSONArray())
+                    toast(when { res.has("added") -> "Note pinned · Claude sees it with every request"; res.has("deleted") -> "Note deleted"; else -> "Note saved" })
+                    buildTree()
+                    pushPins()
+                }
+            } catch (e: IOException) {
+                runOnUiThread { toast(e.message ?: "Couldn't save the note") }
+            }
+        }.start()
+    }
+
+    companion object {
+        private const val REQ_CAMERA = 41
+        private const val REQ_PICK = 42
+        private const val MAX_ATTACH = 6
     }
 }

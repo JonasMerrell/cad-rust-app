@@ -83,6 +83,27 @@ STUB = textwrap.dedent('''\
                 continue
             elif t == "export_drawing":
                 open(args["path"], "w").write('<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 420 297"><text>sheet %d</text></svg>' % args["sheet"])
+            elif t == "note":
+                d = doc["studios"][args["studio"]]["doc"]
+                notes = d.setdefault("notes", [])
+                if args["action"] == "add":
+                    nid = max([n["id"] for n in notes] or [0]) + 1
+                    notes.append({"id": nid, "text": args["text"], "at": args["at"], "normal": args["normal"]})
+                    res = {"added": nid}
+                elif not any(n["id"] == args["id"] for n in notes):
+                    print(json.dumps({"tool": t, "error": "no note %d" % args["id"]}))
+                    continue
+                elif args["action"] == "delete" or not args["text"]:
+                    d["notes"] = notes = [n for n in notes if n["id"] != args["id"]]
+                    res = {"deleted": args["id"]}
+                else:
+                    for n in notes:
+                        if n["id"] == args["id"]:
+                            n["text"] = args["text"]
+                    res = {"edited": args["id"]}
+                res["notes"] = [{"id": n["id"], "text": n["text"], "at": n["at"]} for n in notes]
+                print(json.dumps({"tool": t, "result": res}))
+                continue
             elif t == "drawing_info":
                 print(json.dumps({"tool": t, "result": {"name": "Plate", "sheets": 2, "sheet_size": "A3", "warnings": [],
                     "views": [{"id": 1, "dir": "front", "scale": 2, "sheet": 1}, {"id": 2, "dir": "section:front", "letter": "A", "scale": 2, "sheet": 1},
@@ -141,6 +162,10 @@ STUB = textwrap.dedent('''\
             print(json.dumps({"ok": True, "signed_in": False}))
         sys.exit(0)
     if a[0] == "chat":
+        imgs = [a[i + 1] for i, x in enumerate(a) if x == "--image"]
+        json.dump({"images": imgs, "sizes": [os.path.getsize(p) for p in imgs]},
+                  open(os.path.join(os.path.dirname(os.path.abspath(sys.argv[0])), "chat-args.json"), "w"))
+        a = [x for i, x in enumerate(a) if x != "--image" and (i == 0 or a[i - 1] != "--image")]
         o = dict(zip(a[1::2], a[2::2]))
         doc, prompt = o["--doc"], open(o["--prompt-file"]).read()
         cid = o.get("--chat", "c1")
@@ -478,6 +503,37 @@ class ProjectsTest(unittest.TestCase):
         self.assertIn(["sync", "--doc", os.path.join(os.path.realpath(self.projects_dir), "empty", "empty.json"), "--message",
                        "Started from the rCAD phone app"], calls)
         self.assertEqual(self.req("POST", "/api/github/logout", {})[1]["signed_in"], False)
+
+    def test_notes(self):
+        did = self.doc()[0]["id"]
+        st, res = self.req("POST", f"/api/doc/{did}/note", {"studio": 0, "at": [1, 2, 3], "normal": [0, 0, 1], "text": "Chamfer this edge"})
+        self.assertEqual((st, res["added"]), (200, 1))
+        st, d = self.req("GET", f"/api/doc/{did}")
+        self.assertEqual(d["notes"], [[{"id": 1, "text": "Chamfer this edge", "at": [1, 2, 3]}]])
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/note", {"at": [1, 2], "text": "x"})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/note", {"at": [1, 2, 3], "text": " "})[0], 400)
+        st, res = self.req("POST", f"/api/doc/{did}/note", {"action": "edit", "id": 1, "text": "Chamfer 1 mm"})
+        self.assertEqual(res["notes"][0]["text"], "Chamfer 1 mm")
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/note", {"action": "edit", "id": 7, "text": "?"})[0], 400)
+        st, res = self.req("POST", f"/api/doc/{did}/note", {"action": "delete", "id": 1})
+        self.assertEqual((st, res["notes"]), (200, []))
+
+    def test_chat_with_photos(self):
+        did = self.doc()[0]["id"]
+        jpeg = base64.b64encode(b"\xff\xd8\xff\xe0" + b"x" * 100).decode()
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/chat", {"text": "hi", "images": ["not base64!"]})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/chat", {"text": "hi", "images": [base64.b64encode(b"GIF89a").decode()]})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/chat", {"text": "hi", "images": [jpeg] * 7})[0], 400)
+        st, res = self.req("POST", f"/api/doc/{did}/chat", {"text": "make this", "images": [jpeg, jpeg]})
+        self.assertEqual(st, 200)
+        self.wait_job(res["job"])
+        args = json.load(open(os.path.join(self.tmp, "chat-args.json")))
+        self.assertEqual(len(args["images"]), 2)
+        self.assertTrue(all(p.endswith(".jpg") for p in args["images"]))
+        self.assertTrue(all(sz == 104 for sz in args["sizes"]))
+        # the photos are removed once the request is done
+        time.sleep(0.2)
+        self.assertFalse(any(os.path.exists(p) for p in args["images"]))
 
     def test_new_project(self):
         st, res = self.req("POST", "/api/projects", {"name": "Hex tray"})

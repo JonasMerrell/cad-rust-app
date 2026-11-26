@@ -286,9 +286,9 @@ class Handler(BaseHTTPRequestHandler):
                 break
             n -= len(chunk)
 
-    def body_json(self):
+    def body_json(self, limit=1 << 20):
         n = self.length()
-        if n < 0 or n > 1 << 20:
+        if n < 0 or n > limit:
             raise ValueError("bad length")
         raw = self.rfile.read(n) if n else b"{}"
         obj = json.loads(raw or b"{}")
@@ -423,7 +423,8 @@ class Handler(BaseHTTPRequestHandler):
             return
         p = self.parts()
         try:
-            body = self.body_json()
+            # a phone chat request may carry photos (JPEGs the app has scaled down)
+            body = self.body_json(32 << 20 if p[-1:] == ["chat"] else 1 << 20)
         except ValueError as e:
             return self.send_json(400, {"error": str(e)})
         if p == ["api", "sessions"]:
