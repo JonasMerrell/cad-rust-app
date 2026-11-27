@@ -785,6 +785,8 @@ class DocActivity : Activity() {
                     downY = e.rawY
                     moved = false
                     v.isPressed = true
+                    v.translationZ = Ui.dp(this, 6).toFloat()
+                    v.setBackgroundColor(Ui.SHEET)
                     line.setBackgroundColor(Ui.ACCENT)
                 }
                 android.view.MotionEvent.ACTION_MOVE -> {
@@ -793,12 +795,12 @@ class DocActivity : Activity() {
                         tree.getLocationOnScreen(loc)
                         val y = e.rawY - loc[1]
                         val target = featureRows.count { it.top + it.height / 2 < y }
+                        // the bar follows the finger (moving the view itself would end the drag);
+                        // it goes into its new place when let go
+                        v.translationY = e.rawY - downY
                         if (target != at) {
                             at = target
-                            tree.removeView(bar)
-                            val idx = if (at < featureRows.size) tree.indexOfChild(featureRows[at]) else tree.indexOfChild(featureRows.last()) + 1
-                            tree.addView(bar, idx)
-                            featureRows.forEachIndexed { i, r -> r.alpha = if (i >= at) 0.45f else 1f }
+                            featureRows.forEachIndexed { i, r -> r.alpha = if (i >= at) 0.4f else 1f }
                             label.text = if (at < n) "build ${at} of $n" else "build all"
                             v.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
                         }
@@ -807,6 +809,8 @@ class DocActivity : Activity() {
                 android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
                     v.parent.requestDisallowInterceptTouchEvent(false)
                     v.isPressed = false
+                    v.translationY = 0f
+                    v.translationZ = 0f
                     if (e.actionMasked == android.view.MotionEvent.ACTION_UP && at != rb) postRollback(if (at >= n) null else at)
                     else if (e.actionMasked == android.view.MotionEvent.ACTION_UP && !moved) {
                         if (rb < n) AlertDialog.Builder(this).setTitle("Rollback bar")
