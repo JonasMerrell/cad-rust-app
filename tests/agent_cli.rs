@@ -376,3 +376,42 @@ fn sketch_add_dims_drive_the_geometry() {
     // an item without dimensionable sizes says which ones have them
     assert!(lines[4]["error"].as_str().unwrap().contains("ellipse takes no dims"), "{}", lines[4]);
 }
+
+/// set_rollback builds only the features above the bar, keeps the rest, and comes back in the
+/// saved document and describe; null puts the bar back at the end.
+#[test]
+fn rollback_bar_builds_only_the_features_above_it() {
+    let dir = scratch("rollback");
+    let script = json!([
+        {"tool": "new_document", "args": {}},
+        {"tool": "create_sketch", "args": {"plane": "top"}},
+        {"tool": "sketch_add", "args": {"sketch_id": 1, "items": [{"type": "rect", "corner1": [0, 0], "corner2": [20, 10]}]}},
+        {"tool": "add_feature", "args": {"kind": "extrude", "params": {"profiles": [{"sketch": 1}], "depth": 5}}},
+        {"tool": "edit_feature", "args": {"id": 2, "params": {"depth": "8"}}},
+        {"tool": "set_rollback", "args": {"at": 1}},
+        {"tool": "save_document", "args": {"path": "rb.json"}},
+        {"tool": "describe", "args": {}},
+        {"tool": "set_rollback", "args": {"at": 5}},
+        {"tool": "set_rollback", "args": {"at": null}},
+    ]);
+    std::fs::write(dir.join("rb-script.json"), script.to_string()).unwrap();
+    let o = Command::new(exe()).args(["run", "rb-script.json"]).current_dir(&dir).output().unwrap();
+    let lines: Vec<Value> = String::from_utf8_lossy(&o.stdout).lines().map(|l| serde_json::from_str(l).unwrap()).collect();
+    assert_eq!(lines.len(), 10, "{}", String::from_utf8_lossy(&o.stdout));
+    for l in &lines[..8] {
+        assert!(l.get("error").is_none(), "{l}");
+    }
+    let vol = lines[4]["result"]["parts"][0]["volume_mm3"].as_f64().unwrap();
+    assert!((vol - 20.0 * 10.0 * 8.0).abs() < 1.0, "{vol}");
+    // rolled back above the extrude: no part, but the extrude is still there
+    assert_eq!(lines[5]["result"]["parts"], json!([]));
+    assert_eq!(lines[5]["result"]["rollback"], json!(1));
+    assert_eq!(lines[7]["result"]["rollback"], json!(1));
+    assert_eq!(lines[7]["result"]["features"].as_array().unwrap().len(), 2);
+    let saved: Value = serde_json::from_str(&std::fs::read_to_string(dir.join("rb.json")).unwrap()).unwrap();
+    let rb = saved.pointer("/studios/0/doc/rollback").or_else(|| saved.get("rollback"));
+    assert_eq!(rb, Some(&json!(1)), "{saved}");
+    assert!(lines[8]["error"].as_str().unwrap().contains("there are 2 features"), "{}", lines[8]);
+    assert_eq!(lines[9]["result"]["rollback"], Value::Null);
+    assert_eq!(lines[9]["result"]["parts"].as_array().unwrap().len(), 1);
+}

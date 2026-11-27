@@ -312,6 +312,7 @@ impl Session {
                 let mut v = self.status();
                 v["units"] = json!(self.doc.units.label());
                 v["document"] = self.tabs_summary();
+                v["rollback"] = json!(self.doc.rollback);
                 v["variables"] = json!(self.doc.variables.iter().map(|x| json!({"name": x.name, "expr": x.expr})).collect::<Vec<_>>());
                 v["features"] = json!(self
                     .doc
@@ -444,6 +445,23 @@ impl Session {
                 }
                 self.rebuild()?;
                 self.status()
+            }
+            "set_rollback" => {
+                // the editor's rollback bar: features at or after `at` are not built; no `at` (or
+                // null) puts it back at the end
+                let n = self.doc.features.len();
+                let at = match a.get("at") {
+                    None | Some(Value::Null) => None,
+                    Some(v) => Some(v.as_u64().ok_or("at is how many features to build (0 to the number of features), or null for all")? as usize),
+                };
+                if let Some(i) = at.filter(|&i| i > n) {
+                    return Err(format!("at {i}: there are {n} features"));
+                }
+                self.doc.rollback = at.filter(|&i| i < n);
+                self.rebuild()?;
+                let mut v = self.status();
+                v["rollback"] = json!(self.doc.rollback);
+                v
             }
             "delete_feature" => {
                 let id = id_arg(a, "id")?;
@@ -1954,6 +1972,7 @@ pub(crate) fn tools() -> Value {
         {"name": "add_feature", "description": "Add a feature. kind: extrude, revolve, sweep, loft, fillet, chamfer, shell, hole, draft, thicken, rib, moveFace, deleteFace, helix, plane, linearPattern, circularPattern, curvePattern {kind:'part'|'feature', bodies, path:[curve refs], count, align}, pointPattern {kind, bodies, points:[sketch_point refs], first point = where the original is}, mirror, boolean, split, transform, deleteBody, sheetMetal, heal {bodies, tolerance}, custom. params override the defaults (see describe for the shape). Refs: {kind:'region',sketch,point}, or {sketch:id} for every region of a sketch except holes ({sketch:id, all:true} includes holes); {kind:'face',point,normal}; {kind:'edge',point}; {kind:'body',body:[f,i]}; {kind:'axis',axis:0|1|2}; {kind:'origin_plane',plane:'Top'|'Front'|'Right'}; {kind:'sketch_curve',sketch,curve}; {kind:'sketch_point',sketch,point}; {kind:'feature',feature}; {kind:'curve',feature}. Values are expressions in document units. Examples: extrude {profiles:[{sketch:3}], depth:10, op:'new'|'add'|'remove'|'intersect', end:'blind'|'symmetric'|'through_all'|'up_to_face'|'up_to_next'|'up_to_vertex', up_to:ref, draft:deg}; fillet {edges:[edge refs], radius:2}; chamfer {edges, distance, mode:'equal'|'two'|'angle', distance2, angle}; hole {points:[sketch_point refs], diameter:5, through:true}. feature_defaults gives any kind's params and defaults; unknown param names are rejected. A feature that fails to build stays in the history (as in the editor) and the result has ok:false and new_errors; rollback:true undoes the call instead.", "inputSchema": obj(json!({"kind": {"type": "string"}, "params": {"type": "object"}, "name": {"type": "string"}}), &["kind"])},
         {"name": "feature_defaults", "description": "A feature kind's params with their default values, the shape add_feature params and edit_feature take; without kind, the list of kinds.", "inputSchema": obj(json!({"kind": {"type": "string"}}), &[])},
         {"name": "edit_feature", "description": "Change a feature's params (same format as add_feature) or suppressed flag.", "inputSchema": obj(json!({"id": {"type": "integer"}, "params": {"type": "object"}, "suppressed": {"type": "boolean"}}), &["id"])},
+        {"name": "set_rollback", "description": "Move the rollback bar, as in the editor's feature tree: only the first `at` features are built (later ones stay in the history, unbuilt), and new features go in at the bar. Omit at (or null) to build everything. describe gives the bar's place as rollback (null: at the end).", "inputSchema": obj(json!({"at": {"type": ["integer", "null"]}}), &[])},
         {"name": "delete_feature", "description": "Delete a feature.", "inputSchema": obj(json!({"id": {"type": "integer"}}), &["id"])},
         {"name": "scan_photos", "description": "Photogrammetry: turn a folder of photos of a part (20+ overlapping shots all round it, on a textured table) into a mesh reference body in the active Part Studio, to measure and model against. Runs COLMAP (camera solve; dense surface with CUDA) and OpenMVS (dense surface on the CPU) as separate programs; work files go in <photos>/rcad-scan and a re-run with the same photos and settings carries on. method auto|colmap|openmvs|sparse, quality fast|normal|high. The mesh is cleaned: the table cut away (remove_table), stood on XY (level), thinned to about `triangles` (default 40000). scale: a number (mm per unit), {reference: [a, b, c]} sizes of a block beside the part (a 1-2-3 block is [25.4, 50.8, 76.2]; a ball [d]) found automatically, or {photo, a: [x, y], b: [x, y], mm} two marks clicked on an undistorted photo (rcad-scan/dense/images). Capture-app folders with a session.json reference block are scaled from it by default. Takes minutes to hours.", "inputSchema": obj(json!({"photos": {"type": "string"}, "method": {"type": "string"}, "quality": {"type": "string"}, "gpu": {"type": "boolean"}, "glomap": {"type": "boolean"}, "level": {"type": "boolean"}, "remove_table": {"type": "boolean"}, "triangles": {"type": "integer"}, "scale": {}, "name": {"type": "string"}}), &["photos"])},
         {"name": "import_file", "description": "Import a STEP, IGES, STL or OBJ file into the active Part Studio as a feature; the file is stored in the document. A .dxf or .svg drawing goes into a sketch instead: sketch_id (default a new sketch on plane, default top, named after the file), scale, at [x,y] offset; DXF lines, arcs, circles, polylines (with bulges), splines, ellipses and block inserts, in the file's units ($INSUNITS, unitless = mm); SVG paths in mm at 96 px/inch, Y up from the page bottom, curves as fixed outlines. STEP/IGES give exact solids. STL/OBJ meshes become solids (or surfaces if not closed); merge_faces (default true) joins coplanar triangles into flat faces you can sketch on. scale converts units, e.g. 25.4 for a file in inches. Then use list_geometry and add features as usual.", "inputSchema": obj(json!({"path": {"type": "string"}, "scale": {"type": ["number", "string"]}, "merge_faces": {"type": "boolean"}, "name": {"type": "string"}, "sketch_id": {"type": "integer"}, "plane": {}, "at": {"type": "array"}}), &["path"])},

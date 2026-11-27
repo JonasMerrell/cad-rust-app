@@ -115,6 +115,7 @@ playback) and `export_setup_sheet`.
 | `new_document` / `open_document` / `save_document` | manage the document (`.json`) |
 | `describe` | features with full params, variables, parts, errors |
 | `set_variable` | create or change a variable |
+| `set_rollback` | move the rollback bar: build only the first `at` features (null: all); describe gives `rollback` |
 | `create_sketch` | sketch on `top`, `front`, `right` or a planar face ref |
 | `sketch_add` | points, lines, polylines, rectangles, circles, arcs, ellipses, splines, polygons, text |
 | `sketch_constrain` | geometric constraints and dimensions (values can be expressions) |
