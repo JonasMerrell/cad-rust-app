@@ -39,6 +39,8 @@ pub enum Tool {
     Offset,
     Project,
     Dimension,
+    /// Mirror: pick the line (or sketch axis) to mirror across, then the curves.
+    Mirror,
 }
 
 /// Sketch tool buttons, as `km` in the original.
@@ -168,6 +170,10 @@ pub struct SketchSession {
     pub guides: Vec<DVec2>,
     /// Lines the cursor recently passed over: a new line can be parallel or perpendicular to them.
     pub woken: Vec<Id>,
+    /// The sketch axis under the cursor (0 = horizontal, 1 = vertical), when no sketch geometry is.
+    pub axis_hover: Option<u8>,
+    /// The Mirror tool's mirror line, once picked.
+    pub mirror_axis: Option<Id>,
 }
 
 impl SketchSession {
@@ -338,6 +344,8 @@ impl App {
             infer: None,
             guides: vec![],
             woken: vec![],
+            axis_hover: None,
+            mirror_axis: None,
         });
         if let Some((_, fr)) = sketch_of(&self.doc, id) {
             view_normal(self, &fr);
@@ -428,7 +436,7 @@ impl App {
 
 pub fn finish(app: &mut App) {
     let Some(sess) = app.sketch.take() else { return };
-    let empty = sketch_of(&app.doc, sess.feature).map(|(s, _)| s.curves.is_empty() && s.points.is_empty()).unwrap_or(true);
+    let empty = sketch_of(&app.doc, sess.feature).map(|(s, _)| s.curves.iter().all(|c| c.axis.is_some()) && s.points.len() == s.axis_points().len()).unwrap_or(true);
     if empty && sess.is_new {
         app.doc = sess.before;
         app.undo.pop();
@@ -440,7 +448,7 @@ pub fn finish(app: &mut App) {
 pub fn cancel(app: &mut App) {
     let Some(sess) = app.sketch.take() else { return };
     app.undo.pop();
-    let has_work = sketch_of(&app.doc, sess.feature).map(|(s, _)| !s.curves.is_empty() || !s.points.is_empty()).unwrap_or(false);
+    let has_work = sketch_of(&app.doc, sess.feature).map(|(s, _)| s.curves.iter().any(|c| c.axis.is_none()) || s.points.len() > s.axis_points().len()).unwrap_or(false);
     if !sess.undo.is_empty() && (has_work || !sess.is_new) {
         let edited = std::mem::replace(&mut app.doc, sess.before);
         app.undo.push(edited);
@@ -531,8 +539,13 @@ pub fn toolbar(app: &mut App, ui: &mut Ui) {
         if app.tool_button(ui, "circularPattern", "Circular pattern", "Circular pattern of the selection about the origin (or a selected point)", false, false, has_sel).clicked() {
             app.sketch.as_mut().unwrap().pattern = Some((true, 6, 360.0, 0.0));
         }
-        if app.tool_button(ui, "mirrorSketch", "Mirror", "Mirror selection across a selected line", false, false, true).clicked() {
-            mirror_selection(app);
+        let mirroring = tool == Tool::Mirror;
+        if app.tool_button(ui, "mirrorSketch", "Mirror", "Mirror curves across a line or sketch axis: select them and the line first, or click Mirror and pick them", false, mirroring, true).clicked() {
+            if mirroring {
+                apply_mirror_mode(app);
+            } else {
+                mirror_selection(app);
+            }
         }
         if app.tool_button(ui, "construction", "Construct", "Construction geometry (Q): toggles selected curves, or the mode for new ones", false, construction, true).clicked() {
             toggle_construction(app);
@@ -582,6 +595,7 @@ pub fn set_tool(app: &mut App, t: Tool) {
     s.clicks.clear();
     s.chain = None;
     s.dim_pending.clear();
+    s.mirror_axis = None;
     app.scene_dirty = true;
 }
 
@@ -608,6 +622,8 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Offset => "Click on the side to offset the selected curves to",
         Tool::Project => "Click model edges to bring them into the sketch",
         Tool::Dimension => "Click a line, circle, arc or two items, then click where the dimension goes and type its value; click a dimension to change it",
+        Tool::Mirror if s.mirror_axis.is_none() => "Mirror: click the line or sketch axis to mirror across",
+        Tool::Mirror => "Mirror: click curves or drag boxes around them (each box adds), then press Enter or click Mirror again; Esc cancels",
     };
     let dof = if let Some(e) = &s.status.error {
         format!(" · {e}")
@@ -658,10 +674,15 @@ pub fn shortcuts(app: &mut App, ctx: &egui::Context) {
             s.dim_pending.clear();
         } else if s.tool != Tool::Select {
             s.tool = Tool::Select;
+            s.mirror_axis = None;
         } else {
             s.sel.clear();
         }
         app.scene_dirty = true;
+        return;
+    }
+    if pressed(Key::Enter) && app.sketch.as_ref().is_some_and(|s| s.tool == Tool::Mirror) {
+        apply_mirror_mode(app);
         return;
     }
     if pressed(Key::Enter) {
@@ -830,7 +851,9 @@ fn hit(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2) -> Option<Sel> {
     let mut best: Option<(f32, Sel)> = None;
     // a pending dimension pick reaches a little further for points (circle centres sit under leaders)
     let reach = if geometry_first { 12.0 } else { 8.0 };
-    for p in &sk.points {
+    // the sketch axes are picked whole (see axis_near), not by their hidden end points
+    let axis_pts = sk.axis_points();
+    for p in sk.points.iter().filter(|p| !axis_pts.contains(&p.id)) {
         let d = (to_screen(p.v()) - s).length();
         if d < reach && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
             best = Some((d, Sel::Point(p.id)));
@@ -842,7 +865,7 @@ fn hit(app: &App, s: Pos2, rect: egui::Rect, raw: DVec2) -> Option<Sel> {
     let curve = || {
         let wpp = app.camera.wpp() as f64;
         let mut best: Option<(f64, Sel)> = None;
-        for c in &sk.curves {
+        for c in sk.curves.iter().filter(|c| c.axis.is_none()) {
             let d = sk.curve_distance(c, raw) / wpp;
             if d < 6.0 && best.as_ref().map(|b| d < b.0).unwrap_or(true) {
                 best = Some((d, Sel::Curve(c.id)));
@@ -894,6 +917,27 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
         });
         h = Some(Sel::Point(id));
         app.after_sketch_edit();
+    }
+    // the sketch axes can be picked too: to put points on, dimension from or mirror across
+    let pick_axes = matches!(tool, Tool::Select | Tool::Dimension | Tool::Mirror);
+    let axis = if h.is_none() && model_pt.is_none() && pointer.is_some() && pick_axes { axis_near(app, raw) } else { None };
+    if app.sketch.as_ref().unwrap().axis_hover != axis {
+        app.sketch.as_mut().unwrap().axis_hover = axis;
+        app.scene_dirty = true;
+    }
+    if let (Some(a), true) = (axis, resp.clicked_by(egui::PointerButton::Primary)) {
+        // becomes the fixed axis line (made the first time), then is picked like any line
+        let existing = app.sk().0.curves.iter().find(|c| c.axis == Some(a)).map(|c| c.id);
+        let id = match existing {
+            Some(id) => id,
+            None => {
+                app.sk_checkpoint();
+                let id = app.sk_mut().axis_line(a);
+                app.after_sketch_edit();
+                id
+            }
+        };
+        h = Some(Sel::Curve(id));
     }
     let exclude: HashSet<Id> = match &app.sketch.as_ref().unwrap().drag {
         Some(Drag::Geometry { points, .. }) => points.iter().map(|p| p.0).collect(),
@@ -968,6 +1012,8 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
 
     match tool {
         Tool::Select => select_input(app, ui, resp, rect, s, raw, h, shift),
+        // once the mirror line is picked, curves are picked as with Select: clicks and boxes
+        Tool::Mirror if app.sketch.as_ref().unwrap().mirror_axis.is_some() => select_input(app, ui, resp, rect, s, raw, h, shift),
         // dimension labels can be dragged without leaving the tool
         Tool::Dimension if label_drag(app, ui, resp, rect, raw) => {}
         _ => {
@@ -990,7 +1036,9 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
     if resp.drag_started_by(egui::PointerButton::Primary) {
         let press = ui.input(|i| i.pointer.press_origin()).unwrap_or(s);
         let raw0 = sketch_cursor(app, press, rect).unwrap_or(raw);
-        let h0 = hit(app, press, rect, raw0);
+        // picking what to mirror never moves geometry: any drag draws a selection box
+        let mirroring = app.sketch.as_ref().unwrap().tool == Tool::Mirror;
+        let h0 = if mirroring { None } else { hit(app, press, rect, raw0) };
         let (sk, _) = app.sk();
         let drag = match h0 {
             Some(Sel::Point(p)) => Some(Drag::Geometry { points: vec![(p, sk.pv(p))], start: raw0, radius: None, point: true }),
@@ -1099,12 +1147,14 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                     Pos2::new(rect.min.x + v.x, rect.min.y + v.y)
                 };
                 let mut new: Vec<Sel> = vec![];
-                for p in &sk.points {
+                // the sketch axes are only picked by clicking them
+                let axis_pts = sk.axis_points();
+                for p in sk.points.iter().filter(|p| !axis_pts.contains(&p.id)) {
                     if r.contains(to_screen(p.v())) {
                         new.push(Sel::Point(p.id));
                     }
                 }
-                for c in &sk.curves {
+                for c in sk.curves.iter().filter(|c| c.axis.is_none()) {
                     let pts = sk.tessellate(c, 2.0);
                     let inside = pts.iter().filter(|p| r.contains(to_screen(**p))).count();
                     if inside == pts.len() || (s.x < start.x && inside > 0) {
@@ -1112,10 +1162,15 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                     }
                 }
                 let sess = app.sketch.as_mut().unwrap();
-                if !shift {
+                // boxes add up while picking curves to mirror
+                if !shift && sess.tool != Tool::Mirror {
                     sess.sel.clear();
                 }
-                sess.sel.extend(new);
+                for x in new {
+                    if sess.sel.insert(x) {
+                        sess.order.push(x);
+                    }
+                }
                 sess.box_end = None;
                 app.scene_dirty = true;
             }
@@ -1158,6 +1213,8 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                     }
                 }
             }
+            // an empty click keeps the curves picked so far while mirroring
+            None if sess.tool == Tool::Mirror => {}
             None => {
                 sess.sel.clear();
                 sess.order.clear();
@@ -1200,6 +1257,20 @@ fn label_drag(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect, r
             app.sketch.as_mut().unwrap().drag = other;
             false
         }
+    }
+}
+
+/// The sketch axis under the cursor (0 = horizontal, 1 = vertical): within a few pixels of it,
+/// the nearer one where they cross.
+fn axis_near(app: &App, raw: DVec2) -> Option<u8> {
+    let wpp = app.camera.wpp() as f64;
+    let (dx, dy) = (raw.y.abs() / wpp, raw.x.abs() / wpp);
+    let reach = 6.0;
+    match (dx < reach, dy < reach) {
+        (true, true) => Some(if dx <= dy { 0 } else { 1 }),
+        (true, false) => Some(0),
+        (false, true) => Some(1),
+        _ => None,
     }
 }
 
@@ -1724,6 +1795,7 @@ fn tool_click(app: &mut App, tool: Tool, p: DVec2, snp: Option<Snap>, h: Option<
         }
         Tool::Project => project_at(app, raw),
         Tool::Dimension => dimension_click(app, h, raw),
+        Tool::Mirror => mirror_click(app, h),
         _ => {}
     }
 }
@@ -2577,86 +2649,106 @@ fn offset_curves(sk: &Sketch, ids: &[Id], side: DVec2, d: f64, label: &str) -> R
     Ok(out)
 }
 
+/// The Mirror button. With the curves and the mirror line already selected it mirrors at once;
+/// otherwise it starts the Mirror tool, keeping the selection, to pick what is missing.
 fn mirror_selection(app: &mut App) {
     let sess = app.sketch.as_ref().unwrap();
     let (sk, _) = app.sk();
     let ordered = sess.ordered_sel();
     let lines: Vec<Id> =
         ordered.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).filter(|c| matches!(sk.curve(*c).map(|x| &x.geom), Some(Geom::Line { .. }))).collect();
-    let construction: Vec<Id> = lines.iter().copied().filter(|c| sk.curve(*c).map(|x| x.construction).unwrap_or(false)).collect();
+    // an axis or a construction line is meant as the mirror line
+    let marked: Vec<Id> = lines.iter().copied().filter(|c| sk.curve(*c).is_some_and(|x| x.axis.is_some() || x.construction)).collect();
     let clicked = sess.order.iter().find_map(|s| match s {
         Sel::Curve(c) if lines.contains(c) => Some(*c),
         _ => None,
     });
-    // the mirror line: the only line, else the only construction line, else the first line clicked
-    let axis = match (lines.as_slice(), construction.as_slice(), clicked) {
-        ([], ..) => None,
+    let others = ordered.len();
+    // the mirror line: the only axis / construction line, else the only line, else the first line clicked
+    let axis = match (lines.as_slice(), marked.as_slice(), clicked) {
+        (_, [m], _) => Some(*m),
         ([l], ..) => Some(*l),
-        (_, [c], _) => Some(*c),
-        (_, _, Some(c)) => Some(c),
-        _ => {
-            app.flash("Several lines are selected: click the mirror line first, then the curves to mirror", ToastKind::Info);
-            return;
-        }
+        (_, [], Some(c)) => Some(c),
+        _ => None,
     };
-    let Some(axis) = axis else {
-        app.flash("Select the curves to mirror and a line to mirror across", ToastKind::Info);
+    match axis {
+        Some(a) if others > 1 => {
+            do_mirror(app, a);
+        }
+        _ => {
+            let s = app.sketch.as_mut().unwrap();
+            s.tool = Tool::Mirror;
+            s.clicks.clear();
+            s.chain = None;
+            s.mirror_axis = axis;
+            if axis.is_none() {
+                // what is selected stays selected: those are the curves to mirror
+                s.sel.retain(|x| !matches!(x, Sel::Constraint(_)));
+            }
+            app.scene_dirty = true;
+        }
+    }
+}
+
+/// A click with the Mirror tool: the first line (or sketch axis) is the mirror line, later
+/// clicks add or remove curves and points to mirror.
+fn mirror_click(app: &mut App, h: Option<Sel>) {
+    let Some(h) = h else { return };
+    let is_line = |app: &App, c: Id| matches!(app.sk().0.curve(c).map(|x| &x.geom), Some(Geom::Line { .. }));
+    let s = app.sketch.as_ref().unwrap();
+    match (s.mirror_axis, h) {
+        (None, Sel::Curve(c)) if is_line(app, c) => {
+            let s = app.sketch.as_mut().unwrap();
+            s.mirror_axis = Some(c);
+            s.sel.remove(&Sel::Curve(c));
+        }
+        (None, _) => app.flash("Click a line or a sketch axis to mirror across", ToastKind::Info),
+        (Some(a), Sel::Curve(c)) if c == a => {}
+        (Some(_), x @ (Sel::Curve(_) | Sel::Point(_))) => {
+            let s = app.sketch.as_mut().unwrap();
+            if !s.sel.remove(&x) {
+                s.sel.insert(x);
+                s.order.push(x);
+            }
+        }
+        _ => {}
+    }
+    app.scene_dirty = true;
+}
+
+/// Enter or the Mirror button in the Mirror tool: mirror what is selected across the picked line.
+fn apply_mirror_mode(app: &mut App) {
+    let Some(axis) = app.sketch.as_ref().unwrap().mirror_axis else {
+        app.flash("Click a line or a sketch axis to mirror across first", ToastKind::Info);
         return;
     };
-    let Some(Geom::Line { a, b }) = sk.curve(axis).map(|c| c.geom.clone()) else { return };
-    let (pa, pb) = (sk.pv(a), sk.pv(b));
-    let d = (pb - pa).normalize();
-    let refl = |p: DVec2| {
-        let v = p - pa;
-        pa + d * (2.0 * v.dot(d)) - v
-    };
-    let sel: Vec<Sel> = ordered;
-    let mut out = sk.clone();
-    let mut equal: Vec<(Id, Id)> = vec![];
-    let mut map = std::collections::HashMap::new();
-    let mut new_point = |out: &mut Sketch, id: Id| -> Id {
-        *map.entry(id).or_insert_with(|| {
-            let p = sk.pv(id);
-            // points on the axis map to themselves
-            if crate::sketch::seg_dist(p, pa - d * 1e6, pa + d * 1e6) < 1e-9 { id } else { out.add_point(refl(p)) }
-        })
-    };
-    for s in sel {
-        if let Sel::Curve(id) = s {
-            if id == axis {
-                continue;
-            }
-            let Some(c) = sk.curve(id) else { continue };
-            let g = match c.geom {
-                Geom::Line { a, b } => Geom::Line { a: new_point(&mut out, a), b: new_point(&mut out, b) },
-                Geom::Circle { c, r } => Geom::Circle { c: new_point(&mut out, c), r },
-                // mirroring reverses orientation
-                Geom::Arc { c, a, b } => Geom::Arc { c: new_point(&mut out, c), a: new_point(&mut out, b), b: new_point(&mut out, a) },
-                Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin },
-                // a reflection runs the parameter backwards
-                Geom::EllipticalArc { c, a, rmin, t0, t1 } => Geom::EllipticalArc { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin, t0: -t1, t1: -t0 },
-                Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| new_point(&mut out, *p)).collect(), closed },
-                Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().rev().map(|p| refl(DVec2::from(*p)).into()).collect(), closed },
-            };
-            let round = matches!(c.geom, Geom::Circle { .. } | Geom::Arc { .. });
-            let nid = out.add_curve(g, c.construction);
-            if round {
-                equal.push((id, nid));
-            }
+    if do_mirror(app, axis) {
+        set_tool(app, Tool::Select);
+    }
+}
+
+/// Mirror the selected curves and loose points across line `axis`; false (with a message) when
+/// there was nothing to mirror.
+fn do_mirror(app: &mut App, axis: Id) -> bool {
+    let sel = app.sketch.as_ref().unwrap().ordered_sel();
+    let curves: Vec<Id> = sel.iter().filter_map(|s| if let Sel::Curve(c) = s { Some(*c) } else { None }).collect();
+    let points: Vec<Id> = sel.iter().filter_map(|s| if let Sel::Point(p) = s { Some(*p) } else { None }).collect();
+    let (sk, _) = app.sk();
+    match sk.mirror_items(&curves, &points, axis) {
+        Ok((out, made)) => {
+            app.sk_checkpoint();
+            *app.sk_mut() = out;
+            let s = app.sketch.as_mut().unwrap();
+            s.sel = made.iter().map(|c| Sel::Curve(*c)).collect();
+            s.mirror_axis = None;
+            app.after_sketch_edit();
+            true
+        }
+        Err(e) => {
+            app.flash(e, ToastKind::Info);
+            false
         }
     }
-    // keep the copy linked: each point mirrors its original across the axis, round curves keep the same size
-    for (&orig, &copy) in &map {
-        if orig != copy {
-            out.constraints.push(Constraint::Symmetric { a: orig, b: copy, l: axis });
-        }
-    }
-    for (a, b) in equal {
-        out.constraints.push(Constraint::Equal { a, b });
-    }
-    app.sk_checkpoint();
-    *app.sk_mut() = out;
-    app.after_sketch_edit();
 }
 
 fn toggle_construction(app: &mut App) {
@@ -3398,8 +3490,22 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         }
     }
     let st = &sess.status;
-    for c in &sk.curves {
-        let sel = sess.sel.contains(&Sel::Curve(c.id));
+    // picked or hovered sketch axes, drawn whole
+    for c in sk.curves.iter().filter(|c| c.axis.is_some()) {
+        let picked = sess.sel.contains(&Sel::Curve(c.id)) || sess.mirror_axis == Some(c.id);
+        let hov = sess.hover == Some(Sel::Curve(c.id)) || sess.dim_pending.contains(&Sel::Curve(c.id));
+        if picked || hov {
+            let col = if picked { vp::picked() } else { vp::hover() };
+            let d = if c.axis == Some(0) { DVec2::X } else { DVec2::Y };
+            s.polyline(&[w(-d * half * 4.0), w(d * half * 4.0)], if picked { 3.0 } else { 2.4 }, rgba(col, 1.0), false);
+        }
+    }
+    if let Some(a) = sess.axis_hover {
+        let d = if a == 0 { DVec2::X } else { DVec2::Y };
+        s.polyline(&[w(-d * half * 4.0), w(d * half * 4.0)], 2.4, rgba(vp::hover(), 1.0), false);
+    }
+    for c in sk.curves.iter().filter(|c| c.axis.is_none()) {
+        let sel = sess.sel.contains(&Sel::Curve(c.id)) || sess.mirror_axis == Some(c.id);
         let hov = sess.hover == Some(Sel::Curve(c.id)) || sess.dim_pending.contains(&Sel::Curve(c.id));
         let col = if sel {
             vp::picked()
@@ -3424,7 +3530,8 @@ pub fn scene(app: &App, sess: &SketchSession, s: &mut SceneData) {
         }
     }
     let sel_ends: std::collections::HashSet<Id> = sk.curves.iter().filter(|c| sess.sel.contains(&Sel::Curve(c.id))).flat_map(|c| Sketch::curve_points(&c.geom)).collect();
-    for p in &sk.points {
+    let axis_pts = sk.axis_points();
+    for p in sk.points.iter().filter(|p| !axis_pts.contains(&p.id)) {
         let sel = sess.sel.contains(&Sel::Point(p.id)) || sel_ends.contains(&p.id);
         let hov = sess.hover == Some(Sel::Point(p.id)) || sess.dim_pending.contains(&Sel::Point(p.id));
         let col = if sel {
