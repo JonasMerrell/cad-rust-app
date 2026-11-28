@@ -29,6 +29,16 @@ token as the Capture app). Standard library only.
     POST /api/doc/<id>/sync                 commit (when the project commits on save) and sync with GitHub
     POST /api/doc/<id>/resolve              {"keep": "mine"|"theirs"} after a sync that couldn't combine both sides
 
+    GET  /api/doc/<id>/content              the document file itself, with its sha256 as ETag
+                                            (If-None-Match with that etag: 304 while it is unchanged)
+    PUT  /api/doc/<id>/content              save it back: If-Match "<etag>" of the copy it was made
+                                            from, refused with 412 (and the etag here) when this copy
+                                            changed since; ?copy=<name> saves a new document beside it
+    GET  /api/doc/<id>/files                its chats (.rcad-chats) and its folder's build cache
+                                            entries (.rcad-cache), each with size, mtime and etag
+    GET  /api/doc/<id>/files/<dir>/<file>   one of those; PUT one of its chats (If-Match, or
+                                            If-None-Match: * for a new one)
+
     GET  /api/github                        the GitHub account rCAD on netdash is signed in with
     POST /api/github/login                  start signing in: {"user_code", "verification_uri", "expires_in", "interval"}
     POST /api/github/login/poll             {"state": "waiting"|"slow_down"|"done", "login"}
@@ -36,6 +46,10 @@ token as the Capture app). Standard library only.
     GET  /api/github/repos                  the account's repositories, rCAD projects first; each with
                                             "doc" (its document id) when a copy is already on netdash
     POST /api/github/clone                  {"url"}: clone into the first project folder: {"id"}
+
+The /content and /files routes are how desktop rCAD on another computer on the network opens
+and saves the documents kept here (src/remote.rs). A save into a git project is committed and
+synced like a phone chat's change.
 
 GitHub goes through `rcad github` (src/github_cli.rs), the editor's own sign-in and git code, so
 the token stays on netdash and signing in here signs the editor in too. After a phone chat changes
@@ -92,6 +106,12 @@ MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "cl
 MAX_IMAGES = 6
 MAX_IMAGE_BYTES = 8 << 20
 EFFORTS = {"low", "medium", "high", "xhigh", "max"}
+# a document's own files desktop rCAD on another computer may read (and, for chats, write): by
+# folder beside the document, the file names allowed there
+SIDE_DIRS = {".rcad-chats": r"[A-Za-z0-9-]{1,64}(\.context)?\.json", ".rcad-cache": r"[0-9a-f]{16}\.json\.gz"}
+# biggest upload: a document carries its imported STEP and mesh files inside it
+MAX_UPLOAD = 512 << 20
+CHATS_IGNORE = "# rCAD's Claude chats: kept on this computer, not in version control\n*\n"
 
 
 def default_roots():
@@ -120,6 +140,47 @@ def find_rcad(explicit=None):
 
 def doc_id(root_index, rel):
     return f"{root_index}-" + base64.urlsafe_b64encode(rel.encode()).decode().rstrip("=")
+
+
+def keep_mode(tmp, like):
+    """Give an upload (made 0600 by mkstemp) the permissions of the file it replaces or sits beside,
+    else the usual ones for a new file."""
+    try:
+        mode = os.stat(like).st_mode & 0o777
+    except (OSError, TypeError):
+        umask = os.umask(0)
+        os.umask(umask)
+        mode = 0o666 & ~umask
+    try:
+        os.chmod(tmp, mode)
+    except OSError:
+        pass
+
+
+def check_doc(path):
+    """Why the file at `path` isn't an rCAD document, or None."""
+    if not is_doc(path):
+        return "that isn't an rCAD document"
+    try:
+        with open(path, "rb") as f:
+            v = json.load(f)
+    except (OSError, ValueError) as e:
+        return f"the document isn't valid JSON: {e}"
+    return None if isinstance(v, dict) else "that isn't an rCAD document"
+
+
+def check_chat(path, doc_name):
+    """Why the file at `path` isn't a chat file of the document `doc_name`, or None."""
+    try:
+        with open(path, "rb") as f:
+            v = json.load(f)
+    except (OSError, ValueError):
+        return "a chat file isn't valid JSON"
+    if not isinstance(v, dict):
+        return "a chat file isn't an object"
+    if "lines" in v and v.get("document") != doc_name:
+        return "that chat belongs to another document"
+    return None
 
 
 def is_doc(path):
@@ -255,6 +316,7 @@ class Projects:
         self.busy = {}  # doc path -> job id
         self.lock = threading.Lock()
         self.info_cache = {}  # path -> (mtime, size, info)
+        self.hash_cache = {}  # path -> (mtime, size, sha256) for etags
         self.export_locks = {}
         self.building = {}  # cache key -> start time, for background builds
         self.build_done = {}  # cache key -> Event set when its background build ends
@@ -836,6 +898,159 @@ class Projects:
         if self._git_root(os.path.dirname(path), self.roots[int(did.split("-", 1)[0])]):
             threading.Thread(target=self.github, args=(["sync", "--doc", path, "--message", "A note from the rCAD phone app"], 180), daemon=True).start()
         return 200, res
+
+    # ---------------------------------------------------------------- files (desktop rCAD on another computer)
+
+    def etag(self, path):
+        """The sha256 of a file (hex), kept while its mtime and size stay the same; None if it is gone."""
+        try:
+            st = os.stat(path)
+        except OSError:
+            return None
+        hit = self.hash_cache.get(path)
+        if hit and hit[0] == st.st_mtime_ns and hit[1] == st.st_size:
+            return hit[2]
+        h = hashlib.sha256()
+        try:
+            with open(path, "rb") as f:
+                for chunk in iter(lambda: f.read(1 << 20), b""):
+                    h.update(chunk)
+        except OSError:
+            return None
+        self.hash_cache[path] = (st.st_mtime_ns, st.st_size, h.hexdigest())
+        return h.hexdigest()
+
+    def side_file(self, path, rel):
+        """The path of one of a document's own files (`.rcad-chats/<name>` or `.rcad-cache/<name>`
+        in its folder), or None: nothing else is reachable, and nothing outside that folder."""
+        parts = (rel or "").split("/")
+        if len(parts) != 2 or parts[0] not in SIDE_DIRS or not re.fullmatch(SIDE_DIRS[parts[0]], parts[1]):
+            return None
+        folder = os.path.dirname(path)
+        d = os.path.join(folder, parts[0])
+        if os.path.islink(d) or (os.path.exists(d) and not os.path.isdir(d)):
+            return None
+        f = os.path.join(d, parts[1])
+        if os.path.islink(f) or os.path.realpath(f) != os.path.join(os.path.realpath(folder), parts[0], parts[1]):
+            return None
+        return f
+
+    def side_files(self, did):
+        """The document's chats (both files of each) and its folder's build cache entries:
+        (status, {"files": [{"path", "size", "modified", "etag"}]})."""
+        path = self.resolve(did)
+        if not path:
+            return 404, {"error": "no such document"}
+        out = []
+        chats = {c["id"] for c in self.chat_list(path) if c.get("id")}
+        for d in SIDE_DIRS:
+            try:
+                names = sorted(os.listdir(os.path.join(os.path.dirname(path), d)))
+            except OSError:
+                continue
+            for n in names:
+                if d == ".rcad-chats" and n.split(".", 1)[0] not in chats:
+                    continue  # another document's chat (documents can share a folder)
+                f = self.side_file(path, f"{d}/{n}")
+                if not f or not os.path.isfile(f):
+                    continue
+                st = os.stat(f)
+                out.append({"path": f"{d}/{n}", "size": st.st_size, "modified": int(st.st_mtime), "etag": self.etag(f)})
+        return 200, {"files": out}
+
+    def put_file(self, did, rel, src, if_match, client=""):
+        """Put the uploaded file `src` (a temporary file next to its target, removed either way) in
+        place of the document (`rel` None) or one of its side files, but only over the copy the
+        client last saw: `if_match` is that copy's etag, "*" for any existing copy, or "" for a
+        file that mustn't exist yet. (status, JSON). A git project then commits and syncs."""
+        path = self.resolve(did)
+        try:
+            if not path:
+                return 404, {"error": "no such document"}
+            target = path if rel is None else self.side_file(path, rel)
+            if not target:
+                return 400, {"error": "that file can't be written"}
+            if rel is None or rel.startswith(".rcad-chats/"):
+                err = check_doc(src) if rel is None else check_chat(src, os.path.basename(path))
+                if err:
+                    return 400, {"error": err}
+            elif rel.startswith(".rcad-cache/"):
+                return 400, {"error": "the build cache is rebuilt here, not uploaded"}
+            with self.lock:
+                running = self.busy.get(path)
+                if rel is None and running and running in self.jobs and not self.jobs[running].done:
+                    return 409, {"error": "Claude is working on this document on netdash: save again when it's done", "job": running}
+                now = self.etag(target)
+                if (if_match == "" and now is not None) or (if_match not in ("", "*") and now != if_match) or (if_match == "*" and now is None):
+                    st = os.stat(target) if now else None
+                    return 412, {"error": "the copy here changed since you opened it" if now else "the file is gone here",
+                                 "etag": now, "modified": int(st.st_mtime) if st else None}
+                os.makedirs(os.path.dirname(target), exist_ok=True)
+                keep_mode(src, target)
+                os.replace(src, target)
+                src = None
+                st = os.stat(target)
+                tag = self.etag(target)
+        finally:
+            if src:
+                try:
+                    os.unlink(src)
+                except OSError:
+                    pass
+        res = {"ok": True, "etag": tag, "modified": int(st.st_mtime), "size": st.st_size, "git": False}
+        if rel is None and self._git_root(os.path.dirname(path), self.roots[int(did.split("-", 1)[0])]):
+            # as after a phone chat or note: commit (when the project commits on save) and sync
+            who = re.sub(r"[^A-Za-z0-9 ._-]+", "", client)[:40].strip() or "another computer"
+            threading.Thread(target=self.github, args=(["sync", "--doc", path, "--message", f"Saved from rCAD on {who}"], 180), daemon=True).start()
+            res["git"] = True
+        return 200, res
+
+    def copy_name(self, did, name):
+        """The path for a copy of a document named `name` in its folder, or (None, error)."""
+        path = self.resolve(did)
+        if not path:
+            return None, "no such document"
+        clean = re.sub(r"[^A-Za-z0-9 ()._-]+", "", (name or "").strip()).strip(" .")[:80]
+        if clean.lower().endswith(".json"):
+            clean = clean[:-5]
+        if not clean:
+            return None, "give the copy a name"
+        return os.path.join(os.path.dirname(path), clean + ".json"), None
+
+    def save_copy(self, did, name, src):
+        """A new document `name` beside the document `did`, from the uploaded `src`: (status, JSON)."""
+        target, err = self.copy_name(did, name)
+        if not target:
+            os.unlink(src)
+            return (404 if err == "no such document" else 400), {"error": err}
+        err = check_doc(src)
+        with self.lock:
+            if err or os.path.exists(target):
+                os.unlink(src)
+                return (400, {"error": err}) if err else (409, {"error": f"{os.path.basename(target)} already exists here"})
+            keep_mode(src, self.resolve(did))
+            os.replace(src, target)
+        i = int(did.split("-", 1)[0])
+        root = os.path.realpath(self.roots[i])
+        return 200, {"ok": True, "id": doc_id(i, os.path.relpath(target, root)), "etag": self.etag(target), "name": os.path.basename(target)}
+
+    def upload_dir(self, did, rel):
+        """The folder an upload for `did` (and `rel`, None for the document) is spooled in: the
+        target's own, so the final rename can't cross file systems."""
+        path = self.resolve(did)
+        if not path:
+            return None
+        if rel is None:
+            return os.path.dirname(path)
+        f = self.side_file(path, rel)
+        if not f:
+            return None
+        d = os.path.dirname(f)
+        os.makedirs(d, exist_ok=True)
+        if d.endswith(".rcad-chats") and not os.path.exists(os.path.join(d, ".gitignore")):
+            with open(os.path.join(d, ".gitignore"), "w") as g:
+                g.write(CHATS_IGNORE)
+        return d
 
     # ---------------------------------------------------------------- GitHub
 
@@ -1704,6 +1919,24 @@ def handle(h, method, p, projects, body=None):
             else:
                 h.send_json(*projects.doc_git(did, ["resolve", "--keep", keep]))
             return True
+        if method == "GET" and p[3:] == ["content"]:
+            path = projects.resolve(did)
+            if not path:
+                h.send_json(404, {"error": "no such document"})
+            else:
+                send_tagged(h, path, projects.etag(path))
+            return True
+        if method == "GET" and p[3:] == ["files"]:
+            h.send_json(*projects.side_files(did))
+            return True
+        if method == "GET" and len(p) == 6 and p[3] == "files":
+            path = projects.resolve(did)
+            f = projects.side_file(path, p[4] + "/" + p[5]) if path else None
+            if not f or not os.path.isfile(f):
+                h.send_json(404, {"error": "no such file"})
+            else:
+                send_tagged(h, f, projects.etag(f))
+            return True
         if method == "GET" and len(p) == 3:
             d = projects.doc_detail(did)
             h.send_json(200 if d else 404, d or {"error": "no such document"})
@@ -1757,3 +1990,112 @@ def handle(h, method, p, projects, body=None):
             h.send_json(200, {"ok": True})
             return True
     return False
+
+
+def _tag(v):
+    """An etag header's value without quotes (or weak mark); "*" stays."""
+    v = (v or "").strip()
+    if v.startswith("W/"):
+        v = v[2:]
+    return v.strip('"')
+
+
+def send_tagged(h, path, tag):
+    """Send a file with its etag, or 304 when the client's If-None-Match is that etag already
+    (desktop rCAD polls a document it has open this way to notice changes made here)."""
+    st = os.stat(path)
+    if tag and _tag(h.headers.get("If-None-Match")) == tag:
+        h.send_response(304)
+        h.send_header("ETag", f'"{tag}"')
+        h.send_header("X-Rcad-Modified", str(int(st.st_mtime)))
+        h.send_header("Content-Length", "0")
+        h.end_headers()
+        return
+    try:
+        f = open(path, "rb")
+    except OSError:
+        return h.send_json(404, {"error": "no such file"})
+    with f:
+        size = os.fstat(f.fileno()).st_size
+        h.send_response(200)
+        h.send_header("Content-Type", "application/json" if path.endswith(".json") else "application/octet-stream")
+        h.send_header("Content-Length", str(size))
+        if tag:
+            h.send_header("ETag", f'"{tag}"')
+        h.send_header("X-Rcad-Modified", str(int(st.st_mtime)))
+        h.end_headers()
+        shutil.copyfileobj(f, h.wfile, 1 << 20)
+
+
+def handle_put(h, p, projects):
+    """PUT routes (already authorised), uploads streamed to a temporary file beside their target:
+
+        PUT /api/doc/<id>/content               the document, with If-Match: "<etag>" of the copy
+                                                the client opened (412 and the current etag when it
+                                                changed here since), or If-Match: * to overwrite
+        PUT /api/doc/<id>/content?copy=<name>   the upload as a new document <name>.json beside it
+        PUT /api/doc/<id>/files/.rcad-chats/<f> a chat file, If-Match as above or If-None-Match: *
+                                                for a new one
+
+    True if handled (the body is read or drained either way)."""
+    if not (len(p) >= 4 and p[:2] == ["api", "doc"]):
+        return False
+    did = p[2]
+    if p[3:] == ["content"]:
+        rel = None
+    elif len(p) == 6 and p[3] == "files":
+        rel = p[4] + "/" + p[5]
+    else:
+        return False
+    q = urllib.parse.parse_qs(urllib.parse.urlparse(h.path).query)
+    copy = (q.get("copy") or [None])[0]
+    n = h.length()
+    if n <= 0 or n > MAX_UPLOAD:
+        h.drain()
+        h.send_json(413 if n > 0 else 411, {"error": "bad size"})
+        return True
+    if h.headers.get("If-None-Match", "").strip() == "*":
+        want = ""
+    elif h.headers.get("If-Match") is not None:
+        want = _tag(h.headers.get("If-Match"))
+    else:
+        want = None
+    if want is None and copy is None:
+        h.drain()
+        h.send_json(428, {"error": "say which copy this replaces (If-Match) or that it is new (If-None-Match: *)"})
+        return True
+    d = projects.upload_dir(did, rel)
+    if not d:
+        h.drain()
+        h.send_json(404, {"error": "no such document" if not projects.resolve(did) else "that file can't be written"})
+        return True
+    fd, tmp = tempfile.mkstemp(dir=d, prefix=".rcad-upload-", suffix=".part")
+    got = 0
+    try:
+        with os.fdopen(fd, "wb") as f:
+            while got < n:
+                chunk = h.rfile.read(min(n - got, 1 << 20))
+                if not chunk:
+                    break
+                f.write(chunk)
+                got += len(chunk)
+            f.flush()
+            os.fsync(f.fileno())
+    except OSError as e:
+        os.unlink(tmp)
+        h.send_json(507, {"error": str(e)})
+        return True
+    if got != n:
+        os.unlink(tmp)
+        h.send_json(400, {"error": f"short body {got}/{n}"})
+        return True
+    client = h.headers.get("X-Rcad-Client", "")
+    if copy is not None:
+        if rel is not None:
+            os.unlink(tmp)
+            h.send_json(400, {"error": "only a document can be saved as a copy"})
+        else:
+            h.send_json(*projects.save_copy(did, copy, tmp))
+    else:
+        h.send_json(*projects.put_file(did, rel, tmp, want, client))
+    return True

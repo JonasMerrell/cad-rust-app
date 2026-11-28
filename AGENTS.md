@@ -66,6 +66,31 @@ the program), which Claude Code picks up when it runs in that folder; it starts
 - Results are compact JSON; `describe` shows an imported file's size and hash
   instead of its contents.
 
+## Documents on another computer
+
+The editor can pair with the rCAD receiver on another computer on the network
+(netdash's `rcad-capture-receiver`, the service the phone app uses): *File →
+Open from another computer…* takes its pairing link, or its address and
+token, and keeps them in `~/.config/cad-rust-app/remote.json`. A document opened
+from there is downloaded with its chats into a working copy in the user cache
+(`<cache>/cad-rust-app/remote/<host>/…`), and every save sends it back. A save
+made against a copy that changed over there since (a phone chat, another
+computer) is refused, and the editor offers to reload theirs, keep mine, or
+save mine as a copy beside it.
+
+Agents use the same pairing (made in the editor):
+
+```json
+{"tool": "open_document", "args": {"remote": "bracket-example/bracket.json"}}
+{"tool": "save_document", "args": {}}
+```
+
+`remote` is the document's path on that computer, `<project folder>/<file>.json`
+as listed, or its id; an unknown one is an error listing what is there.
+`save_document` without a path writes the working copy and sends it back; if
+the remote copy changed since it was opened the call fails and says so (open it
+again to take theirs, or pass `"overwrite_remote": true` to replace theirs).
+
 ## Showing a design to the user
 
 When you design a model, part or assembly for someone, show it to them with
@@ -112,7 +137,7 @@ playback) and `export_setup_sheet`.
 
 | tool | what it does |
 |---|---|
-| `new_document` / `open_document` / `save_document` | manage the document (`.json`) |
+| `new_document` / `open_document` / `save_document` | manage the document (`.json`); `open_document` `remote` opens one kept on another computer (see below) |
 | `describe` | features with full params, variables, parts, errors |
 | `set_variable` | create or change a variable |
 | `create_sketch` | sketch on `top`, `front`, `right` or a planar face ref |

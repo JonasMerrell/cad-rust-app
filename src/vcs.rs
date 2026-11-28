@@ -796,7 +796,7 @@ fn save_token_in(p: &Path, token: &str) -> Result<(), String> {
 /// Encryption of the saved token for the signed-in user: DPAPI on Windows; elsewhere the file's
 /// permissions (0600) protect it, as with git's and the GitHub CLI's own stores.
 #[cfg(windows)]
-mod protect {
+pub(crate) mod protect {
     use windows_sys::Win32::Foundation::LocalFree;
     use windows_sys::Win32::Security::Cryptography::{CRYPT_INTEGER_BLOB, CRYPTPROTECT_UI_FORBIDDEN, CryptProtectData, CryptUnprotectData};
 
@@ -830,7 +830,7 @@ mod protect {
 }
 
 #[cfg(not(windows))]
-mod protect {
+pub(crate) mod protect {
     pub fn protect(_: &[u8]) -> Option<Vec<u8>> {
         None
     }

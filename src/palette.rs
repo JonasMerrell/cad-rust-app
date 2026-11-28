@@ -292,6 +292,7 @@ fn commands(app: &App) -> Vec<Cmd> {
     v.push(cmd("Keyboard shortcuts", "Help", "keyboard", Some("F1"), "keys help hotkeys list", Action::Run(|a| a.session.show_shortcuts = true)));
     v.push(cmd("New document", "File", "file", Some("Ctrl+N"), "new part blank start", Action::Run(|a| a.guard(crate::session::Pending::New))));
     v.push(cmd("Version control (git)", "File", "branch", None, "git github history commit push pull track changes versions repository", Action::Run(crate::vcs_ui::toggle)));
+    v.push(cmd("Open from another computer…", "File", "desktop", None, "netdash remote network lan computer receiver pair server share open save", Action::Run(crate::remote_ui::open_window)));
     v.push(cmd("Open from GitHub…", "File", "branch", None, "github clone repository project sync another computer device download", Action::Run(crate::github_ui::open_repos)));
     v.push(cmd("GitHub account", "File", "branch", None, "github sign in login link account token oauth sign out", Action::Run(crate::github_ui::open_account)));
     v.push(cmd("Sync with GitHub", "File", "branch", None, "github sync push pull fetch merge remote", Action::Run(crate::vcs_ui::sync_now)));

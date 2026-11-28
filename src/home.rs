@@ -245,6 +245,7 @@ enum Action {
     NewProject,
     ImportProject,
     OpenGithub,
+    OpenRemote,
     Open,
     OpenPath(PathBuf),
     Forget(PathBuf),
@@ -307,6 +308,10 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
                             if action_button(ui, "folder", "Open…", false).on_hover_text("Ctrl+O").clicked() {
                                 action = Some(Action::Open);
                             }
+                            let remote = crate::remote_ui::paired_name(app).map(|h| format!("Open from {h}…")).unwrap_or_else(|| "Open from another computer…".into());
+                            if action_button(ui, "desktop", &remote, false).on_hover_text("Open a document kept on another computer on this network (netdash's rCAD receiver); saves go back to it").clicked() {
+                                action = Some(Action::OpenRemote);
+                            }
                             if action_button(ui, "branch", "Open from GitHub…", false).on_hover_text("Open a project pushed to GitHub, from this or another computer").clicked() {
                                 action = Some(Action::OpenGithub);
                             }
@@ -356,6 +361,7 @@ pub fn ui(app: &mut App, ui: &mut Ui) {
         Some(Action::NewProject) => crate::vcs_ui::new_project(app),
         Some(Action::ImportProject) => crate::vcs_ui::import_project(app),
         Some(Action::OpenGithub) => crate::github_ui::open_repos(app),
+        Some(Action::OpenRemote) => crate::remote_ui::open_window(app),
         Some(Action::Open) => app.guard(crate::session::Pending::Open),
         Some(Action::OpenPath(p)) => app.guard(crate::session::Pending::OpenPath(p)),
         Some(Action::Forget(p)) => forget(app, &p),

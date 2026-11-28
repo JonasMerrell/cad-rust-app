@@ -241,6 +241,8 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
     Some(match (tool, prop) {
         ("new_document", "units") => en(&["mm", "cm", "m", "in", "ft"], "document units (default mm)"),
         ("open_document", "path") => t("string", "the .json document to open"),
+        ("open_document", "remote") => t("string", "instead of path: a document on the paired computer, by its path there, '<project>/<file>.json' or its id"),
+        ("save_document", "overwrite_remote") => t("boolean", "send a remote document's working copy back even if it changed over there since it was opened (drops those changes)"),
         ("save_document", "path") => out_path("where to save the .json document (default where it was opened or last saved)"),
         ("set_variable", "name") => t("string", "variable name: a letter or _, then letters, digits or _"),
         ("set_variable", "expr") => json!({"type": ["string", "number"], "description": "value: a number or an expression of earlier variables, e.g. '40', 'w / 2', '1 in'"}),

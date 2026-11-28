@@ -279,7 +279,15 @@ impl Session {
                 json!({"ok": true})
             }
             "open_document" => {
-                let path = self.input_path(&str_arg(a, "path")?);
+                let mut note = None;
+                let mut copied = 0;
+                let path = if let Some(what) = a.get("remote").and_then(|r| r.as_str()) {
+                    let (local, n, files) = open_remote(what)?;
+                    (note, copied) = (n, files);
+                    local
+                } else {
+                    self.input_path(&str_arg(a, "path")?)
+                };
                 let text = std::fs::read_to_string(&path).map_err(|e| format!("can't open {path}: {e}"))?;
                 let ws = crate::workspace::Workspace::from_json(&text).map_err(|e| format!("can't open {path}: {e}"))?;
                 self.doc = ws.studios.first().map(|s| s.doc.clone()).unwrap_or_default();
@@ -287,10 +295,17 @@ impl Session {
                 self.cur = 0;
                 self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(std::path::Path::new(&path)));
                 crate::cam_sim_saves::set_doc(Some(std::path::Path::new(&path)));
-                self.path = Some(path);
+                self.path = Some(path.clone());
                 self.saved_keys = self.studio_keys();
                 self.rebuild()?;
-                self.status()
+                let mut v = self.status();
+                if let Some(l) = crate::remote::link_for(std::path::Path::new(&path)) {
+                    v["remote"] = json!({"host": l.host, "path": l.remote_path, "working_copy": path, "chat_and_cache_files_copied": copied});
+                    if let Some(n) = note {
+                        v["remote"]["note"] = json!(n);
+                    }
+                }
+                v
             }
             "save_document" => {
                 let path = a.get("path").and_then(|p| p.as_str()).map(String::from).or(self.path.clone()).ok_or("give a path")?;
@@ -306,7 +321,24 @@ impl Session {
                 for r in std::iter::once(&self.result).chain(self.others.values()).cloned().collect::<Vec<_>>() {
                     self.keep_built(&r);
                 }
-                json!({"saved": path})
+                let mut v = json!({"saved": path});
+                if let Some(l) = crate::remote::link_for(std::path::Path::new(&path)) {
+                    // a working copy of a document on another computer: send it back
+                    let force = a.get("overwrite_remote").and_then(|o| o.as_bool()).unwrap_or(false);
+                    let server = crate::remote::load_server().ok_or_else(|| format!("saved {path} here, but no computer is paired to send it to {}", l.host))?;
+                    let c = crate::remote::Client::connect(&server).map_err(|e| format!("saved {path} here, but can't reach {}: {e}", l.host))?;
+                    match crate::remote::push(&c, std::path::Path::new(&path), force.then_some("*")) {
+                        Ok(p) => v["remote"] = json!({"host": l.host, "path": l.remote_path, "etag": p.etag, "chats_sent": p.chats}),
+                        Err(crate::remote::SaveError::Stale(_)) => {
+                            return Err(format!(
+                                "saved {path} here, but {} changed {} since it was opened, so it wasn't sent: open_document the remote one again (dropping these changes), save_document with overwrite_remote: true (dropping theirs), or save_document to another path",
+                                l.host, l.remote_path
+                            ));
+                        }
+                        Err(e) => return Err(format!("saved {path} here, but it wasn't sent to {}: {e}", l.host)),
+                    }
+                }
+                v
             }
             "describe" => {
                 let mut v = self.status();
@@ -1238,6 +1270,21 @@ pub(crate) fn make_parent(path: &str) -> R<()> {
 }
 
 /// Write an output file, creating its folder; errors name the path.
+/// Download a document from the paired computer (by its path there, `<project>/<file>` or id):
+/// the working copy's path, and a note when an unsent save there was kept.
+fn open_remote(what: &str) -> R<(String, Option<String>, usize)> {
+    let server = crate::remote::load_server().ok_or("no computer is paired: pair one in the editor (File > Open from another computer)")?;
+    let c = crate::remote::Client::connect(&server).map_err(|e| format!("can't reach {}: {e}", server.label()))?;
+    let docs = c.documents()?;
+    let Some(d) = crate::remote::find(&docs, what) else {
+        let names: Vec<String> = docs.iter().take(40).map(|d| crate::remote::id_path(&d.id).map(|p| p.iter().skip(1).map(|c| c.to_string_lossy().into_owned()).collect::<Vec<_>>().join("/")).unwrap_or(d.path.clone())).collect();
+        return Err(format!("{} has no document {what}; it has: {}", c.host, names.join(", ")));
+    };
+    let o = crate::remote::open(&c, d)?;
+    let note = o.kept_local.then(|| "the working copy had a save that never reached the other computer: it was kept, and goes over with the next save_document".to_string());
+    Ok((o.local.to_string_lossy().into_owned(), note, o.files))
+}
+
 pub(crate) fn write_out(path: &str, data: impl AsRef<[u8]>) -> R<()> {
     make_parent(path)?;
     std::fs::write(path, data).map_err(|e| format!("can't write {path}: {e}"))
@@ -1942,8 +1989,8 @@ pub(crate) fn tools() -> Value {
     let obj = |props: Value, req: &[&str]| json!({"type": "object", "properties": props, "required": req});
     json!([
         {"name": "new_document", "description": "Start a new empty Part Studio. Units: mm (default), cm, m, in, ft.", "inputSchema": obj(json!({"units": {"type": "string"}}), &[])},
-        {"name": "open_document", "description": "Open a .json document; its first Part Studio becomes active (see describe for the other tabs).", "inputSchema": obj(json!({"path": {"type": "string"}}), &["path"])},
-        {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the rCAD GUI can open.", "inputSchema": obj(json!({"path": {"type": "string"}}), &[])},
+        {"name": "open_document", "description": "Open a .json document; its first Part Studio becomes active (see describe for the other tabs). With remote instead of path, a document kept on the computer paired in the editor (netdash's rCAD receiver) is downloaded into a working copy and opened; save_document then sends it back.", "inputSchema": obj(json!({"path": {"type": "string"}, "remote": {"type": "string"}}), &[])},
+        {"name": "save_document", "description": "Save the whole document (Part Studios, Assemblies, Drawings) as a .json file the rCAD GUI can open. A remote document's working copy is sent back too, unless it changed over there since it was opened (an error says so; overwrite_remote: true sends it anyway).", "inputSchema": obj(json!({"path": {"type": "string"}, "overwrite_remote": {"type": "boolean"}}), &[])},
         {"name": "describe", "description": "Features (with their full params; imported files show only their size and a hash), variables, parts (name, volume, area, bbox, centroid) and feature errors.", "inputSchema": obj(json!({}), &[])},
         {"name": "note", "description": "Pin a note to a face of a Part Studio (action add: at, a point on the face, normal, text), or change (edit: id, text) or remove (delete: id) one. Notes are the user's reminders and requests on the model; describe lists them with their faces. studio defaults to the active one.", "inputSchema": obj(json!({"action": {"type": "string", "enum": ["add", "edit", "delete"]}, "studio": {"type": "integer"}, "id": {"type": "integer"}, "text": {"type": "string"}, "at": {"type": "array", "items": {"type": "number"}}, "normal": {"type": "array", "items": {"type": "number"}}}), &["action"])},
         {"name": "set_variable", "description": "Create or change a variable usable in any value, e.g. name 'w', expr '40' or 'h * 2'.", "inputSchema": obj(json!({"name": {"type": "string"}, "expr": {"type": ["string", "number"]}}), &["name", "expr"])},

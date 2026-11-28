@@ -86,6 +86,19 @@ Port 8765, saves to `~/scans`, token in `~/.config/rcad-capture/token`
 `X-Content-SHA256`), `POST /api/sessions/<id>/finish`, all with
 `Authorization: Bearer <token>`.
 
+Desktop rCAD on another computer on the network opens and saves the documents
+through the same service (*File → Open from another computer…*, paired with
+the same link as the phone): `GET /api/doc/<id>/content` (the file, with its
+sha256 as `ETag`; `If-None-Match` gives 304 while it is unchanged),
+`PUT /api/doc/<id>/content` with `If-Match: "<etag>"` (412 when the file
+changed here since that copy, nothing written; `?copy=<name>` saves a new
+document beside it), `GET /api/doc/<id>/files` and
+`GET|PUT /api/doc/<id>/files/.rcad-chats/<file>` for its chats (the
+`.rcad-cache` build cache can be read, not written). Writes are atomic, stay
+inside the document's folder, wait while Claude works on the document from the
+phone, and a save into a git project is committed and synced as after a phone
+chat. `GET /api/ping` says `"files": true` when the service can do this.
+
 The APK is signed with `android/app/sideload.keystore`, a deliberately public
 key whose only job is to keep the signature the same between builds so
 updates install over each other.

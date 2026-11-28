@@ -38,7 +38,7 @@ try:  # projects, web viewer and Claude chats for the rCAD phone app (installed 
 except ImportError:
     rcad_projects = None
 
-VERSION = "1.1"
+VERSION = "1.2"
 CONFIG_DIR = os.path.expanduser("~/.config/rcad-capture")
 TOKEN_FILE = os.path.join(CONFIG_DIR, "token")
 # Served at /rcad-capture.apk so the phone can install the app from netdash.
@@ -393,7 +393,9 @@ class Handler(BaseHTTPRequestHandler):
             du = shutil.disk_usage(self.app.root)
             return self.send_json(200, {"ok": True, "version": VERSION, "host": socket.gethostname(),
                                         "root": self.app.root, "free_bytes": du.free,
-                                        "projects": bool(self.app.projects)})
+                                        "projects": bool(self.app.projects),
+                                        # desktop rCAD can open and save the documents (/content, /files)
+                                        "files": bool(self.app.projects)})
         if not self.authed():
             return
         if p == ["api", "sessions"]:
@@ -444,6 +446,8 @@ class Handler(BaseHTTPRequestHandler):
         if not self.authed():
             return
         p = self.parts()
+        if self.app.projects and rcad_projects.handle_put(self, p, self.app.projects):
+            return
         if not (len(p) == 5 and p[:2] == ["api", "sessions"] and p[3] == "photos"):
             self.drain()
             return self.send_json(404, {"error": "not found"})

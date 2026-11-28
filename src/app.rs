@@ -178,6 +178,7 @@ pub struct App {
     /// The Scan from photos window.
     pub photo: crate::photo_ui::PhotoUi,
     pub github: crate::github_ui::GithubUi,
+    pub remote: crate::remote_ui::RemoteUi,
     /// The start screen with recent documents.
     pub home: crate::home::HomeUi,
     /// Sketch button pressed with no plane selected: the next planar pick starts the sketch.
@@ -290,6 +291,7 @@ impl App {
             vcs: Default::default(),
             photo: Default::default(),
             github: Default::default(),
+            remote: Default::default(),
             home: Default::default(),
             awaiting_sketch_plane: false,
             was_narrow: None,
@@ -899,6 +901,7 @@ impl App {
                 crate::cam_sim_saves::set_doc(Some(&p));
                 self.load_workspace(ws);
                 crate::home::touch(self, &p);
+                crate::remote_ui::document_opened(self, &p);
                 self.path = Some(p);
                 self.mark_saved();
                 crate::claude_ui::document_opened(self);
@@ -931,9 +934,10 @@ impl App {
                 self.kernel.cache_dirs = crate::build_cache::dirs_for(Some(&p));
                 crate::cam_sim_saves::set_doc(Some(&p));
                 crate::build_cache::saved(self, &p);
-                let committed = crate::vcs_ui::after_save(self, &p);
+                let mut committed = crate::vcs_ui::after_save(self, &p);
+                committed += &crate::remote_ui::after_save(self, &p);
                 let secs = if committed.is_empty() { 2 } else { 4 };
-                self.flash_info(format!("Saved {}{committed}", p.display()), Some(Duration::from_secs(secs)));
+                self.flash_info(format!("Saved {}{committed}", crate::remote_ui::shown_path(&p)), Some(Duration::from_secs(secs)));
                 self.path = Some(p.clone());
                 self.saved_ok(&p);
                 crate::claude_ui::document_saved(self);
@@ -1668,7 +1672,7 @@ impl App {
             let b = egui::Button::image_and_text(icons::image(icon, 15.0).tint(theme::text()), l).shortcut_text(RichText::new(keys).color(theme::muted()));
             ui.add(b).clicked()
         };
-        for (a, icon, l, keys) in [("home", "home", "Home (recent documents)", ""), ("new", "file", "New document", "Ctrl+N"), ("project", "folder", "New project…", ""), ("open", "folder", "Open…", "Ctrl+O")] {
+        for (a, icon, l, keys) in [("home", "home", "Home (recent documents)", ""), ("new", "file", "New document", "Ctrl+N"), ("project", "folder", "New project…", ""), ("open", "folder", "Open…", "Ctrl+O"), ("remote", "desktop", "Open from another computer…", "")] {
             if item(ui, icon, l, keys) {
                 action = Some(a);
                 ui.close();
@@ -1770,6 +1774,7 @@ impl App {
             Some("home") => crate::home::show_home(self),
             Some("new") => self.guard(crate::session::Pending::New),
             Some("open") => self.open_dialog(),
+            Some("remote") => crate::remote_ui::open_window(self),
             Some("json") => self.save(false),
             Some("saveas") => self.save(true),
             Some("undo") => self.undo(),
@@ -3852,6 +3857,7 @@ impl eframe::App for App {
                 self.toast_ui(&ctx);
             }
             crate::vcs_ui::frame(self, &ctx);
+            crate::remote_ui::frame(self, &ctx);
             crate::session::windows(self, &ctx);
             if ctx.input(|i| i.viewport().title.as_deref() != Some("rCAD")) {
                 ctx.send_viewport_cmd(egui::ViewportCommand::Title("rCAD".into()));
@@ -3957,6 +3963,7 @@ impl eframe::App for App {
         }
         crate::palette::window(self, &ctx);
         crate::vcs_ui::frame(self, &ctx);
+        crate::remote_ui::frame(self, &ctx);
         crate::photo_ui::frame(self, &ctx);
         if self.phone && self.sidebar_open {
             self.drawer(&ctx, central.response.rect);
@@ -3964,7 +3971,8 @@ impl eframe::App for App {
         self.toast_ui(&ctx);
         crate::session::windows(self, &ctx);
         let name = self.path.as_ref().and_then(|p| p.file_name()).map(|s| s.to_string_lossy().to_string()).unwrap_or_else(|| "Untitled document".into());
-        let title = format!("rCAD · {}{name}", if self.is_dirty() { "• " } else { "" });
+        let on = crate::remote_ui::status(self).map(|s| format!(" ({s})")).unwrap_or_default();
+        let title = format!("rCAD · {}{name}{on}", if self.is_dirty() { "• " } else { "" });
         if ctx.input(|i| i.viewport().title.as_deref() != Some(title.as_str())) {
             ctx.send_viewport_cmd(egui::ViewportCommand::Title(title));
         }

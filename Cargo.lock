@@ -3561,6 +3561,7 @@ dependencies = [
  "opencascade-sys",
  "rfd",
  "rhai",
+ "ring",
  "rustls",
  "serde",
  "serde_json",

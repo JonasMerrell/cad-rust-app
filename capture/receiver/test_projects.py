@@ -14,6 +14,7 @@ import textwrap
 import threading
 import time
 import unittest
+import urllib.parse
 from http.server import ThreadingHTTPServer
 
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
@@ -542,6 +543,184 @@ class ProjectsTest(unittest.TestCase):
         self.assertIn(res["id"], [d["id"] for d in self.doc()])
         self.assertEqual(self.req("POST", "/api/projects", {"name": "Hex tray"})[0], 400)
         self.assertEqual(self.req("POST", "/api/projects", {"name": "../"})[0], 400)
+
+    # ---- desktop rCAD on another computer: read and save documents and their files
+
+    def raw(self, method, path, data=None, headers=None, token="tok"):
+        c = http.client.HTTPConnection("127.0.0.1", self.port, timeout=30)
+        h = dict(headers or {})
+        if token:
+            h["Authorization"] = "Bearer " + token
+        c.request(method, path, body=data, headers=h)
+        resp = c.getresponse()
+        body = resp.read()
+        c.close()
+        return resp.status, dict(resp.getheaders()), body
+
+    def bracket(self):
+        return next(d for d in self.doc() if d["name"] == "bracket")
+
+    def test_read_and_save_a_document(self):
+        d = self.bracket()
+        path = os.path.join(self.projects_dir, "Bracket", "bracket.json")
+        os.chmod(path, 0o644)
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/content")
+        self.assertEqual(st, 200)
+        self.assertEqual(body, open(path, "rb").read())
+        tag = hdr["ETag"].strip('"')
+        self.assertEqual(tag, __import__("hashlib").sha256(body).hexdigest())
+        # unchanged: 304, no body
+        st, hdr2, body2 = self.raw("GET", f"/api/doc/{d['id']}/content", headers={"If-None-Match": f'"{tag}"'})
+        self.assertEqual((st, body2, hdr2["ETag"]), (304, b"", f'"{tag}"'))
+        # save over the copy it was made from
+        ws = json.loads(body)
+        ws["studios"][0]["name"] = "Edited on the PC"
+        new = json.dumps(ws).encode()
+        st, _, res = self.raw("PUT", f"/api/doc/{d['id']}/content", new, {"If-Match": f'"{tag}"', "X-Rcad-Client": "WINPC"})
+        res = json.loads(res)
+        self.assertEqual(st, 200, res)
+        self.assertEqual(open(path, "rb").read(), new)
+        self.assertEqual(res["etag"], __import__("hashlib").sha256(new).hexdigest())
+        self.assertFalse(res["git"])
+        # the folder keeps no temporary files, and the file keeps its permissions
+        self.assertEqual(sorted(os.listdir(os.path.dirname(path))), [".rcad-cache", "bracket.json", "notes.json"])
+        self.assertEqual(os.stat(path).st_mode & 0o777, 0o644)
+        # now 200 again for the old etag, with the new content
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/content", headers={"If-None-Match": f'"{tag}"'})
+        self.assertEqual((st, body), (200, new))
+
+    def test_a_save_made_against_a_stale_copy_is_refused(self):
+        d = self.bracket()
+        path = os.path.join(self.projects_dir, "Bracket", "bracket.json")
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/content")
+        tag = hdr["ETag"].strip('"')
+        # the phone changes it meanwhile
+        st, res = self.req("POST", f"/api/doc/{d['id']}/chat", {"text": "Phone edit"})
+        self.wait_job(res["job"])
+        theirs = open(path, "rb").read()
+        mine = body.replace(b'"Body"', b'"Mine"')
+        st, _, res = self.raw("PUT", f"/api/doc/{d['id']}/content", mine, {"If-Match": f'"{tag}"'})
+        res = json.loads(res)
+        self.assertEqual(st, 412)
+        self.assertEqual(res["etag"], __import__("hashlib").sha256(theirs).hexdigest())
+        self.assertEqual(open(path, "rb").read(), theirs)  # nothing lost
+        self.assertEqual(sorted(os.listdir(os.path.dirname(path))), [".rcad-cache", ".rcad-chats", "bracket.json", "notes.json"])
+        # no precondition at all: refused too
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", mine)[0], 428)
+        # keep mine: overwrite whatever is there
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", mine, {"If-Match": "*"})[0], 200)
+        self.assertEqual(open(path, "rb").read(), mine)
+        # save as a copy beside it
+        st, _, res = self.raw("PUT", f"/api/doc/{d['id']}/content?copy=" + urllib.parse.quote("bracket (PC)"), theirs)
+        res = json.loads(res)
+        self.assertEqual((st, res["name"]), (200, "bracket (PC).json"), res)
+        self.assertEqual(open(os.path.join(self.projects_dir, "Bracket", "bracket (PC).json"), "rb").read(), theirs)
+        self.assertEqual(os.stat(os.path.join(self.projects_dir, "Bracket", "bracket (PC).json")).st_mode & 0o777, os.stat(path).st_mode & 0o777)
+        self.assertIn(res["id"], [x["id"] for x in self.doc()])
+        # not over an existing file, and only with a usable name
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content?copy=bracket", theirs)[0], 409)
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content?copy=..%2F..%2Fx", theirs)[0], 200)  # cleaned to "x"
+        self.assertTrue(os.path.isfile(os.path.join(self.projects_dir, "Bracket", "x.json")))
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content?copy=%2F%2F", theirs)[0], 400)
+
+    def test_saves_must_be_documents_and_wait_for_claude(self):
+        d = self.bracket()
+        path = os.path.join(self.projects_dir, "Bracket", "bracket.json")
+        before = open(path, "rb").read()
+        for bad in [b'{"not": "a document"}', b'{"format": "cad-rust-app/workspace-1", "studios": [', b"[]"]:
+            self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", bad, {"If-Match": "*"})[0], 400, bad)
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", b"", {"If-Match": "*"})[0], 411)
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", before, {"If-Match": "*"}, token="nope")[0], 401)
+        st, res = self.req("POST", f"/api/doc/{d['id']}/chat", {"text": "slow"})
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", before, {"If-Match": "*"})[0], 409)
+        self.req("POST", f"/api/jobs/{res['job']}/stop", {})
+        self.wait_job(res["job"])
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/content", before, {"If-Match": "*"})[0], 200)
+        self.assertEqual(sorted(x for x in os.listdir(os.path.dirname(path)) if x.startswith(".rcad-upload")), [])
+
+    def test_chats_and_cache_files(self):
+        d = self.bracket()
+        folder = os.path.join(self.projects_dir, "Bracket")
+        st, res = self.req("POST", f"/api/doc/{d['id']}/chat", {"text": "Make it"})
+        self.wait_job(res["job"])
+        with open(os.path.join(folder, ".rcad-chats", "c1.context.json"), "w") as f:
+            f.write('{"messages": []}')
+        # another document's chat in the same folder isn't listed
+        with open(os.path.join(folder, ".rcad-chats", "c9.json"), "w") as f:
+            json.dump({"id": "c9", "document": "other.json", "lines": []}, f)
+        with open(os.path.join(folder, ".rcad-cache", "00000000000000ab.json.gz"), "wb") as f:
+            f.write(b"\x1f\x8bcache")
+        st, res = self.req("GET", f"/api/doc/{d['id']}/files")
+        self.assertEqual(st, 200)
+        self.assertEqual(sorted(x["path"] for x in res["files"]),
+                         [".rcad-cache/00000000000000ab.json.gz", ".rcad-chats/c1.context.json", ".rcad-chats/c1.json"])
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/files/.rcad-cache/00000000000000ab.json.gz")
+        self.assertEqual((st, body), (200, b"\x1f\x8bcache"))
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/files/.rcad-chats/c1.json")
+        tag = hdr["ETag"].strip('"')
+        chat = json.loads(body)
+        chat["lines"].append({"kind": "user", "text": "from the PC"})
+        new = json.dumps(chat).encode()
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-chats/c1.json", new, {"If-Match": '"stale"'})[0], 412)
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-chats/c1.json", new, {"If-None-Match": "*"})[0], 412)
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-chats/c1.json", new, {"If-Match": f'"{tag}"'})[0], 200)
+        self.assertEqual(open(os.path.join(folder, ".rcad-chats", "c1.json"), "rb").read(), new)
+        # a new chat; not one claiming another document
+        c2 = json.dumps({"id": "c2", "document": "bracket.json", "lines": []}).encode()
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-chats/c2.json", c2, {"If-None-Match": "*"})[0], 200)
+        other = json.dumps({"id": "c3", "document": "other.json", "lines": []}).encode()
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-chats/c3.json", other, {"If-None-Match": "*"})[0], 400)
+        # the build cache is read only
+        self.assertEqual(self.raw("PUT", f"/api/doc/{d['id']}/files/.rcad-cache/00000000000000ab.json.gz", b"x", {"If-Match": "*"})[0], 400)
+
+    def test_file_paths_stay_inside_the_document_folder(self):
+        d = self.bracket()
+        folder = os.path.join(self.projects_dir, "Bracket")
+        with open(os.path.join(self.tmp, "secret.json"), "w") as f:
+            f.write('{"secret": 1}')
+        os.makedirs(os.path.join(folder, ".rcad-chats"), exist_ok=True)
+        os.symlink(os.path.join(self.tmp, "secret.json"), os.path.join(folder, ".rcad-chats", "link.json"))
+        bad = [".rcad-chats/..%2F..%2F..%2Fsecret.json", "..%2Fsecret.json/x", ".git/config", ".rcad-chats/link.json",
+               "notes.json/x", ".rcad-chats/.gitignore", ".rcad-cache/..", "%2Fetc/passwd"]
+        for rel in bad:
+            st, _, _ = self.raw("GET", f"/api/doc/{d['id']}/files/{rel}")
+            self.assertEqual(st, 404, rel)
+            st, _, _ = self.raw("PUT", f"/api/doc/{d['id']}/files/{rel}", b'{"lines": []}', {"If-Match": "*"})
+            self.assertIn(st, (400, 404), rel)
+        self.assertEqual(open(os.path.join(self.tmp, "secret.json")).read(), '{"secret": 1}')
+        for rel in ["../secret.json", "Bracket/../../secret.json"]:
+            did = "0-" + base64.urlsafe_b64encode(rel.encode()).decode().rstrip("=")
+            self.assertEqual(self.raw("GET", f"/api/doc/{did}/content")[0], 404, rel)
+            self.assertEqual(self.raw("PUT", f"/api/doc/{did}/content", b'{"format": "cad-rust-app/1"}', {"If-Match": "*"})[0], 404, rel)
+        # a chats folder that is a link to elsewhere is refused too
+        os.makedirs(os.path.join(self.projects_dir, "Linked"))
+        with open(os.path.join(self.projects_dir, "Linked", "l.json"), "w") as f:
+            f.write('{"format": "cad-rust-app/workspace-1", "studios": []}')
+        os.symlink(self.tmp, os.path.join(self.projects_dir, "Linked", ".rcad-chats"))
+        lid = next(x["id"] for x in self.doc() if x["name"] == "l")
+        st, _, _ = self.raw("PUT", f"/api/doc/{lid}/files/.rcad-chats/x.json", b'{"lines": [], "document": "l.json"}', {"If-None-Match": "*"})
+        self.assertIn(st, (400, 404))
+        self.assertFalse(os.path.exists(os.path.join(self.tmp, "x.json")))
+
+    def test_a_save_in_a_git_project_is_committed(self):
+        d = self.bracket()
+        os.makedirs(os.path.join(self.projects_dir, "Bracket", ".git"))
+        st, hdr, body = self.raw("GET", f"/api/doc/{d['id']}/content")
+        st, _, res = self.raw("PUT", f"/api/doc/{d['id']}/content", body.replace(b'"Body"', b'"B"'),
+                              {"If-Match": hdr["ETag"], "X-Rcad-Client": "WINPC; rm -rf"})
+        self.assertTrue(json.loads(res)["git"])
+        for _ in range(50):
+            log = os.path.join(self.tmp, "github.log")
+            if os.path.exists(log):
+                break
+            time.sleep(0.1)
+        calls = [json.loads(x) for x in open(log)]
+        path = os.path.join(os.path.realpath(self.projects_dir), "Bracket", "bracket.json")
+        self.assertIn(["sync", "--doc", path, "--message", "Saved from rCAD on WINPC rm -rf"], calls)
+
+    def test_ping_says_files_work(self):
+        st, res = self.req("GET", "/api/ping")
+        self.assertTrue(res["files"])
 
 
 if __name__ == "__main__":
