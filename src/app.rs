@@ -100,6 +100,8 @@ pub struct Dialog {
     pub before: Document,
     /// Which selection field viewport clicks go to.
     pub active_field: usize,
+    /// The selection-list row under the pointer, highlighted in the viewport.
+    pub hover_row: Option<Ref>,
 }
 
 #[derive(Default)]
@@ -612,7 +614,7 @@ impl App {
         let name = self.doc.next_name(kind);
         let id = self.doc.insert(name, op);
         self.picks.clear();
-        self.dialog = Some(Dialog { feature: id, is_new: true, before, active_field: 0 });
+        self.dialog = Some(Dialog { feature: id, is_new: true, before, active_field: 0, hover_row: None });
         self.changed();
     }
 
@@ -631,7 +633,7 @@ impl App {
         let before = self.doc.clone();
         self.checkpoint();
         self.picks.clear();
-        self.dialog = Some(Dialog { feature: id, is_new: false, before, active_field: 0 });
+        self.dialog = Some(Dialog { feature: id, is_new: false, before, active_field: 0, hover_row: None });
         self.scene_dirty = true;
     }
 

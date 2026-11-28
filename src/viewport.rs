@@ -49,8 +49,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
         let pin = pointer.filter(|_| app.measure.is_none()).and_then(|p| crate::notes::pin_under(app, rect, p));
         app.notes.hover = pin;
         let hit = pointer.filter(|_| !crate::home::hide_hover(app) && pin.is_none()).and_then(|p| pick(app, local(p)));
-        if hit != app.hover {
-            app.hover = hit.clone();
+        // a row hovered in the feature dialog's selection list lights up its item
+        let shown = app.dialog.as_ref().and_then(|d| d.hover_row.clone()).or_else(|| hit.clone());
+        if shown != app.hover {
+            app.hover = shown;
             app.scene_dirty = true;
         }
         if pin.is_some() {
@@ -177,8 +179,10 @@ pub fn navigate(app: &mut App, ui: &Ui, resp: &egui::Response, free_drag: bool) 
         }
     }
     let (pos, scroll, pinch) = ui.input(|i| (i.pointer.hover_pos(), i.smooth_scroll_delta.y, i.zoom_delta()));
+    // the feature dialog floats over the viewport; scrolling its lists must not zoom
+    let over_dialog = |p: Pos2| ui.ctx().layer_id_at(p).map(|l| l.id) == Some(egui::Id::new("feature-dialog"));
     if let Some(p) = pos {
-        if rect.contains(p) {
+        if rect.contains(p) && !over_dialog(p) {
             let local = Vec2::new(p.x - rect.min.x, p.y - rect.min.y);
             if scroll.abs() > 0.0 {
                 app.camera.zoom_at(local, (scroll * 0.0035).exp());
@@ -642,6 +646,7 @@ fn build_scene(app: &App) -> SceneData {
             app.print_cache.borrow_mut().entry(b.id).or_insert_with(|| crate::printing::classify(b, floor, app.print.overhang, app.print.min_wall)).clone()
         });
         let body_picked = is_picked(app, &Ref::Body { body: b.id });
+        let body_hovered = app.hover.as_ref() == Some(&Ref::Body { body: b.id });
         let body_measured = measure_color(app, &Ref::Body { body: b.id });
         // which faces are highlighted
         let face_of = |p: DVec3| -> Option<usize> {
@@ -677,7 +682,7 @@ fn build_scene(app: &App) -> SceneData {
                 c
             } else if body_picked || picked_f.contains(&fi) {
                 vp::picked()
-            } else if hov_f == Some(fi) {
+            } else if body_hovered || hov_f == Some(fi) {
                 vp::hover()
             } else {
                 match classes.as_ref().and_then(|c| c.get(ti)) {
