@@ -26,6 +26,10 @@ token as the Capture app). Standard library only.
                                             starts a request: {"job", "chat_id"}
     GET  /api/jobs/<job>?after=N            events after N (waits up to 25 s for new ones)
     POST /api/jobs/<job>/stop
+    POST /api/doc/<id>/feature              {"studio"?, "id", "params"?: {key: value}, "suppressed"?, "keep"?}: change a
+                                            feature's values (the tree's "params"); a change that makes a feature
+                                            fail is undone (422, "new_errors") unless keep; 200 {"tree", "errors"}
+    POST /api/doc/<id>/rollback             {"studio"?, "at": n|null}: build only the first n features (null: all)
     POST /api/doc/<id>/sync                 commit (when the project commits on save) and sync with GitHub
     POST /api/doc/<id>/resolve              {"keep": "mine"|"theirs"} after a sync that couldn't combine both sides
 
@@ -188,6 +192,91 @@ def feature_detail(op):
     return " · ".join(out)
 
 
+# feature values the phone can change, as the editor's feature dialogs show them. A string param is
+# an expression (a number, or using variables) unless it is one of these choices.
+CHOICES = {
+    "op": [("new", "New part"), ("add", "Add"), ("remove", "Cut"), ("intersect", "Intersect")],
+    "end": [("blind", "Blind"), ("symmetric", "Symmetric"), ("through_all", "Through all"), ("up_to_next", "Up to next")],
+    "hole_type": [("simple", "Simple"), ("counterbore", "Counterbore"), ("countersink", "Countersink")],
+    ("revolve", "mode"): [("full", "Full"), ("one", "One direction"), ("symmetric", "Symmetric")],
+    ("surfaceRevolve", "mode"): [("full", "Full"), ("one", "One direction"), ("symmetric", "Symmetric")],
+    ("chamfer", "mode"): [("equal", "Equal distances"), ("two", "Two distances"), ("angle", "Distance and angle")],
+    ("transform", "mode"): [("translate", "Move"), ("rotate", "Rotate")],
+    ("boolean", "kind"): [("union", "Union"), ("subtract", "Subtract"), ("intersect", "Intersect")],
+}
+LABELS = {
+    "depth2": "Second depth", "second": "Second direction", "opposite": "Opposite direction", "op": "Result",
+    "end": "End", "draft": "Draft angle", "end_radius": "End radius", "variable": "Variable radius",
+    "distance2": "Second distance", "cb_depth": "Counterbore depth", "cb_diameter": "Counterbore diameter",
+    "cs_angle": "Countersink angle", "cs_diameter": "Countersink diameter", "hole_type": "Hole type",
+    "through": "Through all", "count2": "Second count", "spacing2": "Second spacing", "keep_tools": "Keep tools",
+    "k_factor": "K-factor", "left": "Left-handed", "flip": "Flip", "copy": "Keep the original", "ruled": "Ruled",
+    "align": "Turn with the curve", "kind": "Pattern", "mode": "Mode", "turns": "Turns", "pitch": "Pitch",
+}
+# strings that aren't values (imports and scripts keep data and names in them)
+NOT_PARAMS = {"type", "name", "format", "step", "data", "script", "refs_kind", "text", "font"}
+NO_PARAM_TYPES = {"sketch", "import", "custom"}
+
+
+def _shown(t, op, k):
+    """Whether param k matters with the feature's other settings (the dialogs hide the rest)."""
+    end, mode = op.get("end"), op.get("mode")
+    if k in ("depth2",):
+        return bool(op.get("second"))
+    if k == "depth" and t == "extrude":
+        return end in (None, "blind", "symmetric")
+    if k == "end_radius":
+        return bool(op.get("variable"))
+    if t == "chamfer" and k == "distance2":
+        return mode == "two"
+    if t == "chamfer" and k == "angle":
+        return mode == "angle"
+    if t == "hole":
+        if k.startswith("cb_"):
+            return op.get("hole_type") == "counterbore"
+        if k.startswith("cs_"):
+            return op.get("hole_type") == "countersink"
+        if k == "depth":
+            return not op.get("through")
+    if t == "transform":
+        return not ((k == "distance" and mode == "rotate") or (k == "angle" and mode != "rotate"))
+    if t == "revolve" and k == "angle":
+        return mode != "full"
+    if k in ("count2", "spacing2"):
+        return op.get("second") is not None
+    return True
+
+
+def feature_params(op):
+    """A feature's values the phone can edit: [{key, label, kind: expr|bool|choice, value, choices}]."""
+    t = op.get("type", "")
+    if t in NO_PARAM_TYPES:
+        return []
+    out = []
+    for k, v in op.items():
+        if k in NOT_PARAMS or isinstance(v, (list, dict)) or v is None or not _shown(t, op, k):
+            continue
+        label = LABELS.get(k) or k.replace("_", " ").capitalize()
+        ch = CHOICES.get((t, k)) or CHOICES.get(k)
+        if t == "boolean" and k == "kind":
+            ch = CHOICES[("boolean", "kind")]
+        elif k in ("kind", "mode") and not ch:
+            continue  # what a pattern copies, or how a plane is placed: needs picks, ask Claude
+        if isinstance(v, bool):
+            out.append({"key": k, "label": label, "kind": "bool", "value": v})
+        elif ch:
+            choices = [list(c) for c in ch]
+            if v not in [c[0] for c in ch]:
+                choices.append([v, str(v).replace("_", " ").capitalize()])  # up to a face: kept, not offered
+            out.append({"key": k, "label": label, "kind": "choice", "value": v, "choices": choices})
+        elif isinstance(v, (str, int, float)):
+            out.append({"key": k, "label": label, "kind": "expr", "value": str(v)})
+    # the main size first, as the editor's dialogs do
+    first = [k for k in SHOWN_PARAMS if k not in ("op", "end")]
+    out.sort(key=lambda p: (p["kind"] != "expr", first.index(p["key"]) if p["key"] in first else len(first)))
+    return out
+
+
 def feature_tree(doc):
     """One Part Studio's feature list, rollback bar and variables, for the phone's tree."""
     if not isinstance(doc, dict):
@@ -202,6 +291,7 @@ def feature_tree(doc):
             "name": f.get("name", ""),
             "type": op.get("type", ""),
             "detail": feature_detail(op),
+            "params": feature_params(op),
             "suppressed": bool(f.get("suppressed")),
             "hidden": bool(f.get("hidden")),
         })
@@ -416,7 +506,7 @@ class Projects:
 
     # ---------------------------------------------------------------- viewer
 
-    def _run_script(self, rcad, steps, cwd, timeout, results=None, stderr_path=None):
+    def _run_script(self, rcad, steps, cwd, timeout, results=None, stderr_path=None, stop_on_error=False):
         """Run tool calls with `rcad run`; an error text, or None. `results` (a list) gets each step's result.
         With `stderr_path`, rcad's progress lines go to that file as they come."""
         # rCAD's kernel gives up on one Part Studio after 10 minutes unless told otherwise: let a
@@ -432,7 +522,8 @@ class Projects:
                     r = subprocess.run([rcad, "run", sp], cwd=cwd, stdout=subprocess.PIPE, stderr=ef, text=True, timeout=timeout, env=env)
                 r.stderr = _tail(stderr_path, 2000)
             else:
-                r = subprocess.run([rcad, "run", sp], cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
+                cmd = [rcad, "run", "--stop-on-error", sp] if stop_on_error else [rcad, "run", sp]
+                r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, timeout=timeout, env=env)
         except subprocess.TimeoutExpired:
             return "rcad took too long"
         except OSError as e:
@@ -845,6 +936,100 @@ class Projects:
         if self._git_root(os.path.dirname(path), self.roots[int(did.split("-", 1)[0])]):
             threading.Thread(target=self.github, args=(["sync", "--doc", path, "--message", "A note from the rCAD phone app"], 180), daemon=True).start()
         return 200, res
+
+    # ---------------------------------------------------------------- feature tree edits
+
+    def _change(self, did, steps, tool, message, stop_on_error=False):
+        """Open the document, run `steps` on it, save it (then commit and sync it when its project
+        does): (HTTP status, `tool`'s result, the step that failed or None)."""
+        path = self.resolve(did)
+        if not path:
+            return 404, {"error": "no such document"}, None
+        with self.lock:
+            running = self.busy.get(path)
+            if running and running in self.jobs and not self.jobs[running].done:
+                return 409, {"error": "Claude is working on this document: change it when it's done"}, None
+            lk = self.export_locks.setdefault("note:" + path, threading.Lock())
+        rcad = self.rcad
+        if not rcad:
+            return 503, {"error": "rcad is not installed on this computer"}, None
+        with lk:
+            results = []
+            err = self._run_script(rcad, [{"tool": "open_document", "args": {"path": path}}, *steps,
+                                          {"tool": "save_document", "args": {"path": path}}],
+                                   os.path.dirname(path), 600, results, stop_on_error=stop_on_error)
+            step = next((r for r in results if r.get("tool") == tool), {})
+            res = step.get("result")
+            saved = any(r.get("tool") == "save_document" and not r.get("error") for r in results)
+            if isinstance(res, dict) and res.get("ok") is False and not saved:
+                return 422, res, step  # it would make features fail: not saved
+            if not isinstance(res, dict):
+                return (400 if step.get("error") else 500), {"error": step.get("error") or err or "rcad didn't change it"}, step
+            if not saved:
+                return 500, {"error": f"changed but not saved: {err}"}, step
+        if self._git_root(os.path.dirname(path), self.roots[int(did.split("-", 1)[0])]):
+            threading.Thread(target=self.github, args=(["sync", "--doc", path, "--message", message], 180), daemon=True).start()
+        return 200, res, step
+
+    def _tree_after(self, did, studio, res):
+        """The Part Studio's feature tree as saved, with the build's errors and parts."""
+        path = self.resolve(did)
+        out = {"errors": res.get("errors") or [], "parts": len(res.get("parts") or [])}
+        try:
+            with open(path) as f:
+                ws = json.load(f)
+            docs = [s.get("doc") for s in ws.get("studios")] if isinstance(ws.get("studios"), list) else [ws]
+            out["tree"] = feature_tree(docs[studio] if studio < len(docs) else None)
+        except (OSError, ValueError, TypeError, AttributeError):
+            pass
+        return out
+
+    def edit_feature(self, did, body):
+        """Change a feature's values or suppress it, from the phone's feature tree. Unless `keep`, a
+        change that makes a feature fail is undone and comes back as 422 with `new_errors`."""
+        studio = body.get("studio") if isinstance(body.get("studio"), int) and body.get("studio") >= 0 else 0
+        fid = body.get("id")
+        if not isinstance(fid, int) or isinstance(fid, bool):
+            return 400, {"error": "give the feature's id"}
+        args = {"id": fid}
+        params = body.get("params")
+        if params is not None:
+            if not isinstance(params, dict) or not params:
+                return 400, {"error": "params: the values to change"}
+            for k, v in params.items():
+                if not isinstance(k, str) or not (isinstance(v, (str, bool)) or (isinstance(v, (int, float)))):
+                    return 400, {"error": f"{k}: a value, a choice or true/false"}
+                if isinstance(v, str) and not v.strip():
+                    return 400, {"error": f"{LABELS.get(k) or k}: give a value"}
+            args["params"] = {k: (v.strip() if isinstance(v, str) else v) for k, v in params.items()}
+        if isinstance(body.get("suppressed"), bool):
+            args["suppressed"] = body["suppressed"]
+        if len(args) == 1:
+            return 400, {"error": "nothing to change"}
+        keep = bool(body.get("keep"))
+        if not keep:
+            args["rollback"] = True
+        steps = [{"tool": "switch_part_studio", "args": {"index": studio}}, {"tool": "edit_feature", "args": args}]
+        code, res, step = self._change(did, steps, "edit_feature", "Edited a feature from the rCAD phone app", stop_on_error=not keep)
+        if code == 422:
+            errs = res.get("new_errors") or []
+            msg = "; ".join(f"{e.get('name') or 'a feature'}: {e.get('error')}" for e in errs) or "a feature would fail"
+            return 422, {"error": msg, "new_errors": errs}
+        if code != 200:
+            return code, res
+        return 200, self._tree_after(did, studio, res)
+
+    def set_rollback(self, did, body):
+        """Move a Part Studio's rollback bar: `at` features are built (null: all)."""
+        studio = body.get("studio") if isinstance(body.get("studio"), int) and body.get("studio") >= 0 else 0
+        at = body.get("at")
+        if at is not None and (not isinstance(at, int) or isinstance(at, bool) or at < 0):
+            return 400, {"error": "at: how many features to build, or null for all"}
+        steps = [{"tool": "switch_part_studio", "args": {"index": studio}}, {"tool": "set_rollback", "args": {"at": at}}]
+        code, res, _ = self._change(did, steps, "set_rollback", "Moved the rollback bar from the rCAD phone app")
+        if code != 200:
+            return code, res
+        return 200, self._tree_after(did, studio, res)
 
     # ---------------------------------------------------------------- GitHub
 
@@ -1702,6 +1887,12 @@ def handle(h, method, p, projects, body=None):
         did = p[2]
         if method == "POST" and p[3:] == ["note"]:
             h.send_json(*projects.note(did, body))
+            return True
+        if method == "POST" and p[3:] == ["feature"]:
+            h.send_json(*projects.edit_feature(did, body))
+            return True
+        if method == "POST" and p[3:] == ["rollback"]:
+            h.send_json(*projects.set_rollback(did, body))
             return True
         if method == "POST" and p[3:] == ["sync"]:
             h.send_json(*projects.doc_git(did, ["sync", "--message", "Synced from the rCAD phone app"]))

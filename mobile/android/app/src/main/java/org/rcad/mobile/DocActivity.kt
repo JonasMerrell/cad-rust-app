@@ -43,6 +43,10 @@ class DocActivity : Activity() {
     private lateinit var docId: String
     private var api: Api? = null
     private var detail: JSONObject? = null
+    /** A change to the feature tree being saved on netdash (what the tree says meanwhile). */
+    private var changing: String? = null
+    /** The Part Studio's feature rows, top to bottom, for dragging the rollback bar between them. */
+    private val featureRows = mutableListOf<View>()
     /** The feature tree the viewer page was built from (/tree): errors, parts, an assembly's instances and mates. */
     private var built: JSONObject? = null
 
@@ -551,13 +555,18 @@ class DocActivity : Activity() {
             return
         }
         if (n == 0) tree.addView(note("No features yet. Ask Claude to make something."))
+        if (changing != null) tree.addView(note(changing!!))
         val rb = if (t.isNull("rollback")) n else t.optInt("rollback", n).coerceIn(0, n)
-        for (i in 0..n) {
-            if (i == rb && rb < n) tree.addView(rollbackBar())
-            if (i == n) break
+        featureRows.clear()
+        val bar = rollbackBar(rb, n)
+        for (i in 0 until n) {
+            if (i == rb) tree.addView(bar)
             val f = feats!!.getJSONObject(i)
-            tree.addView(featureRow(f, rolledBack = i >= rb, error = errors[f.optInt("id")]))
+            val row = featureRow(f, i, rolledBack = i >= rb, error = errors[f.optInt("id")])
+            featureRows += row
+            tree.addView(row)
         }
+        if (n > 0 && rb >= n) tree.addView(bar)
 
         notesSection()
         if (b != null) partsSection(b)
@@ -705,7 +714,7 @@ class DocActivity : Activity() {
         setPadding(Ui.dp(context, 14), Ui.dp(context, 12), Ui.dp(context, 14), Ui.dp(context, 12))
     }
 
-    private fun featureRow(f: JSONObject, rolledBack: Boolean, error: String?): View {
+    private fun featureRow(f: JSONObject, i: Int, rolledBack: Boolean, error: String?): View {
         val name = f.optString("name")
         val type = f.optString("type")
         val suppressed = f.optBoolean("suppressed")
@@ -714,7 +723,7 @@ class DocActivity : Activity() {
             "suppressed".takeIf { suppressed },
         ).joinToString(" · ")
         return treeRow(type.ifEmpty { "custom" }, name, extra, dim = rolledBack || suppressed, strike = suppressed, hidden = f.optBoolean("hidden"), error = error != null) {
-            featureMenu(f, error)
+            editFeature(f, i, error)
         }
     }
 
@@ -746,33 +755,238 @@ class DocActivity : Activity() {
         }
     }
 
-    /** The editor's rollback bar: features below it are not built. */
-    private fun rollbackBar() = LinearLayout(this).apply {
-        orientation = LinearLayout.HORIZONTAL
-        gravity = Gravity.CENTER_VERTICAL
-        setPadding(Ui.dp(context, 14), Ui.dp(context, 4), Ui.dp(context, 14), Ui.dp(context, 4))
-        addView(ImageView(context).apply { setImageDrawable(Icon(context, "rollback", Ui.ACCENT, 18)) })
-        addView(View(context).apply { setBackgroundColor(Ui.ACCENT) },
-            LinearLayout.LayoutParams(0, Ui.dp(context, 3), 1f).apply { marginStart = Ui.dp(context, 8); marginEnd = Ui.dp(context, 8) })
-        addView(Ui.text(context, "rolled back", 12f, Ui.ACCENT))
+    /**
+     * The editor's rollback bar: features below it are not built. Drag it up or down the tree;
+     * where it's let go is saved on netdash and the 3D view rebuilds.
+     */
+    @SuppressLint("ClickableViewAccessibility")
+    private fun rollbackBar(rb: Int, n: Int): View {
+        val label = Ui.text(this, if (rb < n) "rolled back · drag" else "drag to roll back", 12f, if (rb < n) Ui.ACCENT else Ui.MUTED)
+        val line = View(this).apply { setBackgroundColor(if (rb < n) Ui.ACCENT else Ui.LINE) }
+        val bar = LinearLayout(this).apply {
+            orientation = LinearLayout.HORIZONTAL
+            gravity = Gravity.CENTER_VERTICAL
+            minimumHeight = Ui.dp(context, 36)
+            setPadding(Ui.dp(context, 14), Ui.dp(context, 4), Ui.dp(context, 14), Ui.dp(context, 4))
+            contentDescription = "Rollback bar"
+            addView(ImageView(context).apply { setImageDrawable(Icon(context, "rollback", Ui.ACCENT, 18)) })
+            addView(line, LinearLayout.LayoutParams(0, Ui.dp(context, 3), 1f).apply { marginStart = Ui.dp(context, 8); marginEnd = Ui.dp(context, 8) })
+            addView(label)
+        }
+        var at = rb
+        var moved = false
+        var downY = 0f
+        val loc = IntArray(2)
+        bar.setOnTouchListener { v, e ->
+            when (e.actionMasked) {
+                android.view.MotionEvent.ACTION_DOWN -> {
+                    // the tray and its scroll view would take the drag otherwise
+                    v.parent.requestDisallowInterceptTouchEvent(true)
+                    downY = e.rawY
+                    moved = false
+                    v.isPressed = true
+                    v.translationZ = Ui.dp(this, 6).toFloat()
+                    v.setBackgroundColor(Ui.SHEET)
+                    line.setBackgroundColor(Ui.ACCENT)
+                }
+                android.view.MotionEvent.ACTION_MOVE -> {
+                    if (Math.abs(e.rawY - downY) > Ui.dp(this, 6)) moved = true
+                    if (moved && featureRows.isNotEmpty()) {
+                        tree.getLocationOnScreen(loc)
+                        val y = e.rawY - loc[1]
+                        val target = featureRows.count { it.top + it.height / 2 < y }
+                        // the bar follows the finger (moving the view itself would end the drag);
+                        // it goes into its new place when let go
+                        v.translationY = e.rawY - downY
+                        if (target != at) {
+                            at = target
+                            featureRows.forEachIndexed { i, r -> r.alpha = if (i >= at) 0.4f else 1f }
+                            label.text = if (at < n) "build ${at} of $n" else "build all"
+                            v.performHapticFeedback(android.view.HapticFeedbackConstants.CLOCK_TICK)
+                        }
+                    }
+                }
+                android.view.MotionEvent.ACTION_UP, android.view.MotionEvent.ACTION_CANCEL -> {
+                    v.parent.requestDisallowInterceptTouchEvent(false)
+                    v.isPressed = false
+                    v.translationY = 0f
+                    v.translationZ = 0f
+                    if (e.actionMasked == android.view.MotionEvent.ACTION_UP && at != rb) postRollback(if (at >= n) null else at)
+                    else if (e.actionMasked == android.view.MotionEvent.ACTION_UP && !moved) {
+                        if (rb < n) AlertDialog.Builder(this).setTitle("Rollback bar")
+                            .setMessage("${n - rb} feature${if (n - rb == 1) " isn't" else "s aren't"} built. Drag the bar to move it.")
+                            .setPositiveButton("Roll to the end") { _, _ -> postRollback(null) }
+                            .setNegativeButton("Close", null).show()
+                        else toast("Drag the bar up to see the part without the features below it")
+                        tree.post { buildTree() }
+                    } else tree.post { buildTree() }
+                }
+            }
+            true
+        }
+        return bar
     }
 
-    private fun featureMenu(f: JSONObject, error: String?) {
+    /**
+     * A feature's values, as the editor's feature dialog has them: numbers and expressions,
+     * switches and choices. Sketches and picks (faces, edges) are changed by asking Claude.
+     */
+    private fun editFeature(f: JSONObject, i: Int, error: String?) {
         val name = f.optString("name")
         val suppressed = f.optBoolean("suppressed")
-        val items = arrayOf(if (error != null) "Ask Claude to fix it" else "Ask Claude about $name…", if (suppressed) "Unsuppress it" else "Suppress it", "Delete it")
+        val params = objs(f.optJSONArray("params"))
+        val pad = Ui.dp(this, 20)
+        val form = LinearLayout(this).apply {
+            orientation = LinearLayout.VERTICAL
+            setPadding(pad, Ui.dp(this@DocActivity, 8), pad, 0)
+        }
+        if (error != null) form.addView(Ui.text(this, error, 13f, Ui.ERR).apply { setPadding(0, 0, 0, Ui.dp(context, 10)) })
+        // each field gives its value when it was changed
+        val changes = mutableListOf<() -> Pair<String, Any>?>()
+        for (p in params) {
+            val key = p.optString("key")
+            val label = p.optString("label")
+            when (p.optString("kind")) {
+                "bool" -> {
+                    val sw = android.widget.Switch(this).apply {
+                        text = label
+                        textSize = 15f
+                        setTextColor(Ui.TEXT)
+                        isChecked = p.optBoolean("value")
+                        minHeight = Ui.dp(context, 44)
+                    }
+                    form.addView(sw)
+                    changes += { if (sw.isChecked != p.optBoolean("value")) key to sw.isChecked else null }
+                }
+                "choice" -> {
+                    val ch = p.optJSONArray("choices") ?: JSONArray()
+                    val values = (0 until ch.length()).map { ch.getJSONArray(it).getString(0) }
+                    val labels = (0 until ch.length()).map { ch.getJSONArray(it).getString(1) }
+                    form.addView(Ui.text(this, label, 12.5f, Ui.MUTED).apply { setPadding(0, Ui.dp(context, 6), 0, 0) })
+                    val sp = android.widget.Spinner(this).apply {
+                        adapter = android.widget.ArrayAdapter(context, android.R.layout.simple_spinner_dropdown_item, labels)
+                        setSelection(values.indexOf(p.optString("value")).coerceAtLeast(0))
+                    }
+                    form.addView(sp)
+                    changes += { values.getOrNull(sp.selectedItemPosition)?.takeIf { it != p.optString("value") }?.let { key to it } }
+                }
+                else -> {
+                    form.addView(Ui.text(this, label, 12.5f, Ui.MUTED).apply { setPadding(0, Ui.dp(context, 6), 0, 0) })
+                    val ed = EditText(this).apply {
+                        setText(p.optString("value"))
+                        isSingleLine = true
+                        hint = "a number, or an expression like w / 2"
+                        imeOptions = android.view.inputmethod.EditorInfo.IME_ACTION_DONE
+                    }
+                    form.addView(ed)
+                    changes += { ed.text.toString().trim().takeIf { it != p.optString("value") }?.let { key to it } }
+                }
+            }
+        }
+        if (params.isEmpty()) form.addView(Ui.text(this,
+            if (f.optString("type") == "sketch") "Sketches are changed by asking Claude, or in the desktop editor." else "This feature has no values to change here: ask Claude.",
+            13.5f, Ui.MUTED).apply { setPadding(0, 0, 0, Ui.dp(context, 8)) })
+        val sup = android.widget.Switch(this).apply {
+            text = "Suppressed"
+            textSize = 15f
+            setTextColor(Ui.TEXT)
+            isChecked = suppressed
+            minHeight = Ui.dp(context, 44)
+        }
+        form.addView(sup)
+        val scroll = android.widget.ScrollView(this).apply { addView(form) }
+        val dlg = AlertDialog.Builder(this)
+            .setTitle(name)
+            .setView(scroll)
+            .setPositiveButton("Apply", null)
+            .setNegativeButton("Cancel", null)
+            .setNeutralButton("More…") { _, _ -> featureMenu(f, i, error) }
+            .create()
+        dlg.setOnShowListener {
+            dlg.getButton(AlertDialog.BUTTON_POSITIVE).setOnClickListener {
+                val body = JSONObject().put("studio", index).put("id", f.optInt("id"))
+                val ps = JSONObject()
+                for (c in changes) c()?.let { (k, v) -> ps.put(k, v) }
+                val blank = params.firstOrNull { p -> p.optString("kind") == "expr" && ps.optString(p.optString("key"), "x").isEmpty() }
+                if (blank != null) {
+                    toast("${blank.optString("label")}: give a value")
+                    return@setOnClickListener
+                }
+                if (ps.length() > 0) body.put("params", ps)
+                if (sup.isChecked != suppressed) body.put("suppressed", sup.isChecked)
+                dlg.dismiss()
+                if (body.length() > 2) postFeature(name, body) else toast("Nothing changed")
+            }
+        }
+        dlg.show()
+    }
+
+    private fun featureMenu(f: JSONObject, i: Int, error: String?) {
+        val name = f.optString("name")
+        val n = featureRows.size
+        val items = listOf(
+            (if (error != null) "Ask Claude to fix it" else "Ask Claude about $name…") to { if (error != null) askAbout("\"$name\" fails: $error. Fix it.", send = true) else askAbout("In \"$name\": ") },
+            "Roll back to here" to { postRollback(if (i + 1 >= n) null else i + 1) },
+            "Delete it" to {
+                AlertDialog.Builder(this).setTitle("Delete $name?")
+                    .setMessage("Claude deletes it on netdash. Features that use it may fail.")
+                    .setPositiveButton("Delete") { _, _ -> askAbout("Delete the feature \"$name\".", send = true) }
+                    .setNegativeButton("Cancel", null).show()
+            },
+        )
         AlertDialog.Builder(this)
             .setTitle(if (error != null) "$name: $error" else name)
-            .setItems(items) { _, i ->
-                when (i) {
-                    0 -> if (error != null) askAbout("\"$name\" fails: $error. Fix it.", send = true) else askAbout("In \"$name\": ")
-                    1 -> askAbout(if (suppressed) "Unsuppress \"$name\"." else "Suppress \"$name\".", send = true)
-                    2 -> AlertDialog.Builder(this).setTitle("Delete $name?")
-                        .setMessage("Claude deletes it on netdash. Features that use it may fail.")
-                        .setPositiveButton("Delete") { _, _ -> askAbout("Delete the feature \"$name\".", send = true) }
-                        .setNegativeButton("Cancel", null).show()
+            .setItems(items.map { it.first }.toTypedArray()) { _, k -> items[k].second() }
+            .show()
+    }
+
+    /** Change a feature on netdash; a change that would make features fail asks first. */
+    private fun postFeature(name: String, body: JSONObject) {
+        changeTree("Changing $name on netdash…", "/api/doc/${Api.enc(docId)}/feature", body) { e ->
+            AlertDialog.Builder(this)
+                .setTitle("That makes a feature fail")
+                .setMessage(e)
+                .setPositiveButton("Keep it anyway") { _, _ -> postFeature(name, JSONObject(body.toString()).put("keep", true)) }
+                .setNegativeButton("Cancel", null).show()
+        }
+    }
+
+    /** Move the rollback bar on netdash: [at] features built, null for all of them. */
+    private fun postRollback(at: Int?) {
+        changeTree(if (at == null) "Rolling to the end…" else "Rolling back on netdash…", "/api/doc/${Api.enc(docId)}/rollback",
+            JSONObject().put("studio", index).put("at", at ?: JSONObject.NULL), null)
+    }
+
+    /** POST a change to the feature tree, then show the tree as saved and rebuild the 3D view. */
+    private fun changeTree(busy: String, path: String, body: JSONObject, onWouldFail: ((String) -> Unit)?) {
+        val a = api ?: return
+        if (changing != null) {
+            toast("Still saving the last change")
+            return
+        }
+        val at = index
+        changing = busy
+        buildTree()
+        Thread {
+            try {
+                val res = a.post(path, body, readMs = 620000)
+                runOnUiThread {
+                    changing = null
+                    val trees = detail?.optJSONArray("trees")
+                    if (trees != null && at < trees.length() && res.has("tree")) trees.put(at, res.getJSONObject("tree"))
+                    val errs = res.optJSONArray("errors")?.length() ?: 0
+                    toast(if (errs > 0) "Saved · $errs feature${if (errs == 1) "" else "s"} failing" else "Saved · rebuilding the 3D view")
+                    if (kind == "studio" && index == at) reloadViewer() else buildTree()
                 }
-            }.show()
+            } catch (e: IOException) {
+                runOnUiThread {
+                    changing = null
+                    buildTree()
+                    if (e is ApiException && e.code == 422 && onWouldFail != null) onWouldFail(e.message ?: "")
+                    else toast(e.message ?: "Couldn't change it")
+                }
+            }
+        }.start()
     }
 
     /** Switch to Claude with [text] in the box, ready to finish (or sent right away). */

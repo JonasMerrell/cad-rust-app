@@ -293,6 +293,7 @@ fn specific(tool: &str, prop: &str) -> Option<Value> {
         ("add_feature", "name") => t("string", "feature name (default Kind N)"),
         ("edit_feature", "id") => json!({"type": "integer", "minimum": 1, "description": "feature id"}),
         ("edit_feature", "params") => json!({"type": "object", "additionalProperties": true, "description": "params to change (as in add_feature)"}),
+        ("set_rollback", "at") => json!({"type": ["integer", "null"], "minimum": 0, "description": "how many features to build, from the top of the tree; null builds them all"}),
         ("edit_feature", "suppressed") => t("boolean", "suppress or unsuppress the feature"),
         ("delete_feature", "id") => json!({"type": "integer", "minimum": 1, "description": "feature id"}),
         ("feature_defaults", "kind") => en(&FEATURE_KINDS, "a feature kind; leave out to list the kinds"),

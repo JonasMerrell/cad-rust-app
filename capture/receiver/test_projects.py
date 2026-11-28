@@ -26,7 +26,7 @@ STUB = textwrap.dedent('''\
     a = sys.argv[1:]
     if a[0] == "run":
         steps = json.load(open(a[-1]))
-        doc = None
+        doc, cur = None, 0
         for s in steps:
             t, args = s["tool"], s["args"]
             if t == "open_document":
@@ -103,6 +103,39 @@ STUB = textwrap.dedent('''\
                     res = {"edited": args["id"]}
                 res["notes"] = [{"id": n["id"], "text": n["text"], "at": n["at"]} for n in notes]
                 print(json.dumps({"tool": t, "result": res}))
+                continue
+            elif t == "switch_part_studio":
+                cur = args["index"]
+            elif t == "edit_feature":
+                d = doc["studios"][cur]["doc"]
+                f = next((f for f in d["features"] if f["id"] == args["id"]), None)
+                if f is None:
+                    print(json.dumps({"tool": t, "error": "no such feature"}))
+                    sys.exit(1) if "--stop-on-error" in a else None
+                    continue
+                if (args.get("params") or {}).get("radius") == "99":
+                    err = {"feature": f["id"], "name": f["name"], "error": "radius too big"}
+                    if args.get("rollback"):
+                        print(json.dumps({"tool": t, "result": {"ok": False, "rolled_back": True, "new_errors": [err]}, "error": "Round fails"}))
+                        sys.exit(1) if "--stop-on-error" in a else None
+                        continue
+                    res = {"ok": False, "new_errors": [err], "errors": [err], "parts": []}
+                else:
+                    res = {"errors": [], "parts": [{"name": "Part 1"}]}
+                f["op"].update(args.get("params") or {})
+                if "suppressed" in args:
+                    f["suppressed"] = args["suppressed"]
+                open(os.path.join(os.environ.get("STUB_DIR", "."), "edit-args.json"), "w").write(json.dumps(args))
+                print(json.dumps({"tool": t, "result": res}))
+                continue
+            elif t == "set_rollback":
+                d = doc["studios"][cur]["doc"]
+                n = len(d["features"])
+                if args["at"] is not None and args["at"] > n:
+                    print(json.dumps({"tool": t, "error": "at %d: there are %d features" % (args["at"], n)}))
+                    continue
+                d["rollback"] = args["at"] if args["at"] is not None and args["at"] < n else None
+                print(json.dumps({"tool": t, "result": {"rollback": d["rollback"], "errors": [], "parts": []}}))
                 continue
             elif t == "drawing_info":
                 print(json.dumps({"tool": t, "result": {"name": "Plate", "sheets": 2, "sheet_size": "A3", "warnings": [],
@@ -517,6 +550,59 @@ class ProjectsTest(unittest.TestCase):
         self.assertEqual(self.req("POST", f"/api/doc/{did}/note", {"action": "edit", "id": 7, "text": "?"})[0], 400)
         st, res = self.req("POST", f"/api/doc/{did}/note", {"action": "delete", "id": 1})
         self.assertEqual((st, res["notes"]), (200, []))
+
+    def test_feature_params_in_the_tree(self):
+        did = self.doc()[0]["id"]
+        st, d = self.req("GET", f"/api/doc/{did}")
+        feats = d["trees"][0]["features"]
+        block = next(f for f in feats if f["name"] == "Block")
+        self.assertEqual(block["params"][0], {"key": "depth", "label": "Depth", "kind": "expr", "value": "H"})
+        op = next(p for p in block["params"] if p["key"] == "op")
+        self.assertEqual(op["kind"], "choice")
+        self.assertIn(["remove", "Cut"], op["choices"])
+        self.assertEqual(next(f for f in feats if f["type"] == "sketch")["params"], [])
+        # a through-all cut has no depth to edit
+        self.assertEqual([p["key"] for p in rp.feature_params({"type": "extrude", "depth": "4", "end": "through_all", "op": "remove"})], ["end", "op"])
+        # an end the phone can't offer (it needs a pick) is kept as a choice
+        end = rp.feature_params({"type": "extrude", "depth": "4", "end": "up_to_face", "op": "add"})[0]
+        self.assertEqual(end["choices"][-1], ["up_to_face", "Up to face"])
+
+    def test_edit_feature(self):
+        os.environ["STUB_DIR"] = self.tmp
+        self.addCleanup(os.environ.pop, "STUB_DIR", None)
+        did = self.doc()[0]["id"]
+        st, res = self.req("POST", f"/api/doc/{did}/feature", {"studio": 0, "id": 4, "params": {"radius": " 5 "}})
+        self.assertEqual(st, 200, res)
+        rnd = next(f for f in res["tree"]["features"] if f["id"] == 4)
+        self.assertEqual(rnd["params"][0]["value"], "5")
+        args = json.load(open(os.path.join(self.tmp, "edit-args.json")))
+        self.assertEqual(args, {"id": 4, "params": {"radius": "5"}, "rollback": True})
+        # a change that breaks the feature is undone and not saved, unless kept
+        path = os.path.join(self.projects_dir, "Bracket", "bracket.json")
+        before = open(path).read()
+        st, res = self.req("POST", f"/api/doc/{did}/feature", {"id": 4, "params": {"radius": "99"}})
+        self.assertEqual(st, 422, res)
+        self.assertEqual(res["new_errors"][0]["error"], "radius too big")
+        self.assertEqual(open(path).read(), before)
+        st, res = self.req("POST", f"/api/doc/{did}/feature", {"id": 4, "params": {"radius": "99"}, "keep": True})
+        self.assertEqual(st, 200, res)
+        self.assertEqual(res["errors"][0]["name"], "Round")
+        st, res = self.req("POST", f"/api/doc/{did}/feature", {"id": 3, "suppressed": False})
+        self.assertFalse(next(f for f in res["tree"]["features"] if f["id"] == 3)["suppressed"])
+        for bad in ({"id": 4}, {"id": "4", "params": {"radius": "2"}}, {"id": 4, "params": {"radius": ""}}, {"id": 4, "params": {"radius": [1]}}):
+            self.assertEqual(self.req("POST", f"/api/doc/{did}/feature", bad)[0], 400, bad)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/feature", {"id": 42, "params": {"radius": "2"}})[0], 400)
+
+    def test_rollback_bar(self):
+        did = self.doc()[0]["id"]
+        st, res = self.req("POST", f"/api/doc/{did}/rollback", {"studio": 0, "at": 2})
+        self.assertEqual((st, res["tree"]["rollback"]), (200, 2))
+        st, d = self.req("GET", f"/api/doc/{did}")
+        self.assertEqual(d["trees"][0]["rollback"], 2)
+        st, res = self.req("POST", f"/api/doc/{did}/rollback", {"at": None})
+        self.assertEqual(res["tree"]["rollback"], None)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/rollback", {"at": -1})[0], 400)
+        self.assertEqual(self.req("POST", f"/api/doc/{did}/rollback", {"at": 9})[0], 400)
 
     def test_chat_with_photos(self):
         did = self.doc()[0]["id"]
