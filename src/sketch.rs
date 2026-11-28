@@ -79,6 +79,11 @@ pub struct Curve {
     pub geom: Geom,
     #[serde(default)]
     pub construction: bool,
+    /// One of the sketch's own axes through the origin (0 = horizontal, 1 = vertical): a fixed
+    /// construction line made the first time the axis is picked, so points can be put on it,
+    /// dimensioned from it and mirrored across it like any other line.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub axis: Option<u8>,
 }
 
 /// A driving dimension: the value is an expression in document units.
@@ -420,8 +425,106 @@ impl Sketch {
 
     pub fn add_curve(&mut self, geom: Geom, construction: bool) -> Id {
         let id = self.new_id();
-        self.curves.push(Curve { id, geom, construction });
+        self.curves.push(Curve { id, geom, construction, axis: None });
         id
+    }
+
+    /// The sketch axis line (0 = horizontal, 1 = vertical), made on first use: a construction
+    /// line from the origin, both ends fixed.
+    pub fn axis_line(&mut self, axis: u8) -> Id {
+        if let Some(c) = self.curves.iter().find(|c| c.axis == Some(axis)) {
+            return c.id;
+        }
+        let dir = if axis == 0 { DVec2::X } else { DVec2::Y };
+        let a = self.add_point(DVec2::ZERO);
+        let b = self.add_point(dir);
+        self.constraints.push(Constraint::Fix { p: a, x: 0.0, y: 0.0 });
+        self.constraints.push(Constraint::Fix { p: b, x: dir.x, y: dir.y });
+        let id = self.add_curve(Geom::Line { a, b }, true);
+        if let Some(c) = self.curves.iter_mut().find(|c| c.id == id) {
+            c.axis = Some(axis);
+        }
+        id
+    }
+
+    /// The end points of the sketch axis lines (hidden: the axes are drawn and picked whole).
+    pub fn axis_points(&self) -> HashSet<Id> {
+        self.curves.iter().filter(|c| c.axis.is_some()).flat_map(|c| Self::curve_points(&c.geom)).collect()
+    }
+
+    /// A copy of the sketch with `curves` and loose `points` mirrored across line `axis`. Each
+    /// copied point is held symmetric to its original and round curves keep the same size, so the
+    /// copy follows edits to the original. Points on the axis are shared, not copied. Returns the
+    /// new sketch and the ids of the new curves, or an error when there is nothing to mirror.
+    pub fn mirror_items(&self, curves: &[Id], points: &[Id], axis: Id) -> Result<(Sketch, Vec<Id>), &'static str> {
+        let Some(Geom::Line { a, b }) = self.curve(axis).map(|c| c.geom.clone()) else { return Err("The mirror line must be a line") };
+        let (pa, pb) = (self.pv(a), self.pv(b));
+        if (pb - pa).length() < 1e-12 {
+            return Err("The mirror line has no length");
+        }
+        let d = (pb - pa).normalize();
+        let refl = |p: DVec2| {
+            let v = p - pa;
+            pa + d * (2.0 * v.dot(d)) - v
+        };
+        // within a hair of the axis, scaled to the drawing (a copy there would sit on its original)
+        let tol = 1e-7 * self.points.iter().map(|p| p.v().length()).fold(1.0, f64::max);
+        let on_axis = |p: DVec2| ((p - pa) - d * (p - pa).dot(d)).length() < tol;
+        let mut out = self.clone();
+        let mut equal: Vec<(Id, Id)> = vec![];
+        let mut map: HashMap<Id, Id> = HashMap::new();
+        let mut new_point = |out: &mut Sketch, id: Id| -> Id {
+            *map.entry(id).or_insert_with(|| {
+                let p = self.pv(id);
+                if on_axis(p) { id } else { out.add_point(refl(p)) }
+            })
+        };
+        let mut made = vec![];
+        for &id in curves {
+            if id == axis {
+                continue;
+            }
+            let Some(c) = self.curve(id) else { continue };
+            if c.axis.is_some() {
+                continue;
+            }
+            let g = match c.geom {
+                Geom::Line { a, b } => Geom::Line { a: new_point(&mut out, a), b: new_point(&mut out, b) },
+                Geom::Circle { c, r } => Geom::Circle { c: new_point(&mut out, c), r },
+                // mirroring reverses orientation
+                Geom::Arc { c, a, b } => Geom::Arc { c: new_point(&mut out, c), a: new_point(&mut out, b), b: new_point(&mut out, a) },
+                Geom::Ellipse { c, a, rmin } => Geom::Ellipse { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin },
+                // a reflection runs the parameter backwards
+                Geom::EllipticalArc { c, a, rmin, t0, t1 } => Geom::EllipticalArc { c: new_point(&mut out, c), a: new_point(&mut out, a), rmin, t0: -t1, t1: -t0 },
+                Geom::Spline { ref pts, closed } => Geom::Spline { pts: pts.iter().map(|p| new_point(&mut out, *p)).collect(), closed },
+                Geom::Poly { ref pts, closed } => Geom::Poly { pts: pts.iter().rev().map(|p| refl(DVec2::from(*p)).into()).collect(), closed },
+            };
+            // an arc's radius already follows from its mirrored centre and ends
+            let circle = matches!(c.geom, Geom::Circle { .. });
+            let nid = out.add_curve(g, c.construction);
+            if circle {
+                equal.push((id, nid));
+            }
+            made.push(nid);
+        }
+        for &p in points {
+            if self.point(p).is_some() {
+                new_point(&mut out, p);
+            }
+        }
+        if made.is_empty() && map.values().zip(map.keys()).all(|(v, k)| v == k) {
+            return Err("Nothing to mirror: select curves or points that are not on the mirror line");
+        }
+        // keep the copy linked: each point mirrors its original across the axis
+        let mut pairs: Vec<(Id, Id)> = map.into_iter().filter(|(o, c)| o != c).collect();
+        pairs.sort();
+        for (orig, copy) in pairs {
+            out.constraints.push(Constraint::Symmetric { a: orig, b: copy, l: axis });
+        }
+        for (a, b) in equal {
+            out.constraints.push(Constraint::Equal { a, b });
+        }
+        Ok((out, made))
     }
 
     pub fn point(&self, id: Id) -> Option<&Point> {
@@ -1567,6 +1670,87 @@ mod tests {
         assert_eq!(st.dof, 0);
         assert!((s.pv(p[2]) - DVec2::new(40.0, 20.0)).length() < 1e-6);
         assert_eq!(st.fixed_curves.len(), 4);
+    }
+
+    #[test]
+    fn axis_lines_are_made_once_fixed_and_round_trip() {
+        let vars = crate::expr::Vars::default();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let x = s.axis_line(0);
+        let y = s.axis_line(1);
+        assert_eq!(s.axis_line(0), x);
+        assert_ne!(x, y);
+        assert_eq!(s.curves.len(), 2);
+        assert_eq!(s.axis_points().len(), 4);
+        let st = s.solve(&env, &[]);
+        assert!(st.ok);
+        assert_eq!(st.dof, 0);
+        // the tag survives the file format, and older files without it still load
+        let json = serde_json::to_string(&s).unwrap();
+        let back: Sketch = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.curve(x).unwrap().axis, Some(0));
+        let mut plain = Sketch::default();
+        let (a, b) = (plain.add_point(DVec2::ZERO), plain.add_point(DVec2::X));
+        plain.add_curve(Geom::Line { a, b }, false);
+        let json = serde_json::to_string(&plain).unwrap();
+        assert!(!json.contains("\"axis\""));
+        let back: Sketch = serde_json::from_str(&json).unwrap();
+        assert_eq!(back.curves[0].axis, None);
+    }
+
+    #[test]
+    fn points_go_on_and_dimension_from_the_axes() {
+        let vars = crate::expr::Vars::default();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let x = s.axis_line(0);
+        let y = s.axis_line(1);
+        let p = s.add_point(DVec2::new(7.0, 3.0));
+        s.constraints.push(Constraint::PointOnLine { p, l: x });
+        s.constraints.push(Constraint::PointLineDistance { p, l: y, dim: Dim::new("15", [0.0; 2]) });
+        let st = s.solve(&env, &[]);
+        assert!(st.ok, "{:?}", st.error);
+        assert_eq!(st.dof, 0);
+        assert!(s.pv(p).y.abs() < 1e-6 && (s.pv(p).x - 15.0).abs() < 1e-6, "{:?}", s.pv(p));
+    }
+
+    #[test]
+    fn mirror_across_an_axis_follows_the_original() {
+        let vars = crate::expr::Vars::default();
+        let env = Env { vars: &vars, units: Units::Mm };
+        let mut s = Sketch::default();
+        let y = s.axis_line(1);
+        // a line touching the axis, an arc and a circle on the right
+        let a = s.add_point(DVec2::new(0.0, 10.0));
+        let b = s.add_point(DVec2::new(20.0, 10.0));
+        let line = s.add_curve(Geom::Line { a, b }, false);
+        let (c, ae, be) = (s.add_point(DVec2::new(20.0, 0.0)), s.add_point(DVec2::new(25.0, 0.0)), s.add_point(DVec2::new(20.0, 5.0)));
+        let arc = s.add_curve(Geom::Arc { c, a: ae, b: be }, false);
+        let cc = s.add_point(DVec2::new(10.0, -10.0));
+        let circle = s.add_curve(Geom::Circle { c: cc, r: 2.0 }, false);
+        let loose = s.add_point(DVec2::new(5.0, 5.0));
+        let (mut m, made) = s.mirror_items(&[line, arc, circle, y], &[loose], y).unwrap();
+        assert_eq!(made.len(), 3);
+        // the point on the axis is shared; the rest are copied
+        assert_eq!(m.points.len(), s.points.len() + 6);
+        let st = m.solve(&env, &[]);
+        assert!(st.ok, "{:?}", st.error);
+        let Geom::Line { a: ma, b: mb } = m.curve(made[0]).unwrap().geom else { panic!() };
+        assert_eq!(ma, a);
+        assert!((m.pv(mb) - DVec2::new(-20.0, 10.0)).length() < 1e-6);
+        let Geom::Circle { c: mc, .. } = m.curve(made[2]).unwrap().geom else { panic!() };
+        assert!((m.pv(mc) - DVec2::new(-10.0, -10.0)).length() < 1e-6);
+        // moving and resizing the original moves the copy
+        m.constraints.push(Constraint::Fix { p: cc, x: 12.0, y: -8.0 });
+        m.constraints.push(Constraint::Radius { c: circle, dim: Dim::new("4", [0.0; 2]) });
+        let st = m.solve(&env, &[]);
+        assert!(st.ok, "{:?}", st.error);
+        assert!((m.pv(mc) - DVec2::new(-12.0, -8.0)).length() < 1e-6);
+        let Geom::Circle { r, .. } = m.curve(made[2]).unwrap().geom else { panic!() };
+        assert!((r - 4.0).abs() < 1e-6);
+        // nothing left to mirror once only the axis or on-axis points are picked
+        assert!(s.mirror_items(&[y], &[a], y).is_err());
     }
 
     #[test]
