@@ -117,8 +117,10 @@ pub enum Drag {
         start: DVec2,
         offset: [f64; 2],
     },
+    /// A selection box, or with Ctrl held a freehand lasso (its path is `SketchSession::lasso`).
     Box {
         start: Pos2,
+        lasso: bool,
     },
 }
 
@@ -151,6 +153,8 @@ pub struct SketchSession {
     /// (constraint index, text being typed)
     pub dim_edit: Option<(usize, String)>,
     pub box_end: Option<Pos2>,
+    /// The lasso being drawn, in screen points from where the drag started.
+    pub lasso: Vec<Pos2>,
     pub text_height: f64,
     /// Text being typed for the Text tool: (baseline start, text).
     pub text_edit: Option<(DVec2, String)>,
@@ -334,6 +338,7 @@ impl App {
             dim_pending: vec![],
             dim_edit: None,
             box_end: None,
+            lasso: vec![],
             text_height: 10.0,
             text_edit: None,
             text_editing: None,
@@ -601,7 +606,7 @@ pub fn set_tool(app: &mut App, t: Tool) {
 
 pub fn status_text(app: &App, s: &SketchSession) -> String {
     let base = match s.tool {
-        Tool::Select => "Click to select, drag to move, drag on empty space to box-select; double-click a dimension to edit",
+        Tool::Select => "Click to select, drag to move, drag on empty space to box-select, Ctrl-drag to lasso; double-click a dimension to edit",
         Tool::Point => "Click to place points",
         Tool::Line => "Click to place line points; Esc or right-click ends the chain. Hover a line to draw parallel or perpendicular to it; hold Shift to place freely",
         Tool::Rect => "Click two opposite corners",
@@ -623,7 +628,7 @@ pub fn status_text(app: &App, s: &SketchSession) -> String {
         Tool::Project => "Click model edges to bring them into the sketch",
         Tool::Dimension => "Click a line, circle, arc or two items, then click where the dimension goes and type its value; click a dimension to change it",
         Tool::Mirror if s.mirror_axis.is_none() => "Mirror: click the line or sketch axis to mirror across",
-        Tool::Mirror => "Mirror: click curves or drag boxes around them (each box adds), then press Enter or click Mirror again; Esc cancels",
+        Tool::Mirror => "Mirror: click curves or drag boxes (Ctrl: lasso) around them (each adds), then press Enter or click Mirror again; Esc cancels",
     };
     let dof = if let Some(e) = &s.status.error {
         format!(" · {e}")
@@ -1030,6 +1035,13 @@ pub fn viewport_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui:
     }
 }
 
+/// Whether a lasso selects by crossing: decided by which way it first heads, like a box
+/// (leftwards = crossing, takes anything partly inside; rightwards = window, fully inside).
+fn lasso_crossing(path: &[Pos2]) -> bool {
+    let Some(start) = path.first() else { return false };
+    path.iter().find(|p| (p.x - start.x).abs() > 4.0).is_some_and(|p| p.x < start.x)
+}
+
 #[allow(clippy::too_many_arguments)]
 fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect, s: Pos2, raw: DVec2, h: Option<Sel>, shift: bool) {
     // start drag
@@ -1038,7 +1050,9 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
         let raw0 = sketch_cursor(app, press, rect).unwrap_or(raw);
         // picking what to mirror never moves geometry: any drag draws a selection box
         let mirroring = app.sketch.as_ref().unwrap().tool == Tool::Mirror;
-        let h0 = if mirroring { None } else { hit(app, press, rect, raw0) };
+        // Ctrl-drag draws a freehand lasso, even when it starts on geometry
+        let lasso = ui.input(|i| i.modifiers.command);
+        let h0 = if mirroring || lasso { None } else { hit(app, press, rect, raw0) };
         let (sk, _) = app.sk();
         let drag = match h0 {
             Some(Sel::Point(p)) => Some(Drag::Geometry { points: vec![(p, sk.pv(p))], start: raw0, radius: None, point: true }),
@@ -1070,8 +1084,11 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                 let off = sk.constraints[i].dim().unwrap().offset;
                 Some(Drag::Label { idx: i, start: raw0, offset: off })
             }
-            _ => Some(Drag::Box { start: press }),
+            _ => Some(Drag::Box { start: press, lasso }),
         };
+        if lasso {
+            app.sketch.as_mut().unwrap().lasso = vec![press];
+        }
         if matches!(drag, Some(Drag::Geometry { .. }) | Some(Drag::Label { .. })) {
             app.sk_checkpoint();
         }
@@ -1133,14 +1150,22 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
             }
         }
         Some(Drag::Label { idx, start, offset }) => move_label(app, idx, start, offset, raw, dragging),
-        Some(Drag::Box { start }) => {
+        Some(Drag::Box { start, lasso }) => {
             if dragging {
                 let sess = app.sketch.as_mut().unwrap();
                 sess.box_end = Some(s);
-                sess.drag = Some(Drag::Box { start });
+                if lasso && sess.lasso.last().is_none_or(|l| l.distance(s) > 3.0) {
+                    sess.lasso.push(s);
+                }
+                sess.drag = Some(Drag::Box { start, lasso });
             } else {
-                // box select: window (left→right) needs full containment
+                // box or lasso select: window (dragged left→right) needs full containment,
+                // crossing (right→left) takes anything partly inside
                 let r = egui::Rect::from_two_pos(start, s);
+                let path = std::mem::take(&mut app.sketch.as_mut().unwrap().lasso);
+                let poly: Vec<DVec2> = path.iter().map(|p| DVec2::new(p.x as f64, p.y as f64)).collect();
+                let crossing = if lasso { lasso_crossing(&path) } else { s.x < start.x };
+                let contains = |q: Pos2| if lasso { poly.len() > 2 && crate::regions::point_in_poly(DVec2::new(q.x as f64, q.y as f64), &poly) } else { r.contains(q) };
                 let (sk, fr) = app.sk();
                 let to_screen = |p: DVec2| {
                     let v = app.camera.project(fr.to_world(p).as_vec3());
@@ -1150,20 +1175,22 @@ fn select_input(app: &mut App, ui: &Ui, resp: &egui::Response, rect: egui::Rect,
                 // the sketch axes are only picked by clicking them
                 let axis_pts = sk.axis_points();
                 for p in sk.points.iter().filter(|p| !axis_pts.contains(&p.id)) {
-                    if r.contains(to_screen(p.v())) {
+                    if contains(to_screen(p.v())) {
                         new.push(Sel::Point(p.id));
                     }
                 }
                 for c in sk.curves.iter().filter(|c| c.axis.is_none()) {
                     let pts = sk.tessellate(c, 2.0);
-                    let inside = pts.iter().filter(|p| r.contains(to_screen(**p))).count();
-                    if inside == pts.len() || (s.x < start.x && inside > 0) {
+                    let inside = pts.iter().filter(|p| contains(to_screen(**p))).count();
+                    if inside == pts.len() || (crossing && inside > 0) {
                         new.push(Sel::Curve(c.id));
                     }
                 }
+                // Ctrl starts a lasso rather than adding, so only Shift adds a lasso to the selection
+                let add = if lasso { ui.input(|i| i.modifiers.shift) } else { shift };
                 let sess = app.sketch.as_mut().unwrap();
                 // boxes add up while picking curves to mirror
-                if !shift && sess.tool != Tool::Mirror {
+                if !add && sess.tool != Tool::Mirror {
                     sess.sel.clear();
                 }
                 for x in new {
@@ -3950,12 +3977,23 @@ pub fn overlay(app: &mut App, ui: &Ui, painter: &egui::Painter, rect: egui::Rect
         }
     }
 
-    if let (Some(Drag::Box { start }), Some(end)) = (&sess.drag, sess.box_end) {
+    if let (Some(Drag::Box { start, lasso: false }), Some(end)) = (&sess.drag, sess.box_end) {
         let r = egui::Rect::from_two_pos(*start, end);
         let crossing = end.x < start.x;
         painter.rect(r, 0.0, theme::accent().gamma_multiply(0.08), Stroke::new(1.0, theme::accent()), egui::StrokeKind::Inside);
         if crossing {
             painter.text(r.left_top() + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "crossing", egui::FontId::proportional(10.0), theme::accent());
+        }
+    }
+    if let (Some(Drag::Box { start, lasso: true }), true) = (&sess.drag, sess.lasso.len() > 1) {
+        let stroke = Stroke::new(1.0, theme::accent());
+        painter.add(egui::Shape::line(sess.lasso.clone(), stroke));
+        // the lasso closes back to where it started
+        if let Some(last) = sess.lasso.last() {
+            painter.add(egui::Shape::dashed_line(&[*last, *start], stroke, 4.0, 3.0));
+        }
+        if lasso_crossing(&sess.lasso) {
+            painter.text(*start + egui::vec2(4.0, 4.0), egui::Align2::LEFT_TOP, "crossing", egui::FontId::proportional(10.0), theme::accent());
         }
     }
 
