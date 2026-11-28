@@ -88,6 +88,9 @@ PHONE_TRIANGLES = 750_000
 # pages at least this big go out gzipped (a big assembly's page is half the size)
 GZIP_MIN = 64 * 1024
 MODELS = {"opus": "claude-opus-5-5", "sonnet": "claude-sonnet-5-5", "haiku": "claude-haiku-5-5"}
+# Gemini through Google's Antigravity CLI (agy, signed in on netdash with a Google account): the
+# phone's choice -> agy model id ("" its default). The Gemini CLI no longer takes personal accounts.
+ANTIGRAVITY_MODELS = {"agy": "", "agy-neon": "gemini-4-neon-high", "agy-flash": "gemini-3.8-flash-medium"}
 # photos with a chat request: how many, and how big each may be (the app sends ~1600 px JPEGs)
 MAX_IMAGES = 6
 MAX_IMAGE_BYTES = 8 << 20
@@ -719,11 +722,17 @@ class Projects:
                 cmd += ["--chat", str(cid)]
             if isinstance(body.get("studio"), int) and body["studio"] >= 0:
                 cmd += ["--studio", str(body["studio"])]
-            model = MODELS.get(str(body.get("model") or ""), self.model)
-            if model:
-                cmd += ["--model", model]
-            if self.auth:
-                cmd += ["--auth", self.auth]
+            choice = str(body.get("model") or "")
+            if choice in ANTIGRAVITY_MODELS:
+                cmd += ["--auth", "antigravity"]
+                if ANTIGRAVITY_MODELS[choice]:
+                    cmd += ["--model", ANTIGRAVITY_MODELS[choice]]
+            else:
+                model = MODELS.get(choice, self.model)
+                if model:
+                    cmd += ["--model", model]
+                if self.auth:
+                    cmd += ["--auth", self.auth]
             if body.get("effort") in EFFORTS:
                 cmd += ["--effort", body["effort"]]
             try:

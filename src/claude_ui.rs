@@ -115,7 +115,7 @@ impl ClaudeUi {
     fn configured(&self) -> bool {
         match self.settings.auth {
             Auth::ApiKey => self.settings.key().is_some(),
-            Auth::Console | Auth::ClaudeCode | Auth::Gemini | Auth::Codex => true,
+            Auth::Console | Auth::ClaudeCode | Auth::Gemini | Auth::Codex | Auth::Antigravity => true,
         }
     }
 }
@@ -263,6 +263,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
     ui.radio_value(&mut auth, Auth::Console, "Claude Console account (ant CLI sign-in)");
     ui.radio_value(&mut auth, Auth::Gemini, "Gemini CLI (your Google account / Gemini plan)");
     ui.radio_value(&mut auth, Auth::Codex, "Codex CLI (your ChatGPT plan)");
+    ui.radio_value(&mut auth, Auth::Antigravity, "Antigravity CLI (your Google account)");
     if auth != c.settings.auth {
         c.settings.auth = auth;
         let _ = crate::claude::save_settings(&c.settings);
@@ -330,13 +331,14 @@ fn settings(app: &mut App, ui: &mut Ui) {
                 c.check = Some(off_thread(ui.ctx(), crate::claude::claude_code_version));
             }
         }
-        Auth::Gemini | Auth::Codex => {
+        Auth::Gemini | Auth::Codex | Auth::Antigravity => {
             let cli = crate::claude::Cli::of(c.settings.auth).unwrap();
             muted(
                 ui,
                 match cli {
                     crate::claude::Cli::Gemini => "Runs Google's Gemini CLI on this computer with its own sign-in, so requests use your Google account's Gemini plan. Install it (npm install -g @google/gemini-cli) and run gemini once to sign in with Google. In the chat it can only use rCAD's tools.",
                     crate::claude::Cli::Codex => "Runs OpenAI's Codex CLI on this computer with its own sign-in, so requests use your ChatGPT plan. Install it (npm install -g @openai/codex) and run codex login to sign in with ChatGPT. In the chat it can only use rCAD's tools.",
+                    crate::claude::Cli::Antigravity => "Runs Google's Antigravity CLI (agy) on this computer with its own sign-in, so requests use your Google account (the Gemini CLI no longer takes personal accounts). Install it (curl -fsSL https://antigravity.google/cli/install.sh | bash) and run agy once to sign in. In the chat its shell, file and web-page tools are turned off; it uses rCAD's tools. It can't be sent pictures.",
                 },
             );
             if ui.add_enabled(c.check.is_none(), egui::Button::new("Check")).clicked() {
@@ -383,6 +385,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
             let (field, hint) = match cli {
                 crate::claude::Cli::Gemini => (&mut c.settings.gemini_model, "auto (the CLI's choice)"),
                 crate::claude::Cli::Codex => (&mut c.settings.codex_model, "Codex's default"),
+                crate::claude::Cli::Antigravity => (&mut c.settings.antigravity_model, "the CLI's default"),
             };
             changed |= ui.add(egui::TextEdit::singleline(field).hint_text(hint).desired_width(170.0)).changed();
             if cli == crate::claude::Cli::Codex {
@@ -396,6 +399,7 @@ fn settings(app: &mut App, ui: &mut Ui) {
         muted(ui, match cli {
             crate::claude::Cli::Gemini => "A Gemini model id (e.g. gemini-3.1-pro-preview), or leave it empty for auto.",
             crate::claude::Cli::Codex => "A model id (e.g. gpt-5.5), or leave it empty for Codex's default. Effort sets its reasoning effort (max is xhigh).",
+            crate::claude::Cli::Antigravity => "A model id from agy models (e.g. gemini-4-neon-high, gemini-3.8-flash-medium; the id names its effort), or leave it empty for the CLI's default model at the effort set here.",
         });
         if changed {
             let _ = crate::claude::save_settings(&c.settings);
@@ -502,6 +506,7 @@ fn chat(app: &mut App, ui: &mut Ui) {
                         match cli {
                             crate::claude::Cli::Codex => format!("Codex · {m} · {}", c.settings.effort),
                             crate::claude::Cli::Gemini => format!("Gemini CLI · {m}"),
+                            crate::claude::Cli::Antigravity => format!("Antigravity · {m} · {}", c.settings.effort),
                         }
                     }
                     None => {

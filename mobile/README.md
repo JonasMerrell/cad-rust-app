@@ -57,6 +57,13 @@ to the same small service the rCAD Capture app uploads photos to.
   afterwards commits Claude's change (its message lists what changed and quotes the request) and
   pushes it. The document's menu has *Sync with GitHub*, which asks which side to keep when both
   changed the same thing.
+- **Gemini through Antigravity**: the model picker also has Gemini 4 Neon and Gemini 3.8 Flash.
+  These run Google's Antigravity CLI (`agy`) on netdash with your Google account (the Gemini CLI
+  no longer takes personal accounts), with only rCAD's tools: its shell, file and web-page tools
+  are denied. It can't be sent photos or drawings. Setup on netdash: install agy
+  (`curl -fsSL https://antigravity.google/cli/install.sh | bash`), run `agy` once to sign in; its
+  sign-in is kept in the keyring (gnome-keyring as a user service, see
+  `~/.config/systemd/user/gnome-keyring-daemon.service.d/unlock.conf`).
 - **Model**: Opus (plans and hands the work to Sonnet or Haiku, as the editor does), Sonnet or
   Haiku, or whatever the editor on netdash is set to.
 

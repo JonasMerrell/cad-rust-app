@@ -36,7 +36,7 @@ use crate::claude::{self, Auth, FromWorker, ToWorker};
 use crate::claude_chats::{self, Line};
 
 const USAGE: &str =
-    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console|gemini|codex] [--model M] [--effort E] [--no-delegate] [--image picture.png|photo.jpg]… (--prompt TEXT | --prompt-file F)";
+    "usage: rcad chat --doc part.json [--chat ID] [--studio N] [--auth claude-code|api-key|console|gemini|codex|antigravity] [--model M] [--effort E] [--no-delegate] [--image picture.png|photo.jpg]… (--prompt TEXT | --prompt-file F)";
 
 struct Args {
     doc: PathBuf,
@@ -75,6 +75,7 @@ fn parse(args: &[String]) -> Result<Args, String> {
                     // the Gemini or Codex CLI on this computer, with its own sign-in
                     "gemini" => Auth::Gemini,
                     "codex" => Auth::Codex,
+                    "antigravity" | "agy" => Auth::Antigravity,
                     o => return Err(format!("unknown --auth {o}")),
                 })
             }
@@ -143,6 +144,7 @@ pub fn main(args: &[String]) -> i32 {
         match settings.auth {
             Auth::Gemini => settings.gemini_model = m.clone(),
             Auth::Codex => settings.codex_model = m.clone(),
+            Auth::Antigravity => settings.antigravity_model = m.clone(),
             _ => settings.model = m.clone(),
         }
     }

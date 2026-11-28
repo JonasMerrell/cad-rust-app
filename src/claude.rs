@@ -76,6 +76,9 @@ pub enum Auth {
     Gemini,
     /// OpenAI's Codex CLI on this computer, signed in with ChatGPT (a ChatGPT plan).
     Codex,
+    /// Google's Antigravity CLI (agy) on this computer, signed in with a Google account: what
+    /// a personal Gemini plan uses now that the Gemini CLI refuses individual accounts.
+    Antigravity,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -91,11 +94,13 @@ pub struct Settings {
     pub gemini_model: String,
     /// Codex's model; empty leaves it to Codex.
     pub codex_model: String,
+    /// The Antigravity CLI's model (agy models lists them); empty for its default.
+    pub antigravity_model: String,
 }
 
 impl Default for Settings {
     fn default() -> Self {
-        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into(), delegate: true, gemini_model: String::new(), codex_model: String::new() }
+        Settings { auth: Auth::ApiKey, api_key: String::new(), model: MODELS[0].0.into(), effort: "high".into(), delegate: true, gemini_model: String::new(), codex_model: String::new(), antigravity_model: String::new() }
     }
 }
 
@@ -123,6 +128,7 @@ impl Settings {
         match cli {
             Cli::Gemini => &self.gemini_model,
             Cli::Codex => &self.codex_model,
+            Cli::Antigravity => &self.antigravity_model,
         }
     }
 
@@ -131,6 +137,7 @@ impl Settings {
         match Cli::of(self.auth) {
             Some(Cli::Gemini) => "Gemini",
             Some(Cli::Codex) => "Codex",
+            Some(Cli::Antigravity) => "Antigravity",
             None => "Claude",
         }
     }
@@ -194,7 +201,7 @@ fn ant(args: &[&str]) -> Result<std::process::Output, String> {
 fn credentials(s: &Settings) -> Result<Cred, String> {
     match s.auth {
         Auth::ApiKey => s.key().map(Cred::Key).ok_or_else(|| "Add an API key in the Claude settings first".into()),
-        Auth::ClaudeCode | Auth::Gemini | Auth::Codex => Err("This program signs in by itself".into()),
+        Auth::ClaudeCode | Auth::Gemini | Auth::Codex | Auth::Antigravity => Err("This program signs in by itself".into()),
         Auth::Console => {
             // print-credentials refreshes the token when it has expired
             let out = ant(&["auth", "print-credentials", "--access-token"])?;
