@@ -62,7 +62,7 @@ pub fn start(app: &mut App, i: usize) {
     let n = app.doc.features.iter().filter(|f| matches!(&f.op, Op::Custom { name, .. } if *name == def.name)).count() + 1;
     let id = app.doc.insert(format!("{} {n}", def.name), op);
     app.picks.clear();
-    app.dialog = Some(crate::app::Dialog { feature: id, is_new: true, before, active_field: 0 });
+    app.dialog = Some(crate::app::Dialog { feature: id, is_new: true, before, active_field: 0, hover_row: None });
     app.changed();
 }
 

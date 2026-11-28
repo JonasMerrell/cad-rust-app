@@ -231,51 +231,37 @@ pub fn field_refs(app: &App) -> Vec<Ref> {
             Slot::One(o) => out.extend(o.iter().cloned()),
         }
     }
+    // the item under the pointer in a selection list is drawn as hovered instead
+    if let Some(h) = &d.hover_row {
+        out.retain(|r| r != h);
+    }
     out
 }
 
-/// What a selection field holds, e.g. "3 edges", "2 regions of Sketch 1", "Top plane".
-fn refs_label(doc: &Document, refs: &[Ref]) -> String {
-    let kind = |r: &Ref| -> (&'static str, &'static str) {
-        match r {
-            Ref::Face { .. } => ("face", "faces"),
-            Ref::Edge { .. } => ("edge", "edges"),
-            Ref::Vertex { .. } => ("vertex", "vertices"),
-            Ref::Region { .. } => ("region", "regions"),
-            Ref::SketchCurve { .. } => ("sketch curve", "sketch curves"),
-            Ref::SketchPoint { .. } => ("point", "points"),
-            Ref::Body { .. } => ("part", "parts"),
-            Ref::Feature { .. } => ("feature", "features"),
-            Ref::Curve { .. } => ("curve", "curves"),
-            _ => ("item", "items"),
-        }
+/// One row of a selection list, e.g. "Edge 3 · Extrude 1". `n` counts items of the
+/// same kind in the field, from 1.
+fn ref_row_label(app: &App, r: &Ref, n: usize) -> String {
+    let doc = &app.doc;
+    let feat = |id: crate::doc::FeatId| doc.feature(id).map(|f| f.name.clone());
+    let made_by = |name: &crate::doc::TopoName| name.0.first().and_then(|f| feat(f.feature));
+    let with = |base: String, from: Option<String>| match from {
+        Some(f) => format!("{base} · {f}"),
+        None => base,
     };
-    let sketch_of = |r: &Ref| match r {
-        Ref::Region { sketch, .. } | Ref::SketchCurve { sketch, .. } | Ref::SketchPoint { sketch, .. } => Some(*sketch),
-        _ => None,
-    };
-    // single planes, axes and features read best by name
-    if refs.len() == 1 {
-        match &refs[0] {
-            Ref::Feature { feature } => return doc.feature(*feature).map(|f| f.name.clone()).unwrap_or_else(|| "Feature".into()),
-            Ref::FeaturePlane { feature } => return doc.feature(*feature).map(|f| f.name.clone()).unwrap_or_else(|| "Plane".into()),
-            Ref::Body { .. } | Ref::OriginPlane { .. } | Ref::Axis { .. } => return refs[0].describe(),
-            _ => {}
+    match r {
+        Ref::Face { name, .. } => with(format!("Face {n}"), made_by(name)),
+        Ref::Edge { name, .. } => with(format!("Edge {n}"), made_by(name)),
+        Ref::Vertex { .. } => format!("Vertex {n}"),
+        Ref::Region { sketch, .. } => with(format!("Region {n}"), feat(*sketch)),
+        Ref::SketchCurve { sketch, .. } => with(format!("Curve {n}"), feat(*sketch)),
+        Ref::SketchPoint { sketch, .. } => with(format!("Point {n}"), feat(*sketch)),
+        Ref::Body { body } => {
+            let name = app.part_name(*body);
+            if name.is_empty() { r.describe() } else { name }
         }
+        Ref::Feature { feature } | Ref::FeaturePlane { feature } | Ref::Curve { feature } => feat(*feature).unwrap_or_else(|| r.describe()),
+        Ref::OriginPlane { .. } | Ref::Axis { .. } => r.describe(),
     }
-    let first = kind(&refs[0]);
-    let same = refs.iter().all(|r| kind(r) == first);
-    let n = refs.len();
-    let mut s = if same { format!("{n} {}", if n == 1 { first.0 } else { first.1 }) } else { format!("{n} items") };
-    // name the sketch when they all come from one
-    if let Some(sk) = sketch_of(&refs[0]) {
-        if refs.iter().all(|r| sketch_of(r) == Some(sk)) {
-            if let Some(f) = doc.feature(sk) {
-                s = format!("{s} of {}", f.name);
-            }
-        }
-    }
-    s
 }
 
 pub fn show(app: &mut App, ui: &mut Ui) {
@@ -297,6 +283,9 @@ pub fn show(app: &mut App, ui: &mut Ui) {
     let mut ok = false;
     let mut cancel = false;
     let mut new_active = None;
+    // (field, item) whose ✕ was clicked, and the list row under the pointer
+    let mut remove: Option<(usize, usize)> = None;
+    let mut hover_row: Option<Ref> = None;
     let flat = app.result.flats.iter().find(|f| f.feature == fid).cloned();
     // Part Studios and their parts, for Derived
     let studios: Vec<(usize, String, Vec<([u64; 2], String)>)> = (0..app.ws.studios.len())
@@ -334,7 +323,7 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                 });
                 ui.add_space(4.0);
 
-                // selection fields
+                // selection fields: each picked item on its own row, with an ✕ to remove it
                 let mut op2 = op.clone();
                 for (i, (label, acc, slot)) in sel_fields(&mut op2).into_iter().enumerate() {
                     let refs: Vec<Ref> = match &slot {
@@ -342,9 +331,10 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                         Slot::One(o) => o.iter().cloned().collect(),
                     };
                     let is_active = i == active;
-                    let resp = ui
-                        .horizontal(|ui| {
-                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(label).color(theme::muted())));
+                    let shown = if refs.len() > 1 { format!("{label} ({})", refs.len()) } else { label.to_string() };
+                    let frame_rect = ui
+                        .horizontal_top(|ui| {
+                            ui.add_sized([96.0, 20.0], egui::Label::new(RichText::new(shown).color(theme::muted())));
                             let fr = egui::Frame::new()
                                 .fill(theme::bg())
                                 .stroke(Stroke::new(1.0, if is_active { theme::accent() } else { theme::border() }))
@@ -354,15 +344,42 @@ pub fn show(app: &mut App, ui: &mut Ui) {
                                 ui.set_width(ui.available_width());
                                 if refs.is_empty() {
                                     ui.label(RichText::new(format!("Select {}", acc.hint())).color(theme::muted()).italics().size(12.0));
-                                } else {
-                                    let txt = refs_label(&app.doc, &refs);
-                                    ui.label(RichText::new(txt).size(12.0));
+                                    return;
                                 }
+                                // up to four rows show before the list scrolls; rows stack downwards
+                                // (the field sits in a horizontal row, which the list would inherit)
+                                // a solid scroll bar takes its own space instead of floating over the ✕ buttons
+                                ui.spacing_mut().scroll = egui::style::ScrollStyle::solid();
+                                egui::ScrollArea::vertical().id_salt(("sel-list", i)).max_height(4.0 * ROW_H).auto_shrink([false, true]).show(ui, |ui| ui.vertical(|ui| {
+                                    for (j, r) in refs.iter().enumerate() {
+                                        let n = 1 + refs[..j].iter().filter(|x| std::mem::discriminant(*x) == std::mem::discriminant(r)).count();
+                                        let row = ui.allocate_ui_with_layout(egui::vec2(ui.available_width(), ROW_H), egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                            let bg = ui.painter().add(egui::Shape::Noop);
+                                            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                                                let x = ui.add(egui::Button::image(icons::image("close", 12.0).tint(theme::muted())).frame(false)).on_hover_text("Remove");
+                                                if x.clicked() {
+                                                    remove = Some((i, j));
+                                                }
+                                                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                                                    ui.add(egui::Label::new(RichText::new(ref_row_label(app, r, n)).size(12.0)).truncate());
+                                                });
+                                            });
+                                            bg
+                                        });
+                                        let rect = row.response.rect;
+                                        if ui.rect_contains_pointer(rect) {
+                                            ui.painter().set(row.inner, egui::Shape::rect_filled(rect.expand2(egui::vec2(3.0, 0.0)), 3, theme::hover_fill()));
+                                            hover_row = Some(r.clone());
+                                        }
+                                    }
+                                }));
                             })
                             .response
+                            .rect
                         })
                         .inner;
-                    if resp.interact(egui::Sense::click()).clicked() {
+                    // a click anywhere on the field (✕ included) makes it the one viewport picks go to
+                    if ui.rect_contains_pointer(frame_rect) && ui.input(|inp| inp.pointer.primary_clicked()) {
                         new_active = Some(i);
                     }
                 }
@@ -773,6 +790,29 @@ pub fn show(app: &mut App, ui: &mut Ui) {
             d.active_field = i;
         }
     }
+    if let Some((i, j)) = remove {
+        if let Some(f) = app.doc.feature_mut(fid) {
+            if let Some((_, _, slot)) = sel_fields(&mut f.op).into_iter().nth(i) {
+                match slot {
+                    Slot::Many(v) if j < v.len() => {
+                        v.remove(j);
+                    }
+                    Slot::One(o) => *o = None,
+                    _ => {}
+                }
+            }
+        }
+        // the removed row is gone, so is its highlight
+        hover_row = None;
+        app.changed();
+    }
+    if let Some(d) = &mut app.dialog {
+        if d.hover_row != hover_row {
+            d.hover_row = hover_row;
+            app.scene_dirty = true;
+            ui.ctx().request_repaint();
+        }
+    }
     if ok {
         app.dialog_ok();
     } else if cancel {
@@ -794,6 +834,9 @@ const ISO_HOLES: &[(&str, f64, f64, f64, f64, f64)] = &[
     ("16", 17.5, 14.0, 26.0, 16.6, 31.0),
     ("20", 22.0, 17.5, 33.0, 20.6, 38.0),
 ];
+
+/// Height of one row in a selection list.
+const ROW_H: f32 = 20.0;
 
 thread_local! {
     static ENTER: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
